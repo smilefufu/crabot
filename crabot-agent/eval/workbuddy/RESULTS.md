@@ -1,31 +1,54 @@
-# 2026-10-28 WorkBuddy 校准：三题已尝试，一题有效完成
+# Crabot WorkBuddy 三题校准报告（2026-10-28 完成）
 
-已停止全部收费调用。用户批准总额度120M token（800M日常用量的15%），先测Code、Web、Office各一题；首次Provider缺usage后，用户另明确批准原额度内保留10M未知预留、只恢复Web一次再Office。第二次Provider缺usage后没有再恢复，也没有追加其他题。
+按用户再次授权完成原Web和Office；Code直接复用此前有效执行，没有重跑。三个类别均有完整产物、原始评分和本地最终答复。原有失败记录全部保留，未扩大题目范围，全部收费调用已结束。
 
-| 类型与题目 | 原始运行得分 | 有效性与失败归因 | 已知token |
-|---|---:|---|---:|
-| Code / testing-medium-format_errors | 100 | 完整端到端执行、原始verifier通过、本地答复交付 | 311,704 |
-| Web / rollout-support-static-page-L2-058 | 0 | 首次Provider SSE 502且无usage；获批恢复在get_message评测边界遗漏处中断 | 23,697，另1次未知 |
-| Office / news-event-multifile-extract-L4-013 | 0 | Worker已启动，第8次请求Provider SSE overloaded且无usage，停止 | 63,809，另1次未知 |
+## 正式结果及口径
 
-**上游原始metrics结果：reward=0.3333，即33.33分；有效完成并判分覆盖率为1/3。这个运行分包含Provider和评测环境错误，不能当成Crabot综合能力分。** 已启动但缺少score.json按原始WorkBuddy规则计0，没有剔除失败抬高均值。Web另有一次入口权限启动错误（0次模型请求）也保留；因此metrics共记录5次试验、3道题。官方`compute_job_metrics`直接读取原始Code score.json及其余真实失败result，不伪造verifier分数。
+| 类别 / 固定题目 | 原始最终分 | 执行已知token | 裁判已知token | 结果 |
+|---|---:|---:|---:|---|
+| Code / testing-medium-format_errors | 100 | 311,704 | 0 | 原始程序验证通过；26次请求；产物含18项unittest |
+| Web / rollout-support-static-page-L2-058 | 80 | 676,109 | 290,434 | 原始12项通过11项，完成条件通过，未达full-pass |
+| Office / news-event-multifile-extract-L4-013 | 77.63 | 447,902 | 146,858 | 规则115/169=68.05分，LLM 12/12=100分，原始70%/30%合分 |
 
-## 用量与预算
+原始`compute_job_metrics`对恢复批次（复用原有效Code，Web/Office各保留首次完整完成结果）输出 **reward=0.8588，即宏平均85.88**；full-pass=1/3，完整执行及评分覆盖3/3。本地最终交付3/3。仅为三个固定样本，不是完整200题成绩，也不足以代表Crabot综合能力。
 
-37次真实请求中，35次有Provider原生usage，2次用量未知。已知合计399,210 token，即0.399210M；其中Manager264,354，Worker134,856，裁判0。输入388,333（含缓存290,432）、输出10,877（含推理4,727）；缓存与推理为子集，不重复相加。已知量约为120M额度的0.333%，但两条未知账目意味着不能声称精确实付总量已核对。
+全历史同样保留并经原始metrics聚合：3道题、7次试验，reward=0.5294，即52.94分。它包含此前Provider中断、评测get_message遗漏和0模型调用的容器启动错误。两个口径分别反映有效完成任务的质量与包含基础设施故障的完整运行历史，不删除失败抬高历史成绩。初次停止时的33.33分记录保存在旧报告和旧metrics中。
 
-首条未知请求的获批10M预留与已知消耗分别记账，从原120M共同扣除；它不是实测消耗。第二条未知请求出现后立即停止，未增加收费裁判或后续题。没有更改Provider、账号、思考配置或模型输出上限。现在不能用一题成功和两题中断可靠外推30/200题总成本。
+## 扣分的含义
 
-## 已验证内容与限制
+Web扣20分的理由为“未证明390px移动端搜索减少可见.flag-card”。原始workflow只做通用fill/select，没有记录该项移动筛选结果。独立无模型、无外网、产物只读的Chromium核对：390px下4张卡片输入pilot-a后变1张，PILOT-A仍1张，清空后恢复4张，页面无JS错误。这证明该功能实际可用，扣分包含上游采证覆盖不足；**保留原始80分，不用额外检查替换或重抽裁判结果**。
 
-Code使用26次请求：Manager9次、188,249 token；Worker17次、123,455 token。原始reward=1.0/full_pass；原始tests_passed=1/tests_total=1是聚合评分单位，不等于只执行一个用户测试。最终产物新增18项unittest，原始程序评分检查了实际文件，Manager消费Worker结果后向本地收件箱交付答复。此成绩只证明这一道题。
+Office的规则扣分包括3条预期事件未抽取、实体/来源覆盖及合并来源计数偏差。LLM rubric主要检查当前产物的一致性、别名区分和来源可追溯，12项都通过；它不能替代规则对预期事件覆盖的检查。原始权重为rule 0.7、LLM 0.3，综合77.63。
 
-Web的评测接线存在两处遗漏：更新镜像入口丢失执行权限，以及本地Channel缺少get_message。入口权限已修复并无网络检查；get_message对照Channel协议补齐，并以脚本模型走真实消息工具、文件与交付链路通过无费用回放。恢复消耗23,697 token及原始失败均保留，没有在修复后追加重跑Web。Office使用修复后的边界，运行到Provider失败。真实LLM/VLM/CBC裁判尚未运行，因此不声称Web/Office裁判已验收。
+## Overloaded、usage与接入修复
 
-验证通过：5项预算回归（包括未知预留不伪造成已知量）、正常生产链路脚本回放、get_message回归、SSE-502单请求后停止及原始错误保留、裁判脚本语法。原始Code空产物0分，自带oracle66.67分；Office空产物程序评分0分；Web缺裁判路由明确报错。未修改原始rubric、权重、阈值、生产提示词或部署。
+1. **Provider确有过载且会缺报失败用量。** 修复后Office真实请求`598c966e-46ee-4e31-a758-1d52842861ac`返回HTTP200/SSE，发出upstream_error/overloaded后正常EOF；完整361字节无usage、无DONE。生产适配器将该SSE错误归为HTTP502。原生下一次尝试正常返回11853 token并继续Worker，未重开整题。
+2. **旧评测也有缺陷。** 消费侧遇错cancel时连带取消上游，可能丢失稍后到达的usage；计量器又把首次失败设成全局fatal，拦住生产第二次尝试。无费用fixture复现了“本可收到17+3 usage尾包，却因cancel被丢弃”。历史两条失败没有完整EOF，不能倒推是否也有尾包。
+3. **修复保持生产机制。** 独立tee审计分支读到EOF，记录HTTP状态、request ID、字节摘要、错误和usage；可重试错误不再提前截断。原代码对这类502最多6次尝试、约1/2/4/8/8秒退避；网络/流中断另有5/10/20/40/60秒持续恢复。本轮没有修改生产分类或增加评测重抽层。
+4. **计量与停止。** 有usage就按原生输入+输出实记，缓存/推理不重复相加；真正无usage的请求各预留10M，仍从同一120M扣除。正常完成却缺usage、计费/鉴权错误、未知RPC或预算不足仍停止。新增HTTP402停机回归，避免无明确code的余额错误落入通用重试。
+5. **评分文件保存也已修复。** 原始Office CompositeVerifier已返回0.7763，但额外下载容器日志覆盖了宿主最终score.json，留下0.6805规则分。现在原始容器日志写入`container-verifier/`，保留原生宿主合分文件。原始文件不覆盖；用保存的规则与十二条原始LLM判定调用固定版本原始finalize_score/ArtifactWriter恢复canonical副本，并断言reward payload与最初Verifier返回逐字段相同，零新增模型调用。
 
-## 固定条件与证据
+曾尝试严格请求SHA匹配的零模型缓存回放：8次命中、15次未命中，未启用Provider fallback，输出只作接线诊断，不作新的Agent成绩或最终判定；完整保留在`office-score-replay/`。最终canonical恢复使用原始判定，未采用该回放的任何分数。
 
-Crabot源码`c6d240c94f566b3f73a402ce79a8858bc0632413`；WorkBuddy`b516950be5b56eb3be406c2f76ee1c5111dcb57f`；数据`3e8ad839685c589d83a1dd60fe2d15eabb75f27a`。模型为当前powerful `gpt-6.1-sol/high`。实际UnifiedAgent/Manager/builtin Worker与原生工具，普通人类消息入口；本地渠道，无私有历史，标准tmp-page Skill，无业务MCP与child profile。Linux amd64题目在ARM Docker主机模拟执行，时间不与原生x64比较。Agent执行期间没有tests/solution、宿主业务挂载，网络仅放行Provider IP的443及loopback。
+## 用量、额度和下一批估算
 
-私有逐请求证据、产物、原始评分、失败现场、原始metrics及SHA256摘要保存在主工作区既有忽略目录`crabot-agent/eval/manager-context/out/2026-10-28-workbuddy-calibration/`。`summary.json`按试验保留角色用量和未知请求；`upstream-metrics.json`为官方聚合器输出。下一步需先解决Provider稳定性与缺失usage，再决定是否重新授权恢复；当前不继续收费。
+共127次真实Provider请求：124次有usage，3次未知。**全部已知1,978,930 token=1.978930M**，包括历史失败、诊断、执行及裁判。Manager876,005、Worker647,216、裁判437,292、原生HTTP取证18,417。已知输入1,920,032、输出58,898；缓存和推理为子集，不额外加总。
+
+3次未知分别是首次Web请求、首次Office第8次请求、恢复Office首请求；各预留10M，共30M。这不是实际已用token。已知量+保守预留合计31.978930M，占120M额度约26.65%；未知账目意味着精确实付总量尚未核对，未把未知按0计费。
+
+三个有效任务执行加裁判共1,873,007已知token。仅按本次单样本粗估，30题（每类10题、复用这3题）全轮约18.84M已知token；加当前30M预留约48.84M。按80 Code/70 Web/50 Office外推200题约122.44M已知token，尚未计未来异常及尾部，不能承诺控制在120M内。建议后续先扩大到30题并持续校准；**本轮未自动开剩余27题**。
+
+## 验证、固定条件与证据
+
+15项Node无费用回归通过，另有1项Python无Docker/无模型回归验证综合评分不被覆盖。原c6d240c基线与当前main的真实UnifiedAgent脚本回放验证了过载后原生重试、普通消息来源、固定权限、Worker目标、真实文件和Manager本地投递。仅评测代码变化，未部署、重启或修改生产提示词/模型/权限/输出上限。
+
+生产基线`c6d240c94f566b3f73a402ce79a8858bc0632413`；WorkBuddy`b516950be5b56eb3be406c2f76ee1c5111dcb57f`；公开数据`3e8ad839685c589d83a1dd60fe2d15eabb75f27a`；当前powerful模型gpt-6.1-sol/high。裁判也使用该配置，与论文Gemini裁判有差异，不能作同条件排行榜比较。标准tmp-page Skill、本地收件箱、空私有历史，无业务MCP及child profile；amd64任务在ARM Docker主机模拟运行，时间不可与原生x64直接比较。
+
+证据位于既有忽略目录`crabot-agent/eval/manager-context/out/2026-10-28-workbuddy-calibration/`：
+- 旧Code产物与评分、旧Web/Office失败、旧报告与metrics全部保留。
+- `wire-diagnosis-20261028/`：两条原生HTTP取证及完整SSE，共18417 token。
+- `recovery-20261028/web/`、`office/`：本轮执行、产物和交付；artifact-sha256.json冻结产物。
+- `web-score/`、`office-score/`：原始裁判与逐请求用量；Office原始result.json已包含0.7763。
+- `office-score-canonical/`：原始组件恢复的正确合分文件及输入SHA、原始返回一致性证明。
+- `mobile-search-audit.json`：独立只读移动筛选检查，分数未变。
+- `valid-upstream-metrics.json`、`all-history-upstream-metrics.json`、`final-summary.json`：两种统计与统一用量。

@@ -48,3 +48,5 @@ node judge.mjs --task-dir "$PINNED_TASK_DIRECTORY" --image "$VERIFIER_IMAGE" --w
 历史首次恢复授权（本轮已结束，当前以末段再次授权为准）：保留 Web 首次 SSE-502/缺 usage 记录，为该请求在原120M内单独预留10M；此预留不计作实测已用。恢复入口设置 `WORKBUDDY_UNKNOWN_RESERVE=10000000`，并按 `WORKBUDDY_PRIOR_TOKENS` 传入所有真实已知用量。预算同时扣除已知用量和未知预留，再为在途请求保留10M。Web只恢复一次，之后Office；再次缺usage即停，不重跑Code。
 
 2026-10-28 再次授权：先诊断并修复接线，再完成同一Web/Office，Code不重跑，历史失败全部保留。两条历史未知各预留10M（共20M）；两条原生HTTP诊断共18,417 token纳入已知累计，续测起点为417,627。`WORKBUDDY_SMOKE_RECOVER=1` 模拟首次overloaded再成功，验证原生重试、独立预留和真实交付。运行 `node --test budget.test.mjs observe.test.mjs judge.test.mjs` 验证预算、EOF观察和无真实凭据的裁判HTTP转发。
+
+评分产物：`verifier/score.json` 和 `reward.json` 保留原始CompositeVerifier宿主最终合分结果，`container-verifier/` 另存容器原始规则日志，避免下载覆盖综合分。用固定基准Python运行 `python -m unittest discover -s crabot-agent/eval/workbuddy -p verify_test.py` 验证保存顺序（无Docker/模型）。HTTP402计费失败会显式关闭评测准入。

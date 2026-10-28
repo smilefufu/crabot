@@ -8,7 +8,7 @@ import { spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 const require = createRequire(import.meta.url)
 const { transformSync } = require('esbuild')
-test('judge forwarding preserves transient retry and meters JSON/SSE without real credentials', async () => {
+for (const paymentFailure of [false, true]) test(`judge forwarding preserves retry/accounting; payment stop=${paymentFailure}`, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workbuddy-judge-fixture-'))
   let attempt = 0
   const provider = http.createServer(async (req, res) => {
@@ -18,6 +18,7 @@ test('judge forwarding preserves transient retry and meters JSON/SSE without rea
     assert.equal(body.model, 'gpt-6.1-sol'); assert.equal(body.reasoning_effort, 'high')
     assert.equal(body.max_tokens, undefined)
     attempt++
+    if (attempt === 5) { res.writeHead(402, {'content-type':'application/json'}); res.end('{"error":{"type":"upstream_error","message":"Insufficient Balance"}}'); return }
     if (attempt === 1) { res.writeHead(503, {'content-type':'application/json'}); res.end('{"error":{"type":"upstream_error","message":"overloaded"}}'); return }
     if (attempt === 2) { res.writeHead(200, {'content-type':'application/json'}); res.end('{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":25,"completion_tokens":4}}'); return }
     assert.equal(body.stream_options.include_usage, true)
@@ -38,9 +39,9 @@ test('judge forwarding preserves transient retry and meters JSON/SSE without rea
     const client = path.join(root,'fixture-python.mjs')
     fs.writeFileSync(client, `#!/usr/bin/env node
 import assert from 'node:assert/strict'
-for(let i=1;i<=4;i++){
+for(let i=1;i<=${paymentFailure ? 5 : 4};i++){
  const r=await fetch(process.env.WORKBUDDY_VERIFIER_LLM_BASE_URL.replace('host.docker.internal','127.0.0.1')+'/chat/completions',{method:'POST',headers:{Authorization:'Bearer '+process.env.WORKBUDDY_VERIFIER_LLM_API_KEY,'content-type':'application/json'},body:JSON.stringify({model:'foreign',max_tokens:1,messages:[{role:'user',content:'fixture'}],stream:i>2})})
- const text=await r.text();assert.equal(r.status,i===1?503:200)
+ const text=await r.text();assert.equal(r.status,i===1?503:i===5?402:200)
  if(i===3)assert.ok(text.includes('upstream_error')&&text.includes('prompt_tokens'))
  if(i===4)assert.ok(text.includes('[DONE]'))
 }
@@ -49,11 +50,11 @@ for(let i=1;i<=4;i++){
     const child = spawn(process.execPath,[path.join(import.meta.dirname,'judge.mjs')],{env:{...process.env,REPLAY_DATA_DIR:path.join(root,'data'),REPLAY_RUNTIME_ROOT:root,WORKBUDDY_JUDGE_OUTPUT:output,WORKBUDDY_PYTHON:client,WORKBUDDY_PRIOR_TOKENS:'417627',WORKBUDDY_UNKNOWN_RESERVE:'20000000',FIXTURE_PROVIDER_ENDPOINT:`http://127.0.0.1:${provider.address().port}`},stdio:['ignore','pipe','pipe']})
     let log='';for(const stream of [child.stdout,child.stderr])stream.on('data',chunk=>{log+=chunk})
     const exit=await new Promise((resolve,reject)=>{child.on('exit',resolve);child.on('error',reject)})
-    assert.equal(exit,0,log+fs.readFileSync(path.join(output,'verify.log'),'utf8'));assert.equal(attempt,4)
+    assert.equal(exit,paymentFailure?1:0,log+fs.readFileSync(path.join(output,'verify.log'),'utf8'));assert.equal(attempt,paymentFailure?5:4)
     const usage=JSON.parse(fs.readFileSync(path.join(output,'usage.json'),'utf8'))
-    assert.equal(usage.used,417674);assert.equal(usage.reserved,30000000);assert.equal(usage.stopped,false)
+    assert.equal(usage.used,417674);assert.equal(usage.reserved,paymentFailure?40000000:30000000);assert.equal(usage.stopped,paymentFailure)
     const receipts=fs.readFileSync(path.join(output,'requests.jsonl'),'utf8').trim().split('\n').map(JSON.parse)
-    assert.equal(receipts.filter(row=>row.type==='unknown_usage').length,1)
+    assert.equal(receipts.filter(row=>row.type==='unknown_usage').length,paymentFailure?2:1)
     assert.equal(receipts.filter(row=>row.type==='usage').length,3)
   } finally {provider.closeAllConnections();await new Promise(resolve=>provider.close(resolve));fs.rmSync(root,{recursive:true,force:true})}
 })
