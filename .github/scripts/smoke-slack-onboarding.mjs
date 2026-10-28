@@ -32,6 +32,22 @@ try {
   assert.equal(manifest.settings.socket_mode_enabled, true)
   await assert.rejects(fs.access(path.join(root, 'handoff.json')))
   console.log(`Slack CLI 4.11.0 verified archive and real local hooks passed: ${process.platform}/${process.arch}; no login, App creation or messages`)
+} catch (error) {
+  // This isolated manifest-only probe never logs in; report fixed milestones, not raw CLI logs.
+  try {
+    const state = await fs.access(path.join(root, 'project', 'process-state.json')).then(() => true, () => false)
+    console.log(`Slack CLI smoke diagnostic: supervisor recorded CLI spawn=${state}`)
+    const logs = path.join(root, 'cli', 'logs')
+    for (const name of (await fs.readdir(logs)).filter(name => /^slack-debug-[0-9]+\.log$/.test(name)).slice(0, 4)) {
+      const lines = (await fs.readFile(path.join(logs, name), 'utf8')).slice(-65536).split('\n')
+      for (const line of lines) {
+        for (const marker of ['starting hook command', 'finished hook command', 'initialized SDK CLI config']) {
+          if (line.includes(marker)) console.log(`Slack CLI smoke diagnostic: ${marker}`)
+        }
+      }
+    }
+  } catch { console.log('Slack CLI smoke diagnostic: isolated CLI log unavailable') }
+  throw error
 } finally {
   clearTimeout(commandTimer)
   globalThis.fetch = originalFetch
