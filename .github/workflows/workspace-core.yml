@@ -97,7 +97,7 @@ defaults:
 jobs:
   core:
     name: ${{ matrix.suite == 'business' && 'Business workspace runtime' || matrix.suite == 'archive' && 'Archived workspace records' || matrix.suite == 'recovery-terminal' && 'Cold workspace release' || matrix.suite == 'recovery-services' && 'Cold workspace service restoration' || matrix.suite == 'recovery-admin' && 'Cold workspace Admin restoration' || matrix.suite == 'recovery' && 'Cold workspace recovery' || matrix.suite == 'owned' && 'Owned workspace migrations' || matrix.suite == 'owned-recovery' && 'Same MM workspace recovery' || matrix.suite == 'completion' && 'Workspace job completion' || 'Fixed workspace lifecycle' }} ${{ matrix.os }}
-    timeout-minutes: ${{ matrix.os == 'windows-2022' && matrix.suite == 'finite' && 90 || matrix.os == 'windows-2022' && 45 || 25 }}
+    timeout-minutes: ${{ matrix.os == 'windows-2022' && matrix.suite == 'finite' && 90 || matrix.os == 'macos-15-intel' && matrix.suite == 'business' && 45 || matrix.os == 'windows-2022' && 45 || 25 }}
     strategy:
       fail-fast: false
       matrix:
