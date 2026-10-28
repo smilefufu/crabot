@@ -1,4 +1,4 @@
-name: Read-only legacy installation discovery
+name: Legacy installation compatibility
 on:
   workflow_dispatch:
   push:
@@ -7,8 +7,11 @@ on:
     paths:
       - 'scripts/lib/legacy-desktop.mjs'
       - 'scripts/lib/legacy-release-*.mjs'
+      - 'scripts/lib/legacy-entry-*.mjs'
+      - 'scripts/lib/desktop-cli-text.mjs'
       - 'scripts/desktop/legacy-releases.json'
       - 'scripts/lib/__tests__/legacy-desktop.test.mjs'
+      - 'scripts/lib/__tests__/legacy-entry-fence.test.mjs'
       - 'scripts/lib/__tests__/fixtures/legacy-release*'
       - '.github/workflows/legacy-discovery.yml'
 permissions:
@@ -28,5 +31,5 @@ jobs:
           node-version: '22.22.3'
       - name: Build only this checkout's actual Native dependency
         run: node scripts/build-native.mjs
-      - name: Verify published entry bytes and read-only location discovery
-        run: node --test scripts/lib/__tests__/legacy-desktop.test.mjs
+      - name: Verify published entry bytes, discovery and reversible entry protection
+        run: node --test scripts/lib/__tests__/legacy-desktop.test.mjs scripts/lib/__tests__/legacy-entry-fence.test.mjs
