@@ -79,7 +79,7 @@ export const WorkspaceRelocationJobQuerySchema = z.strictObject({ intent_id: Rel
 export const WorkspaceRelocationJobStageSchema = z.enum(['preparing', 'stopping', 'moving', 'closing_executors', 'switching', 'validating', 'finalizing', 'restoring', 'finished', 'unknown'])
 export const WorkspaceRelocationJobStatusSchema = z.strictObject({
   intent_id: RelocationJobId, state: z.enum(['preparing', 'running', 'completed', 'needs_attention', 'committed']),
-  stage: WorkspaceRelocationJobStageSchema, source: Directory.optional(), target: Directory.optional(),
+  stage: WorkspaceRelocationJobStageSchema, source: Directory.optional(), target: Directory.optional(), outcome: z.literal('source_restored').optional(),
 }).refine(value => !['completed', 'committed'].includes(value.state) || value.stage === 'finished')
 export const WorkspaceRelocationStatusResultSchema = z.strictObject({ available: z.boolean(), job: WorkspaceRelocationJobStatusSchema.nullable() })
   .refine(value => value.available || value.job === null)
@@ -90,14 +90,25 @@ export type WorkspaceRelocationStatusResult = z.infer<typeof WorkspaceRelocation
 
 
 const RecoveryDigest = z.string().regex(/^[a-f0-9]{64}$/)
-export const WorkspaceRelocationRecoveryOfferSchema = z.strictObject({
+export const WorkspaceArchivedRelocationRecoveryOfferSchema = z.strictObject({
   intent_id: RelocationJobId, completion_sha256: RecoveryDigest, finalizing_sha256: RecoveryDigest,
 })
+export const WorkspaceInterruptedRelocationRecoveryOfferSchema = z.strictObject({
+  intent_id: RelocationJobId, checkpoint_sha256: RecoveryDigest, action: z.enum(['restore_source', 'finish_commit']),
+})
+export const WorkspaceRelocationRecoveryOfferSchema = z.union([WorkspaceArchivedRelocationRecoveryOfferSchema, WorkspaceInterruptedRelocationRecoveryOfferSchema])
 export const WorkspaceRelocationRecoveryPreviewResultSchema = z.strictObject({ available: z.boolean(), recovery: WorkspaceRelocationRecoveryOfferSchema.nullable() })
   .refine(value => value.available || value.recovery === null)
-export const StartWorkspaceRelocationRecoveryParamsSchema = WorkspaceRelocationRecoveryOfferSchema.extend({ recovery_id: RelocationJobId, confirmed: z.literal(true) })
+export const StartWorkspaceArchivedRelocationRecoveryParamsSchema = WorkspaceArchivedRelocationRecoveryOfferSchema.extend({ recovery_id: RelocationJobId, confirmed: z.literal(true) })
+export const StartWorkspaceInterruptedRelocationRecoveryParamsSchema = z.strictObject({ intent_id: RelocationJobId, recovery_id: RelocationJobId,
+  checkpoint_sha256: RecoveryDigest, confirmed: z.literal(true) })
+export const StartWorkspaceRelocationRecoveryParamsSchema = z.union([StartWorkspaceArchivedRelocationRecoveryParamsSchema, StartWorkspaceInterruptedRelocationRecoveryParamsSchema])
 export const WorkspaceRelocationRecoveryAcceptedSchema = z.strictObject({ intent_id: RelocationJobId, recovery_id: RelocationJobId, accepted: z.literal(true) })
 export type WorkspaceRelocationRecoveryOffer = z.infer<typeof WorkspaceRelocationRecoveryOfferSchema>
+export type WorkspaceArchivedRelocationRecoveryOffer = z.infer<typeof WorkspaceArchivedRelocationRecoveryOfferSchema>
+export type WorkspaceInterruptedRelocationRecoveryOffer = z.infer<typeof WorkspaceInterruptedRelocationRecoveryOfferSchema>
+export type StartWorkspaceArchivedRelocationRecoveryParams = z.infer<typeof StartWorkspaceArchivedRelocationRecoveryParamsSchema>
+export type StartWorkspaceInterruptedRelocationRecoveryParams = z.infer<typeof StartWorkspaceInterruptedRelocationRecoveryParamsSchema>
 export type WorkspaceRelocationRecoveryPreviewResult = z.infer<typeof WorkspaceRelocationRecoveryPreviewResultSchema>
 export type StartWorkspaceRelocationRecoveryParams = z.infer<typeof StartWorkspaceRelocationRecoveryParamsSchema>
 export type WorkspaceRelocationRecoveryAccepted = z.infer<typeof WorkspaceRelocationRecoveryAcceptedSchema>

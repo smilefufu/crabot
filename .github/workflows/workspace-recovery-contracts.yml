@@ -1,0 +1,42 @@
+name: Workspace recovery contracts and SDK
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feat/desktop-workspace-recovery-contracts']
+  pull_request:
+    paths:
+      - 'crabot-shared/src/workspace-*.ts'
+      - 'crabot-client/src/contracts/workspaces.ts'
+      - 'crabot-client/tests/workspaces.test.mjs'
+      - '.github/workflows/workspace-recovery-contracts.yml'
+permissions:
+  contents: read
+jobs:
+  contracts:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Build this checkout's actual SDK, Shared and Native
+        shell: bash
+        run: |
+          pnpm --dir crabot-client install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-client run build
+          pnpm --dir crabot-shared install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-shared run build
+          node scripts/build-native.mjs
+      - name: Verify the complete SDK, including correlated recovery and no POST retries
+        working-directory: crabot-client
+        run: node --test tests/*.test.mjs
+      - name: Verify all workspace contracts and original read models
+        working-directory: crabot-shared
+        shell: bash
+        run: node --import tsx --test --test-concurrency=1 src/workspace-*.test.ts

@@ -132,11 +132,46 @@ export { testAudioService } from './audio-client.js'
 export { parseVoiceConnection, voiceTerminalEntry, voiceSetupStatus } from './voice-connection.js'
 export * from './computer-use.js'
 
-export { geminiApiUrl, geminiApiHeaders, geminiModelId } from './gemini-api.js'
+export { parseWorkspaceRelocationJobQuery } from './workspace-job-query.js'
+export type { WorkspaceRecord, WorkspaceUsage, WorkspaceExecution, WorkspaceExecutionInventory, WorkspaceSummary, WorkspaceMaintenanceStatus, WorkspaceListResult,
+  WorkspaceRelocationJobQuery, VerifyWorkspaceRelocationJobQueryResult, WorkspaceRelocationJobStage, WorkspaceRelocationJobStatus, WorkspaceRelocationStatusResult,
+  WorkspaceRelocationAccepted, WorkspaceRelocationUnchanged, WorkspaceRelocationStartResult,
+  VerifyWorkspaceRelocationStartParams, VerifyWorkspaceRelocationStartResult,
+  WorkspaceRelocationPreviewRequest, WorkspaceRelocationPreviewResult, WorkspaceRelocationIssue,
+  WorkspaceCreateRequest, WorkspaceUpdateRequest, WorkspaceRecordResult, WorkspaceGetResult, WorkspaceScanResult,
+  WorkspaceRecoveryRuntimeStart, WorkspaceRecoveryRuntimeRegistration, WorkspaceRecoveryRuntimeInvocation,
+  WorkspaceRecoveryRuntimePlan, WorkspaceRelocationRecoveryOffer, WorkspaceRelocationRecoveryPreviewResult, StartWorkspaceRelocationRecoveryParams, WorkspaceRelocationRecoveryAccepted, VerifyWorkspaceRelocationRecoveryRequestParams, VerifyWorkspaceRelocationRecoveryRequestResult,
+  WorkspaceArchivedRelocationRecoveryOffer, WorkspaceInterruptedRelocationRecoveryOffer, StartWorkspaceArchivedRelocationRecoveryParams, StartWorkspaceInterruptedRelocationRecoveryParams,
+  VerifyWorkspaceRelocationRecoveryAdmissionParams, VerifyWorkspaceRelocationRecoveryAdmissionResult,
+  VerifyWorkspaceRelocationRecoveryRuntimeParams, VerifyWorkspaceRelocationRecoveryRuntimeResult,
+  VerifyWorkspaceRelocationRecoveryRootParams, VerifyWorkspaceRelocationRecoveryRootResult,
+  VerifyWorkspaceRelocationRecoveryFinalizationParams, VerifyWorkspaceRelocationRecoveryFinalizationResult,
+  PrepareWorkspaceRelocationRecoveryCompletionParams, PrepareWorkspaceRelocationRecoveryCompletionResult,
+  VerifyWorkspaceRelocationRecoveryReleaseParams, VerifyWorkspaceRelocationRecoveryReleaseResult, ReleaseWorkspaceRelocationRecoveryCompletionResult,
+  ResumeWorkspaceRelocationRecoveryWebParams, ResumeWorkspaceRelocationRecoveryWebResult,
+  VerifyWorkspaceRelocationRequestParams, VerifyWorkspaceRelocationRequestResult,
+  QuiesceWorkspaceRelocationWebParams, QuiesceWorkspaceRelocationWebResult,
+  WorkspaceRelocationFinalizationAction, WorkspaceRelocationFinalizationRequest,
+  VerifyWorkspaceRelocationFinalizationParams, VerifyWorkspaceRelocationFinalizationResult,
+  PrepareWorkspaceRelocationCompletionParams, PrepareWorkspaceRelocationCompletionResult, ResumeWorkspaceRelocationWebParams, ResumeWorkspaceRelocationWebResult,
+  WorkspaceRelocationCoordinatorAction, VerifyWorkspaceRelocationCoordinatorParams, VerifyWorkspaceRelocationCoordinatorResult,
+  VerifyWorkspaceRelocationRuntimeParams, VerifyWorkspaceRelocationRuntimeResult, VerifyWorkspaceRelocationRootParams, VerifyWorkspaceRelocationRootResult,
+  WorkspaceRelocationImplementation, WorkspaceRelocationIncarnation, WorkspaceRelocationWorker,
+  WorkerProcessIdentity, CaptureWorkspaceRelocationProcessesParams, CaptureWorkspaceRelocationProcessesResult,
+  CaptureWorkspaceRelocationWorkersParams, CaptureWorkspaceRelocationWorkersResult,
+  WorkspaceRelocationStopDispatch, WorkspaceRelocationStopStatus, WorkspaceRelocationStopResult,
+  PrepareWorkspaceRelocationWorkerStopsParams, PrepareWorkspaceRelocationWorkerStopsResult,
+  CompleteWorkspaceRelocationWorkerStopsParams, CompleteWorkspaceRelocationWorkerStopsResult,
+  StopWorkspaceRelocationWorkersParams, StopWorkspaceRelocationWorkersResult } from './workspace-types.js'
 
 export { isStoragePermission, type StoragePermission, type DirectoryStoragePermission, type AllDirectoriesStoragePermission } from './storage-permission.js'
-export type { WorkspaceRecord, WorkspaceUsage, WorkspaceExecution, WorkspaceExecutionInventory, WorkspaceSummary, WorkspaceMaintenanceStatus, WorkspaceListResult, WorkspaceCreateRequest, WorkspaceUpdateRequest, WorkspaceRecordResult, WorkspaceGetResult, WorkspaceScanResult } from './workspace-types.js'
-export type { WorkspaceRelocationImplementation, WorkspaceRelocationIncarnation, WorkspaceRelocationWorker, WorkspaceRelocationStopStatus, WorkspaceRelocationStopResult } from './workspace-types.js'
 
 export { workspaceMaintenancePending, assertWorkspaceExecutionAllowed } from './workspace-maintenance.js'
-export type { WorkerProcessIdentity } from './workspace-types.js'
+
+export { parseWorkspaceRelocationStartRequest } from './workspace-start-request.js'
+
+export { parseWorkspaceRelocationRecoveryStartRequest } from './workspace-recovery-start-request.js'
+export { geminiApiUrl, geminiApiHeaders, geminiModelId } from './gemini-api.js'
+
+export type { WorkspaceInterruptedRecoveryRequest, WorkspaceInterruptedRecoveryRuntimeResult, WorkspaceInterruptedRecoveryWebVerificationParams, WorkspaceInterruptedRecoveryWebJob, WorkspaceInterruptedRecoveryWebVerificationResult, WorkspaceInterruptedRecoveryWebPrepared, WorkspaceInterruptedRecoveryWebResumed } from './workspace-types.js'
+export type { WorkspaceInterruptedExecutionAuthorityParams, WorkspaceInterruptedExecutionAuthorityResult, WorkspaceInterruptedExecutionCaptureResult, CompleteWorkspaceInterruptedWorkerStopsParams } from './workspace-types.js'
