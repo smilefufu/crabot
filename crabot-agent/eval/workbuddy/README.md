@@ -11,6 +11,7 @@
 - `node budget.test.mjs` 应用 Node test runner：`node --test budget.test.mjs`。
 - `node build.mjs "$BUILD_DIRECTORY"` 打包实际生产源码及 tmp-page，输出不包含运行凭据。
 - 题目镜像另加 Linux 版 ripgrep、iptables、util-linux 和打包文件。`launch.sh` 作为入口，启动时只放行原生 Provider IPv4 的 443 出站及 loopback，禁用 IPv6、代理环境及 DNS 出站，随后撤销所有 capabilities。文件、进程和项目上下文均在容器内原生执行。
+- `node check-smoke.mjs "$WORKBUDDY_OUTPUT"` 检查真实产物、普通消息来源、权限快照、Worker归属、消息查询及最终投递。
 - `--smoke` 使用脚本化 HTTP 响应，走真实 SDK、工具、权限和投递链路，无收费模型；检查真实文件、任务来源、固定权限、目标和 Manager 消费结果后的答复。
 
 ## 收费执行
