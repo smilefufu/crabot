@@ -39,6 +39,7 @@ jobs:
           pnpm --dir crabot-shared install --frozen-lockfile --ignore-scripts
           pnpm --dir crabot-shared run build
           pnpm install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-admin install --frozen-lockfile --ignore-scripts
       - name: Build the complete Web application from frozen dependencies
         run: |
           set -e
