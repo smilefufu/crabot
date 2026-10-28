@@ -1,0 +1,51 @@
+name: Desktop program maintenance
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feat/desktop-program-maintenance']
+  pull_request:
+    paths:
+      - 'crabot-desktop/**'
+      - '.github/workflows/desktop-program-maintenance.yml'
+permissions:
+  contents: read
+jobs:
+  host:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Build this checkout's actual SDK, Shared, Native and internal host
+        run: |
+          pnpm --dir crabot-client install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-client run build
+          pnpm --dir crabot-shared install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-shared run build
+          pnpm install --frozen-lockfile --ignore-scripts
+          node scripts/build-native.mjs
+          pnpm --dir crabot-desktop install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-desktop run build
+      - name: Install original publisher fixture dependency
+        run: pnpm --dir crabot-admin install --frozen-lockfile --ignore-scripts
+      - name: Verify original complete payload, legacy takeover and private-copy cleanup
+        run: node --test --test-concurrency=1 scripts/lib/__tests__/desktop-payload.test.mjs scripts/lib/__tests__/removal-copy-cleanup.test.mjs scripts/lib/__tests__/desktop-removal-programs.test.mjs scripts/lib/__tests__/desktop-removal-system-processes.test.mjs
+      - name: Verify update handoff and Ubuntu installation components
+        run: node --test --test-concurrency=1 crabot-desktop/tests/paired-handoff.test.mjs crabot-desktop/tests/paired-update.test.mjs crabot-desktop/tests/ubuntu-installation.test.mjs crabot-desktop/tests/ubuntu-process.test.mjs crabot-desktop/tests/ubuntu-update.test.mjs
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify original closed archive extraction
+        run: python scripts/desktop/__tests__/extract-paired-release.test.py
