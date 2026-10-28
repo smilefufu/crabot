@@ -175,7 +175,9 @@ async function startPersistentShell(opts: SpawnPersistentShellOpts): Promise<str
 
   const logFile = path.join(logsDir, `${entity_id}.log`)
   const exitcodeFile = exitcodeFileForLog(logFile)
-  const logFd = await fs.promises.open(logFile, 'a')
+  // Git Bash cannot write an inherited append-only Windows handle. The random
+  // per-shell log is new; exclusive creation also preserves any existing file.
+  const logFd = await fs.promises.open(logFile, process.platform === 'win32' ? 'wx' : 'a')
 
   // `registeredPromise` resolves after registry.register() succeeds, ensuring
   // that exit/error handlers don't call registry.update() before the record exists.
