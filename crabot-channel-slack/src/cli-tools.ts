@@ -17,10 +17,13 @@ export const CLI_ASSETS = {
 export async function privateDirectory(dir: string): Promise<void> {
   await fs.mkdir(dir, { recursive: true, mode: 0o700 })
   if (process.platform === 'win32') {
-    const { stdout } = await execute('whoami', ['/user', '/fo', 'csv', '/nh'], { windowsHide: true, timeout: 5000 })
+    const systemRoot = process.env.SystemRoot || process.env.SYSTEMROOT
+    if (!systemRoot) throw new Error('Cannot locate native Windows ACL tools')
+    const system32 = path.join(systemRoot, 'System32')
+    const { stdout } = await execute(path.join(system32, 'whoami.exe'), ['/user', '/fo', 'csv', '/nh'], { windowsHide: true, timeout: 5000 })
     const sid = stdout.match(/S-1-5-[0-9-]+/)?.[0]
     if (!sid) throw new Error('无法确认 Windows 用户权限')
-    await execute('icacls', [dir, '/inheritance:r', '/grant:r', `*${sid}:(OI)(CI)F`], { windowsHide: true, timeout: 5000 })
+    await execute(path.join(system32, 'icacls.exe'), [dir, '/inheritance:r', '/grant:r', `*${sid}:(OI)(CI)F`], { windowsHide: true, timeout: 5000 })
   } else await fs.chmod(dir, 0o700)
 }
 export async function writePrivate(file: string, value: unknown): Promise<void> {

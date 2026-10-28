@@ -607,10 +607,13 @@ export class ChannelManager {
         // Establish the ACL on an empty temporary file before writing Slack credentials.
         await fs.writeFile(tempPath, '', { mode })
         const execute = promisify(execFile)
-        const { stdout } = await execute('whoami', ['/user', '/fo', 'csv', '/nh'], { windowsHide: true, timeout: 5000 })
+        const systemRoot = process.env.SystemRoot || process.env.SYSTEMROOT
+        if (!systemRoot) throw new Error('Cannot locate native Windows ACL tools')
+        const system32 = path.join(systemRoot, 'System32')
+        const { stdout } = await execute(path.join(system32, 'whoami.exe'), ['/user', '/fo', 'csv', '/nh'], { windowsHide: true, timeout: 5000 })
         const sid = stdout.match(/S-1-5-[0-9-]+/)?.[0]
         if (!sid) throw new Error('Cannot establish private Slack credential permissions')
-        await execute('icacls', [tempPath, '/inheritance:r', '/grant:r', `*${sid}:F`], { windowsHide: true, timeout: 5000 })
+        await execute(path.join(system32, 'icacls.exe'), [tempPath, '/inheritance:r', '/grant:r', `*${sid}:F`], { windowsHide: true, timeout: 5000 })
       }
       await fs.writeFile(tempPath, content, { encoding: 'utf-8', mode })
       if (mode !== undefined) await fs.chmod(tempPath, mode)

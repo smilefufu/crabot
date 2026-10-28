@@ -11,6 +11,29 @@ afterEach(async()=>{
   for(const dir of dirs.splice(0)) await fs.rm(dir,{recursive:true,force:true})
 })
 describe('Slack Admin -> real module RPC -> persistent restart',()=>{
+  it.skipIf(process.platform === 'win32')('uses native Windows ACL tools when PATH contains a conflicting whoami', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'slack-native-acl-')); dirs.push(dir)
+    const system = path.join(dir, 'windows'), tools = path.join(system, 'System32'), shadow = path.join(dir, 'shadow')
+    await fs.mkdir(tools, { recursive: true }); await fs.mkdir(shadow)
+    const marker = path.join(dir, 'shadow-invoked')
+    await fs.writeFile(path.join(shadow, 'whoami'), `#!/bin/sh\nprintf wrong > '${marker}'\nexit 1\n`, { mode: 0o700 })
+    await fs.writeFile(path.join(tools, 'whoami.exe'), `#!/bin/sh\nprintf '"fixture","S-1-5-21-123"\\n'\n`, { mode: 0o700 })
+    await fs.writeFile(path.join(tools, 'icacls.exe'), '#!/bin/sh\nexit 0\n', { mode: 0o700 })
+    const { privateDirectory } = await import('../../crabot-channel-slack/src/cli-tools.js')
+    const { ConfigStore } = await import('../../crabot-channel-slack/src/config.js')
+    const platform = vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
+    vi.stubEnv('SystemRoot', system); vi.stubEnv('PATH', `${shadow}${path.delimiter}${process.env.PATH}`)
+    try {
+      await privateDirectory(path.join(dir, 'authorization'))
+      new ConfigStore(path.join(dir, 'runtime'), { SLACK_BOT_TOKEN: 'xoxb-fixture', SLACK_APP_TOKEN: 'xapp-fixture' })
+      const manager = new ChannelManager(dir, {} as any)
+      await (manager as any).atomicWriteFile(path.join(dir, 'admin-config.json'), '{}', 0o600)
+      expect(JSON.parse(await fs.readFile(path.join(dir, 'runtime/config.json'), 'utf8')).config.credentials.bot_token).toBe('xoxb-fixture')
+      expect(await fs.readFile(path.join(dir, 'admin-config.json'), 'utf8')).toBe('{}')
+      await expect(fs.access(marker)).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally { platform.mockRestore(); vi.unstubAllEnvs() }
+  })
+
   it('rolls back a new Slack instance if its initial private credential write fails, allowing a same-session retry', async () => {
     const dir=await fs.mkdtemp(path.join(os.tmpdir(),'slack-config-failure-')); dirs.push(dir)
     const manager=new ChannelManager(dir,{registerModuleDefinition:vi.fn()} as any)
