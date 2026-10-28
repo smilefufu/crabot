@@ -1,0 +1,65 @@
+name: Desktop login startup
+
+on:
+  push:
+    branches: ['feat/desktop-platform-acceptance']
+    paths:
+      - 'crabot-desktop/src/login-startup*.ts'
+      - 'crabot-desktop/tests/login-startup*'
+      - 'crabot-desktop/src/installation-entries.ts'
+      - 'crabot-desktop/src/installation-removal.ts'
+      - 'crabot-desktop/tests/installation-entries.test.mjs'
+      - 'crabot-desktop/tests/installation-removal*'
+      - 'crabot-desktop/tests/cli-removal.test.mjs'
+      - 'crabot-desktop/tests/maintenance-bootstrap*'
+      - 'crabot-native/**'
+      - 'scripts/lib/process-identity.cjs'
+      - '.github/workflows/desktop-login.yml'
+  pull_request:
+    paths:
+      - 'crabot-desktop/src/login-startup*.ts'
+      - 'crabot-desktop/tests/login-startup*'
+      - 'crabot-desktop/src/installation-entries.ts'
+      - 'crabot-desktop/src/installation-removal.ts'
+      - 'crabot-desktop/tests/installation-entries.test.mjs'
+      - 'crabot-desktop/tests/installation-removal*'
+      - 'crabot-desktop/tests/cli-removal.test.mjs'
+      - 'crabot-desktop/tests/maintenance-bootstrap*'
+      - 'crabot-native/**'
+      - 'scripts/lib/process-identity.cjs'
+      - '.github/workflows/desktop-login.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-login-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-login:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - run: node scripts/build-native.mjs
+      - run: pnpm --dir crabot-client install --frozen-lockfile
+      - run: node crabot-client/node_modules/typescript/bin/tsc -p crabot-client/tsconfig.json
+      - run: pnpm --dir crabot-desktop install --frozen-lockfile
+      - name: Compile the actual current desktop and protected native bootstrap
+        working-directory: crabot-desktop
+        run: node node_modules/typescript/bin/tsc -p tsconfig.json && node build-preload.mjs
+      - name: Private records and real current-user OS registration
+        working-directory: crabot-desktop
+        run: node --test --test-concurrency=1 tests/login-startup.test.mjs tests/login-startup-update.test.mjs tests/login-startup-native.test.mjs
+      - name: Private user entries and retained-data removal with actual Windows shortcut APIs
+        working-directory: crabot-desktop
+        run: node --test --test-concurrency=1 tests/installation-entries.test.mjs tests/installation-removal.test.mjs tests/cli-removal.test.mjs tests/maintenance-bootstrap.test.mjs
