@@ -66,6 +66,7 @@ jobs:
           src/group-session-config.test.ts src/group-session-permissions.test.ts
           src/request-permission-sources.test.ts src/permission-template-cli-access.test.ts
           src/permission-resolution.test.ts src/shared-request-impact.test.ts src/backup/import/run-import.test.ts
+          src/permission-template-host-scope.test.ts src/admin-web-api.test.ts
           --maxWorkers=1 --minWorkers=1
       - name: Verify upgraded project dispatch and actual file access without a model
         working-directory: crabot-agent
