@@ -164,6 +164,10 @@ export interface SpawnPersistentShellOpts {
  * Returns entity_id (format: `shell_<12 hex chars>`).
  */
 export async function spawnPersistentShell(opts: SpawnPersistentShellOpts): Promise<string> {
+  return opts.registry.runExecutionAdmission(() => startPersistentShell(opts))
+}
+
+async function startPersistentShell(opts: SpawnPersistentShellOpts): Promise<string> {
   const entity_id = `shell_${randomBytes(6).toString('hex')}`
   const logsDir = getBgEntitiesLogsDir()
 
@@ -182,10 +186,16 @@ export async function spawnPersistentShell(opts: SpawnPersistentShellOpts): Prom
     resolveRegistered = resolve
   })
 
-  const child = spawnBash(wrapCommandWithExitSentinel(opts.command, exitcodeFile), {
-    stdio: ['ignore', logFd.fd, logFd.fd],
-    cwd: opts.cwd,
-  })
+  let child: ChildProcess
+  try {
+    child = spawnBash(wrapCommandWithExitSentinel(opts.command, exitcodeFile), {
+      stdio: ['ignore', logFd.fd, logFd.fd],
+      cwd: opts.cwd,
+    })
+  } catch (error) {
+    await logFd.close()
+    throw error
+  }
 
   // CRITICAL: 'error' listener MUST attach BEFORE any await. Node emits spawn
   // failures (ENOENT etc.) asynchronously on next tick. If any await runs
@@ -288,6 +298,7 @@ export async function spawnPersistentShell(opts: SpawnPersistentShellOpts): Prom
   }
 
   await opts.registry.register(record)
+  opts.registry.trackShellProcess(record, child)
 
   // Unblock the exit/error handlers — they will now apply any pending update.
   resolveRegistered()
@@ -357,6 +368,15 @@ async function readFileQuiet(file: string): Promise<string> {
  * 都按可转后台对待。registeredPromise 门控解决「转后台瞬间退出但记录尚未注册」的竞态。
  */
 export async function runShellWithGrace(opts: RunShellWithGraceOpts): Promise<RunShellWithGraceResult> {
+  try {
+    return await opts.registry.runExecutionAdmission(() => startShellWithGrace(opts))
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== 'WORKSPACE_MAINTENANCE') throw error
+    return { kind: 'spawn_error', message: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+async function startShellWithGrace(opts: RunShellWithGraceOpts): Promise<RunShellWithGraceResult> {
   const entity_id = `shell_${randomBytes(6).toString('hex')}`
   const logsDir = getBgEntitiesLogsDir()
   await fs.promises.mkdir(logsDir, { recursive: true })
@@ -584,6 +604,7 @@ export async function runShellWithGrace(opts: RunShellWithGraceOpts): Promise<Ru
     last_activity_at: now,
   }
   await opts.registry.register(record)
+  opts.registry.trackShellProcess(record, child)
   resolveRegistered()
   return { kind: 'background', entity_id }
 }

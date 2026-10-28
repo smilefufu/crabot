@@ -137,3 +137,6 @@ export { geminiApiUrl, geminiApiHeaders, geminiModelId } from './gemini-api.js'
 export { isStoragePermission, type StoragePermission, type DirectoryStoragePermission, type AllDirectoriesStoragePermission } from './storage-permission.js'
 export type { WorkspaceRecord, WorkspaceUsage, WorkspaceExecution, WorkspaceExecutionInventory, WorkspaceSummary, WorkspaceMaintenanceStatus, WorkspaceListResult, WorkspaceCreateRequest, WorkspaceUpdateRequest, WorkspaceRecordResult, WorkspaceGetResult, WorkspaceScanResult } from './workspace-types.js'
 export type { WorkspaceRelocationImplementation, WorkspaceRelocationIncarnation, WorkspaceRelocationWorker, WorkspaceRelocationStopStatus, WorkspaceRelocationStopResult } from './workspace-types.js'
+
+export { workspaceMaintenancePending, assertWorkspaceExecutionAllowed } from './workspace-maintenance.js'
+export type { WorkerProcessIdentity } from './workspace-types.js'

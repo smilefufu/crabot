@@ -56,10 +56,10 @@ export function getWorkspaceDir(): string {
 }
 
 /**
- * Per-task worker workspace 根目录。
+ * 项目/default workspace存储根目录（持久迁移位置由WorkspaceCatalog解析）。
  * 与 getWorkspaceDir() 语义不同：
  * - getWorkspaceDir()：Agent 的全局工作目录（WORKSPACE_DIR env，默认 homedir）
- * - getWorkspacesRootDir()：Per-task worker 工作区根（WORKER_WORKSPACES_DIR env，默认 <dataRoot>/workspaces）
+ * - getWorkspacesRootDir()：项目/default存储根（WORKER_WORKSPACES_DIR env，默认 <dataRoot>/workspaces）
  */
 export function getWorkspacesRootDir(): string {
   if (process.env.WORKER_WORKSPACES_DIR) {
@@ -72,7 +72,7 @@ export function getWorkspacesRootDir(): string {
  * Manager session 持久化根目录:`<dataRoot>/agent/managers`。
  * 与另外两个目录函数的语义区分:
  * - getWorkspaceDir()：Agent 的全局工作目录（用户文件所在处，与存储无关）
- * - getWorkspacesRootDir()：Per-task worker 的工作区根（每个 worker 一份隔离工作区）
+ * - getWorkspacesRootDir()：项目/default工作区存储根（默认工作区内部保留任务隔离）
  * - getManagerSessionsDir()：manager loop 的会话状态存储根（每个 ManagerKey 一份持久化状态，
  *   与上面两者都不同——这里存的是 loop 自身的对话历史/摘要，不是任务执行产物）
  */

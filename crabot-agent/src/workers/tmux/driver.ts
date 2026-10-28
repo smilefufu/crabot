@@ -54,6 +54,16 @@ export interface PaneSnapshot {
   captured_at?: string
 }
 
+/** Internal carrier metadata only; a dead pane's PID is never a new process target. */
+export interface TmuxProcessCarrier {
+  readonly session_name: string
+  readonly session_id: string
+  readonly pane_id: string
+  readonly pane_pid: number
+  readonly dead: boolean
+  readonly server_pid: number
+}
+
 export type TmuxSession = TmuxControlEndpoint & {
   /** 仅在 adapter 已持久化可重建 meta 后调用，避免无主 dead pane。 */
   enableRemainOnExit?: () => Promise<void>
@@ -267,6 +277,42 @@ exec ${spec.command}
     }
   }
 
+  /** No prefix selection, full-server enumeration or terminal contents. Not stop/ownership proof. */
+  async readProcessCarrier(name: string): Promise<TmuxProcessCarrier> {
+    const invalid = () => Object.assign(new Error('执行器tmux载体无法唯一核验，已保留维护保护。'), { code: 'WORKER_CARRIER_UNVERIFIED' })
+    if (!/^crabot-w-[A-Za-z0-9_-]+$/.test(name)) throw invalid()
+    const format = '#{session_name}\t#{session_id}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{pid}'
+    const { stdout } = await this.run(['list-panes', '-s', '-t', '=' + name, '-F', format])
+    const lines = stdout.replace(/\r?\n$/, '').split(/\r?\n/)
+    if (lines.length !== 1) throw invalid()
+    const fields = lines[0].split('\t')
+    const pid = (value: string) => /^[1-9][0-9]*$/.test(value) && Number.isSafeInteger(Number(value)) && Number(value) <= 2147483647
+    if (fields.length !== 6 || fields[0] !== name || !/^\$[0-9]+$/.test(fields[1]) || !/^%[0-9]+$/.test(fields[2])
+      || !pid(fields[3]) || !['0', '1'].includes(fields[4]) || !pid(fields[5])) throw invalid()
+    return Object.freeze({ session_name: name, session_id: fields[1], pane_id: fields[2], pane_pid: Number(fields[3]),
+      dead: fields[4] === '1', server_pid: Number(fields[5]) })
+  }
+
+  /** Exact observation only; null is not an exit/ownership proof and never bypasses legacy evidence checks. */
+  async readOptionalProcessCarrier(name: string): Promise<TmuxProcessCarrier | null> {
+    const invalid = () => Object.assign(new Error('执行器tmux载体状态无法核验，已保留维护保护。'), { code: 'WORKER_CARRIER_UNVERIFIED' })
+    if (!/^crabot-w-[A-Za-z0-9_-]+$/.test(name)) throw invalid()
+    let presence: { stdout: string; stderr: string }
+    try {
+      presence = await this.run(['-N', 'has-session', '-t', '=' + name], true)
+    } catch (error) {
+      const result = error as { code?: unknown; signal?: unknown; killed?: unknown; stdout?: unknown; stderr?: unknown }
+      const message = typeof result.stderr === 'string' ? result.stderr.trim() : ''
+      const absent = message === `can't find session: ${name}` || message === `can't find session: =${name}`
+        || /^no server running on [^\r\n]+$/.test(message)
+        || /^error connecting to [^\r\n]+ \(No such file or directory\)$/.test(message)
+      if (result.code === 1 && result.signal == null && result.killed !== true && result.stdout === '' && absent) return null
+      throw error
+    }
+    if (presence.stdout !== '' || presence.stderr !== '') throw invalid()
+    return this.readProcessCarrier(name)
+  }
+
   async killSession(name: string): Promise<void> {
     try {
       await this.run(['kill-session', '-t', name])
@@ -275,9 +321,9 @@ exec ${spec.command}
     }
   }
 
-  private run(args: string[]): Promise<{ stdout: string; stderr: string }> {
+  private run(args: string[], cLocale = false): Promise<{ stdout: string; stderr: string }> {
     return execFileAsync(this.tmuxBin, args, {
-      env: buildChildEnv(),
+      env: cLocale ? { ...buildChildEnv(), LC_ALL: 'C', LANG: 'C' } : buildChildEnv(),
       timeout: this.commandTimeoutMs,
       killSignal: 'SIGKILL',
     })

@@ -1,3 +1,5 @@
+import { captureWorkspaceRelocationWorkers, assertWorkspaceRelocationWorkersCurrent, type WorkspaceRelocationWorker, type WorkspaceRelocationStopJournal, type WorkspaceRelocationStopResult } from './workspace-relocation-scope.js'
+import { ExecutionAdmissions } from '../../core/execution-admissions.js'
 import { projectWorkspaceExecution } from './workspace-execution.js'
 import { executionAdmission } from '../execution-policy.js'
 import { sha256CanonicalJson } from 'crabot-shared'
@@ -104,6 +106,8 @@ import type {
   WorkspaceGitCheck,
   InspectWorkspaceGitResult,
   WorkerWorkspaceGitContext,
+  WorkerProcessIdentity,
+  WorkerCarrierExit,
 } from '../types'
 import type { BuiltinRuntimeFactory } from '../builtin/runtime'
 import { BUILTIN_WORKER_PERMISSIONS, narrowWorkerPermissions, workerCliExecutionPermissions } from '../builtin/runtime'
@@ -172,6 +176,7 @@ import { isWorkerRuntimeEvent } from '../builtin/runtime-observation.js'
 import { reviewFingerprint, type IdleReviewFacts, type ReviewBackgroundFacts } from './idle-review-facts.js'
 import { readLegacyTraces } from '../legacy-source-reader.js'
 import { isLegacyContinuationAuth, type LegacyContinuationAuth } from './legacy-continuation-auth.js'
+import { createLegacyWorkspaceExecutionMatcher, type LegacyWorkspaceExecutions } from './workspace-legacy-executions.js'
 import { applyStatusTransition, canTransition, isTerminalStatus } from './task-status'
 import { selectWorkerView, resolveWorkerProjects, type WorkerExecutionFact, type WorkerViewSelection, type WorkerViewFacts } from '../../manager/worker-candidates.js'
 import type { ManagerWorkboard } from '../../manager/workboard-store.js'
@@ -743,6 +748,7 @@ export interface HarnessDeps {
   readonly builtinSpawnDefaults?: BuiltinRuntimeFactory
   /** Rejects new spawn/resume/handoff while runtime config is stale; running incarnations remain untouched. */
   readonly assertExecutionAdmission?: () => void
+  readonly assertMaintenanceAdmission?: () => void
   readonly assertExecutionPolicy?: (impl: WorkerImplId, principal?: ResolvedPermissions, newWorker?: boolean) => void
   /**
    * P6-B §6.5：显式/接续目标 impl 的 activation registry gate（唯一 ready 判定点）。
@@ -779,6 +785,8 @@ export interface HarnessDeps {
   readonly hasRunningBg?: (workerId: string, scope?: 'all') => Promise<boolean>
   /** Read-only execution projection waits for startup carrier and background reconciliation. */
   readonly isExecutionReady?: () => boolean
+  /** Startup reconciliation only; an active maintenance fence does not undo it. */
+  readonly isWorkspaceRelocationReady?: () => boolean
   readonly listWorkerBackground?: (workerId: string) => Promise<Array<{
     entity_id: string
     type?: 'shell' | 'agent'
@@ -920,6 +928,11 @@ function continuationDelivery(
 }
 
 export class WorkerHarness {
+  private readonly executionAdmissions = new ExecutionAdmissions()
+  private readonly workspaceRelocationStopWorkers = new Set<string>()
+  private workspaceRelocationStop?: { fingerprint: string; pending: Promise<{
+    dispatch: 'dispatch' | 'observe'; results: ReadonlyArray<WorkspaceRelocationStopResult>
+  }> }
   private readonly requestSpawnMutexes = new Map<string, AsyncMutex>()
   private readonly pendingBgNotifications = new Map<string, number>()
   private readonly continuationObservations = new Map<string, { key: string; fact: WorkerExecutionFact; runtimeFact: WorkerExecutionFact; stoppedAt?: string; stopUnverified?: boolean }>()
@@ -1122,6 +1135,145 @@ export class WorkerHarness {
     })
   }
 
+  // Called only by the verified relocation coordinator, before fixing its stop set.
+  async quiesceExecutionAdmissions(): Promise<void> { await this.executionAdmissions.closeAndDrain() }
+
+  /** Internal capture only. The coordinator must durably fix this set before sending stops. */
+  async captureWorkspaceRelocationScope(): Promise<ReadonlyArray<WorkspaceRelocationWorker>> {
+    const assertReady = () => {
+      if (this.deps.isWorkspaceRelocationReady?.() !== true) {
+        throw Object.assign(new Error('执行器启动对账尚未完成，不能固定迁移范围。'), { code: 'WORKSPACE_MAINTENANCE' })
+      }
+    }
+    assertReady()
+    await this.quiesceExecutionAdmissions()
+    const entries = await this.deps.ledger.listAllWorkers()
+    assertReady()
+    return captureWorkspaceRelocationWorkers(entries)
+  }
+
+  /** Read-only CLI carriers; builtin/Agent-native processes still require the actual module scope. */
+  async captureWorkspaceRelocationProcesses(expected: ReadonlyArray<WorkspaceRelocationWorker>, legacy?: LegacyWorkspaceExecutions): Promise<ReadonlyArray<WorkerProcessIdentity>> {
+    const fingerprint = sha256CanonicalJson(expected)
+    const failure = () => Object.assign(new Error('迁移执行进程与固定范围无法核验，已保留维护保护。'), { code: 'WORKSPACE_MAINTENANCE' })
+    const matchesLegacy = legacy === undefined ? () => false : createLegacyWorkspaceExecutionMatcher(legacy)
+    const legacyAbsences: Array<{ worker_id: string; incarnation_id: string; manager_key: ManagerKey }> = []
+    const currentExitChecks: Array<() => Promise<void>> = []
+    const carrierExited = (value: unknown): value is WorkerCarrierExit => !!value && typeof value === 'object'
+      && !Array.isArray(value) && Object.keys(value).join(',') === 'carrier_exited' && (value as WorkerCarrierExit).carrier_exited === true
+    const scope = await this.captureWorkspaceRelocationScope()
+    if (sha256CanonicalJson(scope) !== fingerprint) throw failure()
+    const adapters = new Map(this.deps.adapters)
+    const processes: WorkerProcessIdentity[] = []
+    for (const worker of scope) {
+      const current = await this.deps.ledger.findWorker(worker.worker_id)
+      assertWorkspaceRelocationWorkersCurrent([worker], current ? [current] : [])
+      for (const fixed of worker.incarnations) {
+        if (fixed.impl === 'builtin' || fixed.impl === 'legacy') continue
+        const incarnation = current!.worker.incarnations.find(item => item.incarnation_id === fixed.incarnation_id)!
+        if (!isExecutableIncarnation(incarnation)) throw failure()
+        const adapter = adapters.get(incarnation.impl)
+        if (!adapter?.captureExecutionProcesses || adapter.implId !== fixed.impl) throw failure()
+        const legacyEnded = matchesLegacy(current!.managerKey, current!.worker, fixed.incarnation_id)
+        const handle = Object.freeze(handleForIncarnation(worker.worker_id, incarnation)), capture = adapter.captureExecutionProcesses
+        const observed = await capture.call(adapter, handle, fixed, legacyEnded ? true : undefined)
+        if (this.deps.adapters.get(fixed.impl) !== adapter) throw failure()
+        if (carrierExited(observed)) {
+          currentExitChecks.push(async () => {
+            if (adapter.captureExecutionProcesses !== capture || !carrierExited(await capture.call(adapter, handle, fixed))) throw failure()
+          })
+          continue
+        }
+        if (!Array.isArray(observed) || observed.length === 0 && !legacyEnded
+          || processes.length + observed.length > 32768) throw failure()
+        if (observed.length === 0) legacyAbsences.push({ worker_id: worker.worker_id, incarnation_id: fixed.incarnation_id, manager_key: worker.manager_key })
+        processes.push(...observed)
+      }
+    }
+    for (const check of currentExitChecks) await check()
+    if (sha256CanonicalJson(await this.captureWorkspaceRelocationScope()) !== fingerprint) throw failure()
+    if (legacyAbsences.length) {
+      const latest = await this.deps.ledger.listAllWorkers()
+      assertWorkspaceRelocationWorkersCurrent(scope, latest)
+      const workers = new Map(latest.map(item => [item.worker.worker_id, item]))
+      for (const absent of legacyAbsences) {
+        const current = workers.get(absent.worker_id)
+        if (!current || current.managerKey !== absent.manager_key || !matchesLegacy(current.managerKey, current.worker, absent.incarnation_id)) throw failure()
+      }
+    }
+    if ([...adapters].some(([impl, adapter]) => this.deps.adapters.get(impl) !== adapter)) throw failure()
+    // Reobserve verified snapshots after adapter reads; only independent Native evidence can establish an original generation exit.
+    const { recaptureObservedProcessScope } = require(join(__dirname, '../../../../scripts/lib/owned-process-tree.cjs'))
+    return recaptureObservedProcessScope(processes)
+  }
+
+  /** Internal submission only; the fixed job still must verify the complete OS/module scope. */
+  requestWorkspaceRelocationStops(
+    expected: ReadonlyArray<WorkspaceRelocationWorker>,
+    journal: WorkspaceRelocationStopJournal,
+  ): Promise<{ dispatch: 'dispatch' | 'observe'; results: ReadonlyArray<WorkspaceRelocationStopResult> }> {
+    const fingerprint = sha256CanonicalJson(expected)
+    if (this.workspaceRelocationStop) {
+      if (this.workspaceRelocationStop.fingerprint !== fingerprint) {
+        return Promise.reject(Object.assign(new Error('迁移停止范围不能更换。'), { code: 'WORKSPACE_MAINTENANCE' }))
+      }
+      return this.workspaceRelocationStop.pending
+    }
+    // Install the single operation before invoking a journal or adapter that can synchronously reenter.
+    const pending = Promise.resolve().then(async () => {
+      const scope = await this.captureWorkspaceRelocationScope()
+      if (sha256CanonicalJson(scope) !== fingerprint) {
+        throw Object.assign(new Error('执行器稳定身份已变化，不能按旧范围停止。'), { code: 'WORKSPACE_MAINTENANCE' })
+      }
+      for (const worker of scope) this.workspaceRelocationStopWorkers.add(worker.worker_id)
+      const dispatch = await journal.prepare(scope)
+      if (dispatch !== 'dispatch' && dispatch !== 'observe') throw new Error('Invalid relocation stop journal acknowledgement')
+      const entries = await this.deps.ledger.listAllWorkers()
+      assertWorkspaceRelocationWorkersCurrent(scope, entries)
+      if (this.deps.isWorkspaceRelocationReady?.() !== true) throw new Error('执行器已进入关闭流程，停止结果尚待核验。')
+      if (dispatch === 'observe') return { dispatch, results: [] }
+      const results: WorkspaceRelocationStopResult[] = []
+      for (const worker of scope) {
+        for (const fixed of worker.incarnations) {
+          const incarnation = await this.withLock(worker.worker_id, async () => {
+            const current = await this.deps.ledger.findWorker(worker.worker_id)
+            assertWorkspaceRelocationWorkersCurrent([worker], current ? [current] : [])
+            return current!.worker.incarnations.find(item => item.incarnation_id === fixed.incarnation_id)!
+          })
+          const target = { worker_id: worker.worker_id, incarnation_id: fixed.incarnation_id }
+          if (!isExecutableIncarnation(incarnation)) {
+            results.push({ ...target, status: 'unavailable' })
+            continue
+          }
+          const adapter = this.deps.adapters.get(incarnation.impl)
+          if (!adapter) {
+            results.push({ ...target, status: 'unavailable' })
+            continue
+          }
+          try {
+            const stop = adapter.stop?.bind(adapter) ?? adapter.kill.bind(adapter)
+            // Do not hold a Worker lock while native callbacks settle their own ledger observations.
+            await stop(handleForIncarnation(worker.worker_id, incarnation))
+            results.push({ ...target, status: 'submitted' })
+          } catch {
+            // A rejected submission can already have reached the carrier. It is not a proved failure/exit.
+            results.push({ ...target, status: 'unknown' })
+          }
+        }
+      }
+      assertWorkspaceRelocationWorkersCurrent(scope, await this.deps.ledger.listAllWorkers())
+      await journal.complete(results)
+      return { dispatch, results }
+    })
+    this.workspaceRelocationStop = { fingerprint, pending }
+    return pending
+  }
+
+  private trackExecutionAdmission<T>(action: () => Promise<T>): Promise<T> {
+    this.deps.assertMaintenanceAdmission?.()
+    return this.executionAdmissions.run(action)
+  }
+
   async spawnWorker(p: SpawnWorkerParams): Promise<LedgerWorker> {
     if (p.origin.request) throw new Error('REQUEST_SPAWN_REQUIRES_BOUND_ADMISSION')
     return this.spawnWorkerInternal(p, `w-${randomUUID()}`)
@@ -1188,7 +1340,11 @@ export class WorkerHarness {
     }
   }
 
-  private async spawnWorkerInternal(p: SpawnWorkerParams, workerId: string, beforeProvision?: () => Promise<void>, authorizeFile?: (file: string, write: boolean, managed: ManagedWorkspaceScope) => Promise<void>): Promise<LedgerWorker> {
+  private async spawnWorkerInternal(...args: Parameters<WorkerHarness['spawnWorkerAdmitted']>): Promise<LedgerWorker> {
+    return this.trackExecutionAdmission(() => this.spawnWorkerAdmitted(...args))
+  }
+
+  private async spawnWorkerAdmitted(p: SpawnWorkerParams, workerId: string, beforeProvision?: () => Promise<void>, authorizeFile?: (file: string, write: boolean, managed: ManagedWorkspaceScope) => Promise<void>): Promise<LedgerWorker> {
     this.deps.assertExecutionAdmission?.()
     if (!p.principal_permissions) throw Object.assign(new Error('CAPABILITY_UNKNOWN: Worker principal unavailable'), { code: 'CAPABILITY_UNKNOWN' })
     const incarnationId = randomUUID()
@@ -1471,6 +1627,14 @@ export class WorkerHarness {
     text: string,
     opts?: HarnessSendToWorkerOptions,
   ): Promise<SendToWorkerResult | void> {
+    return this.trackExecutionAdmission(() => this.sendToWorkerAdmitted(workerId, text, opts))
+  }
+
+  private async sendToWorkerAdmitted(
+    workerId: string,
+    text: string,
+    opts?: HarnessSendToWorkerOptions,
+  ): Promise<SendToWorkerResult | void> {
     const inbox = this.getInbox(workerId)
     let enqueued = true
     let receipt: WorkerInputDeliveryReceipt | undefined
@@ -1492,6 +1656,8 @@ export class WorkerHarness {
       // A queued worker lock or ledger read may have crossed the caller's deadline. Do not
       // create a redirect hold, receipt, or inbox item after the tool has timed out.
       this.assertSynchronousInputDeadline(synchronousDeadlineAt, deliveryId)
+      this.deps.assertMaintenanceAdmission?.()
+      this.executionAdmissions.assertOpen()
       if (!found) throw new WorkerNotFoundError(workerId)
       if (found.worker.task.status === 'closed') throw new TaskCancelledError(workerId)
       const mainline = requireMainlineIncarnation(found.worker)
@@ -2050,10 +2216,16 @@ export class WorkerHarness {
 
   /** Queue an untrusted wake only while the task is non-terminal; never revive it later. */
   async sendToActiveWorker(workerId: string, text: string): Promise<boolean> {
+    return this.trackExecutionAdmission(() => this.sendToActiveWorkerAdmitted(workerId, text))
+  }
+
+  private async sendToActiveWorkerAdmitted(workerId: string, text: string): Promise<boolean> {
     const inbox = this.getInbox(workerId)
     let queued = false
     await this.withLock(workerId, async () => {
       const found = await this.deps.ledger.findWorker(workerId)
+      this.deps.assertMaintenanceAdmission?.()
+      this.executionAdmissions.assertOpen()
       if (!found || isTerminalStatus(found.worker.task.status)) return
       if (!mainlineIncarnation(found.worker)) return
       inbox.enqueue({
@@ -2068,7 +2240,11 @@ export class WorkerHarness {
     return queued
   }
 
-  private async attemptInput(
+  private async attemptInput(...args: Parameters<WorkerHarness['attemptInputAdmitted']>): Promise<InputAttempt> {
+    return this.trackExecutionAdmission(() => this.attemptInputAdmitted(...args))
+  }
+
+  private async attemptInputAdmitted(
     adapter: WorkerAdapter,
     handle: IncarnationHandle,
     text: string,
@@ -2179,7 +2355,7 @@ export class WorkerHarness {
     // 真正的投递不占用 harness 的 per-worker 锁(见文件头说明);inbox 自身的锁保证同一
     // 信箱的并发 flush 不重复投递。deliver 内部对每个 item 重新取一次当前化身,避免用
     // 入队时刻的过期 handle 投递。
-    await inbox.flush(async (item) => {
+    await inbox.flush((item) => this.trackExecutionAdmission(async () => {
       const found = await this.deps.ledger.findWorker(workerId)
       if (!found) throw new WorkerNotFoundError(workerId)
       // 主线化身,不能用"数组最后一个"——fork 之后数组末尾是侧问分支,投递必须仍然打到
@@ -2263,10 +2439,14 @@ export class WorkerHarness {
         )
       }
       return this.settleInputAttempt(workerId, item.text, item.raw, attempt, item)
-    })
+    }))
   }
 
-  private async continueLegacyWorker(
+  private async continueLegacyWorker(...args: Parameters<WorkerHarness['continueLegacyWorkerAdmitted']>): Promise<ContinuationDelivery> {
+    return this.trackExecutionAdmission(() => this.continueLegacyWorkerAdmitted(...args))
+  }
+
+  private async continueLegacyWorkerAdmitted(
     workerId: string,
     item: InboxItem,
   ): Promise<ContinuationDelivery> {
@@ -2977,7 +3157,11 @@ export class WorkerHarness {
   }
 
   /** capabilities().revive===true 分支:adapter.resume 拉起新化身,session 满保真接续。 */
-  private async reviveIncarnation(
+  private async reviveIncarnation(...args: Parameters<WorkerHarness['reviveIncarnationAdmitted']>): Promise<ContinuationDelivery> {
+    return this.trackExecutionAdmission(() => this.reviveIncarnationAdmitted(...args))
+  }
+
+  private async reviveIncarnationAdmitted(
     managerKey: ManagerKey,
     worker: LedgerWorker,
     mainline: ExecutableIncarnation,
@@ -3150,7 +3334,11 @@ export class WorkerHarness {
    * 顺序对齐 protocol-agent-v3 §5.3"跨实现切换":目标实现先完成无副作用 provision pre-flight
    * → Harness 持久化交接包 → (若仍存活)stop 核验并标 superseded → 同 workspace provision+spawn 新实现 → 化身链 +1。
    */
-  private async handoffIncarnation(
+  private async handoffIncarnation(...args: Parameters<WorkerHarness['handoffIncarnationAdmitted']>): Promise<HandoffResult> {
+    return this.trackExecutionAdmission(() => this.handoffIncarnationAdmitted(...args))
+  }
+
+  private async handoffIncarnationAdmitted(
     managerKey: ManagerKey,
     worker: LedgerWorker,
     source: ExecutableIncarnation,
@@ -3510,12 +3698,28 @@ export class WorkerHarness {
     }
     const handle: IncarnationHandle = {
       worker_id: workerId,
+      incarnation_id: incarnation.incarnation_id,
       seq: incarnation.seq,
       impl: incarnation.impl,
       session_ref: incarnation.session_ref,
       ...(incarnation.query_id ? { query_id: incarnation.query_id } : {}),
     }
     return adapter.readTerminal(handle)
+  }
+
+  private async noteWorkspaceUse(workspaceId: string | undefined, at: string): Promise<void> {
+    if (!workspaceId) return
+    try { await this.deps.workspaces.markUsed(workspaceId, at) }
+    catch { console.warn('[WorkerHarness] workspace last-use persistence failed; running execution is preserved') }
+  }
+
+  async getWorkspaceExecutionInventory(): Promise<import('crabot-shared').WorkspaceExecutionInventory> {
+    if (this.deps.isExecutionReady?.() !== true) return { ready: false, items: {} }
+    const workers = (await this.deps.ledger.listAllWorkers()).map(entry => entry.worker)
+    // Until historical roots are indexed, an absent binding cannot be reported as zero occupants.
+    if (workers.some(worker => worker.workspace_id === undefined)) return { ready: false, items: {} }
+    const items = await projectWorkspaceExecution(workers, id => this.getWorkerExecutionObservation(id))
+    return this.deps.isExecutionReady?.() === true ? { ready: true, items } : { ready: false, items: {} }
   }
 
   /** Read-only: no reconciliation, health probe, delivery or lifecycle mutation. */
@@ -3760,12 +3964,54 @@ export class WorkerHarness {
     return { valid: true, cli_access: permissions.cli_access[domain], shell: permissions.shell }
   }
 
+  private async requireWorkspaceOwnership(workerId: string, workspaceRoot: string): Promise<void> {
+    const found = await this.deps.ledger.findWorker(workerId), context = await this.contextStore.read(workerId)
+    if (!found || !context?.principal_permissions || context.manager_key !== found.managerKey
+      || found.worker.manager_key !== found.managerKey || context.creator_friend_id !== found.worker.origin.creator_friend_id
+      || !found.worker.incarnations.some(item => item.workspace === workspaceRoot)) throw new Error('CAPABILITY_UNKNOWN: Worker file ownership unavailable')
+    if (found.worker.origin.request || context.request) {
+      const guard = this.deps.requestGuard?.()
+      if (!guard || !await guard.load(workerId)) throw new Error('CAPABILITY_UNKNOWN: Worker request ownership unavailable')
+    }
+  }
+
   /** Ownership only; caller still applies its own resource/role and lifecycle checks. */
   managedWorkspaceScope(workerId: string, workspaceRoot: string): ManagedWorkspaceScope {
     return async () => {
       await this.requireWorkspaceOwnership(workerId, workspaceRoot)
       return this.deps.workspaces.fileScope(workerId, workspaceRoot)()
     }
+  }
+
+  /** Closed history only. The returned managed scope is never supplied to execution or write entrypoints. */
+  async workspaceHistoryRead(workerId: string, incarnationId: string) {
+    const readOwner = async () => {
+      const found = await this.deps.ledger.findWorker(workerId)
+      const incarnation = found?.worker.incarnations.find(item => item.incarnation_id === incarnationId)
+      if (!found || found.worker.task.status !== 'closed' || !incarnation) return null
+      return structuredClone({ managerKey: found.managerKey, incarnation })
+    }
+    const candidate = await this.deps.ledger.findWorker(workerId)
+    if (!candidate || candidate.worker.task.status !== 'closed' || !candidate.worker.incarnations.some(item => item.incarnation_id === incarnationId)) return null
+    const location = await this.deps.workspaces.locateHistory(candidate.managerKey, workerId, incarnationId)
+    if (!location) return null
+    const original = await readOwner()
+    if (!original) throw new Error('CAPABILITY_UNKNOWN: Worker history ownership unavailable')
+    if (location.manager_key !== original.managerKey || location.worker_id !== workerId || location.incarnation_id !== incarnationId
+      || location.before_root !== original.incarnation.workspace) throw new Error('CAPABILITY_UNKNOWN: Worker history ownership unavailable')
+    const originalHash = sha256CanonicalJson(original), locationHash = sha256CanonicalJson(location)
+    const verify = async () => {
+      if (sha256CanonicalJson(await readOwner()) !== originalHash
+        || sha256CanonicalJson(await this.deps.workspaces.locateHistory(original.managerKey, workerId, incarnationId)) !== locationHash
+        || sha256CanonicalJson(await readOwner()) !== originalHash) throw new Error('CAPABILITY_UNKNOWN: Worker history ownership changed')
+    }
+    await verify()
+    return { before_root: location.before_root, after_root: location.after_root, verify, managedScope: async () => {
+      await verify(); await this.requireWorkspaceOwnership(workerId, original.incarnation.workspace)
+      const scope = await this.deps.workspaces.fileScope(workerId, location.after_root)()
+      await verify(); await this.requireWorkspaceOwnership(workerId, original.incarnation.workspace)
+      return scope
+    } }
   }
 
   private async assertWorkerFileAccess(workerId: string, file: string, write: boolean): Promise<void> {
@@ -3810,7 +4056,7 @@ export class WorkerHarness {
     deliveryId: string,
     onSettled: (settlement: { status: 'delivered' } | { status: 'dead_letter'; reason: string }) => Promise<void>,
   ): Promise<void> {
-    await this.withLock(workerId, async () => {
+    return this.trackExecutionAdmission(() => this.withLock(workerId, async () => {
       const found = await this.deps.ledger.findWorker(workerId)
       const incarnation = found?.worker.incarnations.find((item) => item.incarnation_id === incarnationId)
       if (!incarnation && (await this.queryReceiptStore.list(workerId)).some((receipt) => receipt.state === 'starting')) {
@@ -3839,7 +4085,7 @@ export class WorkerHarness {
         if (!(error instanceof WorkerExitedError)) throw error
         await onSettled({ status: 'dead_letter', reason: 'original execution branch exited before delivery' })
       }
-    })
+    }))
   }
 
   async getWorkerTurn(workerId: string, turnId?: string): Promise<StoredWorkerTurn | undefined> {
@@ -3898,7 +4144,7 @@ export class WorkerHarness {
     status: 'submitted'
     operation: WorkerControlOperation
   }> {
-    return this.withLock(workerId, async () => {
+    return this.trackExecutionAdmission(() => this.withLock(workerId, async () => {
       const snapshot = await this.getActiveUiSnapshot(workerId, snapshotId)
       const action = snapshot.actions.find((candidate) => candidate.action_id === actionId)
       if (!action) throw new Error('worker UI action is not available for this snapshot')
@@ -3956,7 +4202,7 @@ export class WorkerHarness {
         status: 'submitted',
         operation: settled,
       }
-    })
+    }))
   }
 
   private async getActiveUiSnapshot(workerId: string, snapshotId: string): Promise<WorkerUiSnapshot> {
@@ -6099,6 +6345,7 @@ export class WorkerHarness {
     } catch (error) {
       return this.settleControlOperation(current, 'unknown', error instanceof Error ? error.message : String(error))
     }
+    if (operation.kind === 'stop' && this.workspaceRelocationStopWorkers.has(operation.worker_id)) return current
     // `cancelAfterVerifiedStop` / `supersedeAfterVerifiedStop` writes ledger truth before the
     // operation becomes succeeded, so restart reconciliation can complete either boundary.
     if (operation.kind === 'stop' && !handoffSupersede && found?.worker.task.status === 'closed') {
@@ -6373,6 +6620,14 @@ export class WorkerHarness {
    * 责任；不会再合成第二条 fire-and-forget wake。
    */
   async queryWorker(
+    workerId: string,
+    question: string,
+    opts?: { readonly managerKey?: ManagerKey; readonly authorize?: () => Promise<void> },
+  ): Promise<QueryWorkerStartedResult> {
+    return this.trackExecutionAdmission(() => this.queryWorkerAdmitted(workerId, question, opts))
+  }
+
+  private async queryWorkerAdmitted(
     workerId: string,
     question: string,
     opts?: { readonly managerKey?: ManagerKey; readonly authorize?: () => Promise<void> },
@@ -6664,7 +6919,9 @@ export class WorkerHarness {
       return await Promise.race([forkPromise, timeout])
     } catch (error) {
       if (error instanceof ForkEstablishmentError && error.stage === 'timeout') {
-        void forkPromise.then((handle) => adapter.kill(handle)).catch((lateError) => {
+        const cleanup = forkPromise.then((handle) => adapter.kill(handle))
+        this.executionAdmissions.trackCleanup(cleanup)
+        void cleanup.catch((lateError) => {
           console.error('[WorkerHarness] late query fork cleanup failed:', lateError)
         })
       }
@@ -6759,7 +7016,9 @@ export class WorkerHarness {
         // 2026-08-31 状态机修正:化身退出落 halted(粗分类停因进 evidence);manager 发起的
         // 停止(killed)事实成立即 closed,stop operation 的核验判据依赖这一点。
         const reason = report?.endReason
-        if (reason === 'killed') {
+        if (reason === 'killed' && this.workspaceRelocationStopWorkers.has(h.worker_id)) {
+          desired = worker.task.status
+        } else if (reason === 'killed') {
           desired = 'closed'
         } else if (reason === 'superseded') {
           desired = 'running' // 占位:任务状态由化身链新成员决定(与既有语义一致)
@@ -6933,7 +7192,7 @@ export class WorkerHarness {
       const unverifiedStop = state === 'exited' && target.incarnation_id !== undefined &&
         await this.shouldPreserveTaskForUnverifiedStop(h.worker_id, target.incarnation_id, endReason)
       const preserveTaskForStop = state === 'exited' && (
-        pendingStop || unverifiedStop
+        pendingStop || unverifiedStop || this.workspaceRelocationStopWorkers.has(h.worker_id)
       )
       // 2026-08-31 状态机修正:化身停止(idle/exited)一律落 halted,停因进 evidence——
       // ended_reason 细节留在化身记录上;closed 只由 manager 处置产生(killed);
@@ -7296,33 +7555,6 @@ export class WorkerHarness {
     const base: HarnessEvent = { ts, kind, worker_id: workerId, seq }
     const withDetail: HarnessEvent = detail !== undefined ? { ...base, detail } : base
     return taskStatus !== undefined ? { ...withDetail, task_status: taskStatus } : withDetail
-  }
-
-
-  private async noteWorkspaceUse(workspaceId: string | undefined, at: string): Promise<void> {
-    if (!workspaceId) return
-    try { await this.deps.workspaces.markUsed(workspaceId, at) }
-    catch { console.warn('[WorkerHarness] workspace last-use persistence failed; running execution is preserved') }
-  }
-
-  private async requireWorkspaceOwnership(workerId: string, workspaceRoot: string): Promise<void> {
-    const found = await this.deps.ledger.findWorker(workerId), context = await this.contextStore.read(workerId)
-    if (!found || !context?.principal_permissions || context.manager_key !== found.managerKey
-      || found.worker.manager_key !== found.managerKey || context.creator_friend_id !== found.worker.origin.creator_friend_id
-      || !found.worker.incarnations.some(item => item.workspace === workspaceRoot)) throw new Error('CAPABILITY_UNKNOWN: Worker file ownership unavailable')
-    if (found.worker.origin.request || context.request) {
-      const guard = this.deps.requestGuard?.()
-      if (!guard || !await guard.load(workerId)) throw new Error('CAPABILITY_UNKNOWN: Worker request ownership unavailable')
-    }
-  }
-
-  async getWorkspaceExecutionInventory(): Promise<import('crabot-shared').WorkspaceExecutionInventory> {
-    if (this.deps.isExecutionReady?.() !== true) return { ready: false, items: {} }
-    const workers = (await this.deps.ledger.listAllWorkers()).map(entry => entry.worker)
-    // Until historical roots are indexed, an absent binding cannot be reported as zero occupants.
-    if (workers.some(worker => worker.workspace_id === undefined)) return { ready: false, items: {} }
-    const items = await projectWorkspaceExecution(workers, id => this.getWorkerExecutionObservation(id))
-    return this.deps.isExecutionReady?.() === true ? { ready: true, items } : { ready: false, items: {} }
   }
 }
 

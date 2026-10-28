@@ -1,3 +1,4 @@
+import type { WorkspaceRelocationIncarnation, WorkerProcessIdentity } from 'crabot-shared'
 import type { ModelFormat } from 'crabot-shared'
 import type { ToolDefinition, LLMAdapter } from '../engine/index.js'
 import type { LLMThinkingConfig } from '../engine/llm-adapter-types.js'
@@ -551,7 +552,17 @@ export interface WorkerRuntimeEvent {
   runtime: WorkerRuntimeSnapshot
 }
 
+/** Internal maintenance observation, never complete stop proof or process authority. */
+export type { WorkerProcessIdentity } from 'crabot-shared'
+
+export interface WorkerCarrierExit {
+  readonly carrier_exited: true
+}
+export type WorkerProcessObservation = ReadonlyArray<WorkerProcessIdentity> | WorkerCarrierExit
+
 export interface WorkerAdapter {
+  /** Fixed-job observation only. Cold reads need the original scope; legacy absence needs the qualified context. Unknown rejects. */
+  captureExecutionProcesses?(h: IncarnationHandle, fixed?: WorkspaceRelocationIncarnation, legacyEnded?: true): Promise<WorkerProcessObservation>
   readRuntime?(handle: IncarnationHandle): Promise<WorkerRuntimeSnapshot | undefined>
   readonly implId: WorkerImplId
   detect(): Promise<DetectResult>

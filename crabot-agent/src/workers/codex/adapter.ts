@@ -1,3 +1,6 @@
+import { workspaceHistoryFor, nativeHistorySource, readNativeHistoryText, nativeHistoryDirectory, nativeHistorySourcePath, type WorkspaceHistoryReader } from '../relocated-native-history.js'
+import type { WorkspaceRelocationIncarnation } from 'crabot-shared'
+import { captureMetadataNativeProcesses } from '../cold-native-processes.js'
 import { assertCodexProjectConfiguration } from '../provision/codex-project-config.js'
 import { nativeRuntimeRoot, nativeEventChannel, nativeEventSource, runtimeWorkspace, verifyNativeBinding, verifyPrivateNativeRuntime, verifyNativeRuntimeMetadata } from '../provision/native-runtime.js'
 import { isStandardComputerUse } from '../../agent/computer-use-owner.js'
@@ -80,6 +83,7 @@ import type {
   SendInputOptions,
   TraceCursor,
   WorkerAdapter,
+  WorkerProcessObservation,
   WorkerContractState,
   WorkerSubagentSummary,
   Workspace,
@@ -563,6 +567,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   constructor(
     private readonly deps: {
       readonly dataDir: string
+      readonly readWorkspaceHistory?: WorkspaceHistoryReader
       readonly codexBin?: string
       readonly tmux?: TmuxDriver
       /** 真实登录态所在的 CODEX_HOME,默认 ~/.codex;provision 从这里搬一份 auth.json 到
@@ -1812,6 +1817,12 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       const { chunk } = await new OutputLog(join(dir, `output-${h.seq}.log`)).read({ offset: 0 })
       return chunk ? { kind: 'headless_text', text: chunk } : { kind: 'unavailable', unavailable_reason: 'headless_without_text' }
     }
+    const history = await workspaceHistoryFor(h, this.deps.readWorkspaceHistory)
+    if (history) {
+      const final = await readFinalTerminalSnapshot(dir, h.seq)
+      await history.verify()
+      return final ? { kind: 'final_terminal', ...final } : { kind: 'unavailable', unavailable_reason: 'no_final_terminal_snapshot' }
+    }
     const runtime = await this.ensureRuntime(h)
     if (!runtime) {
       const final = await readFinalTerminalSnapshot(dir, h.seq)
@@ -1976,20 +1987,40 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     // runtime)。ensureRuntime 现在从 meta 的 session_discovery + workspace_root(本轮新增
     // 持久化)重新推导出 rolloutPath(见 findRolloutFileBySessionId),readTrace 因此也能在
     // 无常驻 runtime 时工作。
-    const runtime = await this.ensureRuntime(h)
-    if (!runtime) {
-      throw new Error(`CodexWorkerAdapter.readTrace: no such incarnation ${h.worker_id}#${h.seq} resident in this process`)
-    }
+    const historical = await nativeHistorySource(h, this.deps.readWorkspaceHistory, () => this.readMetaFile(join(this.deps.dataDir, h.worker_id), h.seq))
+    let filePath: string
+    if (historical) {
+      const meta = historical.metadata
+      const originalHome = meta.codex_home ?? join(meta.runtime_root ?? historical.history.before_root, '.codex')
+      let rollout: string | undefined
+      if (meta.session_discovery === 'discovered') {
+        try {
+          const sessions = await nativeHistoryDirectory(historical, join(originalHome, 'sessions'))
+          rollout = await findRolloutFileBySessionId(sessions, h.session_ref)
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+        }
+      }
+      await historical.verify()
+      if (!rollout) return { sourceAvailable: false, events: [], nextCursor: cursor ?? { offset: 0 } }
+      filePath = nativeHistorySourcePath(historical.history, originalHome, rollout)
+    } else {
+      const runtime = await this.ensureRuntime(h)
+      if (!runtime) {
+        throw new Error(`CodexWorkerAdapter.readTrace: no such incarnation ${h.worker_id}#${h.seq} resident in this process`)
+      }
 
-    if (!runtime.rolloutPath) {
-      // spawn 时没能发现 rollout 文件(占位 session_id,已知限制)——没有路径可读,退化为空
-      // 数组,cursor 原样透传。
-      return { sourceAvailable: false, events: [], nextCursor: cursor ?? { offset: 0 } }
+      if (!runtime.rolloutPath) {
+        // spawn 时没能发现 rollout 文件(占位 session_id,已知限制)——没有路径可读,退化为空
+        // 数组,cursor 原样透传。
+        return { sourceAvailable: false, events: [], nextCursor: cursor ?? { offset: 0 } }
+      }
+      filePath = runtime.rolloutPath
     }
 
     let raw: string
     try {
-      raw = await fs.readFile(runtime.rolloutPath, 'utf-8')
+      raw = historical ? await readNativeHistoryText(historical, filePath) : await fs.readFile(filePath, 'utf-8')
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { sourceAvailable: false, events: [], nextCursor: cursor ?? { offset: 0 } }
       throw err
@@ -2014,6 +2045,46 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       consumed = i + 1
     }
     return { sourceAvailable: true, events, nextCursor: { offset: consumed } }
+  }
+
+  /** Read-only fixed carrier; cold metadata needs the original scope, never ensureRuntime side effects. */
+  async captureExecutionProcesses(h: IncarnationHandle, fixed?: WorkspaceRelocationIncarnation, legacyEnded?: true): Promise<WorkerProcessObservation> {
+    h = Object.freeze({ ...h })
+    fixed = fixed ? Object.freeze({ ...fixed }) : undefined
+    this.assertActive()
+    const runtime = this.runtimes.get(instanceKey(h))
+    const invalid = () => Object.assign(new Error('执行器化身与运行载体无法核验。'), { code: 'WORKER_CARRIER_UNVERIFIED' })
+    if (legacyEnded !== undefined && (legacyEnded !== true || !fixed) || h.impl !== this.implId || !h.incarnation_id || fixed && (fixed.incarnation_id !== h.incarnation_id || fixed.impl !== h.impl || fixed.seq !== h.seq)) throw invalid()
+    if (!runtime) {
+      if (!fixed) throw invalid()
+      return captureMetadataNativeProcesses(this.deps.dataDir, h, fixed,
+        () => legacyEnded ? this.tmux.readOptionalProcessCarrier(`crabot-w-${h.worker_id}-${h.seq}`) : this.tmux.readProcessCarrier(`crabot-w-${h.worker_id}-${h.seq}`),
+        () => { this.assertActive(); return !this.runtimes.has(instanceKey(h)) }, legacyEnded)
+    }
+    if (runtime.incarnation_id !== h.incarnation_id || runtime.worker_id !== h.worker_id || runtime.seq !== h.seq
+      || fixed && runtime.workspaceRoot !== fixed.workspace) throw invalid()
+    let processes: WorkerProcessObservation
+    if (runtime.headlessClient) {
+      processes = runtime.headlessClient.captureExecutionProcesses(fixed && runtime.controlState?.kind === 'exited' ? true : undefined)
+    } else {
+      if (runtime.sessionName !== `crabot-w-${h.worker_id}-${h.seq}`) throw invalid()
+      if (legacyEnded && fixed && runtime.controlState.kind === 'exited') {
+        const sessionName = runtime.sessionName
+        processes = await captureMetadataNativeProcesses(this.deps.dataDir, h, fixed,
+          () => this.tmux.readOptionalProcessCarrier(sessionName), () => {
+            this.assertActive()
+            return this.runtimes.get(instanceKey(h)) === runtime && runtime.incarnation_id === h.incarnation_id
+              && runtime.worker_id === h.worker_id && runtime.seq === h.seq && runtime.sessionName === sessionName
+              && runtime.workspaceRoot === fixed!.workspace && runtime.controlState.kind === 'exited' && !runtime.headlessClient
+          }, true)
+      } else {
+        const { captureTmuxProcessTree } = require(join(__dirname, '../../../../scripts/lib/tmux-process-tree.cjs'))
+        processes = await captureTmuxProcessTree(() => this.tmux.readProcessCarrier(runtime.sessionName))
+      }
+    }
+    this.assertActive()
+    if (this.runtimes.get(instanceKey(h)) !== runtime || runtime.incarnation_id !== h.incarnation_id) throw invalid()
+    return processes
   }
 
   async kill(h: IncarnationHandle): Promise<void> {
@@ -2070,29 +2141,57 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     return { fork: this.appServerForkSupported, revive: true, goalMode: false, subagent: this.appServerSubagentSupported, structuredTrace: true }
   }
 
-  private async readChildThreads(h: IncarnationHandle): Promise<ReadonlyArray<import('./app-server-client.js').CodexAppServerThread>> {
+  private async childReadContext(h: IncarnationHandle): Promise<{
+    sessionId: string; workspaceRoot: string; codexHome: string; verify?: () => Promise<void>
+  } | undefined> {
+    const historical = await nativeHistorySource(h, this.deps.readWorkspaceHistory,
+      () => this.readMetaFile(join(this.deps.dataDir, h.worker_id), h.seq))
+    if (historical) {
+      if (historical.metadata.session_discovery !== 'discovered') return undefined
+      const originalHome = historical.metadata.codex_home ?? join(historical.metadata.runtime_root ?? historical.history.before_root, '.codex')
+      const workspaceRoot = await nativeHistoryDirectory(historical, historical.history.before_root)
+      const codexHome = await nativeHistoryDirectory(historical, originalHome)
+      const verify = async () => {
+        await historical.verify()
+        if (await nativeHistoryDirectory(historical, historical.history.before_root) !== workspaceRoot
+          || await nativeHistoryDirectory(historical, originalHome) !== codexHome) throw new Error('Codex history query location changed')
+      }
+      await verify()
+      return { sessionId: h.session_ref, workspaceRoot, codexHome, verify }
+    }
     const runtime = await this.ensureRuntime(h)
-    if (!runtime?.sessionId || !runtime.workspaceRoot) return []
+    if (!runtime?.sessionId || !runtime.workspaceRoot) return undefined
+    return { sessionId: runtime.sessionId, workspaceRoot: runtime.workspaceRoot, codexHome: runtime.codexHome }
+  }
+
+  private async readChildThreads(h: IncarnationHandle): Promise<ReadonlyArray<import('./app-server-client.js').CodexAppServerThread>> {
+    const context = await this.childReadContext(h)
+    if (!context) return []
     const resolved = await this.resolveBinForCommand()
     if (!resolved) return []
-    const client = new CodexAppServerClient({
-      command: `${resolved.cmd} app-server --stdio`,
-      cwd: runtime.workspaceRoot,
-      env: await this.buildEnv({ CODEX_HOME: runtime.codexHome }),
-    })
+    const env = await this.buildEnv({ CODEX_HOME: context.codexHome })
+    await context.verify?.()
+    const command = `${resolved.cmd}${context.verify ? ' -c features.plugins=false -c features.recommended_plugins=false' : ''} app-server --stdio`
+    const client = new CodexAppServerClient({ command, cwd: context.workspaceRoot, env })
     const deadlineAt = new Date(Date.now() + 10_000).toISOString()
     try {
       await client.initialize(deadlineAt)
+      await context.verify?.()
       const children: import('./app-server-client.js').CodexAppServerThread[] = []
       let cursor: string | undefined
       do {
-        const page = await client.listThreads({ parentThreadId: runtime.sessionId, ...(cursor ? { cursor } : {}), limit: 100 }, deadlineAt)
-        children.push(...page.data.filter((thread) => thread.parentThreadId === runtime.sessionId))
+        const page = await client.listThreads({ parentThreadId: context.sessionId, ...(cursor ? { cursor } : {}), limit: 100 }, deadlineAt)
+        await context.verify?.()
+        children.push(...page.data.filter((thread) => thread.parentThreadId === context.sessionId))
         cursor = page.nextCursor ?? undefined
       } while (cursor)
       return children
     } finally {
-      await client.terminate()
+      const stopped = await client.terminate()
+      if (context.verify) {
+        if (!stopped) throw new Error('Codex history query process exit could not be confirmed')
+        await context.verify()
+      }
     }
   }
 
@@ -2100,22 +2199,23 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     items: ReadonlyArray<import('./app-server-client.js').CodexAppServerThreadItem>
     startedAtByTurnId: ReadonlyMap<string, string>
   }> {
-    const runtime = await this.ensureRuntime(h)
-    if (!runtime?.workspaceRoot) return { items: [], startedAtByTurnId: new Map() }
+    const context = await this.childReadContext(h)
+    if (!context) return { items: [], startedAtByTurnId: new Map() }
     const resolved = await this.resolveBinForCommand()
     if (!resolved) return { items: [], startedAtByTurnId: new Map() }
-    const client = new CodexAppServerClient({
-      command: `${resolved.cmd} app-server --stdio`,
-      cwd: runtime.workspaceRoot,
-      env: await this.buildEnv({ CODEX_HOME: runtime.codexHome }),
-    })
+    const env = await this.buildEnv({ CODEX_HOME: context.codexHome })
+    await context.verify?.()
+    const command = `${resolved.cmd}${context.verify ? ' -c features.plugins=false -c features.recommended_plugins=false' : ''} app-server --stdio`
+    const client = new CodexAppServerClient({ command, cwd: context.workspaceRoot, env })
     const deadlineAt = new Date(Date.now() + 10_000).toISOString()
     try {
       await client.initialize(deadlineAt)
+      await context.verify?.()
       const items: import('./app-server-client.js').CodexAppServerThreadItem[] = []
       let cursor: string | undefined
       do {
         const page = await client.listThreadItems({ threadId, ...(cursor ? { cursor } : {}), limit: 100 }, deadlineAt)
+        await context.verify?.()
         items.push(...page.data)
         cursor = page.nextCursor ?? undefined
       } while (cursor)
@@ -2131,9 +2231,14 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         // Older app-server versions may not support includeTurns. The caller uses the
         // child thread creation time as a stable fallback without losing its trace.
       }
+      await context.verify?.()
       return { items, startedAtByTurnId }
     } finally {
-      await client.terminate()
+      const stopped = await client.terminate()
+      if (context.verify) {
+        if (!stopped) throw new Error('Codex history query process exit could not be confirmed')
+        await context.verify()
+      }
     }
   }
 

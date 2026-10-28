@@ -2,6 +2,9 @@ import { BUILTIN_WORKER_PERMISSIONS } from '../../../src/workers/builtin/runtime
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { promises as fs } from 'fs'
 import { tmpdir } from 'os'
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
+import { randomUUID } from 'node:crypto'
 import { join } from 'path'
 import { INPUT_DELIVERY_TIMEOUT_MS, WorkerHarness, WorkerNotFoundError, TaskCancelledError, type HarnessDeps, type SpawnWorkerParams } from '../../../src/workers/harness/harness'
 import { LedgerStore } from '../../../src/workers/harness/ledger-store'
@@ -9,6 +12,7 @@ import { WorkspaceManager } from '../../../src/workers/harness/workspace-manager
 import { NativeActivityStore } from '../../../src/workers/harness/native-activity-store'
 import { WorkerTurnStore } from '../../../src/workers/harness/worker-turn-store'
 import { WorkspaceGitInspector } from '../../../src/workers/harness/workspace-git-inspector'
+import { captureLegacyWorkspaceExecutions } from '../../../src/workers/harness/workspace-legacy-executions'
 import { DailyReflectionEvidence } from '../../../src/manager/daily-reflection-evidence'
 import { ManagerSessionStore } from '../../../src/manager/session-store'
 import type { DailyReflectionState } from '../../../src/manager/daily-reflection-types'
@@ -278,8 +282,9 @@ async function makeHarness(
   fakeOpts: FakeAdapterOpts = {},
   depsOverrides: Partial<Pick<
     HarnessDeps,
-    'isExecutionReady' | 'hasRunningBg' | 'listWorkerBackground' | 'readReviewBackgrounds' | 'hasPendingWorkerNotification' | 'capabilityBundle' | 'onEvent' | 'onOperationNotification' | 'onNativeActivityCollected' | 'admitWorkerConnection' | 'redactFailureReason' | 'mintActivityCursor'
+    'isExecutionReady' | 'isWorkspaceRelocationReady' | 'hasRunningBg' | 'listWorkerBackground' | 'readReviewBackgrounds' | 'hasPendingWorkerNotification' | 'capabilityBundle' | 'onEvent' | 'onOperationNotification' | 'onNativeActivityCollected' | 'admitWorkerConnection' | 'redactFailureReason' | 'mintActivityCursor'
   >> = {},
+  dataRoot = dataDir,
 ): Promise<{
   harness: WorkerHarness
   fake: FakeAdapter
@@ -287,13 +292,13 @@ async function makeHarness(
   ledger: LedgerStore
   workersDir: string
 }> {
-  const ledgersDir = join(dataDir, 'ledgers')
-  const workspacesRoot = join(dataDir, 'workspaces')
-  const workersDir = join(dataDir, 'workers')
+  const ledgersDir = join(dataRoot, 'ledgers')
+  const workspacesRoot = join(dataRoot, 'workspaces')
+  const workersDir = join(dataRoot, 'workers')
   await fs.mkdir(workspacesRoot, { recursive: true })
 
   const ledger = new LedgerStore(ledgersDir)
-  const profile = join(dataDir, 'profile')
+  const profile = join(dataRoot, 'profile')
   await fs.mkdir(profile, { recursive: true })
   const workspaces = new WorkspaceManager(workspacesRoot, profile)
 
@@ -3785,6 +3790,7 @@ describe('WorkerHarness.killWorker', () => {
     const worker = await harness.spawnWorker(spawnParams())
     fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: worker.incarnations[0].session_ref }, 'idle')
     await waitUntil(async () => (await harness.listWorkers(worker.manager_key))[0].task.status === 'halted')
+    await Promise.all((harness as any).stateChangeTails.values())
     const state = vi.spyOn(fake, 'state')
     const listSubagents = vi.fn(async () => [])
     Object.assign(fake, { listSubagents })
@@ -4921,7 +4927,7 @@ describe('WorkerHarness.getWorkerTerminal', () => {
 
     expect(result).toEqual({ kind: 'unavailable', unavailable_reason: 'headless_without_text' })
     expect(fake.readTerminalCalls).toHaveLength(1)
-    expect(fake.readTerminalCalls[0]).toEqual({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` })
+    expect(fake.readTerminalCalls[0]).toEqual({ worker_id: worker.worker_id, incarnation_id: worker.incarnations[0].incarnation_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` })
   })
 
   it('不存在的 worker_id → WorkerNotFoundError', async () => {
@@ -4942,7 +4948,7 @@ describe('WorkerHarness.getWorkerTerminal', () => {
   it('给 opts.seq → 读取该 seq 对应化身(如 fork 分支)的输出,不是主线', async () => {
     const { harness, fake } = await makeHarness({ caps: { fork: true } })
     const worker = await harness.spawnWorker(spawnParams())
-    const { fork_seq: forkSeq, query_id: queryId } = await harness.queryWorker(worker.worker_id, '侧问一下')
+    const { fork_seq: forkSeq, fork_incarnation_id: forkIncarnationId, query_id: queryId } = await harness.queryWorker(worker.worker_id, '侧问一下')
 
     const result = await harness.getWorkerTerminal(worker.worker_id, { seq: forkSeq })
 
@@ -4950,6 +4956,7 @@ describe('WorkerHarness.getWorkerTerminal', () => {
     expect(fake.readTerminalCalls).toHaveLength(1)
     expect(fake.readTerminalCalls[0]).toEqual({
       worker_id: worker.worker_id,
+      incarnation_id: forkIncarnationId,
       seq: forkSeq,
       impl: 'builtin',
       session_ref: `fork-ref-${worker.worker_id}#${forkSeq}`,
@@ -5077,25 +5084,26 @@ describe('HarnessEvent.task_status —— 事件自带落账后的 task 状态',
 
   it('非迁移点:stop 后 drain 出的 dead_letter 不带 task_status(迁移由 operation_settled 承载)', async () => {
     const opEvents: HarnessEvent[] = []
-    const { harness } = await makeHarness({
-      // 让第一条卡在投递里,第二条就会留在队列上等 killWorker 去 drain
-      sendInputBehavior: () => new Promise((resolve) => setTimeout(resolve, 30)),
-    }, {
+    const { harness, fake } = await makeHarness({}, {
       onOperationNotification: async (_managerKey, e) => { opEvents.push(e); return { consumed: true } },
     })
     const worker = await harness.spawnWorker(spawnParams())
     events.length = 0
-
-    const inFlight = harness.sendToWorker(worker.worker_id, '第一条')
-    const queued = harness.sendToWorker(worker.worker_id, '第二条').catch(() => undefined)
+    // Hold delivery until the actual public calls have admitted both inputs.
+    const inbox = (harness as any).getInbox(worker.worker_id)
+    inbox.hold('fixture-stop-drain')
+    await Promise.all([
+      harness.sendToWorker(worker.worker_id, '第一条'),
+      harness.sendToWorker(worker.worker_id, '第二条'),
+    ])
+    expect(inbox.pending).toBe(2)
+    expect(fake.sendInputCalls).toHaveLength(0)
     await harness.killWorker(worker.worker_id)
-    await inFlight.catch(() => undefined)
-    await queued
 
     // 死信已降审计：读 events.jsonl 而非唤醒面
     const deadLetters = (await harness.readWorkerEvents(worker.worker_id))
       .filter((e) => e.kind === 'state_changed' && e.detail?.kind === 'dead_letter')
-    expect(deadLetters.length).toBeGreaterThan(0)
+    expect(deadLetters).toHaveLength(2)
     for (const e of deadLetters) expect(e.task_status).toBeUndefined()
     // 同一次 verified stop 的迁移载体是 operation_settled（唯一唤醒，自带 closed）
     await waitUntil(() => opEvents.some((e) => e.kind === 'operation_settled'))
@@ -5209,8 +5217,6 @@ describe('historical ledger startup and candidate budgets', () => {
 
 })
 
-
-
 it('workspace inventory does not publish empty idle before reconciliation or keep evidence after execution readiness changes', async () => {
   let ready = false
   const { harness, ledger } = await makeHarness({}, { isExecutionReady: () => ready })
@@ -5226,8 +5232,6 @@ it('workspace inventory does not publish empty idle before reconciliation or kee
   read.mockRestore()
 })
 
-
-
 it('unindexed historical workers cannot become a false zero or idle workspace inventory', async () => {
   const { harness, ledger } = await makeHarness({}, { isExecutionReady: () => true })
   const worker = await harness.spawnWorker(spawnParams())
@@ -5237,8 +5241,6 @@ it('unindexed historical workers cannot become a false zero or idle workspace in
   expect(await harness.getWorkspaceExecutionInventory()).toEqual({ ready: false, items: {} })
   expect(observe).not.toHaveBeenCalled()
 })
-
-
 
 it('last use follows committed execution; auxiliary persistence failure never turns an accepted spawn into failure', async () => {
   const { harness } = await makeHarness()
@@ -5252,4 +5254,629 @@ it('last use follows committed execution; auxiliary persistence failure never tu
   expect(second.task.status).toBe('running')
   expect(second.incarnations[0].state).toBe('running')
   expect(JSON.parse(await fs.readFile(file, 'utf8')).workspaces[0].last_used_at).toBe(snapshot.workspaces[0].last_used_at)
+})
+
+
+describe('workspace relocation admission quiescence', () => {
+  function deferred<T = void>() {
+    let resolve!: (value: T) => void
+    const promise = new Promise<T>(done => { resolve = done })
+    return { promise, resolve }
+  }
+
+  it('waits for an admitted spawn ledger commit without stopping or closing it', async () => {
+    const { harness, fake, ledger } = await makeHarness(), started = deferred(), ready = deferred()
+    const spawn = fake.spawn.bind(fake)
+    vi.spyOn(fake, 'spawn').mockImplementation(async spec => { started.resolve(); await ready.promise; return spawn(spec) })
+    const pending = harness.spawnWorker(spawnParams()); await started.promise
+    let drained = false
+    const settled = (harness as any).quiesceExecutionAdmissions().then(() => { drained = true })
+    await Promise.resolve(); expect(drained).toBe(false)
+    await expect(harness.spawnWorker(spawnParams())).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+    ready.resolve(); const worker = await pending; await settled
+    const stored = await ledger.findWorker(worker.worker_id)
+    expect(stored?.worker.task.status).toBe('running')
+    expect(stored?.worker.manager_key).toBe('test::friend-1')
+    expect(stored?.worker.origin).toEqual(worker.origin)
+    expect(stored?.worker.report_to).toEqual(worker.report_to)
+    expect(fake.killCalls).toHaveLength(0)
+  })
+
+  it('waits for an admitted query to establish and commit its fork', async () => {
+    const { harness, fake, ledger } = await makeHarness({ caps: { fork: true } }), started = deferred(), ready = deferred()
+    const worker = await harness.spawnWorker(spawnParams()), fork = fake.fork.bind(fake)
+    vi.spyOn(fake, 'fork').mockImplementation(async (...args) => { started.resolve(); await ready.promise; return fork(...args) })
+    const pending = harness.queryWorker(worker.worker_id, 'status'); await started.promise
+    let drained = false
+    const settled = (harness as any).quiesceExecutionAdmissions().then(() => { drained = true })
+    await Promise.resolve(); expect(drained).toBe(false)
+    ready.resolve(); const query = await pending; await settled
+    const stored = await ledger.findWorker(worker.worker_id)
+    expect(stored?.worker.incarnations.some(item => item.query_id === query.query_id)).toBe(true)
+    expect(stored?.worker.task.status).not.toBe('closed')
+  })
+
+  it('retains a timed-out native fork until its late cleanup actually settles', async () => {
+    const { harness, fake } = await makeHarness(), fork = deferred<IncarnationHandle>(), kill = deferred(), started = deferred()
+    vi.spyOn(fake, 'kill').mockImplementation(async () => { started.resolve(); await kill.promise })
+    await expect((harness as any).awaitForkEstablishment(fork.promise, fake, 1)).rejects.toThrow('deadline')
+    let drained = false
+    const settled = (harness as any).quiesceExecutionAdmissions().then(() => { drained = true })
+    await Promise.resolve(); expect(drained).toBe(false)
+    fork.resolve({ worker_id: 'late', seq: 2, impl: 'builtin', session_ref: 'late-session' })
+    await started.promise; expect(drained).toBe(false)
+    kill.resolve(); await settled; expect(drained).toBe(true)
+  })
+
+  it('refuses quiescence if cleanup of a late native fork fails', async () => {
+    const { harness, fake } = await makeHarness(), fork = deferred<IncarnationHandle>()
+    vi.spyOn(fake, 'kill').mockRejectedValue(new Error('stop unknown'))
+    const logging = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await expect((harness as any).awaitForkEstablishment(fork.promise, fake, 1)).rejects.toThrow('deadline')
+      const settled = (harness as any).quiesceExecutionAdmissions()
+      fork.resolve({ worker_id: 'late', seq: 2, impl: 'builtin', session_ref: 'late-session' })
+      await expect(settled).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+      await expect(harness.spawnWorker(spawnParams())).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+    } finally { logging.mockRestore() }
+  })
+})
+
+
+describe('workspace relocation input quiescence', () => {
+  it.each(['sendToWorker', 'sendToActiveWorker'] as const)('waits for admitted %s native input to settle', async method => {
+    const { harness, fake, ledger } = await makeHarness(), entered = deferred(), release = deferred()
+    const worker = await harness.spawnWorker(spawnParams()), send = fake.sendInput.bind(fake)
+    vi.spyOn(fake, 'sendInput').mockImplementation(async (...args) => { entered.resolve(); await release.promise; return send(...args) })
+    const pending = harness[method](worker.worker_id, 'already admitted')
+    await entered.promise
+    let drained = false
+    const quiet = harness.quiesceExecutionAdmissions().then(() => { drained = true })
+    await Promise.resolve(); await Promise.resolve()
+    const finishedEarly = drained
+    release.resolve(); await pending; await quiet
+    expect(finishedEarly).toBe(false)
+    const stored = (await ledger.findWorker(worker.worker_id))!.worker
+    expect(stored.origin).toEqual(worker.origin)
+    expect(stored.report_to).toEqual(worker.report_to)
+    expect(stored.task.status).not.toBe('closed')
+    expect(fake.killCalls).toHaveLength(0)
+  })
+
+  it('retains queued input when an old callback flushes after quiescence', async () => {
+    const { harness, fake } = await makeHarness(), worker = await harness.spawnWorker(spawnParams())
+    const inbox = (harness as any).getInbox(worker.worker_id)
+    inbox.enqueue({ text: 'old queued text', raw: false, enqueued_at: now() })
+    await harness.quiesceExecutionAdmissions()
+    await expect((harness as any).flushInbox(worker.worker_id)).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+    expect(fake.sendInputCalls).toHaveLength(0)
+    expect(inbox.pending).toBe(1)
+  })
+
+  it('rejects an active-worker wake before mutating its inbox after quiescence', async () => {
+    const { harness, fake } = await makeHarness(), worker = await harness.spawnWorker(spawnParams())
+    await harness.quiesceExecutionAdmissions()
+    await expect(harness.sendToActiveWorker(worker.worker_id, 'late wake')).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+    expect((harness as any).getInbox(worker.worker_id).pending).toBe(0)
+    expect(fake.sendInputCalls).toHaveLength(0)
+  })
+
+  it.each(['sendToWorker', 'sendToActiveWorker'] as const)('rechecks %s after waiting for a Worker lock', async method => {
+    const { harness, fake } = await makeHarness(), entered = deferred(), release = deferred()
+    const worker = await harness.spawnWorker(spawnParams())
+    const held = (harness as any).withLock(worker.worker_id, async () => { entered.resolve(); await release.promise })
+    await entered.promise
+    const rejected = expect(harness[method](worker.worker_id, 'not admitted to inbox')).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+    const quiet = harness.quiesceExecutionAdmissions()
+    release.resolve(); await held; await rejected; await quiet
+    expect((harness as any).getInbox(worker.worker_id).pending).toBe(0)
+    expect(fake.sendInputCalls).toHaveLength(0)
+  })
+
+  it('waits for branch input without changing its incarnation or receipt settlement', async () => {
+    const { harness, fake, ledger } = await makeHarness({ caps: { fork: true } }), entered = deferred(), release = deferred()
+    const worker = await harness.spawnWorker(spawnParams()), query = await harness.queryWorker(worker.worker_id, 'query')
+    const fork = (await ledger.findWorker(worker.worker_id))!.worker.incarnations.find(item => item.query_id === query.query_id)!
+    const settled = vi.fn(async () => {})
+    vi.spyOn(fake, 'sendInput').mockImplementation(async (handle, text, opts) => {
+      expect(handle).toMatchObject({ incarnation_id: fork.incarnation_id, query_id: query.query_id })
+      expect(text).toBe('branch notification')
+      entered.resolve(); await release.promise; await opts?.onAccepted?.()
+    })
+    const pending = harness.sendToExecutionBranch(worker.worker_id, fork.incarnation_id!, 'branch notification', 'same-delivery', settled)
+    await entered.promise
+    let drained = false
+    const quiet = harness.quiesceExecutionAdmissions().then(() => { drained = true })
+    await Promise.resolve(); await Promise.resolve(); const finishedEarly = drained
+    expect(settled).not.toHaveBeenCalled()
+    release.resolve(); await pending; await quiet
+    expect(finishedEarly).toBe(false)
+    expect(settled).toHaveBeenCalledTimes(1)
+    expect(settled).toHaveBeenCalledWith({ status: 'delivered' })
+    settled.mockClear()
+    await expect(harness.sendToExecutionBranch(worker.worker_id, fork.incarnation_id!, 'late', 'late-id', settled))
+      .rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+    expect(settled).not.toHaveBeenCalled()
+  })
+
+  it('waits for an admitted one-time UI response, then rejects further responses', async () => {
+    const { harness, fake, ledger } = await makeHarness({ implId: 'claude-code', spawnInitialInput: {
+      control_state: 'waiting_action', disposition: 'not_pasted', report: {
+        waitReason: 'interaction_required', terminal: terminal('Choose'),
+        ui: { fingerprint: 'workspace-ui-once', actions: UI_ACTIONS },
+        notification: { type: 'terminal_interaction', title: 'Choose' },
+      },
+    } }), entered = deferred(), release = deferred()
+    const worker = await harness.spawnWorker(spawnParams({ impl: 'claude-code' }))
+    const snapshot = events.find(event => event.worker_id === worker.worker_id && event.kind === 'interaction_required')!.detail!.snapshot_id as string
+    const respond = fake.respondToUi.bind(fake)
+    vi.spyOn(fake, 'respondToUi').mockImplementation(async (...args) => { entered.resolve(); await release.promise; return respond(...args) })
+    const pending = harness.respondToWorkerUi(worker.worker_id, snapshot, 'confirm')
+    await entered.promise
+    let drained = false
+    const quiet = harness.quiesceExecutionAdmissions().then(() => { drained = true })
+    await Promise.resolve(); await Promise.resolve(); const finishedEarly = drained
+    release.resolve(); const result = await pending; await quiet
+    expect(finishedEarly).toBe(false)
+    expect(result).toMatchObject({ status: 'submitted', snapshot_id: snapshot, operation: { kind: 'ui_response', actor: 'manager', status: 'succeeded' } })
+    await expect(harness.respondToWorkerUi(worker.worker_id, snapshot, 'confirm')).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+    expect(fake.uiResponses).toHaveLength(1)
+    expect((await ledger.findWorker(worker.worker_id))!.worker.task.status).not.toBe('closed')
+    await (harness as any).deliverControlOperationNotifications(worker.worker_id)
+  })
+
+  it('does not mistake a synchronous timeout reply for native input settlement', async () => {
+    const { harness, fake } = await makeHarness(), entered = deferred(), release = deferred()
+    const worker = await harness.spawnWorker(spawnParams()), send = fake.sendInput.bind(fake)
+    const input = vi.spyOn(fake, 'sendInput').mockImplementation(async (...args) => { entered.resolve(); await release.promise; return send(...args) })
+    try {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      const pending = harness.sendToWorker(worker.worker_id, 'native ignores cancellation', { managerKey: 'test::friend-1' })
+      await entered.promise
+      await vi.advanceTimersByTimeAsync(INPUT_DELIVERY_TIMEOUT_MS)
+      expect(await pending).toMatchObject({ status: 'failed' })
+      let drained = false
+      const quiet = harness.quiesceExecutionAdmissions().then(() => { drained = true })
+      await Promise.resolve(); await Promise.resolve(); const finishedEarly = drained
+      release.resolve(); await quiet
+      expect(finishedEarly).toBe(false)
+      expect(input).toHaveBeenCalledTimes(1)
+      expect(fake.killCalls).toHaveLength(0)
+      vi.useRealTimers()
+      await waitUntil(async () => (await harness.readWorkerEvents(worker.worker_id)).some(event => event.kind === 'input_delivery_failed'))
+    } finally { release.resolve(); vi.useRealTimers() }
+  })
+
+  it('keeps the verified stop path available while inputs are quiesced', async () => {
+    const { harness, fake, ledger } = await makeHarness(), worker = await harness.spawnWorker(spawnParams())
+    await harness.quiesceExecutionAdmissions()
+    await harness.killWorker(worker.worker_id)
+    expect(fake.killCalls).toHaveLength(1)
+    expect((await ledger.findWorker(worker.worker_id))!.worker.task.closed?.by).toBe('manager_stop')
+    await (harness as any).deliverControlOperationNotifications(worker.worker_id)
+  })
+})
+
+
+describe('workspace relocation scope capture', () => {
+  it('fixes the full identity set only after admitted spawn commits, without stop or closure', async () => {
+    const { harness, fake, ledger } = await makeHarness({}, { isWorkspaceRelocationReady: () => true })
+    const entered = deferred(), release = deferred(), spawn = fake.spawn.bind(fake)
+    vi.spyOn(fake, 'spawn').mockImplementation(async spec => { entered.resolve(); await release.promise; return spawn(spec) })
+    const pending = harness.spawnWorker(spawnParams()); await entered.promise
+    let captured = false
+    const capture = harness.captureWorkspaceRelocationScope().then(scope => { captured = true; return scope })
+    await Promise.resolve(); await Promise.resolve(); const finishedEarly = captured
+    release.resolve(); const worker = await pending, scope = await capture
+    expect(finishedEarly).toBe(false)
+    expect(scope).toHaveLength(1)
+    expect(scope[0]).toMatchObject({ worker_id: worker.worker_id, manager_key: worker.manager_key,
+      incarnations: [{ incarnation_id: worker.incarnations[0].incarnation_id, workspace: worker.incarnations[0].workspace }] })
+    expect((await ledger.findWorker(worker.worker_id))!.worker.task.status).toBe('running')
+    expect(fake.killCalls).toHaveLength(0)
+  })
+
+  it('refuses capture before startup reconciliation or when readiness changes during the read', async () => {
+    const early = await makeHarness({}, { isWorkspaceRelocationReady: () => false })
+    await expect(early.harness.captureWorkspaceRelocationScope()).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+    let checks = 0
+    const changed = await makeHarness({}, { isWorkspaceRelocationReady: () => ++checks === 1 })
+    await expect(changed.harness.captureWorkspaceRelocationScope()).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+    expect(changed.fake.killCalls).toHaveLength(0)
+  })
+})
+
+
+describe('workspace relocation CLI process capture', () => {
+  async function nativeWorker() {
+    const f = await makeHarness({ implId: 'codex' }, { isWorkspaceRelocationReady: () => true })
+    const worker = await f.harness.spawnWorker(spawnParams({ impl: 'codex' }))
+    return { ...f, worker }
+  }
+
+  it('keeps closed historical incarnations and forks in the read-only Native observation', async () => {
+    const f = await nativeWorker()
+    const child = spawn(process.execPath, ['-e', 'process.send("ready");setTimeout(()=>process.exit(0),30000)'], { stdio: ['ignore', 'ignore', 'inherit', 'ipc'] })
+    const ended = once(child, 'exit')
+    try {
+      await once(child, 'message')
+      await f.ledger.upsertWorker(f.worker.manager_key, f.worker.worker_id, worker => ({ ...worker!, task: { ...worker!.task, status: 'closed' },
+        incarnations: [ { ...worker!.incarnations[0], state: 'exited' }, { ...worker!.incarnations[0], incarnation_id: 'fixed-fork', forked_from: worker!.incarnations[0].incarnation_id, query_id: 'fixed-query', state: 'exited' } ] }))
+      const before = await f.ledger.listAllWorkers(), scope = await f.harness.captureWorkspaceRelocationScope()
+      const { captureSpawnedProcessTree } = require('../../../../scripts/lib/spawned-process-tree.cjs')
+      const capture = vi.fn(async () => captureSpawnedProcessTree(child))
+      ;(f.fake as WorkerAdapter).captureExecutionProcesses = capture
+      const processes = await f.harness.captureWorkspaceRelocationProcesses(scope)
+      expect(processes).toMatchObject([{ pid: child.pid, parent: process.pid }])
+      expect(capture).toHaveBeenCalledTimes(2)
+      expect(capture.mock.calls.map(([handle, fixed]) => [handle.incarnation_id, fixed.incarnation_id])).toEqual(scope[0].incarnations.map(inc => [inc.incarnation_id, inc.incarnation_id]))
+      expect(capture.mock.calls.find(([handle]) => handle.query_id === 'fixed-query')).toBeDefined()
+      expect(Object.isFrozen(processes)).toBe(true); expect(Object.isFrozen(processes[0])).toBe(true)
+      expect(child.exitCode).toBeNull(); expect(f.fake.killCalls).toEqual([])
+      expect(await f.ledger.listAllWorkers()).toEqual(before)
+    } finally { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); await ended }
+  }, 30000)
+
+  it.each(['missing adapter', 'missing observer', 'empty observer', 'failed observer', 'replaced adapter', 'bad Native identity'])('refuses %s without stopping or closing', async change => {
+    const f = await nativeWorker(), scope = await f.harness.captureWorkspaceRelocationScope(), before = await f.ledger.listAllWorkers()
+    const capture = vi.fn(async () => {
+      if (change === 'failed observer') throw new Error('unknown Native observation')
+      if (change === 'replaced adapter') f.adaptersMap.set('codex', new FakeAdapter({ implId: 'codex' }))
+      return change === 'bad Native identity' ? [{ pid: process.pid, parent: 0, started: 'wrong', owner: 'wrong', executable: 'wrong' }] : []
+    })
+    if (change !== 'missing observer') (f.fake as WorkerAdapter).captureExecutionProcesses = capture
+    if (change === 'missing adapter') f.adaptersMap.delete('codex')
+    await expect(f.harness.captureWorkspaceRelocationProcesses(scope)).rejects.toBeDefined()
+    expect(f.fake.killCalls).toEqual([]); expect(await f.ledger.listAllWorkers()).toEqual(before)
+  })
+
+  it.each(['new Worker', 'new incarnation', 'changed root', 'closing Agent'])('refuses %s that appears while a carrier is observed', async change => {
+    let ready = true
+    const f = await makeHarness({ implId: 'codex' }, { isWorkspaceRelocationReady: () => ready })
+    const worker = await f.harness.spawnWorker(spawnParams({ impl: 'codex' })), scope = await f.harness.captureWorkspaceRelocationScope()
+    ;(f.fake as WorkerAdapter).captureExecutionProcesses = vi.fn(async () => {
+      if (change === 'closing Agent') ready = false
+      else if (change === 'new Worker') await f.ledger.upsertWorker(worker.manager_key, 'unexpected', () => ({ ...worker, worker_id: 'unexpected' }))
+      else await f.ledger.upsertWorker(worker.manager_key, worker.worker_id, current => ({ ...current!, incarnations: change === 'new incarnation'
+        ? [...current!.incarnations, { ...current!.incarnations[0], incarnation_id: 'unexpected' }]
+        : current!.incarnations.map(inc => ({ ...inc, workspace: '/changed-root' })) }))
+      // Even a nonempty observation cannot suppress a changed scope or closing Agent.
+      return [{ pid: process.pid, parent: process.ppid, started: '1', owner: 'fixture', executable: 'fixture' }]
+    })
+    await expect(f.harness.captureWorkspaceRelocationProcesses(scope)).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+    expect(f.fake.killCalls).toEqual([])
+  })
+
+  it('refuses an earlier adapter replaced while a later implementation is observed', async () => {
+    const f = await nativeWorker()
+    const claude = new FakeAdapter({ implId: 'claude-code' })
+    f.adaptersMap.set('claude-code', claude)
+    await f.harness.spawnWorker(spawnParams({ impl: 'claude-code' }))
+    const scope = await f.harness.captureWorkspaceRelocationScope()
+    const ordered = scope.map(worker => worker.incarnations[0].impl)
+    const child = spawn(process.execPath, ['-e', 'process.send("ready");setTimeout(()=>process.exit(0),30000)'], { stdio: ['ignore', 'ignore', 'inherit', 'ipc'] })
+    const ended = once(child, 'exit')
+    try {
+      await once(child, 'message')
+      const { captureSpawnedProcessTree } = require('../../../../scripts/lib/spawned-process-tree.cjs')
+      const first = f.adaptersMap.get(ordered[0])!, last = f.adaptersMap.get(ordered[1])!
+      first.captureExecutionProcesses = vi.fn(async () => captureSpawnedProcessTree(child))
+      last.captureExecutionProcesses = vi.fn(async () => {
+        f.adaptersMap.set(ordered[0], new FakeAdapter({ implId: ordered[0] }))
+        return captureSpawnedProcessTree(child)
+      })
+      await expect(f.harness.captureWorkspaceRelocationProcesses(scope)).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+      expect(f.fake.killCalls).toEqual([]); expect(claude.killCalls).toEqual([])
+    } finally { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); await ended }
+  }, 30000)
+
+  async function endedLegacyWorker() {
+    const f = await nativeWorker()
+    const end = new Date(Date.parse(f.worker.incarnations[0].started_at) + 1000).toISOString()
+    await f.ledger.upsertWorker(f.worker.manager_key, f.worker.worker_id, worker => ({ ...worker!,
+      incarnations: worker!.incarnations.map(item => ({ ...item, state: 'exited', ended_at: end, ended_reason: 'completed' })) }))
+    const legacy = captureLegacyWorkspaceExecutions(await f.ledger.listAllWorkers(), end)
+    const scope = await f.harness.captureWorkspaceRelocationScope()
+    return { ...f, legacy, scope }
+  }
+  it('retains the original ended fork relation and query identity without changing source or delivery', async () => {
+    const f = await nativeWorker(), end = new Date(Date.parse(f.worker.incarnations[0].started_at) + 1000).toISOString()
+    await f.ledger.upsertWorker(f.worker.manager_key, f.worker.worker_id, worker => {
+      const main = { ...worker!.incarnations[0], state: 'exited' as const, ended_at: end, ended_reason: 'completed' as const }
+      return { ...worker!, incarnations: [main, { ...main, incarnation_id: 'original-ended-fork', seq: 2, forked_from: main.incarnation_id, query_id: 'original-query' }] }
+    })
+    const before = await f.ledger.listAllWorkers(), legacy = captureLegacyWorkspaceExecutions(before, end), scope = await f.harness.captureWorkspaceRelocationScope()
+    const capture = vi.fn(async (_handle: IncarnationHandle, _fixed: unknown, _legacy?: true) => [])
+    ;(f.fake as WorkerAdapter).captureExecutionProcesses = capture
+    expect(await f.harness.captureWorkspaceRelocationProcesses(scope, legacy)).toEqual([])
+    expect(capture).toHaveBeenCalledTimes(2); expect(capture.mock.calls.every(call => call[2] === true)).toBe(true)
+    expect(capture.mock.calls).toEqual(expect.arrayContaining([[expect.objectContaining({ incarnation_id: 'original-ended-fork', query_id: 'original-query' }),
+      expect.objectContaining({ incarnation_id: 'original-ended-fork', forked_from: f.worker.incarnations[0].incarnation_id, query_id: 'original-query' }), true]]))
+    expect(await f.ledger.listAllWorkers()).toEqual(before); expect(f.fake.killCalls).toEqual([])
+  })
+  it('consumes an explicit current carrier exit without a legacy boundary and rechecks it at the end', async () => {
+    const f = await nativeWorker(), before = await f.ledger.listAllWorkers(), capture = vi.fn(async () => Object.freeze({ carrier_exited: true as const }))
+    ;(f.fake as WorkerAdapter).captureExecutionProcesses = capture
+    expect(await f.harness.captureWorkspaceRelocationProcesses(await f.harness.captureWorkspaceRelocationScope())).toEqual([])
+    expect(capture).toHaveBeenCalledTimes(2)
+    expect(await f.ledger.listAllWorkers()).toEqual(before); expect(f.fake.killCalls).toEqual([])
+  })
+  it.each([{}, { carrier_exited: false }, { carrier_exited: true, extra: true }])('refuses a malformed current exit observation: %j', async value => {
+    const f = await nativeWorker()
+    ;(f.fake as any).captureExecutionProcesses = vi.fn(async () => value)
+    await expect(f.harness.captureWorkspaceRelocationProcesses(await f.harness.captureWorkspaceRelocationScope())).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+  })
+  it('rejects a current exit that changes before its final confirmation', async () => {
+    const f = await nativeWorker(), capture = vi.fn().mockResolvedValueOnce({ carrier_exited: true }).mockResolvedValueOnce([])
+    ;(f.fake as WorkerAdapter).captureExecutionProcesses = capture
+    await expect(f.harness.captureWorkspaceRelocationProcesses(await f.harness.captureWorkspaceRelocationScope())).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+    expect(capture).toHaveBeenCalledTimes(2); expect(f.fake.killCalls).toEqual([])
+  })
+  it('uses only the fixed old boundary for an empty current carrier observation', async () => {
+    const f = await endedLegacyWorker(), before = await f.ledger.listAllWorkers(), capture = vi.fn(async (_handle: IncarnationHandle, _fixed: unknown, _legacy?: true) => [])
+    ;(f.fake as WorkerAdapter).captureExecutionProcesses = capture
+    expect(await (f.harness.captureWorkspaceRelocationProcesses as any)(f.scope, f.legacy)).toEqual([])
+    expect(capture).toHaveBeenCalledTimes(1); expect(capture.mock.calls[0][2]).toBe(true)
+    expect(await f.ledger.listAllWorkers()).toEqual(before); expect(f.fake.killCalls).toEqual([])
+  })
+  it('rejects an adapter replaced during the final legacy-ledger recheck', async () => {
+    const f = await endedLegacyWorker(), original = f.ledger.listAllWorkers.bind(f.ledger)
+    let observed = false, readsAfterObservation = 0
+    ;(f.fake as WorkerAdapter).captureExecutionProcesses = vi.fn(async () => { observed = true; return [] })
+    vi.spyOn(f.ledger, 'listAllWorkers').mockImplementation(async () => {
+      const entries = await original()
+      if (observed && ++readsAfterObservation === 2) f.adaptersMap.set('codex', new FakeAdapter({ implId: 'codex' }))
+      return entries
+    })
+    await expect(f.harness.captureWorkspaceRelocationProcesses(f.scope, f.legacy)).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+    expect(readsAfterObservation).toBe(2); expect(f.fake.killCalls).toEqual([])
+  })
+  it.each(['missing boundary', 'empty boundary', 'changed evidence', 'new execution', 'failed observation', 'changed during observation'])('never grants a legacy empty observation for %s', async change => {
+    const f = await endedLegacyWorker(); let legacy: unknown = f.legacy
+    if (change === 'missing boundary') legacy = undefined
+    if (change === 'empty boundary') legacy = { ...f.legacy, entries: [] }
+    if (change === 'changed evidence') await f.ledger.upsertWorker(f.worker.manager_key, f.worker.worker_id, worker => ({ ...worker!,
+      incarnations: worker!.incarnations.map(item => ({ ...item, ended_reason: 'failed' })) }))
+    if (change === 'new execution') await f.ledger.upsertWorker(f.worker.manager_key, 'post-upgrade-worker', () => ({ ...f.worker, worker_id: 'post-upgrade-worker', task: { ...f.worker.task, id: 'post-upgrade-task' }, incarnations: f.worker.incarnations.map(item => ({ ...item, incarnation_id: 'post-upgrade-incarnation' })) }))
+    ;(f.fake as WorkerAdapter).captureExecutionProcesses = vi.fn(async () => {
+      if (change === 'failed observation') throw new Error('current carrier unknown')
+      if (change === 'changed during observation') await f.ledger.upsertWorker(f.worker.manager_key, f.worker.worker_id, worker => ({ ...worker!,
+        incarnations: worker!.incarnations.map(item => ({ ...item, state: 'running' })) }))
+      return []
+    })
+    const scope = await f.harness.captureWorkspaceRelocationScope()
+    await expect((f.harness.captureWorkspaceRelocationProcesses as any)(scope, legacy)).rejects.toBeDefined()
+    expect(f.fake.killCalls).toEqual([])
+  })
+
+  it('does not ask builtin or legacy to vouch for the separate Agent/module process tree', async () => {
+    const f = await makeHarness({}, { isWorkspaceRelocationReady: () => true })
+    const worker = await f.harness.spawnWorker(spawnParams())
+    const legacy: LegacyIncarnation = { incarnation_id: 'history', impl: 'legacy', seq: 1, state: 'exited', workspace: dataDir,
+      started_at: now(), ended_at: now(), ended_reason: 'pre_migration' }
+    await f.ledger.importLegacyWorker(worker.manager_key, { ...worker, worker_id: 'historical-worker',
+      task: { ...worker.task, id: 'historical-task', status: 'closed' }, incarnations: [legacy],
+      legacy_source: { kind: 'v2_admin_task', admin_task_id: 'old-task', trace_ids: [], imported_at: now() } })
+    const capture = vi.fn(async () => { throw new Error('builtin is covered by Agent scope') })
+    ;(f.fake as WorkerAdapter).captureExecutionProcesses = capture
+    expect(await f.harness.captureWorkspaceRelocationProcesses(await f.harness.captureWorkspaceRelocationScope())).toEqual([])
+    expect(capture).not.toHaveBeenCalled(); expect(f.fake.killCalls).toEqual([])
+  })
+})
+
+describe('workspace relocation stop submission', () => {
+  function journal() {
+    return { prepare: vi.fn(async () => 'dispatch' as 'dispatch' | 'observe'),
+      complete: vi.fn(async (_results: unknown) => {}) }
+  }
+
+  it('waits for durable intent before stopping and preserves task truth through synchronous killed callbacks', async () => {
+    const { harness, fake, ledger } = await makeHarness({}, { isWorkspaceRelocationReady: () => true })
+    const worker = await harness.spawnWorker(spawnParams()), scope = await harness.captureWorkspaceRelocationScope()
+    const entered = deferred(), release = deferred(), log = journal()
+    log.prepare.mockImplementation(async () => { entered.resolve(); await release.promise; return 'dispatch' })
+    const stop = vi.spyOn(fake, 'stop').mockImplementation(async h => {
+      fake.emitStateChange(h, 'exited', undefined, 'killed')
+      await (harness as any).stateChangeTails.get(`${h.worker_id}#${h.impl}#${h.seq}`)
+    })
+    const pending = harness.requestWorkspaceRelocationStops(scope, log)
+    await entered.promise
+    expect(stop).not.toHaveBeenCalled()
+    release.resolve(); const result = await pending
+    expect(result).toMatchObject({ dispatch: 'dispatch', results: [{ worker_id: worker.worker_id, status: 'submitted' }] })
+    const saved = (await ledger.findWorker(worker.worker_id))!.worker
+    expect(saved.incarnations[0].state).toBe('exited')
+    expect(saved.task.status).toBe('running')
+    expect(saved.task.closed).toBeUndefined()
+    expect(saved.origin).toEqual(worker.origin); expect(saved.report_to).toEqual(worker.report_to)
+    expect(await harness.getWorkerControlOperations(worker.worker_id)).toEqual([])
+    expect(log.complete).toHaveBeenCalledWith(result.results)
+  })
+
+  it('issues no stop if the fixed identity set changed while registering', async () => {
+    const { harness, fake, ledger } = await makeHarness({}, { isWorkspaceRelocationReady: () => true })
+    const worker = await harness.spawnWorker(spawnParams()), scope = await harness.captureWorkspaceRelocationScope()
+    const log = journal()
+    log.prepare.mockImplementation(async () => {
+      await ledger.upsertWorker(worker.manager_key, worker.worker_id, previous => ({ ...previous!,
+        incarnations: previous!.incarnations.map(item => ({ ...item, incarnation_id: 'replacement' })) }))
+      return 'dispatch'
+    })
+    await expect(harness.requestWorkspaceRelocationStops(scope, log)).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+    expect(fake.killCalls).toHaveLength(0); expect(log.complete).not.toHaveBeenCalled()
+  })
+
+  it('issues no stop when persistence fails and never retries a failed single operation', async () => {
+    const { harness, fake } = await makeHarness({}, { isWorkspaceRelocationReady: () => true })
+    await harness.spawnWorker(spawnParams()); const scope = await harness.captureWorkspaceRelocationScope(), log = journal()
+    log.prepare.mockRejectedValue(new Error('disk full'))
+    const pending = harness.requestWorkspaceRelocationStops(scope, log)
+    await expect(pending).rejects.toThrow('disk full')
+    expect(harness.requestWorkspaceRelocationStops(scope, log)).toBe(pending)
+    await expect(pending).rejects.toThrow('disk full')
+    expect(log.prepare).toHaveBeenCalledTimes(1); expect(fake.killCalls).toHaveLength(0)
+  })
+
+  it('shares an in-flight attempt, includes forks and historical exits, and records individual submission uncertainty', async () => {
+    const { harness, fake, ledger } = await makeHarness({}, { isWorkspaceRelocationReady: () => true })
+    const first = await harness.spawnWorker(spawnParams()), second = await harness.spawnWorker(spawnParams())
+    await ledger.upsertWorker(first.manager_key, first.worker_id, previous => ({ ...previous!, incarnations: [
+      ...previous!.incarnations,
+      { ...previous!.incarnations[0], incarnation_id: 'history', seq: 2, state: 'exited', ended_at: now(), ended_reason: 'completed' },
+      { ...previous!.incarnations[0], incarnation_id: 'fork', seq: 3, forked_from: previous!.incarnations[0].incarnation_id, query_id: 'query' },
+    ] }))
+    const scope = await harness.captureWorkspaceRelocationScope(), log = journal(), entered = deferred(), release = deferred()
+    log.prepare.mockImplementation(async () => { entered.resolve(); await release.promise; return 'dispatch' })
+    const stop = vi.spyOn(fake, 'stop').mockImplementation(async h => { if (h.worker_id === first.worker_id && h.seq === 1) throw new Error('reply lost') })
+    const pending = harness.requestWorkspaceRelocationStops(scope, log); await entered.promise
+    expect(harness.requestWorkspaceRelocationStops(scope, log)).toBe(pending)
+    await expect(harness.requestWorkspaceRelocationStops([], log)).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+    release.resolve(); const result = await pending
+    expect(stop).toHaveBeenCalledTimes(4)
+    expect(stop.mock.calls.map(([h]) => [h.worker_id, h.incarnation_id])).toEqual(expect.arrayContaining([
+      [first.worker_id, 'history'], [first.worker_id, 'fork'], [second.worker_id, second.incarnations[0].incarnation_id],
+    ]))
+    expect(result.results.filter(item => item.status === 'unknown')).toEqual([{ worker_id: first.worker_id,
+      incarnation_id: first.incarnations[0].incarnation_id, status: 'unknown' }])
+    expect(log.prepare).toHaveBeenCalledTimes(1)
+    expect((await ledger.findWorker(first.worker_id))!.worker.task.status).toBe('running')
+    expect(JSON.stringify(result)).not.toContain('reply lost')
+  })
+
+  it('refuses a replacement discovered between two stop submissions rather than stopping the replacement', async () => {
+    const { harness, fake, ledger } = await makeHarness({}, { isWorkspaceRelocationReady: () => true })
+    await harness.spawnWorker(spawnParams()); await harness.spawnWorker(spawnParams())
+    const scope = await harness.captureWorkspaceRelocationScope(), log = journal()
+    const stop = vi.spyOn(fake, 'stop').mockImplementation(async h => {
+      if (h.worker_id !== scope[0].worker_id) throw new Error('must not reach the replacement')
+      await ledger.upsertWorker(scope[1].manager_key, scope[1].worker_id, previous => ({ ...previous!,
+        incarnations: previous!.incarnations.map(item => ({ ...item, incarnation_id: 'replacement-after-first-stop' })) }))
+    })
+    await expect(harness.requestWorkspaceRelocationStops(scope, log)).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+    expect(stop).toHaveBeenCalledTimes(1); expect(log.complete).not.toHaveBeenCalled()
+  })
+
+  it('records a late CLI killed result without manager_stop closure and defers a simultaneous ordinary stop receipt', async () => {
+    const { harness, fake, ledger } = await makeHarness({}, { isWorkspaceRelocationReady: () => true })
+    const worker = await harness.spawnWorker(spawnParams()), scope = await harness.captureWorkspaceRelocationScope(), log = journal()
+    const entered = deferred(), release = deferred()
+    log.prepare.mockImplementation(async () => { entered.resolve(); await release.promise; return 'dispatch' })
+    const pending = harness.requestWorkspaceRelocationStops(scope, log); await entered.promise
+    const h = { worker_id: worker.worker_id, ...worker.incarnations[0], session_ref: 'ref' } as IncarnationHandle
+    await (harness as any).recordCliInputResult(h, 'exited', { endReason: 'killed' })
+    expect((await ledger.findWorker(worker.worker_id))!.worker.task.status).toBe('running')
+    const operation = await harness.requestWorkerStop(worker.worker_id)
+    expect(operation.status).toBe('verifying')
+    expect((await ledger.findWorker(worker.worker_id))!.worker.task.closed).toBeUndefined()
+    release.resolve(); await pending
+    expect(await harness.getWorkerControlOperations(worker.worker_id)).toMatchObject([{ status: 'verifying' }])
+    expect(fake.killCalls.length).toBeGreaterThan(0)
+    await Promise.all((harness as any).stateChangeTails.values())
+  })
+
+  it('joins the real private journal, native lock and actual Ledger without moving files or closing Workers', async () => {
+    const { WorkspaceCatalog } = await import('../../../../crabot-shared/dist/workspace-catalog.js')
+    const { default: native } = await import('../../../../scripts/lib/process-identity.cjs')
+    const { default: management } = await import('../../../../scripts/lib/desktop-management.cjs')
+    const { acquireCliLock, releaseCliLock } = await import('../../../../scripts/lib/cli-lock.mjs')
+    const relocation = await import('../../../../scripts/lib/workspace-relocation-intent.mjs')
+    const privateData = management.ensurePrivateDataRoot(join(await fs.realpath(dataDir), 'private-instance'))
+    const catalog = new WorkspaceCatalog({ dataRoot: privateData, files: native }); await catalog.initialize()
+    const { harness, fake, ledger } = await makeHarness({}, { isWorkspaceRelocationReady: () => true }, privateData)
+    const worker = await harness.spawnWorker(spawnParams()), scope = await harness.captureWorkspaceRelocationScope()
+    const snapshot = await catalog.snapshot(), id = 'a3c5871e-9992-480b-b0b7-81d5fb1d35e0', lock = await acquireCliLock(privateData, 'workspace-relocation')
+    try {
+      await relocation.beginWorkspaceRelocationIntent({ dataDir: privateData, id, target: join(dataDir, 'relocated'),
+        expectedRevision: snapshot.revision, protectedRoots: [join(privateData, 'workspace-control')] })
+      relocation.commitWorkspaceRelocationWorkers({ dataDir: privateData, id, workers: scope })
+      const log = { prepare: async (workers: typeof scope) => relocation.prepareWorkspaceRelocationStops({ dataDir: privateData, id, workers }).dispatch,
+        complete: async (results: unknown) => { relocation.completeWorkspaceRelocationStops({ dataDir: privateData, id, results }); throw new Error('reply lost after receipt publication') } }
+      const stop = vi.spyOn(fake, 'stop').mockImplementation(async h => {
+        fake.emitStateChange(h, 'exited', undefined, 'killed')
+        await (harness as any).stateChangeTails.get(`${h.worker_id}#${h.impl}#${h.seq}`)
+      })
+      await expect(harness.requestWorkspaceRelocationStops(scope, log)).rejects.toThrow('reply lost')
+      expect(stop).toHaveBeenCalledTimes(1)
+      const stored = relocation.readWorkspaceRelocationStops(privateData, id)
+      expect(stored.submission.results).toEqual([{ worker_id: worker.worker_id,
+        incarnation_id: worker.incarnations[0].incarnation_id, status: 'submitted' }])
+      const freshHarness = new WorkerHarness((harness as any).deps)
+      expect(await freshHarness.requestWorkspaceRelocationStops(scope, log)).toEqual({ dispatch: 'observe', results: [] })
+      expect(stop).toHaveBeenCalledTimes(1)
+      expect((await ledger.findWorker(worker.worker_id))!.worker.task.closed).toBeUndefined()
+      expect(await catalog.snapshot()).toEqual(snapshot)
+      await expect(fs.stat(join(dataDir, 'relocated'))).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally { releaseCliLock(lock) }
+  })
+
+  it.each(['normal', 'lock lost', 'receipt reply lost', 'false persistence ack'])('uses an independent coordinator for the actual Worker stop journal: %s', async mode => {
+    const { WorkspaceCatalog } = await import('../../../../crabot-shared/dist/workspace-catalog.js')
+    const { sha256CanonicalJson } = await import('crabot-shared')
+    const { default: native } = await import('../../../../scripts/lib/process-identity.cjs')
+    const { default: management } = await import('../../../../scripts/lib/desktop-management.cjs')
+    const locks = await import('../../../../scripts/lib/cli-lock.mjs'), relocation = await import('../../../../scripts/lib/workspace-relocation-intent.mjs')
+    const privateData = management.ensurePrivateDataRoot(join(await fs.realpath(dataDir), 'private-coordinator-instance'))
+    const catalog = new WorkspaceCatalog({ dataRoot: privateData, files: native }); await catalog.initialize()
+    const { harness, fake, ledger } = await makeHarness({}, { isWorkspaceRelocationReady: () => true }, privateData)
+    const worker = await harness.spawnWorker(spawnParams()), scope = await harness.captureWorkspaceRelocationScope(), snapshot = await catalog.snapshot()
+    const id = randomUUID(), lock = await locks.acquireCliLock(privateData, 'workspace-relocation')
+    await relocation.beginWorkspaceRelocationIntent({ dataDir: privateData, id, target: join(dataDir, 'relocated'), expectedRevision: snapshot.revision, protectedRoots: [] })
+    const entry = new URL('../../../../scripts/lib/workspace-coordinator-entry.mjs', import.meta.url).href
+    const bridge = new URL('../../../../scripts/lib/workspace-worker-journal.mjs', import.meta.url).href
+    const code = `import{enterWorkspaceRelocationCoordinator}from ${JSON.stringify(entry)};import{serveWorkspaceWorkerJournal}from ${JSON.stringify(bridge)};
+      const context=await enterWorkspaceRelocationCoordinator();
+      if(${JSON.stringify(mode)}==='false persistence ack')process.on('message',m=>{if(m.kind==='workspace_worker_journal_request')process.send({kind:'workspace_worker_journal_reply',request_id:m.request_id,launch_id:m.launch_id,operation:m.operation,ok:true,result:m.operation==='prepare'?'dispatch':true})});
+      else serveWorkspaceWorkerJournal(context);
+      if(${JSON.stringify(mode)}==='receipt reply lost'){const send=process.send.bind(process);process.send=(m,cb)=>m.kind==='workspace_worker_journal_reply'&&m.operation==='complete'?(cb?.(null),false):send(m,cb)}
+      if(${JSON.stringify(mode)}==='lock lost')context.release();process.send({kind:'fixture-serving'});setTimeout(()=>process.exit(2),30000);`
+    const child = spawn(process.execPath, ['--input-type=module', '-e', code], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] })
+    let output = ''; child.stderr.on('data', bytes => { output += bytes.toString() })
+    const exited = once(child, 'exit'); void exited.catch(() => {})
+    let journal: any, recovered: any
+    const stop = vi.spyOn(fake, 'stop').mockImplementation(async h => {
+      fake.emitStateChange(h, 'exited', undefined, 'killed')
+      await (harness as any).stateChangeTails.get(`${h.worker_id}#${h.impl}#${h.seq}`)
+    })
+    try {
+      await once(child, 'spawn')
+      const launchId = randomUUID(), launch = relocation.commitWorkspaceRelocationCoordinator({ dataDir: privateData, id, launchId, coordinator: native.inspectProcess(child.pid) })
+      const messages: any[] = []; child.on('message', message => messages.push(message))
+      locks.releaseCliLock(lock)
+      child.send({ kind: 'workspace_relocation_start', data_dir: privateData, intent_id: id, launch_id: launchId, launch_sha256: sha256CanonicalJson(launch) })
+      await vi.waitFor(() => expect(messages.some(item => item.kind === 'fixture-serving'), output).toBe(true), { timeout: 10000 })
+      const { createWorkspaceWorkerJournal } = await import('../../../../scripts/lib/workspace-worker-journal.mjs')
+      journal = createWorkspaceWorkerJournal(child, { dataDir: privateData, id, launch })
+      const pending = harness.requestWorkspaceRelocationStops(scope, journal)
+      if (mode === 'lock lost' || mode === 'false persistence ack') {
+        await expect(pending).rejects.toMatchObject({ code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' })
+        expect(stop).not.toHaveBeenCalled(); expect(relocation.readWorkspaceRelocationWorkers(privateData, id)).toBeNull()
+      } else {
+        if (mode === 'receipt reply lost') {
+          await expect(pending).rejects.toMatchObject({ code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' })
+          expect(harness.requestWorkspaceRelocationStops(scope, journal)).toBe(pending)
+          const fresh = new WorkerHarness((harness as any).deps)
+          recovered = createWorkspaceWorkerJournal(child, { dataDir: privateData, id, launch })
+          expect(await fresh.requestWorkspaceRelocationStops(scope, recovered)).toEqual({ dispatch: 'observe', results: [] })
+        } else expect((await pending).dispatch).toBe('dispatch')
+        expect(stop).toHaveBeenCalledTimes(1)
+        expect(relocation.readWorkspaceRelocationStops(privateData, id).submission.results).toEqual([{ worker_id: worker.worker_id, incarnation_id: worker.incarnations[0].incarnation_id, status: 'submitted' }])
+      }
+      const current = (await ledger.findWorker(worker.worker_id))!.worker
+      expect(current.task.closed).toBeUndefined(); expect(current.origin).toEqual(worker.origin)
+      expect(await catalog.snapshot()).toEqual(snapshot)
+      await expect(fs.stat(join(dataDir, 'relocated'))).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally {
+      journal?.close(); recovered?.close(); locks.releaseCliLock(lock)
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+      await exited
+    }
+  }, 30000)
+  it('never repeats an already registered attempt or pretends that its executions stopped', async () => {
+    const { harness, fake, ledger } = await makeHarness({}, { isWorkspaceRelocationReady: () => true })
+    const worker = await harness.spawnWorker(spawnParams()), scope = await harness.captureWorkspaceRelocationScope(), log = journal()
+    log.prepare.mockResolvedValue('observe')
+    expect(await harness.requestWorkspaceRelocationStops(scope, log)).toEqual({ dispatch: 'observe', results: [] })
+    expect(fake.killCalls).toHaveLength(0); expect(log.complete).not.toHaveBeenCalled()
+    expect((await ledger.findWorker(worker.worker_id))!.worker.task.status).toBe('running')
+  })
 })

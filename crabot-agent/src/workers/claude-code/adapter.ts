@@ -1,3 +1,7 @@
+import { workspaceHistoryFor, nativeHistorySource, readNativeHistoryText, nativeHistoryDirectory, type NativeHistorySource, type WorkspaceHistoryReader } from '../relocated-native-history.js'
+import type { WorkspaceRelocationIncarnation } from 'crabot-shared'
+import { captureMetadataNativeProcesses } from '../cold-native-processes.js'
+import { captureHeadlessNativeProcesses } from '../headless-native-processes.js'
 import { nativeRuntimeRoot, nativeEventChannel, nativeEventSource, runtimeWorkspace, verifyNativeBinding, verifyPrivateNativeRuntime, verifyNativeRuntimeMetadata } from '../provision/native-runtime.js'
 /**
  * Claude Code WorkerAdapter.
@@ -83,6 +87,7 @@ import type {
   WorkerSubagentStatus,
   WorkerSubagentSummary,
   WorkerAdapter,
+  WorkerProcessObservation,
   WorkerContractState,
   Workspace,
   WorkerTerminalView,
@@ -271,6 +276,7 @@ interface ClaudeTraceRecord {
 }
 
 interface ClaudeSubagentRecord {
+  readonly history?: NativeHistorySource
   readonly filePath: string
   readonly summary: WorkerSubagentSummary
 }
@@ -350,6 +356,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   constructor(
     private readonly deps: {
       readonly dataDir: string
+      readonly readWorkspaceHistory?: WorkspaceHistoryReader
       readonly claudeBin?: string
       readonly tmux?: TmuxDriver
       /** cc trace 文件根目录,默认 ~/.claude/projects;detect() 的 activated 检查也复用它
@@ -1431,6 +1438,12 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       const { chunk } = await new OutputLog(join(dir, `output-${h.seq}.log`)).read({ offset: 0 })
       return chunk ? { kind: 'headless_text', text: chunk } : { kind: 'unavailable', unavailable_reason: 'headless_without_text' }
     }
+    const history = await workspaceHistoryFor(h, this.deps.readWorkspaceHistory)
+    if (history) {
+      const final = await readFinalTerminalSnapshot(dir, h.seq)
+      await history.verify()
+      return final ? { kind: 'final_terminal', ...final } : { kind: 'unavailable', unavailable_reason: 'no_final_terminal_snapshot' }
+    }
     const runtime = await this.ensureRuntime(h)
     if (!runtime) {
       const final = await readFinalTerminalSnapshot(dir, h.seq)
@@ -1575,7 +1588,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     if (!child) throw new Error(`ClaudeCodeAdapter: subagent not found: ${subagentId}`)
     let raw: string
     try {
-      raw = await fs.readFile(child.filePath, 'utf-8')
+      raw = child.history ? await readNativeHistoryText(child.history, child.filePath) : await fs.readFile(child.filePath, 'utf-8')
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         return {
@@ -1606,24 +1619,30 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     // 里(meta.json 不落它)，进程重启后无法重建路径。现在从 meta 里的 workspace_root 字段
     // (本轮新增持久化)重建它,readTrace 因此也能在
     // 无常驻 runtime 时工作,不再是"只能对本进程内常驻的化身调用"。
-    const runtime = await this.ensureRuntime(h)
-    if (!runtime) {
-      throw new Error(`ClaudeCodeAdapter.readTrace: no such incarnation ${h.worker_id}#${h.seq} resident in this process`)
-    }
-    if (!runtime.workspaceRoot) {
-      // 重建自缺 workspace_root 的老 meta(升级前写入,已知限制,见 ensureRuntime 注释)。
-      throw new Error(
-        `ClaudeCodeAdapter.readTrace: cannot rebuild workspace for ${h.worker_id}#${h.seq} ` +
-          `(meta.json predates workspace_root persistence; trace unavailable after an adapter restart)`,
-      )
-    }
+    const historical = await nativeHistorySource(h, this.deps.readWorkspaceHistory, () => this.readMetaFile(join(this.deps.dataDir, h.worker_id), h.seq))
+    let filePath: string
+    if (historical) {
+      filePath = join(this.claudeProjectsDir, projectSlug(historical.history.before_root), `${h.session_ref}.jsonl`)
+    } else {
+      const runtime = await this.ensureRuntime(h)
+      if (!runtime) {
+        throw new Error(`ClaudeCodeAdapter.readTrace: no such incarnation ${h.worker_id}#${h.seq} resident in this process`)
+      }
+      if (!runtime.workspaceRoot) {
+        // 重建自缺 workspace_root 的老 meta(升级前写入,已知限制,见 ensureRuntime 注释)。
+        throw new Error(
+          `ClaudeCodeAdapter.readTrace: cannot rebuild workspace for ${h.worker_id}#${h.seq} ` +
+            `(meta.json predates workspace_root persistence; trace unavailable after an adapter restart)`,
+        )
+      }
 
-    const slug = projectSlug(runtime.workspaceRoot)
-    const filePath = join(this.claudeProjectsDir, slug, `${runtime.sessionId}.jsonl`)
+      const slug = projectSlug(runtime.workspaceRoot)
+      filePath = join(this.claudeProjectsDir, slug, `${runtime.sessionId}.jsonl`)
+    }
 
     let raw: string
     try {
-      raw = await fs.readFile(filePath, 'utf-8')
+      raw = historical ? await readNativeHistoryText(historical, filePath) : await fs.readFile(filePath, 'utf-8')
     } catch (err) {
       // 文件缺失(化身还没写过 trace,或 fork 化身的占位 session_id 本就对不上真实文件)
       // 退化为空数组,cursor 原样透传——没有新内容可消费,调用方下次仍从原位置续读。
@@ -1653,26 +1672,34 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   }
 
   private async readSubagentRecords(h: IncarnationHandle): Promise<ReadonlyArray<ClaudeSubagentRecord>> {
-    const runtime = await this.ensureRuntime(h)
-    if (!runtime?.workspaceRoot || !runtime.sessionId) return []
-    const childrenDir = join(this.claudeProjectsDir, projectSlug(runtime.workspaceRoot), runtime.sessionId, 'subagents')
+    const historical = await nativeHistorySource(h, this.deps.readWorkspaceHistory, () => this.readMetaFile(join(this.deps.dataDir, h.worker_id), h.seq))
+    let childrenDir: string
+    if (historical) {
+      childrenDir = join(this.claudeProjectsDir, projectSlug(historical.history.before_root), h.session_ref, 'subagents')
+    } else {
+      const runtime = await this.ensureRuntime(h)
+      if (!runtime?.workspaceRoot || !runtime.sessionId) return []
+      childrenDir = join(this.claudeProjectsDir, projectSlug(runtime.workspaceRoot), runtime.sessionId, 'subagents')
+    }
     let entries: import('node:fs').Dirent[]
     try {
-      entries = await fs.readdir(childrenDir, { withFileTypes: true })
+      const directory = historical ? await nativeHistoryDirectory(historical, childrenDir) : childrenDir
+      entries = await fs.readdir(directory, { withFileTypes: true })
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') { await historical?.verify(); return [] }
       throw error
     }
     const children = await Promise.all(entries
       .filter((entry) => entry.isFile() && /^agent-[a-zA-Z0-9]+\.jsonl$/.test(entry.name))
-      .map(async (entry) => this.readSubagentRecord(h.worker_id, join(childrenDir, entry.name))))
+      .map(async (entry) => this.readSubagentRecord(h.worker_id, join(childrenDir, entry.name), historical ?? undefined)))
+    await historical?.verify()
     return children.filter((child): child is ClaudeSubagentRecord => child !== undefined)
   }
 
-  private async readSubagentRecord(workerId: string, filePath: string): Promise<ClaudeSubagentRecord | undefined> {
+  private async readSubagentRecord(workerId: string, filePath: string, history?: NativeHistorySource): Promise<ClaudeSubagentRecord | undefined> {
     let raw: string
     try {
-      raw = await fs.readFile(filePath, 'utf-8')
+      raw = history ? await readNativeHistoryText(history, filePath) : await fs.readFile(filePath, 'utf-8')
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
       throw error
@@ -1698,6 +1725,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       ? last.timestamp
       : undefined
     return {
+      ...(history ? { history } : {}),
       filePath,
       summary: {
         subagent_id: first.agentId,
@@ -1711,6 +1739,46 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         ...(endedAt ? { ended_at: endedAt } : {}),
       },
     }
+  }
+
+  /** Read-only fixed carrier; cold metadata needs the original scope, never ensureRuntime side effects. */
+  async captureExecutionProcesses(h: IncarnationHandle, fixed?: WorkspaceRelocationIncarnation, legacyEnded?: true): Promise<WorkerProcessObservation> {
+    h = Object.freeze({ ...h })
+    fixed = fixed ? Object.freeze({ ...fixed }) : undefined
+    this.assertActive()
+    const runtime = this.runtimes.get(instanceKey(h))
+    const invalid = () => Object.assign(new Error('执行器化身与运行载体无法核验。'), { code: 'WORKER_CARRIER_UNVERIFIED' })
+    if (legacyEnded !== undefined && (legacyEnded !== true || !fixed) || h.impl !== this.implId || !h.incarnation_id || fixed && (fixed.incarnation_id !== h.incarnation_id || fixed.impl !== h.impl || fixed.seq !== h.seq)) throw invalid()
+    if (!runtime) {
+      if (!fixed) throw invalid()
+      return captureMetadataNativeProcesses(this.deps.dataDir, h, fixed,
+        () => legacyEnded ? this.tmux.readOptionalProcessCarrier(`crabot-w-${h.worker_id}-${h.seq}`) : this.tmux.readProcessCarrier(`crabot-w-${h.worker_id}-${h.seq}`),
+        () => { this.assertActive(); return !this.runtimes.has(instanceKey(h)) }, legacyEnded)
+    }
+    if (runtime.incarnation_id !== h.incarnation_id || runtime.worker_id !== h.worker_id || runtime.seq !== h.seq
+      || fixed && runtime.workspaceRoot !== fixed.workspace) throw invalid()
+    let processes: WorkerProcessObservation
+    if (runtime.headlessChild) {
+      processes = captureHeadlessNativeProcesses(runtime.headlessChild, fixed && runtime.controlState?.kind === 'exited' ? true : undefined)
+    } else {
+      if (runtime.sessionName !== `crabot-w-${h.worker_id}-${h.seq}`) throw invalid()
+      if (legacyEnded && fixed && runtime.controlState.kind === 'exited') {
+        const sessionName = runtime.sessionName
+        processes = await captureMetadataNativeProcesses(this.deps.dataDir, h, fixed,
+          () => this.tmux.readOptionalProcessCarrier(sessionName), () => {
+            this.assertActive()
+            return this.runtimes.get(instanceKey(h)) === runtime && runtime.incarnation_id === h.incarnation_id
+              && runtime.worker_id === h.worker_id && runtime.seq === h.seq && runtime.sessionName === sessionName
+              && runtime.workspaceRoot === fixed!.workspace && runtime.controlState.kind === 'exited' && !runtime.headlessChild
+          }, true)
+      } else {
+        const { captureTmuxProcessTree } = require(join(__dirname, '../../../../scripts/lib/tmux-process-tree.cjs'))
+        processes = await captureTmuxProcessTree(() => this.tmux.readProcessCarrier(runtime.sessionName))
+      }
+    }
+    this.assertActive()
+    if (this.runtimes.get(instanceKey(h)) !== runtime || runtime.incarnation_id !== h.incarnation_id) throw invalid()
+    return processes
   }
 
   async kill(h: IncarnationHandle): Promise<void> {

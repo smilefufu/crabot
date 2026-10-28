@@ -1,5 +1,7 @@
 import { execFile, spawn, type ChildProcess, type StdioOptions } from 'node:child_process'
 import { buildChildEnv } from '../core/runtime-env'
+import { getDataRootDir } from '../core/data-paths'
+import { assertWorkspaceExecutionAllowed } from 'crabot-shared'
 
 export interface HostProcessLimits {
   readonly timeoutMs: number
@@ -54,6 +56,7 @@ const DEFAULT_KILL_GRACE_MS = 500
  * returning so a later caller failure can never become an Agent-level uncaught `error` event.
  */
 export function launchHostProcess(spec: HostProcessLaunchSpec): ChildProcess {
+  assertWorkspaceExecutionAllowed(getDataRootDir())
   const [file, ...args] = spec.argv
   const child = spawn(file, args, {
     cwd: spec.cwd,
@@ -215,6 +218,7 @@ function createCollector(limit: number, capture: boolean): BoundedCollector {
  * exits remain `exit`, so each operation retains its own exit-code contract.
  */
 export function runHostProcess(spec: HostProcessRunSpec): Promise<HostProcessOutcome> {
+  const dataRoot = getDataRootDir()
   if (spec.abortSignal?.aborted) {
     return Promise.resolve({
       kind: 'aborted', exitCode: null, signal: null, stdout: '', stderr: '', stdoutBytes: 0, stderrBytes: 0,
@@ -294,6 +298,7 @@ export function runHostProcess(spec: HostProcessRunSpec): Promise<HostProcessOut
       // EPIPE means the child declined the request. Its close result determines the tool error.
     })
     void Promise.resolve(spec.beforeStdin?.(child)).then(() => {
+      if (spec.stdin !== undefined) assertWorkspaceExecutionAllowed(dataRoot)
       child.stdin?.end(spec.stdin)
     }).catch((error) => {
       beforeStdinError = error instanceof Error ? error.message : String(error)

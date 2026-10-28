@@ -100,3 +100,11 @@ export interface WorkspaceRelocationStopResult {
   readonly incarnation_id: string
   readonly status: WorkspaceRelocationStopStatus
 }
+
+export interface WorkerProcessIdentity {
+  readonly pid: number
+  readonly parent: number
+  readonly started: string
+  readonly owner: string
+  readonly executable: string
+}
