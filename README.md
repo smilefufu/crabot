@@ -35,6 +35,7 @@
 | `crabot-channel-telegram` | TypeScript | Telegram 渠道 |
 | `crabot-channel-wechat` | TypeScript | 微信渠道 |
 | `crabot-channel-feishu` | TypeScript | 飞书渠道 |
+| `crabot-channel-slack` | TypeScript | Slack 私聊/群聊渠道（Socket Mode） |
 | `crabot-mcp-tools` | TypeScript | 内置 MCP 工具服务 |
 
 ## 快速开始

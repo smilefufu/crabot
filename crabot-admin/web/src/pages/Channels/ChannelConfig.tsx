@@ -269,6 +269,25 @@ export const ChannelConfig: React.FC = () => {
     loadImplementations()
   }, [])
 
+  // 生命周期请求可能先返回处理中状态，持续刷新以便停止完成后显示删除入口。
+  useEffect(() => {
+    let active = true
+    let loadingStatus = false
+    const timer = window.setInterval(async () => {
+      if (loadingStatus) return
+      loadingStatus = true
+      try {
+        const response = await channelService.listInstances()
+        if (active) setInstances(response.items)
+      } catch {
+        // 保留已有列表；后续轮询可恢复，不将查询失败当成停止成功。
+      } finally {
+        loadingStatus = false
+      }
+    }, 2000)
+    return () => { active = false; window.clearInterval(timer) }
+  }, [])
+
   // 来自 /channels/new "手动填写" 入口：?implementation_id=xxx
   useEffect(() => {
     const implId = searchParams.get('implementation_id')
@@ -440,8 +459,14 @@ export const ChannelConfig: React.FC = () => {
 
   const handleStop = async (instanceId: string) => {
     try {
-      await channelService.stopInstance(instanceId)
-      toast.success('Channel 已停止')
+      const result = await channelService.stopInstance(instanceId)
+      if (result.status === 'stopped') {
+        toast.success('Channel 已停止')
+      } else if (['running', 'starting', 'stopping'].includes(result.status)) {
+        toast.info('停止请求已受理，正在等待进程退出')
+      } else {
+        toast.error('尚未确认 Channel 停止，请检查模块状态')
+      }
       setHealthMap((prev) => {
         const next = { ...prev }
         delete next[instanceId]
