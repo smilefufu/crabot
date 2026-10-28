@@ -39,4 +39,4 @@ jobs:
           pnpm --dir crabot-desktop install --frozen-lockfile --ignore-scripts
           pnpm --dir crabot-desktop run build
       - name: Verify original session, IPC, generation, folder, diagnostics and login-intent components
-        run: node --test --test-concurrency=1 crabot-desktop/tests/*.test.mjs
+        run: node --test --test-concurrency=1 crabot-desktop/tests/artifact-network.test.mjs crabot-desktop/tests/bootstrap-log.test.mjs crabot-desktop/tests/controller.test.mjs crabot-desktop/tests/desktop-ipc.test.mjs crabot-desktop/tests/desktop-network.test.mjs crabot-desktop/tests/diagnostics.test.mjs crabot-desktop/tests/local-pages.test.mjs crabot-desktop/tests/login-startup-update.test.mjs crabot-desktop/tests/login-startup.test.mjs crabot-desktop/tests/session-host.test.mjs crabot-desktop/tests/update-dialog.test.mjs crabot-desktop/tests/update-package.test.mjs crabot-desktop/tests/workspace-folder.test.mjs
