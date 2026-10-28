@@ -1,5 +1,10 @@
 # Crabot 项目进度
 
+### system管理员基础：独立审查候选
+
+- 按已确认System协议拆出管理员注册、systemd模板、批量策略及参数解析，依赖完整Native生命周期锁；不提前激活UID助手、升级转换或CLI，不把root注册表操作与员工业务数据混用。
+- 本机26项回归通过，覆盖唯一端口/身份、重复开通保留、停止集合、代际变化、逐项失败/未知与确认规则。四平台自身Native构建继续；真实三UID/systemd产品验收单独保留，不以策略测试替代。未建PR、不推产品main。
+
 ### 桌面共同启动互斥：独立审查候选
 
 - 从已确认桌面实现提取 Native 生命周期锁与有限启动前检查，现有 start/restart/ui-upgrade/direct-MM/prepared-upgrade 同步真实 token；原 CLI 启停/迁移驱动保持，不提前接新 MM 登记流程。workspace 专用作业锁随后续真实调用者接入。

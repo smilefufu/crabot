@@ -1,0 +1,40 @@
+name: System administrator foundation
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feat/desktop-system-foundation']
+  pull_request:
+    paths:
+      - 'scripts/lib/system-registry.mjs'
+      - 'scripts/lib/system-service.mjs'
+      - 'scripts/lib/system-batch.mjs'
+      - 'scripts/lib/system-arguments.mjs'
+      - 'scripts/lib/__tests__/system-registry.test.mjs'
+      - 'scripts/lib/__tests__/system-service.test.mjs'
+      - 'scripts/lib/__tests__/system-batch.test.mjs'
+      - 'scripts/lib/__tests__/system-arguments.test.mjs'
+      - '.github/workflows/system-foundation.yml'
+permissions:
+  contents: read
+jobs:
+  foundation:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Build this checkout's Native mutex dependency
+        run: node scripts/build-native.mjs
+      - name: Verify administrator registry and batch policies without changing the host
+        run: >-
+          node --test --test-concurrency=1
+          scripts/lib/__tests__/system-registry.test.mjs
+          scripts/lib/__tests__/system-service.test.mjs
+          scripts/lib/__tests__/system-batch.test.mjs
+          scripts/lib/__tests__/system-arguments.test.mjs
