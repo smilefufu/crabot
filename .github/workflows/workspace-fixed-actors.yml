@@ -40,6 +40,27 @@ jobs:
           pnpm --dir crabot-agent install --frozen-lockfile --ignore-scripts
           pnpm --dir crabot-agent run build
           node scripts/build-native.mjs
+      - name: Diagnose Windows ordinary Bash file-handle output
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path';
+          import { spawnSync } from 'node:child_process';
+          const root = fs.mkdtempSync(path.join(os.tmpdir(), 'crabot-bash-log-probe-'));
+          const bash = spawnSync('where.exe', ['bash.exe'], { encoding: 'utf8' }).stdout.trim().split(/\r?\n/)[0];
+          try {
+            for (const mode of ['sync', 'promise', 'redirection']) {
+              const log = path.join(root, mode + '.log');
+              const handle = mode === 'promise' ? await fs.promises.open(log, 'a') : null;
+              const fd = handle?.fd ?? fs.openSync(log, 'a');
+              const command = mode === 'redirection' ? `printf probe > '${log.replaceAll('\\', '/')}'` : 'printf probe';
+              const result = spawnSync(bash, ['-c', command], { stdio: ['ignore', fd, fd], encoding: 'utf8', timeout: 10000 });
+              if (handle) await handle.close(); else fs.closeSync(fd);
+              console.log(JSON.stringify({ mode, status: result.status, error: result.error?.code, content: fs.readFileSync(log, 'utf8') }));
+            }
+          } finally { fs.rmSync(root, { recursive: true, force: true }); }
+          NODE
       - name: Verify actual finite coordinator, file Host and per-action journals
         if: runner.os != 'Windows'
         run: >-
