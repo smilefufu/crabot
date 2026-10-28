@@ -102,9 +102,9 @@ describe('ManagerKey ledger contract', () => {
       ).rejects.toThrow(/invalid manager_key/)
       expect(await fs.readdir(dir)).toEqual([])
 
-      await fs.writeFile(join(dir, 'channel::session.json'), '{}')
+      await fs.writeFile(join(dir, 'channel%3a%3asession.json'), '{}')
       await expect(new LedgerStore(dir).init()).rejects.toThrow(/non-canonical ledger filename/)
-      await fs.rm(join(dir, 'channel::session.json'))
+      await fs.rm(join(dir, 'channel%3a%3asession.json'))
       await fs.writeFile(join(dir, 'channel%3A%3A.json'), '{}')
       await expect(new LedgerStore(dir).init()).rejects.toThrow(/invalid.*ledger filename/)
     } finally {

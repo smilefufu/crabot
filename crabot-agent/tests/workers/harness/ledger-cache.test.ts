@@ -59,7 +59,7 @@ describe('LedgerStore validated read cache', () => {
     await fs.unlink(path)
     await expect(store.findWorker('w')).rejects.toThrow('index inconsistent')
   })
-  it('does not cache bytes read while the path is replaced', async () => {
+  it('does not cache bytes read while the physical file changes', async () => {
     await write([worker('w')]); await store.init()
     const open = fs.open.bind(fs)
     const changed = worker('w'); changed.task.title = 'replacement'
@@ -68,8 +68,13 @@ describe('LedgerStore validated read cache', () => {
       const read = handle.readFile.bind(handle)
       vi.spyOn(handle, 'readFile').mockImplementationOnce(async (...readArgs: any[]) => {
         const raw = await (read as any)(...readArgs)
-        await fs.writeFile(`${path}.new`, JSON.stringify({ manager_key: key, workers: [changed] }))
-        await fs.rename(`${path}.new`, path)
+        // Windows cannot replace this open read handle; an in-place write
+        // exercises its real concurrent-change path instead of assuming POSIX rename.
+        if (process.platform === 'win32') await write([changed])
+        else {
+          await fs.writeFile(`${path}.new`, JSON.stringify({ manager_key: key, workers: [changed] }))
+          await fs.rename(`${path}.new`, path)
+        }
         return raw
       })
       return handle
