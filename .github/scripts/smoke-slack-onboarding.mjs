@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { execFileSync } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
 import { cliEnvironment, ensureCli, privateDirectory, startCli } from '../../crabot-channel-slack/dist/cli-tools.js'
 import { prepareProject, SLACK_MANIFEST } from '../../crabot-channel-slack/dist/cli-project.js'
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "crabot slack-cli's $safe-"))
@@ -37,28 +37,29 @@ try {
   console.log(`Slack CLI 4.11.0 verified archive and real local hooks passed: ${process.platform}/${process.arch}; no login, App creation or messages`)
 } catch (error) {
   if (process.platform === 'win32' && executable && !job) {
-    // Diagnostic-only profiles: never use their result to accept the original failed probe.
-    const base = cliEnvironment()
-    const standard = { ...base }
-    for (const key of ['OS', 'SystemDrive', 'HOMEDRIVE', 'HOMEPATH', 'USERNAME', 'USERDOMAIN', 'COMPUTERNAME', 'PATHEXT', 'ProgramData', 'ProgramFiles', 'CommonProgramFiles', 'WINDIR', 'NUMBER_OF_PROCESSORS', 'PROCESSOR_ARCHITECTURE']) {
-      if (process.env[key] !== undefined) standard[key] = process.env[key]
-    }
-    for (const [label, env] of [['standard-windows-env', standard], ['noninteractive-terminal', { ...base, CI: 'true', TERM: 'dumb', NO_COLOR: '1' }]]) {
+    // Diagnostic-only I/O profiles; the original failed probe still fails this job.
+    const options = { cwd: root, env: cliEnvironment(), timeout: 15000, windowsHide: true, encoding: 'utf8' }
+    for (const [label, stdio] of [['stdin-pipe', ['pipe', 'pipe', 'pipe']], ['overlapped-output', ['ignore', 'overlapped', 'overlapped']]]) {
       try {
-        const output = execFileSync(executable, ['--version'], { cwd: root, env, timeout: 15000, windowsHide: true, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+        const output = execFileSync(executable, ['--version'], { ...options, stdio })
         console.log(`Slack CLI startup diagnostic: ${label} pinned-version=${output.includes('4.11.0')}`)
       } catch { console.log(`Slack CLI startup diagnostic: ${label} failed`) }
     }
-    let plain
+    const handles = []
     try {
-      plain = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-slack-cli-startup-'))
-      await privateDirectory(plain)
-      const copy = path.join(plain, 'slack.exe')
-      await fs.copyFile(executable, copy)
-      const output = execFileSync(copy, ['--version'], { cwd: plain, env: base, timeout: 15000, windowsHide: true, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
-      console.log(`Slack CLI startup diagnostic: simple-private-path pinned-version=${output.includes('4.11.0')}`)
-    } catch { console.log('Slack CLI startup diagnostic: simple-private-path failed') }
-    finally { if (plain) await fs.rm(plain, { recursive: true, force: true }).catch(() => console.log('Slack CLI startup diagnostic: temporary copy cleanup failed')) }
+      handles.push(await fs.open(path.join(root, 'version.stdout'), 'wx', 0o600))
+      handles.push(await fs.open(path.join(root, 'version.stderr'), 'wx', 0o600))
+      execFileSync(executable, ['--version'], { ...options, stdio: ['ignore', handles[0].fd, handles[1].fd] })
+      const output = await fs.readFile(path.join(root, 'version.stdout'), 'utf8')
+      console.log(`Slack CLI startup diagnostic: regular-output-files pinned-version=${output.includes('4.11.0')}`)
+    } catch { console.log('Slack CLI startup diagnostic: regular-output-files failed') }
+    finally { await Promise.all(handles.map(handle => handle.close().catch(() => {}))) }
+    await new Promise(resolve => {
+      execFile(executable, ['--version'], options, (error, output) => {
+        console.log(`Slack CLI startup diagnostic: async-default-pipes pinned-version=${!error && output.includes('4.11.0')}`)
+        resolve()
+      })
+    })
   }
   // This isolated manifest-only probe never logs in; report fixed milestones, not raw CLI logs.
   try {
