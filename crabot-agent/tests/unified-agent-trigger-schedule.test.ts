@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { ConfigLoader } from '../src/core/config-loader.js'
+import { ExecutionAdmissions } from '../src/core/execution-admissions.js'
 
 import { UnifiedAgent, type TriggerScheduleParams, type TriggerScheduleResult } from '../src/unified-agent.js'
 import type { AgentEventPublisher } from '../src/manager/events.js'
@@ -11,6 +12,7 @@ interface AgentUnderTest {
   configAuthenticated: boolean
   configStale: boolean
   managerStack: unknown
+  executionAdmissions: ExecutionAdmissions
   memoryWriter: { runMaintenance(scope: 'all'): Promise<void> }
   managerEventPublisher: AgentEventPublisher
   handleTriggerSchedule(params: TriggerScheduleParams): Promise<TriggerScheduleResult>
@@ -66,6 +68,7 @@ function buildAgent(runMaintenance: () => Promise<void>) {
   // 直接 test fixture：构造函数默认 runtime_config_authenticated=true；Object.create 绕过构造函数，这里补齐。
   agent.configAuthenticated = true
   agent.configStale = false
+  agent.executionAdmissions = new ExecutionAdmissions()
   agent.managerStack = {
     ledger,
     principals: { managerKeyFor: () => managerKey },

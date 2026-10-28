@@ -147,9 +147,9 @@ describe('Worker request guard never borrows a neighbouring speaker or legacy sn
       return result
     })
     await expect(harness.authorizeAgentCliExecution(execution, 'schedule', 'read')).rejects.toThrow(/FORBIDDEN|closed/)
-    current.mockImplementation(originalCurrent)
-    await activeExecution()
-    await ledger.upsertWorker(key, 'w-owner', prev => ({ ...prev!, task: { ...prev!.task, status: 'running' } }))
+  })
+  it('CLI authority rejects half bindings for an active execution', async () => {
+    const execution = await activeExecution(), harness = resourceHarness()
     await fs.rm(path.join(root, 'workers/w-owner/context.json'))
     await expect(harness.authorizeAgentCliExecution(execution, 'schedule', 'read')).rejects.toThrow('CAPABILITY_UNKNOWN')
   })

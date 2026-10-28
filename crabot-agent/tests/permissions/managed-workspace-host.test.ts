@@ -27,7 +27,8 @@ beforeEach(async () => {
   root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'managed-host-')))
   ledger = new LedgerStore(path.join(root, 'ledgers'))
   contexts = new WorkerContextStore(path.join(root, 'workers'))
-  workspaces = new WorkspaceManager(path.join(root, 'workspaces'))
+  await fs.mkdir(path.join(root, 'data'), { mode: 0o700 })
+  workspaces = new WorkspaceManager(path.join(root, 'data', 'workspaces'), path.join(root, 'data'))
   adapter = { implId: 'builtin', provision: vi.fn(async () => undefined),
     spawn: vi.fn(async (spec: SpawnSpec) => { lastSpec = spec; return { worker_id: spec.worker_id,
       incarnation_id: spec.incarnation_id, seq: 1, impl: 'builtin', session_ref: 'fixture' } }),
@@ -119,7 +120,7 @@ describe('host task ownership and compatibility', () => {
       const worker = await stack.harness.spawnWorker(params()), workspace = worker.incarnations[0].workspace
       const tools = (lastSpec.builtin!.tools as () => any[])(), write = tools.find(tool => tool.name === 'Write')
       const file = path.join(workspace, 'deliverables', 'result.html')
-      expect(workspace).toBe(path.join(root, 'configured-workspaces', worker.worker_id))
+      expect(workspace).toBe(path.join(root, 'configured-workspaces', 'default', 'tasks', worker.worker_id))
       expect((await write.call({ file_path: file, content: 'task result' }, {})).isError).toBe(false)
       expect(await fs.readFile(file, 'utf8')).toBe('task result')
       expect((await tools.find(tool => tool.name === 'Read').call({ file_path: file }, {})).output).toContain('task result')
