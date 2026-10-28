@@ -5,6 +5,7 @@ import path from 'node:path'
 import { findTranslator, connectionCapabilitiesFor } from '../../src/workers/connections/registry.js'
 import { buildScrubbedChildEnv } from '../../src/workers/connections/secret-env.js'
 import { RuntimeFileSet } from '../../src/workers/connections/runtime-file.js'
+import { expectPrivateRuntimeFile } from './private-runtime-file.js'
 
 async function binaryFixture() {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-binary-resolution-')))
@@ -85,9 +86,7 @@ describe('connection translators（P6-B §7）', () => {
       require('../../../scripts/lib/process-identity.cjs').createPrivateDirectory(root)
     }
     const set = await RuntimeFileSet.create(root, { 'config.toml': 'x = 1' })
-    const stat = await fs.stat(set.resolve('config.toml'))
-    if (process.platform === 'win32') expect(require('../../../scripts/lib/process-identity.cjs').isOwnerOnlyFile(set.resolve('config.toml'))).toBe(true)
-    else expect(stat.mode & 0o777).toBe(0o600)
+    await expectPrivateRuntimeFile(set.resolve('config.toml'), root)
     expect(() => set.resolve('../escape')).toThrow(/escapes/)
     await set.dispose()
     await expect(fs.stat(set.root)).rejects.toThrow(/ENOENT/)
