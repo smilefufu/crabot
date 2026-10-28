@@ -183,7 +183,7 @@ describe('ManagersView', () => {
       </MemoryRouter>,
     )
     await waitFor(() => expect(mocked.listManagers).toHaveBeenCalledWith(1, 20))
-    fireEvent.click(screen.getByText('下一页'))
+    fireEvent.click(await screen.findByText('下一页'))
     await waitFor(() => expect(mocked.listManagers).toHaveBeenCalledWith(2, 20))
   })
 })
