@@ -625,6 +625,7 @@ export class ChannelManager {
         const { stdout } = await execute(path.join(system32, 'whoami.exe'), ['/user', '/fo', 'csv', '/nh'], { windowsHide: true, timeout: 5000 })
         const sid = stdout.match(/S-1-5-[0-9-]+/)?.[0]
         if (!sid) throw new Error('Cannot establish private Slack credential permissions')
+        await execute(path.join(system32, 'icacls.exe'), [tempPath, '/reset'], { windowsHide: true, timeout: 5000 })
         await execute(path.join(system32, 'icacls.exe'), [tempPath, '/inheritance:r', '/grant:r', `*${sid}:F`], { windowsHide: true, timeout: 5000 })
       }
       await fs.writeFile(tempPath, content, { encoding: 'utf-8', mode })

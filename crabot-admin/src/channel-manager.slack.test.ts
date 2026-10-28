@@ -56,6 +56,24 @@ describe('Slack Admin -> real module RPC -> persistent restart',()=>{
     } finally { platform.mockRestore(); vi.unstubAllEnvs() }
   })
 
+  it.skipIf(process.platform === 'win32')('keeps the previous credentials and removes the empty temporary file if ACL reset fails', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'slack-acl-reset-failure-')); dirs.push(dir)
+    const system = path.join(dir, 'windows'), tools = path.join(system, 'System32')
+    await fs.mkdir(tools, { recursive: true })
+    await fs.writeFile(path.join(tools, 'whoami.exe'), `#!/bin/sh\nprintf '"fixture","S-1-5-21-123"\\n'\n`, { mode: 0o700 })
+    await fs.writeFile(path.join(tools, 'icacls.exe'), '#!/bin/sh\nif [ "$2" = /reset ]; then [ ! -s "$1" ] && exit 1; exit 2; fi\nexit 0\n', { mode: 0o700 })
+    const file = path.join(dir, 'credentials.json')
+    await fs.writeFile(file, '{"bot_token":"xoxb-old-fixture"}')
+    const platform = vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
+    vi.stubEnv('SystemRoot', system)
+    try {
+      const manager = new ChannelManager(dir, {} as any)
+      await expect((manager as any).atomicWriteFile(file, '{"bot_token":"xoxb-new-fixture"}', 0o600)).rejects.toMatchObject({ code: 1 })
+      expect(await fs.readFile(file, 'utf8')).toBe('{"bot_token":"xoxb-old-fixture"}')
+      await expect(fs.access(`${file}.tmp`)).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally { platform.mockRestore(); vi.unstubAllEnvs() }
+  })
+
   it('rolls back a new Slack instance if its initial private credential write fails, allowing a same-session retry', async () => {
     const dir=await fs.mkdtemp(path.join(os.tmpdir(),'slack-config-failure-')); dirs.push(dir)
     const manager=new ChannelManager(dir,{registerModuleDefinition:vi.fn()} as any)
@@ -90,6 +108,12 @@ describe('Slack Admin -> real module RPC -> persistent restart',()=>{
       return channel
     }
     const first=await boot()
+    if(process.platform==='win32'){
+      const {promisify}=await import('node:util'),{execFile}=await import('node:child_process')
+      const tmp=path.join(dir,'channel-configs','slack-test.json.tmp')
+      await fs.writeFile(tmp,'')
+      await promisify(execFile)(path.join(process.env.SystemRoot||process.env.SYSTEMROOT!,'System32','icacls.exe'),[tmp,'/grant:r','*S-1-5-32-545:R'],{windowsHide:true,timeout:5000})
+    }
     const changed=await manager.updateConfig({instance_id:instance.id,config:{group:{only_respond_to_mentions:false}}})
     const credentialFile=path.join(dir,'channel-configs','slack-test.json')
     if(process.platform==='win32'){
