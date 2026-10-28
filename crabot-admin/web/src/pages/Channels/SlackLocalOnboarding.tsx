@@ -103,7 +103,7 @@ export function SlackLocalOnboarding() {
   }
   async function start() {
     const instanceName = name.normalize('NFC')
-    if (!/^[\p{Script=Han}a-z0-9-]{2,50}$/u.test(instanceName)) { setError('名称可用中文、小写英文字母、数字和连字符，2–50 字符'); return }
+    if (!/^[\p{Script=Han}A-Za-z0-9-]{2,50}$/u.test(instanceName)) { setError('名称可用中文、大小写英文字母、数字和连字符，2–50 字符'); return }
     const current = ++generation.current
     setName(instanceName); setError(''); setCode(''); setPhase('starting')
     try {

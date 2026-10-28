@@ -24,12 +24,13 @@ async function start() {
   await screen.findByLabelText('一次性验证码')
 }
 describe('Slack local setup experience', () => {
-  it('rejects uppercase instance names before starting authorization, matching the shared contract', () => {
+  it('preserves uppercase instance names when starting authorization, matching the updated contract', async () => {
     render(<MemoryRouter><SlackLocalOnboarding /></MemoryRouter>)
     fireEvent.change(screen.getByLabelText('渠道名称'), { target: { value: 'Slack-one' } })
     fireEvent.click(screen.getByRole('button', { name: '开始授权' }))
-    expect(channelService.onboardBegin).not.toHaveBeenCalled()
-    expect(screen.getByRole('alert')).toHaveTextContent('小写英文字母')
+    await screen.findByLabelText('一次性验证码')
+    expect(channelService.onboardBegin).toHaveBeenCalledWith('channel-slack', 'local-cli', { instance_name: 'Slack-one' })
+    expect(screen.queryByRole('alert')).toBeNull()
   })
 
   it('keeps a newer terminal SSE result when a submit HTTP response arrives late', async () => {
