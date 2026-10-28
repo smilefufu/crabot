@@ -77,6 +77,72 @@ try {
     try { Verify-Release $root 'v2026.10.12.4' } catch { $failed = $true }
     Assert $failed 'legacy release must reject mixed new components'
 } finally { Remove-Item -LiteralPath $root -Recurse -Force }
+$slackFixture = Join-Path ([IO.Path]::GetTempPath()) ('installer-slack-legacy-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $slackFixture | Out-Null
+try {
+    $probe = Join-Path $slackFixture 'probe.ps1'
+    Set-Content -LiteralPath $probe -Encoding UTF8 -Value @'
+param($Installer, $Root, $TargetVersion, $Mode)
+. $Installer -Version $TargetVersion -InstallDir (Join-Path $Root 'installed')
+$env:PROCESSOR_ARCHITECTURE = 'AMD64'; $env:PROCESSOR_ARCHITEW6432 = $null
+function Ensure-Node {}
+function Ensure-Uv {}
+function Ensure-Bash {}
+function Ensure-Pnpm {}
+function Assert-CrabotStopped {}
+function Invoke-WebRequest($Uri, $OutFile, [switch]$UseBasicParsing, $TimeoutSec) {
+    if ($OutFile.EndsWith('.sha256')) {
+        Set-Content -LiteralPath $OutFile -Value (Get-FileHash -LiteralPath $OutFile.Substring(0, $OutFile.Length - 7) -Algorithm SHA256).Hash
+    } else { Set-Content -LiteralPath $OutFile -Value 'archive fixture' }
+}
+function Expand-Archive($LiteralPath, $DestinationPath, [switch]$Force) {
+    $release = Join-Path $DestinationPath "crabot-$Version-windows-x64"
+    foreach ($file in @('cli.mjs','package.json','scripts/fixture','crabot-memory/pyproject.toml','crabot-memory/uv.lock','dist/fixture')) {
+        $path = Join-Path $release $file
+        New-Item -ItemType Directory -Force -Path (Split-Path $path -Parent) | Out-Null
+        Set-Content -LiteralPath $path -Value 'fixture'
+    }
+    foreach ($mod in @('crabot-shared','scripts/lib','crabot-core','crabot-admin','crabot-agent','crabot-channel-dingtalk','crabot-channel-slack','crabot-channel-feishu','crabot-channel-telegram','crabot-channel-wechat','crabot-mcp-tools')) {
+        if ($mod -eq 'crabot-channel-slack' -and $Mode -ne 'complete') {
+            if ($Mode -eq 'partial') { New-Item -ItemType Directory -Path (Join-Path $release $mod) | Out-Null }
+            continue
+        }
+        if ($mod -eq 'crabot-core' -and $Mode -eq 'missing-core') { continue }
+        foreach ($file in @('package.json','pnpm-lock.yaml')) {
+            $path = Join-Path (Join-Path $release $mod) $file
+            New-Item -ItemType Directory -Force -Path (Split-Path $path -Parent) | Out-Null
+            Set-Content -LiteralPath $path -Value 'fixture'
+        }
+    }
+}
+# Stop after the actual dependency preflight, before product replacement or tool execution.
+function Verify-Release { throw 'fixture-preflight-complete' }
+try { Install-Crabot } catch {
+    if ($_.Exception.Message -eq 'fixture-preflight-complete') { Write-Output 'fixture-preflight-complete'; exit 0 }
+    Write-Output $_.Exception.Message; exit 2
+}
+exit 99
+'@
+    $shell = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+    foreach ($case in @(
+        @('v2026.9.23', 'absent', ''),
+        @('v2026.10.12.4', 'absent', ''),
+        @('v2026.10.12.4', 'complete', ''),
+        @('pr-test', 'complete', ''),
+        @('pr-test', 'absent', 'crabot-channel-slack'),
+        @('v2026.10.12.4', 'partial', 'crabot-channel-slack'),
+        @('v2026.10.12.4', 'missing-core', 'crabot-core')
+    )) {
+        $caseRoot = Join-Path $slackFixture ($case[0] + '-' + $case[1])
+        $output = (& $shell -NoProfile -NonInteractive -File $probe (Join-Path $repo 'install.ps1') $caseRoot $case[0] $case[1] 2>&1) -join "`n"
+        if ($case[2]) {
+            Assert ($LASTEXITCODE -eq 1 -and $output.Contains("Release dependency manifest missing for $($case[2])")) "incomplete $($case[0])/$($case[1]) must be rejected: $output"
+            Assert (-not $output.Contains('fixture-preflight-complete')) 'incomplete package must fail before product replacement'
+        } else {
+            Assert ($LASTEXITCODE -eq 0 -and $output.Contains('fixture-preflight-complete')) "supported $($case[0])/$($case[1]) must pass dependency preflight: $output"
+        }
+    }
+} finally { Remove-Item -LiteralPath $slackFixture -Recurse -Force }
 if ($env:OS -eq 'Windows_NT') {
     $launcherRoot = Join-Path ([IO.Path]::GetTempPath()) ('launcher space-' + [guid]::NewGuid().ToString('N'))
     $oldLocal = $env:LOCALAPPDATA; $oldPath = $env:Path

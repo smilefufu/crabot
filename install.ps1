@@ -404,7 +404,12 @@ await runSourceUpgrade(process.cwd(), console)
             exit 1
         }
 
-        $runtimeModules = @('crabot-shared','scripts/lib','crabot-core','crabot-admin','crabot-agent','crabot-channel-dingtalk','crabot-channel-feishu','crabot-channel-telegram','crabot-channel-wechat','crabot-mcp-tools')
+        $runtimeModules = @('crabot-shared','scripts/lib','crabot-core','crabot-admin','crabot-agent','crabot-channel-dingtalk','crabot-channel-slack','crabot-channel-feishu','crabot-channel-telegram','crabot-channel-wechat','crabot-mcp-tools')
+        # Supported public legacy packages predate the Slack module.
+        if ($Version -in @('v2026.9.23','v2026.10.12.4') -and
+            -not (Test-Path -LiteralPath (Join-Path $stageRelease 'crabot-channel-slack'))) {
+            $runtimeModules = @($runtimeModules | Where-Object { $_ -ne 'crabot-channel-slack' })
+        }
         foreach ($mod in $runtimeModules) {
             $moduleDir = Join-Path $stageRelease $mod
             if (-not (Test-Path -LiteralPath (Join-Path $moduleDir 'package.json') -PathType Leaf) -or

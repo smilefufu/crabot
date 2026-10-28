@@ -390,7 +390,7 @@ export class FeishuClient {
     }
     const resp = await this.client.im.message.list({
       params: query,
-    })
+    }).catch(rethrowHistoryRequestError)
     assertHistoryResponse(resp)
     return {
       items: (resp.data?.items ?? []) as Array<Record<string, unknown>>,
@@ -402,7 +402,7 @@ export class FeishuClient {
   /** 单条消息查询：im.v1.message.get */
   async getMessage(messageId: string): Promise<Record<string, unknown> | null> {
     const params = { user_id_type: 'open_id' as const, card_msg_content_type: 'user_card_content' }
-    const resp = await this.client.im.message.get({ path: { message_id: messageId }, params })
+    const resp = await this.client.im.message.get({ path: { message_id: messageId }, params }).catch(rethrowHistoryRequestError)
     assertHistoryResponse(resp)
     const items = resp.data?.items ?? []
     return items.length > 0 ? (items[0] as Record<string, unknown>) : null
@@ -420,6 +420,16 @@ function assertHistoryResponse(response: { code?: number; msg?: string }): void 
   })
 }
 
+function rethrowHistoryRequestError(err: unknown): never {
+  const extracted = tryExtractFeishuError(err)
+  if (!extracted) throw err
+  const logId = extracted.log_id ? `，log_id=${extracted.log_id}` : ''
+  const hint = [99991672, 99991663, 230027].includes(extracted.code)
+    ? '；请检查应用身份的消息读取权限（im:message:readonly 或 im:message）；群聊还需 im:message.group_msg，并确认机器人在群内、权限已生效。'
+    : ''
+  throw Object.assign(new Error(`飞书历史消息读取失败（code=${extracted.code}${logId}）：${extracted.msg}${hint}`), { cause: err })
+}
+
 async function streamToBuffer(stream: Readable): Promise<Buffer> {
   const chunks: Buffer[] = []
   return new Promise((resolve, reject) => {
@@ -429,16 +439,17 @@ async function streamToBuffer(stream: Readable): Promise<Buffer> {
   })
 }
 
-/** 从 Axios/SDK 拒绝的 error.response.data 安全提取飞书业务 code/msg，无 payload 返回 null。 */
-function tryExtractFeishuError(err: unknown): { code: number; msg: string } | null {
+/** 从 Axios/SDK 拒绝的 error.response.data 安全提取飞书业务 code/msg/log_id，无 payload 返回 null。 */
+function tryExtractFeishuError(err: unknown): { code: number; msg: string; log_id?: string } | null {
   if (!err || typeof err !== 'object') return null
   const response = (err as { response?: unknown }).response
   if (!response || typeof response !== 'object') return null
   const data = (response as { data?: unknown }).data
   if (!data || typeof data !== 'object') return null
-  const { code, msg } = data as { code?: unknown; msg?: unknown }
+  const { code, msg, log_id, error } = data as { code?: unknown; msg?: unknown; log_id?: unknown; error?: { log_id?: unknown } }
   if (typeof code === 'number' && typeof msg === 'string') {
-    return { code, msg }
+    const logId = log_id ?? error?.log_id
+    return { code, msg, ...(typeof logId === 'string' ? { log_id: logId } : {}) }
   }
   return null
 }

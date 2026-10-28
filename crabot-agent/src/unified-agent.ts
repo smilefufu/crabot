@@ -613,6 +613,7 @@ function parseAdminChatAssertionId(assertion: string): string {
  * 群聊里一批消息也可能连着来。没有冷却 = 故障期间往用户脸上刷屏。
  */
 const FAIL_LOUD_COOLDOWN_MS = 5 * 60 * 1000
+const LLM_RECOVERY_NOTICE_DELAY_MS = 30_000
 
 /** F3（静默完成）只记日志计数：私聊连续这么多轮"跑完但一句话没说"才 warn。 */
 const SILENT_EPISODE_WARN_THRESHOLD = 3
@@ -2500,20 +2501,19 @@ export class UnifiedAgent extends ModuleBase {
     }
   }
 
-  /** 连接恢复进度独立冷却；通知不占用人类回复或失败告知的结算责任。 */
+  /** 连接恢复前 30 秒静默，后续进度独立冷却；通知不占用人类回复或失败告知的结算责任。 */
   private async sendManagerLlmRetry(
     key: ManagerKey,
     event: Extract<import('./engine/types.js').LiveProgressEvent, { type: 'llm_retry' }>,
   ): Promise<void> {
-    if (event.retryMode !== 'connection_recovery') return
+    if (event.retryMode !== 'connection_recovery' || (event.elapsedMs ?? 0) < LLM_RECOVERY_NOTICE_DELAY_MS) return
     const now = Date.now()
     const lastAt = this.llmRecoverySentAt.get(key)
     if (lastAt !== undefined && now - lastAt < FAIL_LOUD_COOLDOWN_MS) return
     this.llmRecoverySentAt.set(key, now)
     try {
       const { channelId, sessionId } = splitManagerKey(key)
-      const reason = redactSecrets(event.error, [...this.knownSecrets]).slice(0, FAIL_LOUD_ERROR_MAX_CHARS)
-      const text = `LLM 连接恢复中，已尝试 ${event.attempt} 次，已用 ${Math.floor((event.elapsedMs ?? 0) / 1000)} 秒。最近原因：${reason}。正在重试，你也可以在 Admin 切换模型。`
+      const text = '模型连接暂时不稳定，正在自动重试。'
       if (channelId === 'admin-web' && sessionId === 'admin-chat') {
         // 进度只追加消息，不 claim 或结算当前人类请求。
         await this.deliverAdminChatText(text, [])
