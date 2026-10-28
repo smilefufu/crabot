@@ -1,0 +1,66 @@
+name: Desktop finite acceptance components
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feat/desktop-acceptance-components']
+  pull_request:
+    paths:
+      - 'crabot-desktop/tests/**'
+      - '.github/scripts/**'
+      - '.github/workflows/desktop-acceptance-components.yml'
+permissions:
+  contents: read
+jobs:
+  host:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Build this checkout's actual SDK, Shared, Native and internal host
+        run: |
+          pnpm --dir crabot-client install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-client run build
+          pnpm --dir crabot-shared install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-shared run build
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm run build:cli
+          pnpm --dir scripts/lib install --frozen-lockfile --ignore-scripts
+          node scripts/build-native.mjs
+          pnpm --dir crabot-core install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-core run build
+          pnpm --dir crabot-agent install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-agent run build
+          pnpm --dir crabot-desktop install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-desktop run build
+      - name: Install original publisher fixture dependency
+        run: pnpm --dir crabot-admin install --frozen-lockfile --ignore-scripts
+      - name: Build actual Admin startup dependency
+        run: pnpm --dir crabot-admin run build
+      - name: Verify fixture authority, evidence, transport and actual resource observation
+        run: >-
+          node --test --test-concurrency=1
+          .github/scripts/__tests__/read-ci-crash-frame.test.mjs
+          .github/scripts/check-paired-update-report.test.mjs
+          .github/scripts/paired-update-source-activity.test.mjs
+          .github/scripts/paired-update-source-data.test.mjs
+          .github/scripts/paired-update-source-model.test.mjs
+          .github/scripts/paired-update-target-evidence.test.mjs
+          .github/scripts/prepare-paired-update-core.test.mjs
+          crabot-desktop/tests/desktop-disk.test.mjs
+          crabot-desktop/tests/desktop-resources.test.mjs
+          crabot-desktop/tests/first-model-fixture.test.mjs
+          crabot-desktop/tests/full-host-control.test.mjs
+          crabot-desktop/tests/paired-update-host.test.mjs
