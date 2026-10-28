@@ -103,6 +103,7 @@ export class ChatManager {
   private readonly requestIndex: ChatRequestIndex
   /** P6-A §3.4/§11.8：delivery 事务 journal（prepared/committing/committed/rolled_back）。 */
   private readonly deliveryJournal: ChatDeliveryJournalStore
+  private readonly inboundDispatches = new Set<string>()
   private readonly inboundAbort = new AbortController()
 
   constructor(
@@ -390,13 +391,22 @@ export class ChatManager {
    * pending_dispatch，Admin startup 在开放 chat ingress 前恢复重放。
    */
   private async runInboundDispatch(record: InboundDispatchJournalRecord): Promise<void> {
-    const MAX_ATTEMPTS = 5
-    while (record.status === 'pending_dispatch') {
+    if (this.inboundAbort.signal.aborted || this.inboundDispatches.has(record.request_id)) return
+    this.inboundDispatches.add(record.request_id)
+    try { await this.dispatchInbound(record) }
+    finally { this.inboundDispatches.delete(record.request_id) }
+  }
+
+  private async dispatchInbound(record: InboundDispatchJournalRecord): Promise<void> {
+    const signal = this.inboundAbort.signal
+    while (record.status === 'pending_dispatch' && !signal.aborted) {
       try {
         const agentPort = await this.resolveAgentPort()
+        if (signal.aborted) return
         if (!agentPort) throw new Error('Agent module not available')
         record.attempt += 1
         await this.writeInboundJournal(record)
+        if (signal.aborted) return
         const assertion = this.assertions.issue({
           requestId: record.request_id,
           payloadSha256: sha256CanonicalJson(record.message),
@@ -412,6 +422,7 @@ export class ChatManager {
           },
           'admin-web',
         )
+        if (signal.aborted) return // Leave recovery to the next Admin incarnation.
         record.status = 'agent_accepted'
         await this.writeInboundJournal(record)
         // 终态 journal 即删：Agent 侧 wake journal 已接管恢复责任，Admin 无需保留——
@@ -419,19 +430,18 @@ export class ChatManager {
         await fs.rm(this.inboundJournalPath(record.request_id), { force: true })
         return
       } catch (error) {
+        if (signal.aborted) return
         console.error(`[ChatManager] dispatch attempt ${record.attempt} failed for ${record.request_id}:`,
           error instanceof Error ? error.message : String(error))
-        if (record.attempt >= MAX_ATTEMPTS) {
-          // 放弃即终态：journal 与 request index 都标 expired——重启不再重投，
-          // 用户不会收到对过期问题的迟到回答。
-          this.pushToClient({ type: 'chat_error', request_id: record.request_id, error: '系统暂时不可用，请稍后重试' })
-          record.status = 'expired'
-          await this.writeInboundJournal(record)
-          await this.requestIndex.expire(record.request_id)
-          await fs.rm(this.inboundJournalPath(record.request_id), { force: true })
-          return
-        }
-        await new Promise((resolve) => setTimeout(resolve, Math.min(1000 * 2 ** record.attempt, 10_000)))
+        // Unknown acceptance never expires a committed input. Retry with bounded
+        // backoff; shutdown cancels only the wait, preserving the durable outbox.
+        await new Promise<void>(resolve => {
+          const finish = () => { clearTimeout(timer); signal.removeEventListener('abort', finish); resolve() }
+          const timer = setTimeout(finish, Math.min(1000 * 2 ** Math.min(record.attempt, 4), 10_000))
+          timer.unref()
+          signal.addEventListener('abort', finish, { once: true })
+          if (signal.aborted) finish()
+        })
       }
     }
   }

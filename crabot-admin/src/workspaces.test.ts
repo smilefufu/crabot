@@ -170,3 +170,33 @@ it('maintenance pauses only scan access, drains owned handles, keeps management 
   await service.close()
   expect(() => service.resumeScanning()).toThrow()
 })
+
+
+it('preview cancellation and concurrent catalog changes never authorize or start migration', async () => {
+  const f = await fixture(), target = path.join(path.dirname(f.root), 'preview-cancel-' + randomUUID())
+  const controller = new AbortController(); controller.abort()
+  await expect(f.service.previewRelocation({ target }, controller.signal)).rejects.toMatchObject({ code: 'WORKSPACE_SCAN_CANCELLED' })
+  let changed = false
+  ;(f.service as any).execution = async () => {
+    if (!changed) { changed = true; await f.service.create({ workspace_id: randomUUID(), name: 'concurrent' }) }
+    return { ready: false, items: {} }
+  }
+  await expect(f.service.previewRelocation({ target })).rejects.toMatchObject({ code: 'WORKSPACE_REVISION_CONFLICT' })
+  expect(changed).toBe(true)
+  await expect(fs.stat(target)).rejects.toMatchObject({ code: 'ENOENT' })
+  await expect(fs.stat(path.join(f.root, 'workspace-control/relocation-active'))).rejects.toMatchObject({ code: 'ENOENT' })
+})
+
+it('previews a canonical return to the host default but still rejects other private data without changing the catalog', async () => {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'workspace-return-preview-')))
+  cleanup.push(() => fs.rm(root, { recursive: true, force: true }))
+  const data = require('../../scripts/lib/desktop-management.cjs').ensurePrivateDataRoot(path.join(root, 'data')), source = path.join(root, 'external')
+  const catalog = new (require('crabot-shared/dist/workspace-catalog.js').WorkspaceCatalog)({ dataRoot: data, storageRoot: source, files: require('../../scripts/lib/process-identity.cjs') })
+  await catalog.initialize()
+  const service = new WorkspaceService({ dataRoot: data }); cleanup.push(() => service.close()); await service.initialize()
+  const before = await catalog.snapshot(), target = path.join(data, 'workspaces')
+  expect(await service.previewRelocation({ target })).toMatchObject({ source, target, mode: 'rename', revision: before.revision })
+  await expect(service.previewRelocation({ target: path.join(data, 'agent') })).rejects.toMatchObject({ code: 'WORKSPACE_INVALID_REQUEST' })
+  expect(await catalog.snapshot()).toEqual(before)
+  await expect(fs.stat(target)).rejects.toMatchObject({ code: 'ENOENT' })
+})

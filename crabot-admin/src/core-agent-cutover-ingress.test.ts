@@ -12,8 +12,9 @@ const dataDirs: string[] = []
 
 async function makeAdmin(): Promise<{ admin: AdminModule; port: number; dataDir: string; token: string }> {
   const port = nextPort++
-  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-admin-cutover-ingress-'))
-  dataDirs.push(dataDir)
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-admin-cutover-ingress-'))
+  dataDirs.push(dataRoot)
+  const dataDir = path.join(dataRoot, 'admin')
   const credentials = await newCredentialsFromPassword('test_password_123', { is_temp: false, changed_via: 'start' })
   await writeCredentials(dataDir, credentials)
   const previousMode = process.env.CRABOT_ADMIN_STARTUP_MODE

@@ -8,7 +8,7 @@ import fs from 'fs/promises'
 import fsSync from 'fs'
 import path from 'path'
 import yaml from 'js-yaml'
-import { generateTimestamp, type RpcClient, validateInstanceId, voiceSetupStatus, type VoiceSetupMetadata } from 'crabot-shared'
+import { generateTimestamp, RpcCallError, type RpcClient, validateInstanceId, voiceSetupStatus, type VoiceSetupMetadata } from 'crabot-shared'
 import type {
   ChannelImplementation,
   ChannelInstance,
@@ -372,11 +372,13 @@ export class ChannelManager {
     }
 
     if (instance.module_registered) {
+      await this.rpcClient.stopModule(id, 'admin')
+      // stopModule 只表示已受理；注销失败时必须保留实例/配置，供停止完成后重试。
       try {
-        await this.rpcClient.stopModule(id, 'admin')
         await this.rpcClient.unregisterModuleDefinition(id, 'admin')
       } catch (error) {
-        console.error(`[ChannelManager] Failed to unregister module:`, error)
+        // MM 已明确确认定义不存在时，可以清理遗留实例；连接/权限等错误不能吞掉。
+        if (!(error instanceof RpcCallError && error.code === 'NOT_FOUND')) throw error
       }
     }
 
@@ -465,7 +467,7 @@ export class ChannelManager {
    * 此方法在 Admin onStart() 中调用，确保已有实例重新注册。
    * 对 auto_start: true 的实例额外调用 startModule。
    */
-  async reRegisterInstances(): Promise<void> {
+  async registerBuiltinInstanceDefinitions(): Promise<ChannelInstance[]> {
     // 收集所有 builtin 实现的实例
     const builtinImplIds = new Set(
       Array.from(this.implementations.values())
@@ -476,7 +478,7 @@ export class ChannelManager {
       .filter((i) => builtinImplIds.has(i.implementation_id))
 
     if (instances.length === 0) {
-      return
+      return []
     }
 
     console.log(`[ChannelManager] Re-registering ${instances.length} builtin channel instances to MM`)
@@ -506,6 +508,12 @@ export class ChannelManager {
     }
 
     await this.saveInstances()
+    return instances
+  }
+
+  /** Ordinary startup retains its original auto_start semantics. */
+  async reRegisterInstances(): Promise<void> {
+    const instances = await this.registerBuiltinInstanceDefinitions()
 
     // 自动启动 auto_start 实例
     const autoStartInstances = instances

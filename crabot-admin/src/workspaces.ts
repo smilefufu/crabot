@@ -1,10 +1,12 @@
 import fs from 'node:fs/promises'
+import path from 'node:path'
+import { inspectWorkspaceRelocationTarget } from 'crabot-shared/dist/workspace-relocation-target.js'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { WorkspaceCatalog, WorkspaceError } from 'crabot-shared/dist/workspace-catalog.js'
 import { scanWorkspaceUsage, scanWorkspaceSetUsage } from 'crabot-shared/dist/workspace-usage.js'
 import type { WorkspaceCreateRequest, WorkspaceExecution, WorkspaceExecutionInventory, WorkspaceRecord, WorkspaceScanResult, WorkspaceSummary,
-  WorkspaceUpdateRequest, WorkspaceUsage } from 'crabot-shared'
-import { WorkspaceCreateRequestSchema, WorkspaceIdSchema, WorkspaceUpdateRequestSchema, z } from 'crabot-client'
+  WorkspaceRelocationPreviewRequest, WorkspaceRelocationPreviewResult, WorkspaceUpdateRequest, WorkspaceUsage } from 'crabot-shared'
+import { WorkspaceRelocationPreviewRequestSchema, WorkspaceCreateRequestSchema, WorkspaceIdSchema, WorkspaceUpdateRequestSchema, z } from 'crabot-client'
 
 const pending = (): WorkspaceUsage => ({ status: 'pending', file_count: 0, skipped_entries: 0 })
 type Scan = typeof scanWorkspaceUsage
@@ -16,6 +18,8 @@ interface Observation { root: string; usage: WorkspaceUsage }
 /** Human management projection; never invokes an Agent, shell or task runner to scan. */
 export class WorkspaceService {
   private readonly catalog: WorkspaceCatalog
+  private readonly dataRoot: string
+  private readonly fixedStorageRoot: boolean
   private readonly scanSet: typeof scanWorkspaceSetUsage
   private readonly scan: Scan
   private readonly execution?: () => Promise<WorkspaceExecutionInventory>
@@ -27,6 +31,8 @@ export class WorkspaceService {
 
   constructor(options: { dataRoot: string; storageRoot?: string; scan?: Scan; scanSet?: typeof scanWorkspaceSetUsage;
     execution?: () => Promise<WorkspaceExecutionInventory> }) {
+    this.dataRoot = path.resolve(options.dataRoot)
+    this.fixedStorageRoot = options.storageRoot !== undefined
     this.catalog = new WorkspaceCatalog({ ...options, files: require('../../scripts/lib/process-identity.cjs') })
     this.scan = options.scan ?? scanWorkspaceUsage
     this.scanSet = options.scanSet ?? scanWorkspaceSetUsage
@@ -39,6 +45,30 @@ export class WorkspaceService {
       throw new WorkspaceError('WORKSPACE_UNAVAILABLE', '工作区登记尚未就绪，请查看诊断；未创建替代工作区。')
     }
     return snapshot
+  }
+  async previewRelocation(input: WorkspaceRelocationPreviewRequest, signal?: AbortSignal): Promise<WorkspaceRelocationPreviewResult> {
+    this.checkScanning()
+    const snapshot = await this.snapshot()
+    const policy = require('../../scripts/lib/workspace-target-policy.cjs').workspaceRelocationTargetPolicy(this.dataRoot)
+    const preview = await inspectWorkspaceRelocationTarget(snapshot.storage_root, input.target,
+      { ...policy, signal, inspectTargetAccess: require('../../scripts/lib/process-identity.cjs').inspectDirectoryWriteAccess })
+    if (preview.mode !== 'unchanged' && this.fixedStorageRoot) {
+      throw new WorkspaceError('WORKSPACE_DIRECTORY_CONFLICT', '当前部署通过 WORKER_WORKSPACES_DIR 固定了工作区位置；未停止任务或修改设置。')
+    }
+    const withinSource = (root: string) => {
+      const relative = path.relative(snapshot.storage_root, root)
+      return relative === '' || relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative)
+    }
+    const execution = await this.executionSnapshot(), current = await this.snapshot()
+    if (current.revision !== snapshot.revision || current.storage_root !== snapshot.storage_root) {
+      throw new WorkspaceError('WORKSPACE_REVISION_CONFLICT', '工作区登记在预检期间变化，请重新预检；未停止任务或搬动文件。')
+    }
+    this.checkScanning()
+    if (signal?.aborted) throw new WorkspaceError('WORKSPACE_SCAN_CANCELLED', '工作区预检已取消，未开始迁移。')
+    return { revision: snapshot.revision, source: preview.source, target: preview.target, mode: preview.mode,
+      workspaces: snapshot.workspaces.filter(record => withinSource(record.root)), retained_workspaces: snapshot.workspaces.filter(record => !withinSource(record.root)),
+      execution, issues: preview.mode === 'unchanged' ? [] : preview.inspection.issues,
+      ...(preview.mode === 'unchanged' ? {} : { usage: preview.usage, available_bytes: String(preview.available_bytes) }) }
   }
   create(input: WorkspaceCreateRequest) { return this.catalog.createProject(input) }
   update(id: string, input: WorkspaceUpdateRequest) { return this.catalog.update(id, input) }
@@ -157,6 +187,18 @@ export class WorkspaceService {
         if (req.method === 'GET') send(200, await this.list())
         else if (req.method === 'POST') send(200, await this.create(WorkspaceCreateRequestSchema.parse(await readBody())))
         else send(405, { code: 'WORKSPACE_METHOD_NOT_ALLOWED', message: '工作区不支持此操作。' })
+        return true
+      }
+      if (pathname === '/api/workspaces/relocation/preview') {
+        if (req.method !== 'POST') { send(405, { code: 'WORKSPACE_METHOD_NOT_ALLOWED', message: '工作区预检需要提交目标位置。' }); return true }
+        const input = WorkspaceRelocationPreviewRequestSchema.parse(await readBody()), controller = new AbortController()
+        const cancel = () => controller.abort()
+        res.once('close', cancel)
+        try {
+          if (res.destroyed) controller.abort()
+          const preview = await this.previewRelocation(input, controller.signal)
+          if (!res.destroyed) send(200, preview)
+        } finally { res.removeListener('close', cancel) }
         return true
       }
       if (pathname === '/api/workspaces/usage' || pathname === '/api/workspaces/usage/refresh') {

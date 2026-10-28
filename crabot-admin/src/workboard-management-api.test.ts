@@ -47,10 +47,12 @@ const MUTATIONS = [
 describe('Manager workboard Admin API', () => {
   let admin: AdminModule
   let dataDir: string
+  let dataRoot: string
   let token: string
 
   beforeAll(async () => {
-    dataDir = await mkdtemp(join(tmpdir(), 'workboard-management-api-'))
+    dataRoot = await mkdtemp(join(tmpdir(), 'workboard-management-api-'))
+    dataDir = join(dataRoot, 'admin')
     process.env.TEST_JWT_SECRET_WORKBOARD = 'test_jwt_secret_at_least_32_chars'
     await writeCredentials(dataDir, await newCredentialsFromPassword('test_password_123', { is_temp: false, changed_via: 'start' }))
     admin = new AdminModule(
@@ -68,7 +70,7 @@ describe('Manager workboard Admin API', () => {
 
   afterAll(async () => {
     await admin.stop()
-    await rm(dataDir, { recursive: true, force: true })
+    await rm(dataRoot, { recursive: true, force: true })
     delete process.env.TEST_JWT_SECRET_WORKBOARD
   })
 

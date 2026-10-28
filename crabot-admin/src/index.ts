@@ -1,14 +1,21 @@
-import type { GetAgentModelConfigResult } from './types.js'
-import { resolveManagedMcpConfig } from './managed-mcp-runtime.js'
-import { WorkspaceService } from './workspaces.js'
-import { WorkspaceExecutionInventorySchema, WorkspaceIdSchema } from 'crabot-client'
-import { parseChatMultipartMetadata } from 'crabot-client'
-import { correlateHttpRequest } from './http-diagnostics.js'
-import { DesktopSessions, type DesktopClaims } from './desktop-session.js'
+import { verifyWorkspaceRecoveryAdmin } from './workspace-recovery-auth.js'
+import { assertWorkspaceExecutionAllowed, workspaceMaintenancePending } from 'crabot-shared'
+import { createWorkspaceFinalizationWeb } from './workspace-finalization-web.js'
+import { createWorkspaceRecoveryFinalizationWeb } from './workspace-recovery-finalization-web.js'
+import { createWorkspaceInterruptedFinalizationWeb } from './workspace-interrupted-finalization-web.js'
 import { parseFriendPermissionRecords, serializeFriendPermissionRecords } from './friend-permission-store.js'
+import { WorkspaceRelocationRecoveryAcceptedSchema, WorkspaceRelocationRecoveryPreviewResultSchema, WorkspaceExecutionInventorySchema, WorkspaceIdSchema, WorkspaceRelocationStatusResultSchema, WorkspaceRelocationStartResultSchema } from 'crabot-client'
+import { WorkspaceService } from './workspaces.js'
+import { WorkspaceWebAdmissions, requiresWorkspaceWebAdmission } from './workspace-web-admissions.js'
+import { parseWorkspaceRelocationRecoveryStartRequest, parseWorkspaceRelocationStartRequest, parseWorkspaceRelocationJobQuery } from 'crabot-shared'
+import type { WorkspaceRelocationJobQuery, VerifyWorkspaceRelocationJobQueryResult, VerifyWorkspaceRelocationStartParams, VerifyWorkspaceRelocationStartResult, VerifyWorkspaceRelocationRecoveryRequestParams, VerifyWorkspaceRelocationRecoveryRequestResult, VerifyWorkspaceRelocationRequestParams, VerifyWorkspaceRelocationRequestResult, QuiesceWorkspaceRelocationWebParams, QuiesceWorkspaceRelocationWebResult } from 'crabot-shared'
+import { resolveManagedMcpConfig } from './managed-mcp-runtime.js'
 import type { ConversationRequestSource } from 'crabot-shared'
 import type { VerifyMemoryAccessResult, VerifyMemoryRequestAccessResult } from 'crabot-shared'
 import { adminWebTransport } from './admin-web-transport.js'
+import { parseChatMultipartMetadata } from 'crabot-client'
+import { correlateHttpRequest } from './http-diagnostics.js'
+import { DesktopSessions, type DesktopClaims } from './desktop-session.js'
 import { VoiceGateway } from './voice-gateway.js'
 import { loadVoiceTls } from './voice-tls.js'
 import { VoiceAdmin } from './voice-admin.js'
@@ -41,7 +48,7 @@ import { runCrabotImport, ImportPreflightRejected, type ImportDeps } from './bac
 import type { ImportStatus, OnConflict, ImportItemResult } from './backup/import/import-types.js'
 import { shouldDisableOnImport } from './backup/import/schedule-arm.js'
 import { VersionService } from './version/version-service.js'
-import { startUpgrade, canUpgrade, isUpgradeInProgress } from './version/upgrade-runner.js'
+import { startUpgrade, canUpgrade, isUpgradeInProgress, requiresDesktopUpdater, DESKTOP_UPGRADE_REASON } from './version/upgrade-runner.js'
 import { readArchiveTextFile, listArchiveEntries } from './openclaw-import/archive-reader.js'
 import { readJsonArrayFromArchive } from './backup/import/read-archive-category.js'
 import { extractArchiveSubtree } from './openclaw-import/extract-subtree.js'
@@ -146,6 +153,7 @@ import {
   type UpdateModelProviderParams,
   type ImportFromVendorParams,
   type GlobalModelConfig,
+  type GetAgentModelConfigResult,
   type LLMConnectionInfo,
   type AgentImplementation,
   type AgentInstance,
@@ -298,12 +306,12 @@ import { getAdminLogsDir, getDataRootDir } from './core/data-paths.js'
 // ============================================================================
 
 interface JwtPayload {
-  desktop?: DesktopClaims
   sub: string
   iat: number
   exp: number
   e?: number          // token_epoch；internal-token 无此字段
   agent_cli?: AgentCliCredentialContext
+  desktop?: DesktopClaims
 }
 
 interface AgentCliWebAuth {
@@ -333,6 +341,7 @@ function classifyAgentCliRoute(method: string | undefined, pathname: string): Ag
     ?? allowed('friend', ['GET', 'POST', 'PATCH', 'DELETE'], /^\/api\/friends(?:\/[^/]+)?$/)
     ?? allowed('permission', ['GET', 'POST', 'PATCH', 'DELETE'], /^\/api\/permission-templates(?:\/[^/]+)?$/)
     ?? allowed('config', ['GET', 'PATCH'], /^\/api\/(?:model-config\/global|proxy-config)$/)
+    ?? allowed('config', ['GET'], /^\/api\/model-config\/agents\/crabot-agent$/)
 }
 
 function hasCliAccess(actual: 'none' | 'read' | 'write', required: 'read' | 'write'): boolean {
@@ -388,11 +397,14 @@ function verifyJwt(token: string, secret: string): JwtPayload | null {
     .replace(/\+/g, '-')
     .replace(/\//g, '_')
 
-  if (signatureB64 !== expectedSignature) return null
+  if (!/^[A-Za-z0-9_-]{43}$/.test(signatureB64) || signatureB64.length !== expectedSignature.length
+    || !crypto.timingSafeEqual(Buffer.from(signatureB64), Buffer.from(expectedSignature))) return null
 
   try {
+    const header = JSON.parse(Buffer.from(headerB64, 'base64').toString())
     const payload = JSON.parse(Buffer.from(payloadB64, 'base64').toString())
-    if (payload.exp <= Math.floor(Date.now() / 1000)) return null
+    if (header.alg !== 'HS256' || typeof payload.sub !== 'string' || !Number.isSafeInteger(payload.iat)
+      || !Number.isSafeInteger(payload.exp) || payload.exp <= Math.floor(Date.now() / 1000)) return null
     return payload
   } catch {
     return null
@@ -675,6 +687,10 @@ export class AdminModule extends ModuleBase {
   private readonly managementOnly: boolean
   private readonly cutoverBearer?: string
   private cutoverActivated = false
+  private workspaceStartupSuspended = false
+  private workspaceStartupDefinitions?: Promise<void>
+  private workspaceStartupActivation?: Promise<void>
+  private workspaceStartupSkillsPending = false
   private configInvalidationPublicationEnabled = false
   private configDrainRetryTimer?: ReturnType<typeof setTimeout>
   private configDrainRetryDelayMs = 1_000
@@ -710,6 +726,11 @@ export class AdminModule extends ModuleBase {
 
   // Channel 管理器
   private channelManager: ChannelManager
+  private workspaceService: WorkspaceService
+  private workspaceFinalizationWeb?: ReturnType<typeof createWorkspaceFinalizationWeb>
+  private workspaceRecoveryFinalizationWeb?: ReturnType<typeof createWorkspaceRecoveryFinalizationWeb>
+  private workspaceInterruptedFinalizationWeb?: ReturnType<typeof createWorkspaceInterruptedFinalizationWeb>
+  private workspaceWebAdmissions?: WorkspaceWebAdmissions
   private voiceAdmin: VoiceAdmin
 
   // 模块安装器
@@ -762,7 +783,6 @@ export class AdminModule extends ModuleBase {
   private readonly templatesFilePath: string
   private readonly pendingMessagesFilePath: string
   private readonly sessionConfigsFilePath: string
-  private workspaceService: WorkspaceService
   private readonly friendPermissionConfigsFilePath: string
   private readonly schedulesFilePath: string
   private readonly tasksFilePath: string
@@ -875,8 +895,8 @@ export class AdminModule extends ModuleBase {
       verifyRuntime: async (id, bearer) => { await this.rpcClient.callModuleManagerSensitive('verify_voice_runtime', { expected_module_id: id }, this.config.moduleId, { authorizationBearer: bearer }) },
       verifyCore: async bearer => { await this.rpcClient.callModuleManagerSensitive('verify_core_agent_runtime', { expected_module_id: 'crabot-agent' }, this.config.moduleId, { authorizationBearer: bearer }) },
       verifyHuman: async bearer => {
-        const payload = bearer ? await this.verifyAuthenticatedToken(bearer) : null
-        if (!payload) throw new RpcError('UNAUTHORIZED', 'Human Admin credential required')
+        const payload = bearer ? await this.verifyHumanToken(bearer) : null
+        if (!payload) throw new RpcError(this.isNonHumanToken(bearer) ? 'FORBIDDEN' : 'UNAUTHORIZED', 'Human Admin credential required')
         if (payload.sub !== 'admin' || payload.agent_cli) throw new RpcError('FORBIDDEN', 'Human Admin credential required')
       },
       resolveFriend: (channelId, platformUserId) => this.resolveFriendByChannelIdentity(channelId, platformUserId) ?? undefined,
@@ -1010,6 +1030,18 @@ export class AdminModule extends ModuleBase {
     this.registerMethod('get_task_stats', this.handleGetTaskStats.bind(this))
     this.registerMethod('delete_task', this.handleDeleteTask.bind(this))
 
+    this.registerMethod('verify_workspace_relocation_recovery_request', this.handleVerifyWorkspaceRelocationRecoveryRequest.bind(this))
+    this.registerMethod('verify_workspace_relocation_start', this.handleVerifyWorkspaceRelocationStart.bind(this))
+    this.registerMethod('verify_workspace_relocation_job_query', this.handleVerifyWorkspaceRelocationJobQuery.bind(this))
+    this.registerMethod('verify_workspace_relocation_request', this.handleVerifyWorkspaceRelocationRequest.bind(this))
+    this.registerMethod('quiesce_workspace_relocation_web', this.handleQuiesceWorkspaceRelocationWeb.bind(this))
+    this.registerMethod('prepare_workspace_relocation_completion', (params, context) => this.workspaceFinalizationAccess().prepare(params, context?.authorizationBearer))
+    this.registerMethod('prepare_workspace_relocation_recovery_completion', (params, context) => this.workspaceRecoveryFinalizationAccess().prepare(params, context?.authorizationBearer))
+    this.registerMethod('resume_workspace_relocation_recovery_web', (params, context) => this.workspaceRecoveryFinalizationAccess().resume(params, context?.authorizationBearer))
+    this.registerMethod('prepare_workspace_interrupted_recovery_web', (params, context) => this.workspaceInterruptedFinalizationAccess().prepare(params, context?.authorizationBearer))
+    this.registerMethod('resume_workspace_interrupted_recovery_web', (params, context) => this.workspaceInterruptedFinalizationAccess().resume(params, context?.authorizationBearer))
+    this.registerMethod('resume_workspace_relocation_web', (params, context) => this.workspaceFinalizationAccess().resume(params, context?.authorizationBearer))
+
     // Schedule 管理
     this.registerMethod('create_schedule', this.handleCreateSchedule.bind(this))
     this.registerMethod('get_schedule', this.handleGetSchedule.bind(this))
@@ -1141,8 +1173,12 @@ export class AdminModule extends ModuleBase {
 
     // 确保数据目录存在
     await fs.mkdir(this.adminConfig.data_dir, { recursive: true })
-    try { await this.workspaceService.initialize() }
-    catch { console.warn('[Admin] Workspace catalog unavailable; management remains online and original records are retained') }
+    this.workspaceStartupSuspended = workspaceMaintenancePending(path.resolve(this.adminConfig.data_dir, '..'))
+    if (this.workspaceStartupSuspended) await this.workspaceService.pauseScanning()
+    else {
+      try { await this.workspaceService.initialize() }
+      catch { console.warn('[Admin] Workspace catalog unavailable; management remains online and original records are retained') }
+    }
     await this.voiceAdmin.load()
     this.voiceAdmin.start()
     // Source managers must load before coordinator recovery so its semantic HMAC observes
@@ -1244,7 +1280,8 @@ export class AdminModule extends ModuleBase {
     console.log(`[Admin] Seeded ${getBuiltinSkills().length} builtin skills`)
 
     // 扫描工作区 skill（来自 WORKSPACE_DIR/.agents/skills/）
-    const scannedCount = await this.skillManager.scanWorkspaceSkills(this.workspaceDir)
+    this.workspaceStartupSkillsPending = this.workspaceStartupSuspended
+    const scannedCount = this.workspaceStartupSkillsPending ? 0 : await this.skillManager.scanWorkspaceSkills(this.workspaceDir)
     if (scannedCount > 0) {
       console.log(`[SkillManager] 扫描发现 ${scannedCount} 个新 skill（来自 ${this.workspaceDir}/.agents/skills/）`)
     }
@@ -1611,6 +1648,7 @@ export class AdminModule extends ModuleBase {
     const pathname = url.pathname
     const workspaceRequest = pathname === '/api/workspaces' || pathname.startsWith('/api/workspaces/')
     if (pathname.startsWith('/api/')) correlateHttpRequest(req, res)
+    if (pathname === '/api/workspaces/relocation/recover' || /^\/api\/workspaces\/relocation\/jobs\/[^/]+\/recovery$/.test(pathname)) res.setHeader('Cache-Control', 'no-store')
     let agentCliAuth: AgentCliWebAuth | undefined
 
     if (!this.cutoverActivated && (pathname === '/api/chat/messages' || pathname === '/api/chat/tasks' || pathname.startsWith('/api/chat/messages/') || pathname.startsWith('/api/chat/tasks/'))) {
@@ -1647,15 +1685,11 @@ export class AdminModule extends ModuleBase {
         }
       } else {
         const payload = await this.verifyAuthenticatedToken(token)
-        if ((pathname.startsWith('/api/chat/') || workspaceRequest) && payload && (payload.sub !== 'admin' || payload.agent_cli)) {
-          sendJson(res, 403, { error: 'Human Admin credential required' })
+        if (!payload) {
+        if (basicPayload?.sub === 'admin' && basicPayload.desktop !== undefined) {
+          sendJson(res, 401, { error: 'DESKTOP_UNAUTHORIZED', message: 'Desktop session is unavailable; reconnect locally' })
           return
         }
-        if (!payload) {
-          if (verifyJwt(token, this.jwtSecret)?.desktop !== undefined) {
-            sendJson(res, 401, { error: 'DESKTOP_UNAUTHORIZED', message: 'Desktop session is unavailable; reconnect locally' })
-            return
-          }
         // 区分 token 不合法 vs epoch 失效
         const basicValid = basicPayload
         if (basicValid && basicValid.sub !== 'internal') {
@@ -1670,11 +1704,96 @@ export class AdminModule extends ModuleBase {
         }
         return
         }
+        if ((pathname.startsWith('/api/chat/') || workspaceRequest) && (payload.sub !== 'admin' || payload.agent_cli)) {
+          sendJson(res, 403, { error: 'Human Admin credential required' })
+          return
+        }
       }
     }
 
+    const route = () => this.routeWebRequest(req, res, url, agentCliAuth)
+    if (requiresWorkspaceWebAdmission(req.method, pathname)) return this.withWorkspaceWebAccess(res, route)
+    return route()
+  }
+
+  private workspaceFinalizationAccess(): ReturnType<typeof createWorkspaceFinalizationWeb> {
+    return this.workspaceFinalizationWeb ??= createWorkspaceFinalizationWeb({ dataDir: path.resolve(this.adminConfig.data_dir, '..'),
+      moduleManagerPort: this.rpcClient.moduleManagerTargetPort,
+      runtimeIdentity: () => ({ instance_id: process.env.CRABOT_INSTANCE_ID, module_id: this.config.moduleId, runtime_id: process.env.CRABOT_MODULE_RUNTIME_ID }),
+      quiesce: () => this.quiesceWorkspaceWebAccess(), resume: () => {
+        assertWorkspaceExecutionAllowed(path.resolve(this.adminConfig.data_dir, '..'))
+        this.workspaceService.resumeScanning(); this.workspaceWebAccess().reopen()
+      } })
+  }
+
+  private workspaceRecoveryFinalizationAccess(): ReturnType<typeof createWorkspaceRecoveryFinalizationWeb> {
+    return this.workspaceRecoveryFinalizationWeb ??= createWorkspaceRecoveryFinalizationWeb({ dataDir: path.resolve(this.adminConfig.data_dir, '..'),
+      moduleManagerPort: this.rpcClient.moduleManagerTargetPort, modulePort: this.config.port,
+      runtimeIdentity: () => ({ instance_id: process.env.CRABOT_INSTANCE_ID, module_id: this.config.moduleId, runtime_id: process.env.CRABOT_MODULE_RUNTIME_ID }),
+      quiesce: () => this.quiesceWorkspaceWebAccess(), reclose: () => this.recloseWorkspaceWebAccessAfterResumeFailure(), resume: async verify => {
+        assertWorkspaceExecutionAllowed(path.resolve(this.adminConfig.data_dir, '..'))
+        await this.resumeWorkspaceStartup(verify)
+        await verify()
+        this.workspaceService.resumeScanning(); this.workspaceWebAccess().reopen()
+      } })
+  }
+
+  private workspaceInterruptedFinalizationAccess(): ReturnType<typeof createWorkspaceInterruptedFinalizationWeb> {
+    return this.workspaceInterruptedFinalizationWeb ??= createWorkspaceInterruptedFinalizationWeb({ dataDir: path.resolve(this.adminConfig.data_dir, '..'),
+      moduleManagerPort: this.rpcClient.moduleManagerTargetPort, modulePort: this.config.port,
+      runtimeIdentity: () => ({ instance_id: process.env.CRABOT_INSTANCE_ID, module_id: this.config.moduleId, runtime_id: process.env.CRABOT_MODULE_RUNTIME_ID }),
+      quiesce: async released => {
+        if (!released) return this.quiesceWorkspaceWebAccess()
+        await Promise.all([this.workspaceWebAccess().closeAfterRelease(), this.workspaceService.pauseScanning()])
+      }, reclose: () => this.recloseWorkspaceWebAccessAfterResumeFailure(), resume: async verify => {
+        await this.resumeWorkspaceStartup(verify)
+        await verify()
+        this.workspaceService.resumeScanning(); this.workspaceWebAccess().reopen()
+      } })
+  }
+
+  private workspaceWebAccess(): WorkspaceWebAdmissions {
+    return this.workspaceWebAdmissions ??= new WorkspaceWebAdmissions(path.resolve(this.adminConfig.data_dir, '..'))
+  }
+
+  private async withWorkspaceWebAccess(res: ServerResponse, action: () => Promise<void>): Promise<void> {
+    try { await this.workspaceWebAccess().run(action) }
+    catch (error) {
+      if ((error as { code?: string }).code !== 'WORKSPACE_MAINTENANCE') throw error
+      sendJson(res, 503, { code: 'WORKSPACE_MAINTENANCE', message: (error as Error).message })
+    }
+  }
+
+  /** Internal coordination only; callers still verify the fixed job and complete execution exit. */
+  private async quiesceWorkspaceWebAccess(): Promise<void> {
+    await Promise.all([this.workspaceWebAccess().closeAndDrain(), this.workspaceService.pauseScanning()])
+  }
+
+  /** Same prepared recovery only: its committed release must not prevent closing admission. */
+  private async recloseWorkspaceWebAccessAfterResumeFailure(): Promise<void> {
+    await Promise.all([this.workspaceWebAccess().closeAfterFailedResume(), this.workspaceService.pauseScanning()])
+  }
+
+  private async routeWebRequest(req: IncomingMessage, res: ServerResponse, url: URL, agentCliAuth?: AgentCliWebAuth): Promise<void> {
+    const pathname = url.pathname
+    const workspaceRequest = pathname === '/api/workspaces' || pathname.startsWith('/api/workspaces/')
     // 路由处理
     try {
+      if (pathname === '/api/workspaces/maintenance') {
+        res.setHeader('Cache-Control', 'no-store')
+        if (req.method === 'GET') sendJson(res, 200, { maintenance: workspaceMaintenancePending(path.resolve(this.adminConfig.data_dir, '..')) || this.workspaceWebAccess().isClosed() })
+        else sendJson(res, 405, { code: 'WORKSPACE_METHOD_NOT_ALLOWED', message: '工作区维护状态仅支持读取。' })
+        return
+      }
+      const workspaceRecovery = pathname.match(/^\/api\/workspaces\/relocation\/jobs\/([^/]+)\/recovery$/)
+      if (pathname === '/api/workspaces/relocation/recover' || workspaceRecovery) {
+        await this.handleWorkspaceRelocationRecoveryHttp(req, res, url, workspaceRecovery?.[1]); return
+      }
+      const workspaceJob = pathname.match(/^\/api\/workspaces\/relocation\/jobs\/([^/]+)$/)
+      if (pathname === '/api/workspaces/relocation/current' || workspaceJob) {
+        await this.handleWorkspaceRelocationStatusHttp(req, res, url, workspaceJob?.[1]); return
+      }
+      if (pathname === '/api/workspaces/relocation/start') { await this.handleWorkspaceRelocationStartHttp(req, res); return }
       if (workspaceRequest && await this.workspaceService.handleWeb(req, res, pathname, () => this.readJsonBody(req, 65536))) return
       if (await this.voiceAdmin.handleWeb(req, res, pathname, () => this.readJsonBody(req))) return
       if (pathname === '/api/auth/login' && req.method === 'POST') {
@@ -3068,6 +3187,90 @@ export class AdminModule extends ModuleBase {
     }
   }
 
+  private async handleWorkspaceRelocationStatusHttp(req: IncomingMessage, res: ServerResponse, url: URL, intentId?: string): Promise<void> {
+    res.setHeader('Cache-Control', 'no-store')
+    if (req.method !== 'GET') { sendJson(res, 405, { code: 'WORKSPACE_METHOD_NOT_ALLOWED', message: '作业状态仅支持读取。' }); return }
+    try {
+      let query: WorkspaceRelocationJobQuery
+      try {
+        if (url.search) throw new Error('Unexpected query fields')
+        query = parseWorkspaceRelocationJobQuery(intentId === undefined ? {} : { intent_id: decodeURIComponent(intentId) })
+      } catch { sendJson(res, 400, { code: 'INVALID_PARAMS', message: '作业编号无效。' }); return }
+      const result = WorkspaceRelocationStatusResultSchema.safeParse(await this.rpcClient.callModuleManagerSensitive(
+        'get_workspace_relocation_status', query, this.config.moduleId, { authorizationBearer: req.headers.authorization!.slice(7), timeoutMs: 30_000 }))
+      if (!result.success || query.intent_id && result.data.job && result.data.job.intent_id !== query.intent_id) {
+        throw new RpcError('SERVICE_UNAVAILABLE', 'Workspace job observation unavailable')
+      }
+      sendJson(res, 200, result.data)
+    } catch (error) {
+      const code = (error as { code?: string }).code
+      let status = 503
+      if (code === 'UNAUTHORIZED') status = 401
+      else if (code === 'FORBIDDEN') status = 403
+      else if (code === 'INVALID_PARAMS') status = 400
+      sendJson(res, status, { code: status === 503 ? 'SERVICE_UNAVAILABLE' : code, message: '当前作业状态暂时无法核实，请稍后查看；未重发任何作业。' })
+    }
+  }
+
+  /** Recovery control remains available while the original file-admission fence is closed. */
+  private async handleWorkspaceRelocationRecoveryHttp(req: IncomingMessage, res: ServerResponse, url: URL, intentId?: string): Promise<void> {
+    res.setHeader('Cache-Control', 'no-store')
+    const preview = intentId !== undefined
+    if (req.method !== (preview ? 'GET' : 'POST')) { sendJson(res, 405, { code: 'WORKSPACE_METHOD_NOT_ALLOWED', message: '恢复入口方法无效。' }); return }
+    try {
+      if (url.search) throw new RpcError('INVALID_PARAMS', 'Unexpected query fields')
+      const input = preview ? parseWorkspaceRelocationJobQuery({ intent_id: intentId })
+        : parseWorkspaceRelocationRecoveryStartRequest(await this.readJsonBody(req, 65536).catch(() => { throw new RpcError('INVALID_PARAMS', 'Invalid JSON') }))
+      const raw = await this.rpcClient.callModuleManagerSensitive(preview ? 'preview_workspace_relocation_recovery' : 'start_workspace_relocation_recovery', input,
+        this.config.moduleId, { authorizationBearer: req.headers.authorization!.slice(7), timeoutMs: preview ? 30_000 : 120_000 })
+      if (preview) {
+        const result = WorkspaceRelocationRecoveryPreviewResultSchema.safeParse(raw)
+        if (!result.success || result.data.recovery && result.data.recovery.intent_id !== input.intent_id) throw new RpcError('SERVICE_UNAVAILABLE', 'Recovery offer unavailable')
+        sendJson(res, 200, result.data)
+      } else {
+        const result = WorkspaceRelocationRecoveryAcceptedSchema.safeParse(raw)
+        if (!result.success || result.data.intent_id !== input.intent_id || result.data.recovery_id !== ('recovery_id' in input ? input.recovery_id : undefined)) throw new RpcError('SERVICE_UNAVAILABLE', 'Recovery receipt unavailable')
+        sendJson(res, 202, result.data)
+      }
+    } catch (error) {
+      const code = (error as { code?: string }).code
+      const status = code === 'UNAUTHORIZED' ? 401 : code === 'FORBIDDEN' ? 403 : code === 'INVALID_PARAMS' ? 400 : 503
+      sendJson(res, status, { code: status === 503 ? 'SERVICE_UNAVAILABLE' : code,
+        message: '恢复结果尚未核实，请保留原作业编号并查询进度；未自动重发。' })
+    }
+  }
+
+  /** Management handoff: this handler must not await its own file-admission drain. */
+  private async handleWorkspaceRelocationStartHttp(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    res.setHeader('Cache-Control', 'no-store')
+    if (req.method !== 'POST') { sendJson(res, 405, { code: 'WORKSPACE_METHOD_NOT_ALLOWED', message: '迁移确认仅支持 POST。' }); return }
+    const admit = () => {
+      if (this.workspaceWebAccess().isClosed()) throw new RpcError('WORKSPACE_MAINTENANCE', '工作区维护尚未结束。')
+      assertWorkspaceExecutionAllowed(path.resolve(this.adminConfig.data_dir, '..'))
+    }
+    try {
+      admit()
+      let input: VerifyWorkspaceRelocationStartParams
+      try { input = parseWorkspaceRelocationStartRequest(await this.readJsonBody(req, 65536)) }
+      catch { sendJson(res, 400, { code: 'INVALID_PARAMS', message: '请重新预检并明确确认本次迁移。' }); return }
+      admit()
+      const result = WorkspaceRelocationStartResultSchema.safeParse(await this.rpcClient.callModuleManagerSensitive(
+        'start_workspace_relocation', input, this.config.moduleId, { authorizationBearer: req.headers.authorization!.slice(7), timeoutMs: 120_000 }))
+      if (!result.success || 'accepted' in result.data && result.data.intent_id !== input.intent_id) {
+        throw new RpcError('SERVICE_UNAVAILABLE', '迁移接纳回执无法核实。')
+      }
+      sendJson(res, 'accepted' in result.data ? 202 : 200, result.data)
+    } catch (error) {
+      const code = (error as { code?: string }).code
+      const statuses: Record<string, number> = { UNAUTHORIZED: 401, FORBIDDEN: 403, INVALID_PARAMS: 400,
+        WORKSPACE_INVALID_REQUEST: 400, WORKSPACE_DIRECTORY_CONFLICT: 409, WORKSPACE_REVISION_CONFLICT: 409,
+        WORKSPACE_RELOCATION_BLOCKED: 409, WORKSPACE_MAINTENANCE: 503 }
+      const status = code && Object.prototype.hasOwnProperty.call(statuses, code) ? statuses[code] : undefined
+      sendJson(res, status ?? 503, { code: status === undefined ? 'SERVICE_UNAVAILABLE' : code,
+        message: code === 'UNAUTHORIZED' ? '请重新登录后查询原作业。' : code === 'WORKSPACE_MAINTENANCE' ? '工作区正在维护，请查看原作业。' : '本次迁移尚未确认，请保留作业编号并查看当前状态；未自动重发。' })
+    }
+  }
+
   private async serveStaticFile(pathname: string, res: ServerResponse): Promise<void> {
     const webDir = path.join(__dirname, '../dist/web')
     let filePath = path.join(webDir, pathname)
@@ -3188,6 +3391,94 @@ export class AdminModule extends ModuleBase {
   private async verifyHumanToken(token: string): Promise<JwtPayload | null> {
     const payload = await this.verifyAuthenticatedToken(token)
     return payload?.sub === 'admin' && !payload.agent_cli ? payload : null
+  }
+
+  private async handleVerifyWorkspaceRelocationJobQuery(
+    params: WorkspaceRelocationJobQuery, context?: RpcHandlerContext,
+  ): Promise<VerifyWorkspaceRelocationJobQueryResult> {
+    const snapshot = params && typeof params === 'object' && !Array.isArray(params) ? Object.freeze({ ...params }) : params
+    const bearer = context?.authorizationBearer
+    if (!bearer || !await this.verifyHumanToken(bearer)) {
+      throw new RpcError(this.isNonHumanToken(bearer) ? 'FORBIDDEN' : 'UNAUTHORIZED', 'Human Admin credential required')
+    }
+    return { verified: true, ...parseWorkspaceRelocationJobQuery(snapshot) }
+  }
+
+  private async handleVerifyWorkspaceRelocationStart(
+    params: VerifyWorkspaceRelocationStartParams, context?: RpcHandlerContext,
+  ): Promise<VerifyWorkspaceRelocationStartResult> {
+    const snapshot = params && typeof params === 'object' && !Array.isArray(params) ? Object.freeze({ ...params }) : params
+    const bearer = context?.authorizationBearer
+    if (!bearer || !await this.verifyHumanToken(bearer)) {
+      throw new RpcError(this.isNonHumanToken(bearer) ? 'FORBIDDEN' : 'UNAUTHORIZED', 'Human Admin credential required')
+    }
+    return { verified: true, ...parseWorkspaceRelocationStartRequest(snapshot) }
+  }
+
+  private async handleVerifyWorkspaceRelocationRecoveryRequest(
+    params: VerifyWorkspaceRelocationRecoveryRequestParams, context?: RpcHandlerContext,
+  ): Promise<VerifyWorkspaceRelocationRecoveryRequestResult> {
+    const bearer = context?.authorizationBearer
+    if (!bearer || !await this.verifyHumanToken(bearer)) {
+      throw new RpcError(this.isNonHumanToken(bearer) ? 'FORBIDDEN' : 'UNAUTHORIZED', 'Human Admin credential required')
+    }
+    return verifyWorkspaceRecoveryAdmin({ dataDir: path.resolve(this.adminConfig.data_dir, '..'),
+      moduleManagerPort: this.rpcClient.moduleManagerTargetPort, modulePort: this.config.port,
+      runtimeIdentity: () => ({ instance_id: process.env.CRABOT_INSTANCE_ID, module_id: this.config.moduleId, runtime_id: process.env.CRABOT_MODULE_RUNTIME_ID }) }, params, bearer)
+  }
+
+  private async handleVerifyWorkspaceRelocationRequest(
+    params: VerifyWorkspaceRelocationRequestParams, context?: RpcHandlerContext,
+  ): Promise<VerifyWorkspaceRelocationRequestResult> {
+    return { verified: true, ...await this.requireHumanWorkspaceRelocationIntent(params, context) }
+  }
+
+  private async handleQuiesceWorkspaceRelocationWeb(
+    params: QuiesceWorkspaceRelocationWebParams, context?: RpcHandlerContext,
+  ): Promise<QuiesceWorkspaceRelocationWebResult> {
+    const proof = await this.requireHumanWorkspaceRelocationIntent(params, context)
+    try {
+      await this.quiesceWorkspaceWebAccess()
+      const { readWorkspaceRelocationIntent } = require('../../scripts/lib/workspace-relocation-intent.mjs')
+      const intent = readWorkspaceRelocationIntent(path.resolve(this.adminConfig.data_dir, '..'))
+      if (!intent || intent.id !== proof.intent_id || sha256CanonicalJson(intent) !== proof.intent_sha256) throw new Error('Original workspace intent changed')
+      return { quiesced: true, ...proof }
+    } catch { throw new RpcError('SERVICE_UNAVAILABLE', '管理面请求或文件句柄收口无法核实，已保留原维护保护。') }
+  }
+
+  /** Same human and fixed-intent assertion; actions keep their own side effects and result types. */
+  private async requireHumanWorkspaceRelocationIntent(
+    params: VerifyWorkspaceRelocationRequestParams, context?: RpcHandlerContext,
+  ): Promise<VerifyWorkspaceRelocationRequestParams> {
+    params = params && typeof params === 'object' && !Array.isArray(params) ? Object.freeze({ ...params }) : params
+    const bearer = context?.authorizationBearer
+    if (!bearer || !await this.verifyHumanToken(bearer)) {
+      throw new RpcError(this.isNonHumanToken(bearer) ? 'FORBIDDEN' : 'UNAUTHORIZED', 'Human Admin credential required')
+    }
+    if (!params || typeof params !== 'object' || Array.isArray(params) || Object.keys(params).length !== 2
+      || !Object.keys(params).every(key => key === 'intent_id' || key === 'intent_sha256')
+      || typeof params.intent_id !== 'string' || !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(params.intent_id)
+      || typeof params.intent_sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(params.intent_sha256)) {
+      throw new RpcError('INVALID_PARAMS', 'Invalid workspace relocation request')
+    }
+    let intent: { id: string } | null, fingerprint: string | undefined
+    try {
+      const { readWorkspaceRelocationIntent } = require('../../scripts/lib/workspace-relocation-intent.mjs')
+      intent = readWorkspaceRelocationIntent(path.resolve(this.adminConfig.data_dir, '..'))
+      if (intent) fingerprint = sha256CanonicalJson(intent)
+    } catch { throw new RpcError('SERVICE_UNAVAILABLE', 'Workspace relocation record is unavailable') }
+    if (!intent || !fingerprint) throw new RpcError('SERVICE_UNAVAILABLE', 'Workspace relocation record is unavailable')
+    if (intent.id !== params.intent_id || fingerprint !== params.intent_sha256) {
+      throw new RpcError('FORBIDDEN', 'Workspace relocation request does not match the fixed intent')
+    }
+    return { intent_id: intent.id, intent_sha256: fingerprint }
+  }
+
+  private isNonHumanToken(token: string | undefined): boolean {
+    // Denial classification only: this method never grants or forwards authority.
+    if (!token) return false
+    const payload = verifyJwt(token, this.jwtSecret)
+    return !!payload && (payload.sub !== 'admin' || !!payload.agent_cli)
   }
 
   private async handleLogin(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -7394,6 +7685,10 @@ export class AdminModule extends ModuleBase {
   }
 
   private async handleStartUpgradeApi(_req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (requiresDesktopUpdater(CRABOT_HOME)) {
+      sendJson(res, 409, { code: 'DESKTOP_MANAGED_INSTALLATION', error: DESKTOP_UPGRADE_REASON })
+      return
+    }
     const state = await this.versionService.check()
     const verdict = canUpgrade(state)
     if (!verdict.ok) {
@@ -7793,8 +8088,10 @@ export class AdminModule extends ModuleBase {
     this.cutoverRecoveryReason = null
     this.cutoverAttempt = this.completeCoreAgentCutoverAttempt()
       .catch((error) => {
-        this.configInvalidationPublicationEnabled = false
-        this.cutoverRecoveryReason = this.classifyCutoverRecoveryReason(error)
+        if (!this.workspaceStartupActivation) {
+          this.configInvalidationPublicationEnabled = false
+          this.cutoverRecoveryReason = this.classifyCutoverRecoveryReason(error)
+        }
         throw error
       })
       .finally(() => { this.cutoverAttempt = null })
@@ -7803,6 +8100,7 @@ export class AdminModule extends ModuleBase {
 
   private classifyCutoverRecoveryReason(error: unknown): string {
     const code = (error as { code?: unknown })?.code
+    if (code === 'WORKSPACE_MAINTENANCE') return 'workspace maintenance is waiting for authenticated recovery'
     if (code === 'MODULE_MANAGER_CUTOVER_STOP_FAILED') return 'legacy Agent process tree could not be stopped; retry after recovery'
     if (code === 'MODULE_MANAGER_CUTOVER_CONFLICT') return 'core Agent cutover inventory conflicts with durable marker'
     const message = error instanceof Error ? error.message : String(error)
@@ -7870,16 +8168,36 @@ export class AdminModule extends ModuleBase {
     if (!existing) {
       await this.cutoverStore.saveMarker({ schema_version: 1, completed: true, completed_at: new Date().toISOString(), archive_fingerprint: archive.fingerprint, archive_record_count: archive.record_count, mm_result: result })
     }
+    // A delayed ordinary retry only observes the current recovery's activation.
+    if (this.workspaceStartupActivation) return this.workspaceStartupActivation
     // The durable marker commits topology cutover. Readiness activation is a separate,
     // retryable phase: the MM bearer has already been consumed and must never be replayed.
-    await this.waitForCoreAgentReady()
+    if (workspaceMaintenancePending(path.resolve(this.adminConfig.data_dir, '..'))) this.workspaceStartupSuspended = true
+    if (this.workspaceStartupSuspended) {
+      this.workspaceStartupDefinitions ??= this.channelManager.registerBuiltinInstanceDefinitions().then(() => {})
+      await this.workspaceStartupDefinitions
+      throw new RpcError('WORKSPACE_MAINTENANCE', '工作目录恢复期间管理面保持在线；业务启动等待当前恢复完成。')
+    }
+    await this.activateCoreAgentBusiness(true)
+  }
+
+  /** Ordinary readiness only; topology handshake remains exclusively in its original runner. */
+  private async activateCoreAgentBusiness(registerChannels: boolean, verify?: () => Promise<void>): Promise<void> {
+    const step = async (action: () => Promise<unknown>) => {
+      await verify?.(); await action(); await verify?.()
+    }
+    await step(() => this.waitForCoreAgentReady())
     this.configInvalidationPublicationEnabled = true
-    await this.configMutationCoordinator.drainPendingInvalidation()
-    await this.channelManager.reRegisterInstances()
-    await this.ensureBuiltinSchedules()
-    await this.publishCurrentAgentConfigInvalidation()
+    await step(() => this.configMutationCoordinator.drainPendingInvalidation())
+    if (this.workspaceStartupSkillsPending) {
+      await step(() => this.skillManager.scanWorkspaceSkills(this.workspaceDir))
+      this.workspaceStartupSkillsPending = false
+    }
+    if (registerChannels) await step(() => this.channelManager.reRegisterInstances())
+    await step(() => this.ensureBuiltinSchedules())
+    await step(() => this.publishCurrentAgentConfigInvalidation())
     try {
-      await this.startAgentDependentMaintenance()
+      await step(() => this.startAgentDependentMaintenance())
     } catch (error) {
       this.configInvalidationPublicationEnabled = false
       throw error
@@ -7887,6 +8205,7 @@ export class AdminModule extends ModuleBase {
     // §3.19.12 step 4：开放 ingress 前完成 worker implementation 初始迁移
     // （grandfather bootstrap；fresh deploy 只落 completed marker，不 inspect 不付费 verify）。
     // 失败不阻断 Admin 启动：marker 保持 pending，下次启动重试（inspect/commit 幂等）。
+    await verify?.()
     try {
       await this.runWorkerImplementationBootstrap()
     } catch (error) {
@@ -7894,11 +8213,35 @@ export class AdminModule extends ModuleBase {
         error instanceof Error ? error.message : String(error))
     }
 
+    await verify?.()
     // Open ingress before arming timers: an already-due one-shot must never fire into
     // the management-only gate and be lost.
     this.cutoverActivated = true
     this.scheduleEngine.startAll(Array.from(this.schedules.values()))
     this.cutoverRecoveryReason = null
+  }
+
+  /** The owning prepared recovery supplies the live guard; no old cutover bearer is consumed. */
+  private resumeWorkspaceStartup(verify: () => Promise<void>): Promise<void> {
+    if (!this.workspaceStartupSuspended) {
+      if (this.cutoverActivated) return Promise.resolve()
+      return Promise.reject(new RpcError('SERVICE_UNAVAILABLE', '当前Admin业务启动尚未就绪。'))
+    }
+    if (!this.workspaceStartupActivation) {
+      this.workspaceStartupActivation = Promise.resolve().then(async () => {
+        try {
+          assertWorkspaceExecutionAllowed(path.resolve(this.adminConfig.data_dir, '..'))
+          await this.activateCoreAgentBusiness(false, verify)
+          this.workspaceStartupSuspended = false
+        } catch (error) {
+          this.cutoverActivated = false
+          this.configInvalidationPublicationEnabled = false
+          this.scheduleEngine.stop()
+          throw error
+        }
+      })
+    }
+    return this.workspaceStartupActivation
   }
 
   // ============================================================================
@@ -8280,8 +8623,12 @@ export class AdminModule extends ModuleBase {
   private async handleComputerUseSetupApi(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const header = req.headers.authorization
     const token = typeof header === 'string' && header.startsWith('Bearer ') ? header.slice(7) : ''
-    const human = await this.verifyAuthenticatedToken(token)
-    if (!human || !Number.isSafeInteger(human.exp) || human.exp <= Date.now() / 1000) { sendJson(res, 401, { error: 'Unauthorized' }); return }
+    const human = await this.verifyHumanToken(token)
+    if (!human) {
+      const forbidden = this.isNonHumanToken(token)
+      sendJson(res, forbidden ? 403 : 401, { error: forbidden ? 'Forbidden' : 'Unauthorized' }); return
+    }
+    if (!Number.isSafeInteger(human.exp) || human.exp <= Date.now() / 1000) { sendJson(res, 401, { error: 'Unauthorized' }); return }
     if (human.sub !== 'admin') { sendJson(res, 403, { error: 'Forbidden' }); return }
     try {
       const setup = this.desktopSetup()
@@ -10395,6 +10742,10 @@ export class AdminModule extends ModuleBase {
       sendJson(res, 401, { error: 'Unauthorized' })
       return
     }
+    return this.withWorkspaceWebAccess(res, () => this.readMediaFile(res, url))
+  }
+
+  private async readMediaFile(res: ServerResponse, url: URL): Promise<void> {
     const id = decodeURIComponent(url.pathname.slice('/api/media/'.length))
     const resolved = this.mediaStore?.resolve(id)
     if (!resolved) {
@@ -10694,8 +11045,11 @@ export class AdminModule extends ModuleBase {
     const bearer = context?.authorizationBearer
     if (!bearer) throw new RpcError('UNAUTHORIZED', 'Missing Memory credential')
     if (params.caller_kind === 'admin_web') {
-      const payload = await this.verifyAuthenticatedToken(bearer)
-      if (!payload) throw new RpcError('UNAUTHORIZED', 'Invalid Admin credential')
+      const payload = await this.verifyHumanToken(bearer)
+      if (!payload) {
+        if (this.isNonHumanToken(bearer)) throw new RpcError('FORBIDDEN', 'Human Admin credential required')
+        throw new RpcError('UNAUTHORIZED', 'Invalid Admin credential')
+      }
       if (payload.sub !== 'admin' || payload.agent_cli) throw new RpcError('FORBIDDEN', 'Human Admin credential required')
     } else if (params.caller_kind === 'core_agent') {
       try {

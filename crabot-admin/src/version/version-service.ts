@@ -4,6 +4,8 @@ import type { UpgradeCapability, VersionState, DeployMode, InstallKind } from '.
 import { defaultGitRunner } from './git.js'
 import { readUpgradeStatus } from './upgrade-runner.js'
 
+const { readCoreVersion } = require('../../../scripts/lib/cli-location.cjs') as { readCoreVersion: (root: string) => string | null }
+
 const SIX_HOURS = 6 * 60 * 60 * 1000
 
 export interface VersionServiceDeps {
@@ -58,6 +60,8 @@ export class VersionService {
   }
 
   private readVersionFile(): string | null {
+    const sealed = readCoreVersion(this.deps.crabotHome)
+    if (sealed !== null) return sealed
     const p = join(this.deps.crabotHome, 'VERSION')
     if (!existsSync(p)) return null
     const v = readFileSync(p, 'utf-8').trim()
@@ -117,7 +121,7 @@ export class VersionService {
     const latest = await (this.deps.fetchLatestTag ?? fetchLatestTagDefault)()
     return {
       ...base, checking: false, current_version: current, latest_version: latest,
-      upgrade_available: latest !== current,
+      upgrade_available: latest.replace(/^v/, '') !== current?.replace(/^v/, ''),
       last_checked: new Date(this.deps.now()).toISOString(),
     }
   }

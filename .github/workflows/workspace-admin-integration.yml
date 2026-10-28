@@ -1,0 +1,73 @@
+name: Workspace online Admin integration
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feat/desktop-workspace-admin-integration']
+  pull_request:
+    paths:
+      - 'crabot-admin/src/index.ts'
+      - 'crabot-admin/src/workspace*.ts'
+      - 'crabot-admin/src/channel-manager.ts'
+      - 'crabot-admin/src/chat-manager.ts'
+      - 'crabot-shared/src/module-base.ts'
+      - '.github/workflows/workspace-admin-integration.yml'
+permissions:
+  contents: read
+jobs:
+  admin:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Build this checkout's actual SDK, Shared, Admin and Native
+        shell: bash
+        run: |
+          pnpm --dir crabot-client install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-client run build
+          pnpm --dir crabot-shared install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-shared run build
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm --dir scripts/lib install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-admin install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-admin run build
+          node scripts/build-native.mjs
+      - name: Verify all original sensitive transport methods without params or response tracing
+        working-directory: crabot-shared
+        run: node --import tsx --test src/module-base.test.ts
+      - name: Verify online management, drain, current recovery and durable ingress
+        working-directory: crabot-admin
+        run: >-
+          node node_modules/vitest/vitest.mjs run
+          src/channel-manager.workspace-startup.test.ts
+          src/workspace-finalization-web.test.ts
+          src/workspace-recovery-auth.test.ts
+          src/workspace-recovery-finalization-web.test.ts
+          src/workspace-relocation-auth.test.ts
+          src/workspace-relocation-start-auth.test.ts
+          src/workspace-web-maintenance.test.ts
+          src/workspaces-http.test.ts
+          src/workspaces.test.ts
+          src/chat-manager.test.ts
+          src/chat-outbox-recovery.test.ts
+          src/core-agent-cutover-retry.test.ts
+          src/task-goal-rpc.test.ts
+          src/workboard-management-api.test.ts
+          src/desktop-upgrade-http.test.ts
+          src/version/upgrade-runner.test.ts
+          src/version/version-service.test.ts
+          --maxWorkers=1 --minWorkers=1
+      - name: Verify actual isolated Admin startup and management-only ingress
+        working-directory: crabot-admin
+        # Covers the whole startup fixture; product/transport deadlines are unchanged.
+        # vitest.setup fixes MM to unused test port 59321, with no business model configured.
+        run: >-
+          node node_modules/vitest/vitest.mjs run src/core-agent-cutover-ingress.test.ts
+          --testTimeout=30000 --maxWorkers=1 --minWorkers=1

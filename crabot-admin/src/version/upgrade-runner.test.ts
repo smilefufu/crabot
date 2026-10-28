@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, existsSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { readUpgradeStatus, canUpgrade, isUpgradeInProgress, writeUpgradeStarting, startUpgrade } from './upgrade-runner.js'
@@ -113,5 +113,16 @@ describe('startUpgrade：不再覆盖 DATA_DIR（已全局统一为顶层）', (
     startUpgrade('/repo', dir, 'v1')
     const passedEnv = (spawnMock.mock.calls[0][2] as { env: Record<string, string> }).env
     expect(passedEnv.DATA_DIR).toBe('/home/u/.crabot/data')
+  })
+
+  it('桌面受管核心拒绝旧 archive 升级，且不落状态、日志或子进程', () => {
+    const root = mkdtempSync(join(tmpdir(), 'crabot-desktop-upgrade-')), dir = join(root, 'data/admin')
+    mkdirSync(dir, { recursive: true }); writeFileSync(join(root, 'desktop-host.json'), '{}')
+    try {
+      expect(() => startUpgrade(root, dir, '1.2.3')).toThrow('桌面')
+      expect(spawnMock).not.toHaveBeenCalled()
+      expect(readdirSync(dir)).toEqual([])
+      expect(existsSync(join(root, 'data/logs'))).toBe(false)
+    } finally { rmSync(root, { recursive: true, force: true }) }
   })
 })

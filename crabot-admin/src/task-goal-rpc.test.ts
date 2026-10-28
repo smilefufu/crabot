@@ -23,9 +23,11 @@ function sampleCriteria(): AcceptanceCriterion[] {
 describe('task-goal RPC handlers', () => {
   let admin: AdminModule
   let tmpDir: string
+  let dataRoot: string
 
   beforeAll(async () => {
-    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-task-goal-rpc-'))
+    dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-task-goal-rpc-'))
+    tmpDir = path.join(dataRoot, 'admin')
     process.env.TEST_ADMIN_PASSWORD_TG_RPC = 'test_password_123'
     process.env.TEST_JWT_SECRET_TG_RPC = 'test_jwt_secret_at_least_32_chars'
     admin = new AdminModule(
@@ -50,7 +52,7 @@ describe('task-goal RPC handlers', () => {
 
   afterAll(async () => {
     await admin.stop()
-    await fs.rm(tmpDir, { recursive: true, force: true })
+    await fs.rm(dataRoot, { recursive: true, force: true })
   })
 
   async function createBareTask(): Promise<Task> {

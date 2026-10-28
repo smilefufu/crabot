@@ -14,10 +14,19 @@ import {
 import { MEMORY_DATA_RPC_METHODS } from './memory-access.js'
 
 const SENSITIVE_METHODS: SensitiveRpcMethod[] = [
+  'verify_workspace_interrupted_recovery_execution', 'capture_workspace_interrupted_recovery_execution', 'stop_workspace_interrupted_recovery_workers', 'prepare_workspace_interrupted_recovery_worker_stops', 'complete_workspace_interrupted_recovery_worker_stops',
+  'verify_workspace_interrupted_recovery_runtime', 'verify_workspace_interrupted_recovery_root', 'prepare_workspace_interrupted_recovery_web', 'resume_workspace_interrupted_recovery_web', 'verify_workspace_interrupted_recovery_web',
   'resolve_request_permission_source', 'resolve_request_permission_sources',
   'get_voice_config', 'submit_voice_turn', 'get_voice_turn_status', 'get_authorized_voice_turn', 'confirm_voice_turn',
   'verify_voice_runtime', 'register_voice_runtime', 'voice_admin_action', 'verify_voice_admin', 'sync_voice_terminal',
   'verify_memory_access',
+  'verify_workspace_relocation_job_query', 'preview_workspace_relocation_recovery', 'start_workspace_relocation_recovery', 'get_workspace_relocation_status', 'start_workspace_relocation', 'verify_workspace_relocation_start', 'verify_workspace_relocation_request', 'quiesce_workspace_relocation_web',
+  'verify_workspace_relocation_recovery_request', 'verify_workspace_relocation_recovery_admission', 'verify_workspace_relocation_finalization', 'prepare_workspace_relocation_completion', 'resume_workspace_relocation_web',
+  'verify_workspace_relocation_recovery_runtime', 'verify_workspace_relocation_recovery_root',
+  'resume_workspace_relocation_recovery_web', 'verify_workspace_relocation_recovery_release', 'verify_workspace_relocation_recovery_finalization', 'prepare_workspace_relocation_recovery_completion',
+  'verify_workspace_relocation_runtime', 'verify_workspace_relocation_root', 'verify_workspace_relocation_coordinator',
+  'capture_workspace_relocation_processes', 'capture_workspace_relocation_workers', 'stop_workspace_relocation_workers',
+  'prepare_workspace_relocation_worker_stops', 'complete_workspace_relocation_worker_stops',
   'get_agent_config',
   'resolve_worker_connection',
   'verify_core_agent_runtime',
@@ -36,20 +45,31 @@ const SENSITIVE_METHODS: SensitiveRpcMethod[] = [
   'cancel_worker_implementation_operation',
 ]
 
-test('RPC wall deadline destroys a stalled partial response instead of leaving playback pending', async () => {
-  let closed = false
+test('RPC wall deadline destroys a stalled partial response instead of leaving playback pending', { timeout: 5000 }, async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let sent!: (error?: Error | null) => void, disconnected!: () => void
+  const partial = new Promise<void>((resolve, reject) => { sent = error => error ? reject(error) : resolve() })
+  const closed = new Promise<void>(resolve => { disconnected = resolve })
   const server = http.createServer((req, res) => {
     req.resume()
-    res.on('close', () => { closed = true })
-    res.writeHead(200, { 'Content-Type': 'application/json' }); res.write('{"success":')
+    res.on('close', disconnected)
+    res.writeHead(200, { 'Content-Type': 'application/json' }); res.write('{"success":', sent)
   })
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
-  try {
-    const port = (server.address() as { port: number }).port
-    await assert.rejects(new RpcClient().call(port, 'send_message', {}, 'voice-probe', undefined, { timeoutMs: 80 }), /timed out/)
-    await new Promise(resolve => setTimeout(resolve, 20))
-    assert.equal(closed, true)
-  } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())) }
+  t.after(async () => { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())) })
+  const port = (server.address() as { port: number }).port
+  let settled = false
+  const response = new RpcClient().call(port, 'send_message', {}, 'voice-probe', undefined, { timeoutMs: 80 })
+    .finally(() => { settled = true })
+  const timedOut = assert.rejects(response, /timed out/)
+  // Establish the actual partial response before advancing the registered timer;
+  // slow localhost lookup or delivery of a close event is not an RPC leak.
+  await partial
+  t.mock.timers.tick(79); await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(settled, false)
+  t.mock.timers.tick(1)
+  await timedOut
+  await closed
 })
 
 test('interrupted RPC bodies fail promptly even without an explicit call deadline', async () => {
@@ -115,6 +135,13 @@ test('ordinary call rejects a sensitive method before network I/O or trace creat
     }),
     (error: unknown) => (error as { code?: string }).code === 'SENSITIVE_RPC_REQUIRES_NO_TRACE_TRANSPORT',
   )
+})
+
+test('workspace relocation RPCs cannot use ordinary traced transport', async () => {
+  const client = new RpcClient(), trace = { startSpan: () => { throw new Error('trace must not start') }, endSpan: () => {} }
+  for (const method of ['resume_workspace_relocation_recovery_web', 'verify_workspace_relocation_recovery_release', 'verify_workspace_relocation_recovery_finalization', 'prepare_workspace_relocation_recovery_completion', 'verify_workspace_relocation_recovery_runtime', 'verify_workspace_relocation_recovery_root', 'verify_workspace_relocation_recovery_request', 'verify_workspace_relocation_recovery_admission', 'verify_workspace_relocation_finalization', 'prepare_workspace_relocation_completion', 'resume_workspace_relocation_web', 'verify_workspace_relocation_request', 'quiesce_workspace_relocation_web', 'verify_workspace_relocation_coordinator', 'capture_workspace_relocation_processes', 'capture_workspace_relocation_workers', 'stop_workspace_relocation_workers', 'prepare_workspace_relocation_worker_stops', 'complete_workspace_relocation_worker_stops']) await assert.rejects(client.call(1, method, { intent_id: 'fixed' }, 'forged-source', {
+    traceStore: trace, traceId: 'fixture',
+  }), (error: unknown) => (error as { code?: string }).code === 'SENSITIVE_RPC_REQUIRES_NO_TRACE_TRANSPORT')
 })
 
 test('callSensitive rejects methods outside the sensitive closure before network I/O', async () => {

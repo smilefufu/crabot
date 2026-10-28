@@ -3,6 +3,11 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, openSync } from 'no
 import { join } from 'node:path'
 import type { UpgradeStatus, VersionState } from './types.js'
 
+export const DESKTOP_UPGRADE_REASON = '请在 Crabot 桌面应用中检查与安装更新。'
+export function requiresDesktopUpdater(crabotHome: string): boolean {
+  return existsSync(join(crabotHome, 'desktop-host.json'))
+}
+
 export function readUpgradeStatus(dataDir: string): UpgradeStatus | null {
   const p = join(dataDir, 'upgrade-status.json')
   if (!existsSync(p)) return null
@@ -46,6 +51,7 @@ export function writeUpgradeStarting(dataDir: string, fromVersion?: string | nul
  * 先同步落 upgrading 状态再 spawn；进程脱离 admin 进程组，stop MM 时不被杀。
  */
 export function startUpgrade(crabotHome: string, dataDir: string, fromVersion?: string | null): { status: 'started' } {
+  if (requiresDesktopUpdater(crabotHome)) throw Object.assign(new Error(DESKTOP_UPGRADE_REASON), { code: 'DESKTOP_MANAGED_INSTALLATION' })
   writeUpgradeStarting(dataDir, fromVersion)
   // 升级进程日志落文件（dataDir 形如 .../data/admin，logs 是其 sibling）。
   // stdout/stderr 指向 upgrade.log，ui-upgrade.mjs 的 console 与其 inherit 子进程（git/pnpm/stop/start）输出都汇到此文件，
