@@ -2,7 +2,6 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { execFileSync } from 'node:child_process'
 import { cliEnvironment, ensureCli, privateDirectory, startCli } from '../../crabot-channel-slack/dist/cli-tools.js'
 import { prepareProject, SLACK_MANIFEST } from '../../crabot-channel-slack/dist/cli-project.js'
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "crabot slack-cli's $safe-"))
@@ -14,12 +13,17 @@ try {
   if (process.env.SLACK_CLI_TEST_ARCHIVE) globalThis.fetch = async () => new Response(await fs.readFile(process.env.SLACK_CLI_TEST_ARCHIVE))
   try { executable = await ensureCli(root, AbortSignal.timeout(300000)) }
   finally { globalThis.fetch = originalFetch }
-  console.log('Slack CLI smoke: checking verified executable startup (15 second limit)')
-  const version = execFileSync(executable, ['--version'], { cwd: root, env: cliEnvironment(), timeout: 15000, windowsHide: false, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
-  assert.ok(version.includes('4.11.0'), 'Verified official executable must report its pinned version')
-  console.log('Slack CLI smoke: verified official tool started; preparing fixed hooks')
   const project = await prepareProject(root)
   await privateDirectory(path.join(root, 'cli'))
+  console.log('Slack CLI smoke: checking owned executable startup (15 second limit)')
+  job = startCli(executable, ['--version'], project)
+  const version = await Promise.race([job.result, new Promise((_, reject) => {
+    commandTimer = setTimeout(() => reject(new Error('Owned Slack CLI version command exceeded 15 seconds')), 15000)
+  })])
+  clearTimeout(commandTimer)
+  assert.equal(version.code, 0, 'Verified official executable must exit successfully through its supervisor')
+  assert.ok(version.output.includes('4.11.0'), 'Verified official executable must report its pinned version')
+  console.log('Slack CLI smoke: verified official tool started through its supervisor')
   console.log('Slack CLI smoke: starting local manifest/hooks command (5 minute limit)')
   job = startCli(executable, ['manifest', 'info', '--source', 'local', '--skip-update', '--no-color', '--config-dir', path.join(root, 'cli')], project)
   const result = await Promise.race([job.result, new Promise((_, reject) => {
