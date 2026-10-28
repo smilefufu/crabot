@@ -41,12 +41,23 @@ jobs:
           pnpm --dir crabot-agent run build
           node scripts/build-native.mjs
       - name: Verify actual finite coordinator, file Host and per-action journals
+        if: runner.os != 'Windows'
         run: >-
           node --test --test-concurrency=1
           scripts/lib/__tests__/workspace-coordinator-entry.test.mjs
           scripts/lib/__tests__/workspace-coordinator-launch.test.mjs
           scripts/lib/__tests__/workspace-copy-job.test.mjs
           scripts/lib/__tests__/tmux-process-tree.test.mjs
+      - name: Verify fixed file actors with ordinary current-user default ownership
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./.github/scripts/run-current-user-owner.ps1 -TestFiles @(
+            'scripts/lib/__tests__/workspace-coordinator-entry.test.mjs',
+            'scripts/lib/__tests__/workspace-coordinator-launch.test.mjs',
+            'scripts/lib/__tests__/workspace-copy-job.test.mjs',
+            'scripts/lib/__tests__/tmux-process-tree.test.mjs'
+          )
       - name: Verify both original CLI carriers, Harness closure and background execution admission
         working-directory: crabot-agent
         run: >-
