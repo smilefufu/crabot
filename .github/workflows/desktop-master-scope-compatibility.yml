@@ -1,6 +1,11 @@
 name: Desktop built-in administrator scope
 on:
   workflow_dispatch:
+  push:
+    branches: ['feat/desktop-master-scope-compatibility']
+    paths:
+      - 'crabot-admin/src/permission-template-host-scope.test.ts'
+      - '.github/workflows/desktop-master-scope-compatibility.yml'
 permissions:
   contents: read
 jobs:
