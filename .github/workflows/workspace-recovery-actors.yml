@@ -1,0 +1,51 @@
+name: Workspace current recovery actors
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feat/desktop-workspace-recovery-actors']
+  pull_request:
+    paths:
+      - 'scripts/lib/workspace-interrupted-*.mjs'
+      - 'scripts/lib/workspace-recovery-*.mjs'
+      - 'scripts/lib/workspace-runtime-*.mjs'
+      - 'scripts/workspace-*-coordinator.mjs'
+      - 'scripts/workspace-runtime-gate.mjs'
+      - '.github/workflows/workspace-recovery-actors.yml'
+permissions:
+  contents: read
+jobs:
+  recovery:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Build this checkout's actual dependencies and recovery observers
+        shell: bash
+        run: |
+          pnpm --dir crabot-client install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-client run build
+          pnpm --dir crabot-shared install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-shared run build
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm --dir scripts/lib install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-agent install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-agent run build
+          node scripts/build-native.mjs
+      - name: Verify actual finite interrupted-role handoff and fixed execution evidence
+        run: node --test --test-concurrency=1 scripts/lib/__tests__/workspace-interrupted-role.test.mjs
+      - name: Verify distinct current authority, stop records and recovery validation
+        working-directory: crabot-agent
+        run: >-
+          node node_modules/vitest/vitest.mjs run
+          tests/core/workspace-relocation-authority.test.ts
+          tests/core/workspace-relocation-stop-journal.test.ts
+          tests/core/workspace-recovery-validation.test.ts
+          --maxWorkers=1 --minWorkers=1
