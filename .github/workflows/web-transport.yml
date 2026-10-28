@@ -1,0 +1,43 @@
+name: Web shared transport and chat snapshots
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feat/desktop-web-transport']
+  pull_request:
+    paths:
+      - 'crabot-admin/web/**'
+      - 'crabot-client/**'
+      - '.github/workflows/web-transport.yml'
+permissions:
+  contents: read
+jobs:
+  web:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Build this branch's SDK before installing its Web consumer
+        run: |
+          set -e
+          pnpm --dir crabot-client install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-client run build
+          node --test crabot-client/tests/*.test.mjs
+      - name: Build the complete Web application from frozen dependencies
+        run: |
+          set -e
+          pnpm --dir crabot-admin/web install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-admin/web run build
+      - name: Verify complete existing Web baseline and HTTP snapshot behavior
+        working-directory: crabot-admin/web
+        run: node node_modules/vitest/vitest.mjs run

@@ -1,178 +1,60 @@
-/**
- * Chat WebSocket 服务
- */
-
+import { ChatClient, ChatConnection, ClientError, createChatRequest, createRequestId } from 'crabot-client'
 import { storage } from '../utils/storage'
-import { api } from './api'
-import type { ChatMessage, ChatClientMessage, ChatServerMessage, ChatTaskSnapshot, ConnectionStatus } from '../types/chat'
+import { getWebClient } from './api'
+import { adminUrl, desktopConnection, getDesktopState, isDesktop } from './desktop-host'
 
-type MessageHandler = (message: ChatServerMessage) => void
-type StatusHandler = (status: ConnectionStatus) => void
-
-class ChatWebSocketClient {
-  private ws: WebSocket | null = null
-  private messageHandlers: Set<MessageHandler> = new Set()
-  private statusHandlers: Set<StatusHandler> = new Set()
-  private reconnectAttempts = 0
-  private maxReconnectAttempts = 5
-  private reconnectDelay = 1000
-  private _status: ConnectionStatus = 'disconnected'
-
-  get status(): ConnectionStatus {
-    return this._status
+class ChatService extends ChatConnection {
+  constructor() {
+    super({
+      url: () => {
+        if (isDesktop) {
+          const url = new URL('/ws/chat', desktopConnection().origin)
+          url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+          return url.href
+        }
+        const token = storage.getToken()
+        if (!token) throw new Error('Authentication required')
+        const url = new URL('/ws/chat', window.location.origin)
+        url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+        url.searchParams.set('token', token)
+        return url.href
+      },
+      socket: url => new WebSocket(url),
+    })
   }
-
-  private setStatus(status: ConnectionStatus): void {
-    this._status = status
-    this.statusHandlers.forEach((handler) => handler(status))
+  private get client() { return new ChatClient(getWebClient()) }
+  async loadHistory(limit = 30, before?: string, signal?: AbortSignal) {
+    return (await this.client.history(limit, before, { signal })).messages
   }
-
-  connect(): void {
-    const token = storage.getToken()
-    if (!token) {
-      this.setStatus('error')
-      return
-    }
-
-    // 清理已有连接，防止旧连接的 onclose 覆盖新连接状态
-    if (this.ws) {
-      this.ws.onopen = null
-      this.ws.onclose = null
-      this.ws.onerror = null
-      this.ws.onmessage = null
-      this.ws.close()
-      this.ws = null
-    }
-
-    // 构建 WebSocket URL
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const host = window.location.host
-    const wsUrl = `${protocol}//${host}/ws/chat?token=${encodeURIComponent(token)}`
-
-    this.setStatus('connecting')
-    this.ws = new WebSocket(wsUrl)
-
-    this.ws.onopen = () => {
-      this.setStatus('connected')
-      this.reconnectAttempts = 0
-    }
-
-    this.ws.onmessage = (event) => {
-      try {
-        const message = JSON.parse(event.data) as ChatServerMessage
-        this.messageHandlers.forEach((handler) => handler(message))
-      } catch (error) {
-        console.error('[ChatService] Failed to parse message:', error)
-      }
-    }
-
-    this.ws.onclose = (event) => {
-      this.setStatus('disconnected')
-
-      // 如果不是正常关闭，尝试重连
-      if (event.code !== 1000 && this.reconnectAttempts < this.maxReconnectAttempts) {
-        this.reconnectAttempts++
-        const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1)
-        setTimeout(() => this.connect(), delay)
-      }
-    }
-
-    this.ws.onerror = () => {
-      this.setStatus('error')
-    }
+  async getTaskSnapshot(taskId: string, signal?: AbortSignal) {
+    try { return await this.client.task(taskId, { signal }) }
+    catch (error) { if (error instanceof ClientError && error.status === 404) return null; throw error }
   }
-
-  disconnect(): void {
-    if (this.ws) {
-      this.ws.close(1000, 'User disconnected')
-      this.ws = null
-    }
-    this.setStatus('disconnected')
+  async getActiveTasks() { return (await this.client.activeTasks()).tasks }
+  async sendMessageWithAttachments(text: string, files: File[], requestId = createRequestId()) {
+    const request = createChatRequest(text, files, requestId)
+    const { message } = await this.client.send(request)
+    return { message, request_id: request.request_id }
   }
-
-  sendMessage(content: string): string {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      throw new Error('WebSocket not connected')
-    }
-
-    const request_id = this.generateRequestId()
-    const message: ChatClientMessage = {
-      type: 'chat_message',
-      request_id,
-      content,
-    }
-
-    this.ws.send(JSON.stringify(message))
-    return request_id
-  }
-
-  onMessage(handler: MessageHandler): () => void {
-    this.messageHandlers.add(handler)
-    return () => this.messageHandlers.delete(handler)
-  }
-
-  onStatusChange(handler: StatusHandler): () => void {
-    this.statusHandlers.add(handler)
-    return () => this.statusHandlers.delete(handler)
-  }
-
-  async loadHistory(limit = 30, before?: string): Promise<ChatMessage[]> {
-    let url = `/chat/messages?limit=${limit}`
-    if (before) url += `&before=${encodeURIComponent(before)}`
-    const { messages } = await api.get<{ messages: ChatMessage[] }>(url)
-    return messages
-  }
-
-  /** 任务状态卡 hydrate（页面加载/重连时）；404/网络错误返回 null，卡片降级为纯链接 */
-  async getTaskSnapshot(taskId: string): Promise<ChatTaskSnapshot | null> {
-    try {
-      return await api.get<ChatTaskSnapshot>(`/chat/tasks/${encodeURIComponent(taskId)}`)
-    } catch {
-      return null
-    }
-  }
-
-  /** 拉取所有非终态任务快照（进行中任务条数据源）；出错返回空数组，不阻塞主流程 */
-  async getActiveTasks(): Promise<ChatTaskSnapshot[]> {
-    try {
-      const { tasks } = await api.get<{ tasks: ChatTaskSnapshot[] }>('/chat/tasks')
-      return tasks
-    } catch {
-      return []
-    }
-  }
-
-  /** 带附件的消息走 HTTP multipart（WS 保持纯文本）。返回落库后的 user 消息。 */
-  async sendMessageWithAttachments(text: string, files: File[]): Promise<{ message: ChatMessage; request_id: string }> {
-    const request_id = this.generateRequestId()
-    const form = new FormData()
-    form.append('request_id', request_id)
-    form.append('text', text)
-    for (const f of files) form.append('files', f, f.name)
-    const { message } = await api.post<{ message: ChatMessage }>('/chat/messages', form)
-    return { message, request_id }
-  }
-
-  /** 删除单条消息（204 成功，404 消息不存在抛错） */
-  async deleteMessage(messageId: string): Promise<void> {
-    await api.delete(`/chat/messages/${encodeURIComponent(messageId)}`)
-  }
-
-  /** 清空全部聊天记录 */
-  async clearMessages(): Promise<void> {
-    await api.delete('/chat/messages')
-  }
-
-  /** store 相对 URL → 可直接用于 <img>/<a> 的带 token URL；http(s) 原样返回 */
-  mediaSrc(mediaUrl: string): string {
+  async sendMessage(text: string, requestId?: string) { return this.sendMessageWithAttachments(text, [], requestId) }
+  deleteMessage(messageId: string) { return this.client.delete(messageId) }
+  clearMessages() { return this.client.clear() }
+  mediaSrc(mediaUrl: string) {
     if (mediaUrl.startsWith('http://') || mediaUrl.startsWith('https://')) return mediaUrl
+    if (isDesktop) return getDesktopState()?.phase === 'ready' ? adminUrl(mediaUrl) : 'data:,'
     const token = storage.getToken()
     return token ? `${mediaUrl}?token=${encodeURIComponent(token)}` : mediaUrl
   }
-
-  private generateRequestId(): string {
-    return `req_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`
-  }
 }
 
-export const chatService = new ChatWebSocketClient()
+export const chatService = new ChatService()
+if (isDesktop) {
+  // Keep the socket attached to the same host lifetime as HTTP, including a
+  // reconnect with the same generation after an Admin restart.
+  let signal: AbortSignal | undefined
+  window.crabotDesktop!.onStateChanged(() => {
+    if (getDesktopState()?.phase !== 'ready') { chatService.disconnect(); signal = undefined; return }
+    const next = desktopConnection().signal
+    if (signal !== next) { chatService.disconnect(); signal = next; chatService.connect() }
+  })
+}

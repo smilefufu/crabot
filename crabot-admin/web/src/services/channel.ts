@@ -1,5 +1,6 @@
 import { api } from './api'
 import { storage } from '../utils/storage'
+import { adminUrl, desktopConnection, isDesktop } from './desktop-host'
 import type {
   ChannelImplementation,
   ChannelInstance,
@@ -95,9 +96,12 @@ export const channelService = {
     sessionId: string,
     onEvent: (ev: OnboardPollEvent) => void,
   ): { close: () => void } {
-    const token = storage.getToken() ?? ''
-    const url = `/api/channels/onboard/poll?implementation_id=${encodeURIComponent(implementationId)}&method_id=${encodeURIComponent(methodId)}&session_id=${encodeURIComponent(sessionId)}&token=${encodeURIComponent(token)}`
+    const token = isDesktop ? '' : storage.getToken() ?? ''
+    const url = adminUrl(`/api/channels/onboard/poll?implementation_id=${encodeURIComponent(implementationId)}&method_id=${encodeURIComponent(methodId)}&session_id=${encodeURIComponent(sessionId)}${token ? `&token=${encodeURIComponent(token)}` : ''}`)
     const es = new EventSource(url)
+    const signal = isDesktop ? desktopConnection().signal : undefined
+    const close = () => { es.close(); signal?.removeEventListener('abort', close) }
+    signal?.addEventListener('abort', close, { once: true })
     const types: OnboardPollEvent['type'][] = ['pending', 'slow_down', 'success', 'error']
     types.forEach((t) => {
       es.addEventListener(t, (ev) => {
@@ -109,7 +113,7 @@ export const channelService = {
         }
       })
     })
-    return { close: () => es.close() }
+    return { close }
   },
 
   async onboardFinish(implementationId: string, methodId: string, sessionId: string, name: string) {

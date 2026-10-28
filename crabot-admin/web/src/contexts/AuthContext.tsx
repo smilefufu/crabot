@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react'
 import { authService } from '../services/auth'
+import { isDesktop } from '../services/desktop-host'
 
 interface AuthContextType {
   isAuthenticated: boolean
@@ -14,9 +15,10 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined)
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [isAuthenticated, setIsAuthenticated] = useState(authService.isAuthenticated())
-  const [isTemp, setIsTemp] = useState<boolean | null>(null)
+  const [isTemp, setIsTemp] = useState<boolean | null>(isDesktop ? false : null)
 
   const refreshMe = useCallback(async () => {
+    if (isDesktop) { setIsTemp(false); return }
     if (!authService.isAuthenticated()) {
       setIsTemp(null)
       return
@@ -47,6 +49,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const logout = () => {
     authService.logout()
+    if (isDesktop) return
     setIsAuthenticated(false)
     setIsTemp(null)
   }

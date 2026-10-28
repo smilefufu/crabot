@@ -3,17 +3,47 @@
  */
 
 import { storage } from '../utils/storage'
-import type { ApiError } from '../types'
+import { HttpClient, z } from 'crabot-client'
+import { adminUrl, desktopBridge, desktopConnection, isDesktop } from './desktop-host'
 
 const API_BASE = '/api'
+
+let client: HttpClient | undefined
+let clientSignal: AbortSignal | undefined
+export function getWebClient(): HttpClient {
+  const host = isDesktop ? desktopConnection() : undefined
+  if (host && host.signal !== clientSignal) { client = undefined; clientSignal = host.signal }
+  client ??= new HttpClient({
+    endpoint: new URL(API_BASE, host?.origin ?? window.location.origin).href,
+    signal: host?.signal,
+    token: path => isDesktop || path === '/auth/login' ? null : storage.getToken(),
+    fetch: async (url, options) => {
+      const response = await fetch(url, options)
+      if (response.status === 401) {
+        if (isDesktop) void desktopBridge?.reconnect()
+        else { storage.clearToken(); window.location.href = '/login' }
+      }
+      return response
+    },
+  })
+  return client
+}
+
+// Binary uploads/downloads and SSE use the same verified direct Admin origin.
+export function fetchAdmin(relative: string, options: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(options.headers)
+  const token = isDesktop ? null : storage.getToken()
+  if (token) headers.set('Authorization', 'Bearer ' + token)
+  const hostSignal = isDesktop ? desktopConnection().signal : undefined
+  const signals = [options.signal, hostSignal].filter((value): value is AbortSignal => !!value)
+  return fetch(adminUrl(relative), { ...options, headers, redirect: 'error', ...(signals.length ? { signal: AbortSignal.any(signals) } : {}) })
+}
 
 class ApiClient {
   private async request<T>(
     endpoint: string,
     options: RequestInit = {}
   ): Promise<T> {
-    const token = storage.getToken()
-
     const headers: Record<string, string> =
       options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }
 
@@ -21,44 +51,8 @@ class ApiClient {
       Object.assign(headers, options.headers)
     }
 
-    if (token && endpoint !== '/auth/login') {
-      headers['Authorization'] = `Bearer ${token}`
-    }
-
-    const response = await fetch(`${API_BASE}${endpoint}`, {
-      ...options,
-      headers,
-    })
-
-    if (response.status === 401) {
-      // 尽量先解析 body 拿 error code（不阻塞 throw）
-      let body: { error?: string } = {}
-      try { body = await response.clone().json() } catch {}
-      if (body.error === 'ADMIN_TOKEN_REVOKED') {
-        // token 已失效会自动跳转到 /login，重定向本身作为用户反馈
-        console.warn('[auth] token revoked — admin password was changed elsewhere')
-      }
-      storage.clearToken()
-      window.location.href = '/login'
-      throw new Error('Unauthorized')
-    }
-
-    if (!response.ok) {
-      const body: ApiError = await response.json().catch(() => ({ error: 'Request failed' }))
-      const err = new Error(body.error || 'Request failed') as Error & {
-        status?: number
-        body?: ApiError & Record<string, unknown>
-      }
-      err.status = response.status
-      err.body = body as ApiError & Record<string, unknown>
-      throw err
-    }
-
-    if (response.status === 204 || response.headers.get('content-length') === '0') {
-      return undefined as T
-    }
-
-    return response.json()
+    // Compatibility boundary for advanced resource pages not yet assigned a shared DTO schema.
+    return await getWebClient().request(endpoint, z.unknown(), { ...options, headers, timeoutMs: 120_000 }) as T
   }
 
   async get<T>(endpoint: string): Promise<T> {
