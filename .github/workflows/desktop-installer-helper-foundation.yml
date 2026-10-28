@@ -1,0 +1,29 @@
+name: Installer helper foundation
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feat/desktop-installer-helper-foundation']
+  pull_request:
+    paths:
+      - 'scripts/lib/install-network.mjs'
+      - 'scripts/lib/run-bounded.mjs'
+      - 'scripts/lib/__tests__/install-network.test.mjs'
+      - 'scripts/lib/__tests__/run-bounded.test.mjs'
+      - '.github/workflows/desktop-installer-helper-foundation.yml'
+permissions:
+  contents: read
+jobs:
+  helpers:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Verify actual child exit/descriptor behavior and bounded dependency transport
+        run: node --test scripts/lib/__tests__/install-network.test.mjs scripts/lib/__tests__/run-bounded.test.mjs
