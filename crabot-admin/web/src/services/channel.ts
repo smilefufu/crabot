@@ -73,7 +73,7 @@ export const channelService = {
   },
 
   async stopInstance(id: string) {
-    return api.post(`/channel-instances/${encodeURIComponent(id)}/stop`)
+    return api.post<{ status: string }>(`/channel-instances/${encodeURIComponent(id)}/stop`)
   },
 
   async restartInstance(id: string) {
