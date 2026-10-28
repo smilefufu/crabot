@@ -1055,7 +1055,7 @@ describe('Admin Web API', () => {
           desktop: true,
         },
         cli_access: createCliAccessConfig('write'),
-        storage: { workspace_path: '/', access: 'readwrite' },
+        storage: { scope: 'all', access: 'readwrite' },
         memory_scopes: [],
       })
     })
@@ -1191,7 +1191,7 @@ describe('Admin Web API', () => {
           desktop: true,
         },
         cli_access: createCliAccessConfig('write'),
-        storage: { workspace_path: '/', access: 'readwrite' },
+        storage: { scope: 'all', access: 'readwrite' },
         memory_scopes: [],
       })
     })
