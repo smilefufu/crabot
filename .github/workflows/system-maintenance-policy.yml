@@ -1,0 +1,46 @@
+name: System UID delegation and maintenance policies
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feat/desktop-system-maintenance-policy']
+  pull_request:
+    paths:
+      - 'scripts/lib/system-*.mjs'
+      - 'scripts/lib/legacy-system-*.mjs'
+      - 'scripts/lib/cli-location.cjs'
+      - 'scripts/lib/desktop-installation.cjs'
+      - 'scripts/lib/__tests__/system-*.test.mjs'
+      - 'scripts/lib/__tests__/legacy-system-*.test.mjs'
+      - '.github/workflows/system-maintenance-policy.yml'
+permissions:
+  contents: read
+jobs:
+  maintenance:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Build this checkout's real Native dependency
+        run: node scripts/build-native.mjs
+      - name: Verify actual temporary journals, entry fencing and role-specific maintenance
+        run: >-
+          node --test --test-concurrency=1
+          scripts/lib/__tests__/system-user.test.mjs
+          scripts/lib/__tests__/system-coordinator.test.mjs
+          scripts/lib/__tests__/system-conversion-permit.test.mjs
+          scripts/lib/__tests__/system-conversion.test.mjs
+          scripts/lib/__tests__/system-conversion-recovery.test.mjs
+          scripts/lib/__tests__/legacy-system-directory.test.mjs
+          scripts/lib/__tests__/system-recovery.test.mjs
+          scripts/lib/__tests__/system-upgrade.test.mjs
+          scripts/lib/__tests__/system-operation.test.mjs
+          scripts/lib/__tests__/legacy-system-fence.test.mjs
+          scripts/lib/__tests__/legacy-system-command.test.mjs
+          scripts/lib/__tests__/legacy-system-release.test.mjs
