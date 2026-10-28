@@ -114,12 +114,12 @@ describe('ModuleRuntimeRegistry', () => {
     expect(await probeProcessStartIdentity(2_147_483_647)).toBeNull()
   })
 
-  it('recovers every stale runtime for one module before replacement', async () => {
+  it.each(['linux', 'win32'] as const)('recovers every stale runtime for one module before replacement on %s', async platform => {
     const identities = new Map<number, string | null>([
       [101, 'start-101'],
       [102, 'start-102'],
     ])
-    const { registry, terminateTree } = makeRegistry(identities)
+    const { registry, terminateTree } = makeRegistry(identities, new Set(), { platform, probeRuntimeIdentity: async () => null })
     await record(registry, 'runtime-a', 'crabot-agent', 101, 19003)
     await record(registry, 'runtime-b', 'crabot-agent', 102, 19003)
 
@@ -130,16 +130,9 @@ describe('ModuleRuntimeRegistry', () => {
     })
 
     expect(terminateTree).toHaveBeenCalledTimes(2)
-    expect(terminateTree).toHaveBeenNthCalledWith(1, 101, expect.objectContaining({
-      gracefulTimeoutMs: 30_000,
-      modulePort: 19003,
-      requireOwnedProcess: true,
-    }))
-    expect(terminateTree).toHaveBeenNthCalledWith(2, 102, expect.objectContaining({
-      gracefulTimeoutMs: 30_000,
-      modulePort: 19003,
-      requireOwnedProcess: true,
-    }))
+    const options = { gracefulTimeoutMs: 30_000, requireOwnedProcess: true, ...(platform === 'win32' ? {} : { modulePort: 19003 }) }
+    expect(terminateTree).toHaveBeenNthCalledWith(1, 101, options)
+    expect(terminateTree).toHaveBeenNthCalledWith(2, 102, options)
     expect(await registry.listRecords()).toEqual([])
   })
 
