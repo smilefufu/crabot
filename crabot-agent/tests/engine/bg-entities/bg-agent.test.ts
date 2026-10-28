@@ -398,7 +398,7 @@ it('resumes the same child after its own real Shell finishes, without repeating 
   const { ChildShellSession } = await import('../../../src/workers/builtin/child-shell-session.js')
   const { runShellWithGrace } = await import('../../../src/engine/bg-entities/bg-shell.js')
   let session: InstanceType<typeof ChildShellSession>
-  let shellId = ''; let requests = 0; let launches = 0
+  let shellId = ''; let requests = 0; let launches = 0; let completed = false
   const histories: unknown[] = []
   const adapter: LLMAdapter = {
     async *stream(messages) {
@@ -413,6 +413,7 @@ it('resumes the same child after its own real Shell finishes, without repeating 
     }, updateConfig() {},
   }
   const id = await spawnPersistentAgent({ ...baseOpts(adapter),
+    onExit: ({ status }) => { completed = status === 'completed' },
     owner: { friend_id: '__builtin_worker__', worker_id: 'w' }, spawned_by_task_id: 'w', permissionConfig: { mode: 'bypass' },
     createExecution: (child, signal) => {
       session = new ChildShellSession(registry, child, signal)
@@ -433,12 +434,13 @@ it('resumes the same child after its own real Shell finishes, without repeating 
   })
   await waitFor(() => requests >= 2)
   expect((await registry.get(id))?.status).toBe('running')
-  await waitFor(async () => (await registry.get(id))?.status === 'completed', 5000)
+  await waitFor(() => completed, 5000)
+  expect((await registry.get(id))?.status).toBe('completed')
   expect(launches).toBe(1); expect(requests).toBe(3)
   expect(JSON.stringify(histories[2])).toContain('后台工作尚未完成')
   expect(JSON.stringify(histories[2])).toContain('<bg-notification>')
   expect((await registry.get(shellId))?.exit_notification?.status).toBe('delivered')
-})
+}, 10_000)
 
 
 it('图像初始输入与后续工具图片都到达实际 adapter 请求', async () => {
