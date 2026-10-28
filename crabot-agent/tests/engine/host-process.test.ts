@@ -34,10 +34,10 @@ describe('runHostProcess', () => {
   it('terminates the entire process group on timeout and leaves later calls usable', async () => {
     const pidFile = path.join(await fs.mkdtemp(path.join(os.tmpdir(), 'host-process-tree-')), 'grandchild.pid')
     temporaryPaths.push(path.dirname(pidFile))
-    const childProgram = `require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000)`
+    const childProgram = `require('node:fs').writeFileSync(${JSON.stringify(pidFile.replaceAll('\\', '/'))}, String(process.pid)); setInterval(() => {}, 1000)`
     const timedOut = await shell(
-      `${JSON.stringify(process.execPath)} -e ${JSON.stringify(childProgram)} & wait`,
-      { limits: { timeoutMs: 500, stdoutBytes: 64 * 1024, stderrBytes: 64 * 1024, killGraceMs: 100 } },
+      `${JSON.stringify(process.execPath.replaceAll('\\', '/'))} -e ${JSON.stringify(childProgram)} & wait`,
+      { limits: { timeoutMs: process.platform === 'win32' ? 3_000 : 500, stdoutBytes: 64 * 1024, stderrBytes: 64 * 1024, killGraceMs: 100 } },
     )
 
     expect(timedOut.kind).toBe('timed_out')
@@ -47,7 +47,7 @@ describe('runHostProcess', () => {
 
     const later = await shell('printf still-running')
     expect(later).toMatchObject({ kind: 'exit', exitCode: 0, stdout: 'still-running' })
-  })
+  }, 10_000)
 
   it('reports abort and bounded-output failures while retaining the collected tail', async () => {
     const controller = new AbortController()
