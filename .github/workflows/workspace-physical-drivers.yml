@@ -1,0 +1,53 @@
+name: Workspace physical copy and publication
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feat/desktop-workspace-physical-drivers']
+  pull_request:
+    paths:
+      - 'scripts/lib/workspace-copy.mjs'
+      - 'scripts/lib/workspace-*-copy.mjs'
+      - 'scripts/lib/workspace-file-metadata.mjs'
+      - 'scripts/lib/workspace-root-*.mjs'
+      - 'scripts/workspace-copy-host.mjs'
+      - 'scripts/workspace-root-probe.mjs'
+      - '.github/workflows/workspace-physical-drivers.yml'
+permissions:
+  contents: read
+jobs:
+  files:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Build only this checkout's Shared and Native
+        shell: bash
+        run: |
+          pnpm --dir crabot-shared install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-shared run build
+          node scripts/build-native.mjs
+      - name: Verify contents independently of file metadata
+        working-directory: crabot-shared
+        run: >-
+          node --import tsx --test --test-concurrency=1
+          src/workspace-relocation-content.test.ts
+          src/workspace-relocation-files.test.ts
+      - name: Verify actual finite filesystem copies, directory publication and cleanup
+        run: >-
+          node --test --test-concurrency=1
+          scripts/lib/__tests__/workspace-copy.test.mjs
+          scripts/lib/__tests__/workspace-file-metadata.test.mjs
+          scripts/lib/__tests__/workspace-sync.test.mjs
+          scripts/lib/__tests__/workspace-tar.test.mjs
+          scripts/lib/__tests__/workspace-windows-copy.test.mjs
+          scripts/lib/__tests__/workspace-windows-sync.test.mjs
+          scripts/lib/__tests__/workspace-root-probe.test.mjs
+          scripts/lib/__tests__/workspace-root-publish.test.mjs
