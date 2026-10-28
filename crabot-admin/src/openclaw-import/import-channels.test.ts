@@ -54,6 +54,28 @@ describe('importChannels', () => {
     expect(results).toEqual([{ kind: 'channel', name: 'feishu-main', status: 'skipped', reason: 'conflict' }])
   })
 
+  it('已有名称忽略大小写查重，导入时跳过 conflict', async () => {
+    const { deps } = makeDeps(['Feishu-Main'])
+    const results = await importChannels(channels, [{ source_channel: 'feishu', account_id: 'main' }], deps)
+    expect(deps.createChannel).not.toHaveBeenCalled()
+    expect(results).toEqual([{ kind: 'channel', name: 'feishu-main', status: 'skipped', reason: 'conflict' }])
+  })
+
+  it('大写账号可导入并保留名称，同批次大小写重名跳过', async () => {
+    const { created, deps } = makeDeps()
+    const accounts = { feishu: { accounts: {
+      Main: { appId: 'a', appSecret: 's' }, main: { appId: 'b', appSecret: 't' },
+    } } }
+    const results = await importChannels(accounts, [
+      { source_channel: 'feishu', account_id: 'Main' }, { source_channel: 'feishu', account_id: 'main' },
+    ], deps)
+    expect(created.map(p => p.name)).toEqual(['feishu-Main'])
+    expect(results).toEqual([
+      { kind: 'channel', name: 'feishu-Main', status: 'imported' },
+      { kind: 'channel', name: 'feishu-main', status: 'skipped', reason: 'conflict' },
+    ])
+  })
+
   it('secret 是 SecretRef（明文不在备份）→ 跳过 missing-secret', async () => {
     const { deps } = makeDeps()
 

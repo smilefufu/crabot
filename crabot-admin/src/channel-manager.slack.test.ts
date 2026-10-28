@@ -3,6 +3,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { ChannelManager } from './channel-manager.js'
+import { SlackOnboardingSessions } from './slack-onboarding-sessions.js'
 import { SlackChannel } from '../../crabot-channel-slack/src/slack-channel.js'
 
 const dirs: string[] = [], channels: SlackChannel[] = []
@@ -11,6 +12,27 @@ afterEach(async()=>{
   for(const dir of dirs.splice(0)) await fs.rm(dir,{recursive:true,force:true})
 })
 describe('Slack Admin -> real module RPC -> persistent restart',()=>{
+  it('preserves uppercase through onboarding completion and rejects a differently cased duplicate before authorization', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'slack-case-integration-')); dirs.push(dir)
+    const manager = new ChannelManager(dir, { registerModuleDefinition: vi.fn(), startModule: vi.fn() } as any)
+    await manager.initialize()
+    const onboarder = {
+      begin: vi.fn(async () => ({ session_id: '44444444-4444-4444-8444-444444444444', ui_mode: 'challenge_code' as const })),
+      finish: vi.fn(async () => ({ env: { SLACK_BOT_TOKEN: 'xoxb-fixture', SLACK_APP_TOKEN: 'xapp-fixture' } })),
+      poll: vi.fn(), cancel: vi.fn(),
+    }
+    const sessions = new SlackOnboardingSessions(dir)
+    const begin = await sessions.begin('human:0', onboarder, { instance_name: 'Slack-Mixed' }, manager)
+    await sessions.finish('human:0', begin.session_id, 'Slack-Mixed', onboarder, manager)
+    expect(manager.getInstance('Slack-Mixed')?.id).toBe('Slack-Mixed')
+    expect(manager.getInstance('slack-mixed')).toBeUndefined()
+    expect((await manager.loadLocalConfig('Slack-Mixed'))?.SLACK_BOT_TOKEN).toBe('xoxb-fixture')
+    await expect(sessions.begin('human:0', onboarder, { instance_name: 'slack-mixed' }, manager)).rejects.toMatchObject({ status: 409 })
+    expect(onboarder.begin).toHaveBeenCalledTimes(1)
+    await expect(manager.createInstance({ implementation_id: 'channel-slack', name: 'slack-mixed' })).rejects.toThrow('already exists')
+    expect(manager.listInstances().items.map(item => item.id)).toEqual(['Slack-Mixed'])
+  })
+
   it.skipIf(process.platform === 'win32')('uses native Windows ACL tools when PATH contains a conflicting whoami', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'slack-native-acl-')); dirs.push(dir)
     const system = path.join(dir, 'windows'), tools = path.join(system, 'System32'), shadow = path.join(dir, 'shadow')

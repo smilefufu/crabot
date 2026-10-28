@@ -220,13 +220,14 @@ export class SlackOnboarder implements Onboarder {
   }
   private async previousApp(session: Session, identity: Identity): Promise<string | undefined> {
     if (!session.requested_name) return undefined
+    const nameKey = session.requested_name.normalize('NFC').toLowerCase()
     let found: string | undefined
     const base = path.dirname(session.root)
     for (const entry of await fs.readdir(base, { withFileTypes: true })) {
       if (!entry.isDirectory() || entry.name === session.id || !/^[a-f0-9-]{36}$/.test(entry.name)) continue
       let intent
       try { intent = JSON.parse(await fs.readFile(path.join(base, entry.name, 'intent.json'), 'utf8')) } catch { continue }
-      if (intent.stage === 'completed' || intent.requested_name !== session.requested_name || intent.team_id !== identity.team_id || intent.user_id !== identity.user_id) continue
+      if (intent.stage === 'completed' || (typeof intent.requested_name !== 'string' || intent.requested_name.normalize('NFC').toLowerCase() !== nameKey) || intent.team_id !== identity.team_id || intent.user_id !== identity.user_id) continue
       if (!/^A[A-Z0-9]+$/.test(intent.app_id ?? '')) throw new Error('Previous remote creation outcome unknown; confirm in Slack first')
       if (found && found !== intent.app_id) throw new Error('More than one previous App; confirm in Slack first')
       found = intent.app_id

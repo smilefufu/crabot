@@ -62,6 +62,19 @@ describe('ChannelManager.upsertInstanceById', () => {
     expect(found?.name).toBe('Updated')
   })
 
+  it.each(['skip', 'overwrite'] as const)(
+    '仅大小写不同的导入 id（%s）不改名、不覆盖配置', async onConflict => {
+      await manager.upsertInstanceById(makeInstance('AI客服bot', 'AI客服bot'), { KEY: 'original' }, 'skip')
+      const before = await fs.readFile(path.join(dataDir, 'channel-instances.json'), 'utf8')
+      const importing = manager.upsertInstanceById(makeInstance('ai客服bot', 'ai客服bot'), { KEY: 'replacement' }, onConflict)
+      if (onConflict === 'skip') expect(await importing).toBe('skipped')
+      else await expect(importing).rejects.toThrow(/already exists/)
+      expect(manager.listInstances({}).items.map(i => i.id)).toEqual(['AI客服bot'])
+      expect(await manager.loadLocalConfig('AI客服bot')).toEqual({ KEY: 'original' })
+      expect(await fs.readFile(path.join(dataDir, 'channel-instances.json'), 'utf8')).toBe(before)
+    },
+  )
+
   it('config 非空时写入本地配置文件', async () => {
     const inst = makeInstance('ch-import-4', 'with-config')
     const config = { WECHAT_API_KEY: 'secret-123' }

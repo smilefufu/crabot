@@ -188,6 +188,11 @@ export class ChannelManager {
     return this.instances.get(id)
   }
 
+  private findInstanceIdConflict(id: string): ChannelInstance | undefined {
+    const key = id.normalize('NFC').toLowerCase()
+    return Array.from(this.instances.values()).find(instance => instance.id.normalize('NFC').toLowerCase() === key)
+  }
+
   async createInstance(params: CreateChannelInstanceParams): Promise<ChannelInstance> {
     if ('voice_setup' in params) throw new Error('voice_setup 只能由语音向导维护')
     const impl = this.implementations.get(params.implementation_id)
@@ -201,7 +206,7 @@ export class ChannelManager {
       throw new Error(`Invalid instance name: ${validated.reason}`)
     }
     const instanceId = validated.id
-    if (this.instances.has(instanceId)) {
+    if (this.findInstanceIdConflict(instanceId)) {
       throw new Error(`Instance name already exists: ${params.name}`)
     }
 
@@ -379,6 +384,11 @@ export class ChannelManager {
     if (!instance) {
       throw new Error(`Instance not found: ${id}`)
     }
+    const channelsDir = path.resolve(this.dataDir, 'channels')
+    const instanceDataDir = path.resolve(channelsDir, id)
+    if (path.basename(id) !== id || path.dirname(instanceDataDir) !== channelsDir) {
+      throw new Error(`Invalid instance data path: ${id}`)
+    }
 
     if (instance.module_registered) {
       await this.rpcClient.stopModule(id, 'admin')
@@ -391,9 +401,11 @@ export class ChannelManager {
       }
     }
 
+    // 清理完成前保留在册记录，避免重建同名实例复用残留数据。
+    await fs.rm(instanceDataDir, { recursive: true, force: true })
+    await this.deleteConfigFile(id)
     this.instances.delete(id)
     await this.saveInstances()
-    await this.deleteConfigFile(id)
   }
 
   // ============================================================================
@@ -694,11 +706,7 @@ export class ChannelManager {
 
   private async deleteConfigFile(instanceId: string): Promise<void> {
     const configPath = path.join(this.configsDir, `${instanceId}.json`)
-    try {
-      await fs.unlink(configPath)
-    } catch {
-      // 文件不存在，忽略
-    }
+    await fs.rm(configPath, { force: true })
   }
 
   async upsertInstanceById(
@@ -709,8 +717,13 @@ export class ChannelManager {
     // 备份可能来自 macOS（NFD 文件名），归一化后再匹配，防跨平台 id 对不上号
     const id = instance.id.normalize('NFC')
     const normalized: ChannelInstance = { ...instance, id, name: instance.name.normalize('NFC') }
-    const exists = this.instances.has(id)
-    if (exists && onConflict === 'skip') return 'skipped'
+    const conflict = this.findInstanceIdConflict(id)
+    if (conflict && onConflict === 'skip') return 'skipped'
+    // 导入必须保留 id；仅大小写不同不能当成覆盖，否则会留下断开的会话/好友引用。
+    if (conflict && conflict.id !== id) {
+      throw new Error(`Instance name already exists: ${instance.id} (${conflict.id})`)
+    }
+    const exists = conflict !== undefined
     this.instances.set(id, normalized)
     await this.saveInstances()
     if (config !== null) {

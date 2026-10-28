@@ -66,7 +66,7 @@ describe('local Slack onboarding contract', () => {
     const first = await onboarder.begin({ instance_name: 'slack-reuse' })
     await onboarder.submit(first.session_id, { challenge_code: 'fixture' })
     expect((await terminal(onboarder, first.session_id))?.type).toBe('error')
-    const second = await onboarder.begin({ instance_name: 'slack-reuse' })
+    const second = await onboarder.begin({ instance_name: 'SLACK-reuse' })
     await onboarder.submit(second.session_id, { challenge_code: 'fixture' })
     expect((await terminal(onboarder, second.session_id))?.type).toBe('success')
     const registry = JSON.parse(await fs.readFile(path.join(dataDir, 'slack-onboarding', second.session_id, 'project/.slack/apps.dev.json'), 'utf8'))
@@ -89,7 +89,7 @@ describe('local Slack onboarding contract', () => {
 
   it('hands off only after stopping CLI, retains a retryable result and clears developer credentials after durable creation', async () => {
     const { onboarder, dataDir, commands, stopped, verify, proxyContexts } = await setup()
-    const begin = await onboarder.begin({ __admin_proxy: { mode: 'none' } })
+    const begin = await onboarder.begin({ instance_name: 'Slack-local', __admin_proxy: { mode: 'none' } })
     expect(begin).toMatchObject({ ui_mode: 'challenge_code', authorization_command: '/slackauthticket fixture-ticket' })
     await onboarder.submit(begin.session_id, { challenge_code: 'fixture' })
     await expect(onboarder.submit(begin.session_id, { challenge_code: 'fixture' })).rejects.toMatchObject({ status: 409, code: 'session_busy' })
