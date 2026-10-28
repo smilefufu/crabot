@@ -1,0 +1,42 @@
+name: Desktop host components
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feat/desktop-host-components']
+  pull_request:
+    paths:
+      - 'crabot-desktop/**'
+      - '.github/workflows/desktop-host-components.yml'
+permissions:
+  contents: read
+jobs:
+  host:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Build this checkout's actual SDK, Shared, Native and internal host
+        run: |
+          pnpm --dir crabot-client install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-client run build
+          pnpm --dir crabot-shared install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-shared run build
+          pnpm install --frozen-lockfile --ignore-scripts
+          node scripts/build-native.mjs
+          pnpm --dir crabot-desktop install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-desktop run build
+      - name: Verify original session, IPC, generation, folder, diagnostics and login-intent components
+        run: node --test --test-concurrency=1 crabot-desktop/tests/*.test.mjs

@@ -1,0 +1,356 @@
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+import { existsSync, realpathSync } from 'node:fs'
+import { lstat, readdir } from 'node:fs/promises'
+import path from 'node:path'
+import { pathToFileURL } from 'node:url'
+import { ActivityClient, HttpClient, type DesktopHostState } from 'crabot-client'
+import { SessionHost, sameHostContext } from './session-host.js'
+import type { UpdateDownload } from './update-dialog.js'
+import type { PreparedInstallation } from './installation-entries.js'
+import type { LoginStartup, StartupState } from './login-startup.js'
+import { LoginStartupUpdateStore } from './login-startup-update.js'
+
+export type PreparedDesktopPair = PreparedInstallation & { source: PreparedInstallation['selection']; proof: { file: string; sha256: string } }
+
+export class DesktopController {
+  readonly host: SessionHost
+  private operation: Promise<void> = Promise.resolve()
+  private busy = 0
+  private polling?: ReturnType<typeof setInterval>
+  private checking = false
+  private retries = 0
+  constructor(private readonly options: { coreRoot: string; dataRoot: string; appVersion: string; platform: 'darwin' | 'win32' | 'linux'; packaged?: boolean; verifyBinding?: () => void;
+    loginStartup?: Pick<LoginStartup, 'captureForUpdate' | 'restoreForUpdate'>; loginStartupRecovered?: (state: StartupState | null) => void }) {
+    this.host = new SessionHost(options)
+  }
+  private load(file: string, root = this.options.coreRoot): Promise<any> { return import(pathToFileURL(path.join(root, file)).href) }
+  private async verifyInstallation() {
+    this.options.verifyBinding?.()
+    if (this.options.packaged || existsSync(path.join(this.options.coreRoot, 'core-release.json'))) {
+      this.host.status('discovering', '正在校验内置组件和应用版本。')
+      const { verifyCoreRelease } = await this.load('scripts/lib/core-release.mjs')
+      await verifyCoreRelease(this.options.coreRoot, { version: this.options.appVersion })
+    }
+  }
+  private async connect(operation: Promise<void>) {
+    await this.verifyInstallation()
+    if (this.busy || this.operation !== operation) return
+    await this.host.reconnect()
+  }
+  private report(error: unknown) {
+    const value = error as { code?: string }
+    const code = typeof value?.code === 'string' && /^[A-Z0-9_]{1,128}$/.test(value.code) ? value.code : 'DESKTOP_UNAVAILABLE'
+    const migration = ['CRABOT_DESKTOP_TAKEOVER_REQUIRED', 'CRABOT_DATA_NOT_PRIVATE', 'CRABOT_LEGACY_INSTANCE'].includes(code)
+    let message = '本机服务尚未就绪。可重新检查连接或查看基础诊断，按提示恢复。'
+    if (migration) message = '发现已有部署或数据，需要先检查并确认接管。'
+    else if (['CRABOT_CORE_INTEGRITY', 'CRABOT_RUNTIME_INVALID'].includes(code)) message = '内置运行文件未通过校验。请保留数据目录，并使用同版或更高版的桌面安装包修复；修复前先确认共享服务已停止。工作依赖不会因此被清空。'
+    else if (['CRABOT_PYTHON_ENV_INVALID', 'CRABOT_PYTHON_ENV_MIGRATION_REQUIRED', 'CRABOT_PYTHON_ENV_SELECTION_INVALID'].includes(code)) message = '工作用Python环境需要单独核验，现有依赖已保留。请打开基础诊断并导出报告；重新安装应用不会自动清空或重建该环境。'
+    else if (['CRABOT_BACKUP_SPACE', 'CRABOT_UPDATE_SPACE', 'ENOSPC'].includes(code)) message = '磁盘空间不足，当前步骤未能完成。请保留现有数据和维护记录，释放空间后打开基础诊断核对，再继续操作。'
+    else if (code === 'CRABOT_BACKUP_SCOPE_UNVERIFIED') message = '迁移涉及无法确认备份覆盖的数据引用，已停止迁移。请保留现有数据并查看恢复选项。'
+    else if (code === 'CRABOT_MIGRATION_INTERRUPTED') message = '上次数据迁移尚未完成，已停止自动重试。原数据、备份和维护记录已保留，请查看基础诊断并按恢复流程处理。'
+    else if (['CRABOT_PREFLIGHT_BUSY', 'CRABOT_PREFLIGHT_INTERRUPTED', 'CRABOT_PREFLIGHT_TIMEOUT'].includes(code)) message = '上次启动检查尚未确认结束，检查记录已保留。稍后点击启动可重新核对；只有旧检查进程已结束才会继续，不会清空数据。'
+    else if (code === 'CRABOT_INSTANCE_STARTING') message = '服务仍在启动。请稍候重新检查状态，再停止服务。'
+    else if (code === 'CRABOT_LOGIN_STARTUP_UPDATE') message = '登录启动设置无法核验，尚未停止服务或开始版本切换。请核对系统登录项；原设置和更新记录已保留。'
+    else if (code === 'CRABOT_MAINTENANCE_PENDING') message = '版本更新尚未核验完成。请退出并重新打开 Crabot 检查恢复；仍未恢复时重新安装目标版本，保留现有数据。'
+    this.host.status(migration ? 'migration_required' : 'error', message, code)
+  }
+  fail(error: unknown) { this.report(error) }
+  async updateActivity(): Promise<'idle' | 'active' | 'unknown'> {
+    try {
+      const current = await this.current()
+      if (this.host.snapshot().phase === 'stopped' && current.state === 'stopped') {
+        const records = await readdir(path.join(this.options.dataRoot, 'module-runtime-registry/records')).catch(error => {
+          if (error.code === 'ENOENT') return []; throw error
+        })
+        return records.some(name => name.endsWith('.json')) ? 'unknown' : 'idle'
+      }
+      const credential = await this.host.credential()
+      if (!credential || !current.mmAlive || credential.generation !== current.record?.generation) return 'unknown'
+      const activity = await new ActivityClient(new HttpClient({ endpoint: new URL('/api', credential.admin_url).href,
+        token: () => {
+          const context = this.host.context()
+          if (!context || !sameHostContext(credential, context)) throw new Error('Instance changed')
+          return credential.token
+        } })).read()
+      const context = this.host.context()
+      return context && sameHostContext(credential, context) ? activity : 'unknown'
+    } catch { return 'unknown' }
+  }
+  async prepareUpdate(update: UpdateDownload, install: () => Promise<void>): Promise<void> {
+    this.busy++
+    const pending = this.operation.then(async () => {
+      const { acquireCliLock, releaseCliLock } = await this.load('scripts/lib/cli-lock.mjs')
+      const maintenance = await this.load('scripts/lib/version-maintenance.mjs')
+      const { stopInstance } = await this.load('scripts/lib/instance-controller.mjs')
+      const { createMaintenanceBackup } = await this.load('scripts/lib/maintenance-backup.mjs')
+      const lock = await acquireCliLock(this.options.dataRoot, 'desktop-update')
+      try {
+        await this.current()
+        if (await this.updateActivity() !== 'idle') throw Object.assign(new Error('Current activity cannot be confirmed idle'), { code: 'CRABOT_UPDATE_BUSY' })
+        const record = await maintenance.beginVersionMaintenance(this.options.dataRoot, this.options.coreRoot, update.version, this.options.appVersion)
+        this.host.status('stopping', '正在停止共享实例并备份升级所需的数据。')
+        await stopInstance(this.options.dataRoot)
+        this.host.status('stopped', '共享实例已停止，正在准备版本更新。')
+        const backup = await createMaintenanceBackup(this.options.dataRoot)
+        await maintenance.recordVersionMaintenanceBackup(this.options.dataRoot, record.id, backup)
+        await maintenance.markVersionMaintenanceInstalling(this.options.dataRoot, record.id)
+        await install()
+      } finally { releaseCliLock(lock) }
+    }).catch(error => { this.report(error); throw error })
+    this.operation = pending.catch(() => {}).finally(() => { this.busy-- })
+    return pending
+  }
+  async applyPreparedPair(prepared: PreparedDesktopPair, replaceEntries: (source: PreparedInstallation, target: PreparedInstallation) => Promise<void>): Promise<{ executable: string; dataDir: string }> {
+    this.busy++
+    const pending = this.operation.then(async () => {
+      this.options.verifyBinding?.()
+      const { verifyPreparedDesktopPair } = await this.load('scripts/lib/desktop-pair-preparation.mjs')
+      const installation = await verifyPreparedDesktopPair(prepared)
+      if (installation.coreRoot !== this.options.coreRoot || installation.dataDir !== this.options.dataRoot
+        || installation.selection.version !== this.options.appVersion || JSON.stringify(installation.selection) !== JSON.stringify(prepared.source)) {
+        throw Object.assign(new Error('The prepared update belongs to another source installation'), { code: 'CRABOT_DESKTOP_INSTALLATION' })
+      }
+      // Target code executes only after its complete immutable payload is verified.
+      const root = prepared.coreRoot
+      const { acquireCliLock, releaseCliLock } = await this.load('scripts/lib/cli-lock.mjs', root)
+      const maintenance = await this.load('scripts/lib/version-maintenance.mjs', root)
+      const { stopInstance } = await this.load('scripts/lib/instance-controller.mjs', root)
+      const core = await this.load('scripts/lib/core-preparation.mjs', root)
+      const { inspectLocalMigrationData } = await this.load('scripts/lib/maintenance-backup.mjs', root)
+      const { previewMigrations } = await this.load('scripts/upgrade-lib/migrate.mjs', root)
+      const { default: selection } = await this.load('scripts/lib/desktop-installation.cjs')
+      const checkSource = () => {
+        this.options.verifyBinding?.()
+        const current = selection.readDesktopSelection(prepared.installRoot)
+        if (current.record.installation_id !== prepared.installation_id || JSON.stringify(current.selection) !== JSON.stringify(prepared.source)) {
+          throw Object.assign(new Error('The source pair changed'), { code: 'CRABOT_DESKTOP_INSTALLATION' })
+        }
+      }
+      const verifyData = async () => {
+        if (core.verifyDataCompatibility(root, this.options.dataRoot).length) throw Object.assign(new Error('Target data migration is incomplete'), { code: 'CRABOT_MIGRATION_FAILED' })
+        const preview = await previewMigrations(root, this.options.dataRoot)
+        return preview.modules.length === 0 && ['ready', 'not_applicable'].includes(preview.shared.status)
+      }
+      const lock = await acquireCliLock(this.options.dataRoot, 'desktop-paired-update')
+      let record
+      try {
+        checkSource(); await this.current()
+        await inspectLocalMigrationData(this.options.dataRoot, core.verifyDataCompatibility(root, this.options.dataRoot), root)
+        if (await this.updateActivity() !== 'idle') throw Object.assign(new Error('Current activity cannot be confirmed idle'), { code: 'CRABOT_UPDATE_BUSY' })
+        checkSource(); await this.current()
+        record = await maintenance.beginVersionMaintenance(this.options.dataRoot, this.options.coreRoot, prepared.selection.version, this.options.appVersion, { dataProtection: 'scoped' })
+        await maintenance.bindVersionMaintenanceTarget(this.options.dataRoot, record.id, root)
+        if (this.options.loginStartup) {
+          await this.captureLoginStartup(prepared, record.id)
+          checkSource(); await this.current(); checkSource()
+        }
+        this.host.status('stopping', '正在停止共享实例并准备更新所需的数据转换。')
+        await stopInstance(this.options.dataRoot)
+        checkSource()
+        this.host.status('stopped', '共享实例已停止，正在更新数据。')
+        await maintenance.prepareScopedVersionMaintenance(this.options.dataRoot, record.id)
+        await maintenance.markVersionMaintenanceInstalling(this.options.dataRoot, record.id)
+        await maintenance.migrateStoppedVersionMaintenance({ dataDir: this.options.dataRoot, root, id: record.id,
+          migrate: () => core.applyStartupMigrations(root, this.options.dataRoot, { ...process.env,
+            DATA_DIR: this.options.dataRoot, CRABOT_HOME: root, CRABOT_PRODUCT_REQUIRED: '1' }),
+          verifyComplete: async () => { if (!await verifyData()) throw Object.assign(new Error('Target data completion is unconfirmed'), { code: 'CRABOT_MIGRATION_INTERRUPTED' }) } })
+      } finally { releaseCliLock(lock) }
+      this.host.status('stopped', '数据转换已核验，正在提交应用版本；启动保护保持。')
+      const { commitPreparedDesktopPair } = await this.load('scripts/lib/desktop-pair-commit.mjs')
+      return commitPreparedDesktopPair(prepared, { maintenanceId: record.id, verifyData, replaceEntries })
+    }).catch(error => { this.report(error); throw error })
+    this.operation = pending.then(() => {}, () => {}).finally(() => { this.busy-- })
+    return pending
+  }
+  private async loginStartupStore(prepared: PreparedDesktopPair, id: string, phase: 'preparing' | 'verifying') {
+    const { cliLockToken } = await this.load('scripts/lib/cli-lock.mjs', prepared.coreRoot)
+    const maintenance = await this.load('scripts/lib/version-maintenance.mjs', prepared.coreRoot)
+    const guard = () => {
+      this.options.verifyBinding?.()
+      const record = maintenance.readVersionMaintenance(this.options.dataRoot)
+      if (!cliLockToken(path.join(this.options.dataRoot, 'cli.lock')) || record?.schema_version !== 3 || record.id !== id
+        || record.phase !== phase || record.data_protection !== 'scoped' || record.system_operation_id !== undefined
+        || record.data_dir !== this.options.dataRoot || record.install_root !== path.join(prepared.installRoot, 'releases', prepared.source.core_id)
+        || record.source_version !== prepared.source.version || record.source_inventory_sha256 !== prepared.source.core_id
+        || record.target_version !== prepared.selection.version || record.target_core?.root !== prepared.coreRoot
+        || record.target_core.inventory_sha256 !== prepared.selection.core_id) {
+        throw Object.assign(new Error('Login startup maintenance binding changed'), { code: 'CRABOT_LOGIN_STARTUP_UPDATE' })
+      }
+    }
+    guard()
+    return new LoginStartupUpdateStore({ installRoot: prepared.installRoot, installation_id: prepared.installation_id,
+      maintenance_id: id, source: prepared.source, target: prepared.selection }, guard)
+  }
+  private async captureLoginStartup(prepared: PreparedDesktopPair, id: string) {
+    try {
+      const store = await this.loginStartupStore(prepared, id, 'preparing')
+      await store.capture(await this.options.loginStartup!.captureForUpdate())
+    } catch {
+      throw Object.assign(new Error('Login startup intent could not be confirmed before stop'), { code: 'CRABOT_LOGIN_STARTUP_UPDATE' })
+    }
+  }
+  private async recoverLoginStartup(): Promise<StartupState | null | undefined> {
+    if (!this.options.loginStartup) return
+    try {
+      const maintenance = await this.load('scripts/lib/version-maintenance.mjs')
+      const record = maintenance.readVersionMaintenance(this.options.dataRoot)
+      // Source recovery and old jobs without this sidecar retain their original path.
+      if (record?.schema_version !== 3 || record.phase !== 'verifying' || record.install_root === this.options.coreRoot
+        || record.target_core?.root !== this.options.coreRoot) return
+      this.options.verifyBinding?.()
+      const { default: installation } = await this.load('scripts/lib/desktop-installation.cjs')
+      const own = installation.locateDesktopCore(this.options.coreRoot)
+      if (!own || own.dataDir !== this.options.dataRoot) throw new Error('Login startup installation changed')
+      const sidecar = path.join(own.root, 'app/updates', record.id, 'login-startup.json')
+      const present = await lstat(sidecar).catch(error => { if (error.code === 'ENOENT') return null; throw error })
+      if (!present) return
+      const { readCommittedDesktopPair } = await this.load('scripts/lib/desktop-pair-commit.mjs')
+      const prepared = await readCommittedDesktopPair(own.root, record.id)
+      const store = await this.loginStartupStore(prepared, record.id, 'verifying')
+      const intent = await store.read()
+      if (!intent || intent.phase === 'consumed') return
+      const sourceGui = path.join(prepared.installRoot, 'app/releases', prepared.source.gui_id)
+      const sourceExecutable = path.join(sourceGui, this.options.platform === 'darwin' ? 'Crabot.app/Contents/MacOS/Crabot'
+        : this.options.platform === 'win32' ? 'Crabot.exe' : 'crabot-desktop')
+      const state = await this.options.loginStartup.restoreForUpdate(intent.intent, sourceExecutable)
+      await store.consume(intent)
+      return state
+    } catch {
+      // This capability cannot clear maintenance, bypass health or mask a data error.
+      return null
+    }
+  }
+  private async verifyLegacyCli(): Promise<void> {
+    const before = await this.current(), state = this.host.snapshot()
+    if (state.phase !== 'ready' || !before.mmAlive || before.record?.generation !== state.generation) {
+      throw Object.assign(new Error('Legacy takeover service health is unconfirmed'), { code: 'CRABOT_MAINTENANCE_PENDING' })
+    }
+    const { default: installation } = await this.load('scripts/lib/desktop-installation.cjs')
+    const own = installation.locateDesktopCore(this.options.coreRoot)
+    if (!own || own.dataDir !== this.options.dataRoot) throw new Error('Legacy takeover installation changed')
+    const env: NodeJS.ProcessEnv = { ...process.env, DATA_DIR: own.dataDir, CRABOT_HOME: own.coreRoot, CRABOT_DEV: 'false', CRABOT_PORT_OFFSET: '0', CRABOT_PRODUCT_REQUIRED: '1' }
+    for (const name of ['NODE_OPTIONS', 'NODE_PATH', 'ELECTRON_RUN_AS_NODE']) delete env[name]
+    const { stdout } = await promisify(execFile)(own.command, ['status', '--json'], { env, encoding: 'utf8', timeout: 15_000, maxBuffer: 1024 * 1024, windowsHide: true })
+    const status = JSON.parse(stdout), after = await this.current(), afterState = this.host.snapshot()
+    this.options.verifyBinding?.()
+    if (status.running !== true || typeof status.data_dir !== 'string' || realpathSync(status.data_dir) !== own.dataDir
+      || !after.mmAlive || after.record?.generation !== before.record.generation || afterState.phase !== 'ready' || afterState.generation !== state.generation) {
+      throw Object.assign(new Error('Legacy takeover CLI does not confirm this healthy instance'), { code: 'CRABOT_MAINTENANCE_PENDING' })
+    }
+  }
+  recoverVersion(): Promise<boolean> {
+    this.busy++
+    const pending = this.operation.then(async () => {
+      const maintenance = await this.load('scripts/lib/version-maintenance.mjs')
+      const record = maintenance.readVersionMaintenance(this.options.dataRoot)
+      if (!record) return false
+      const { verifyDataCompatibility } = await this.load('scripts/lib/core-preparation.mjs')
+      const { assertLocalMigrationData } = await this.load('scripts/lib/maintenance-backup.mjs')
+      let startupState: StartupState | null | undefined
+      try {
+        const recover = record.schema_version === 4 ? maintenance.recoverLegacyUserVersionMaintenance : maintenance.recoverVersionMaintenance
+        await recover({ dataDir: this.options.dataRoot, root: this.options.coreRoot, appVersion: this.options.appVersion,
+          ...(record.schema_version === 4 ? { verifyTakeover: async () => { this.options.verifyBinding?.() } } : {}),
+          verifyCompatible: async () => {
+            const pending = verifyDataCompatibility(this.options.coreRoot, this.options.dataRoot)
+            if (pending.length && maintenance.readVersionMaintenance(this.options.dataRoot)?.phase === 'verifying') {
+              throw Object.assign(new Error('An earlier migration attempt has an unconfirmed result'), { code: 'CRABOT_MIGRATION_INTERRUPTED' })
+            }
+            await assertLocalMigrationData(this.options.dataRoot, pending, this.options.coreRoot)
+          },
+          run: async () => {
+            startupState = await this.recoverLoginStartup()
+            await this.startCore()
+            if (record.schema_version === 4) await this.verifyLegacyCli()
+            return this.host.snapshot().phase === 'ready'
+          } })
+      } finally {
+        // A macOS app-modal notice can block even before showMessageBox returns.
+        // Present it only after actual service recovery and maintenance settlement.
+        if (startupState !== undefined) {
+          try { this.options.loginStartupRecovered?.(startupState) }
+          catch { /* Presentation cannot replace the service recovery result. */ }
+        }
+      }
+      return true
+    })
+    this.operation = pending.then(() => {}, () => {}).finally(() => { this.busy-- })
+    return pending
+  }
+  private run(operation: () => Promise<void>): Promise<DesktopHostState> {
+    this.busy++
+    const pending = this.operation.then(operation).catch(error => { this.report(error) }).finally(() => { this.busy-- })
+    this.operation = pending
+    return pending.then(() => this.host.snapshot())
+  }
+  private async current() {
+    const { inspectInstance, identity } = await this.load('scripts/lib/instance-runtime.mjs')
+    const current = inspectInstance(this.options.dataRoot)
+    if (current.state === 'legacy' || current.record && realpathSync(current.record.install_root) !== realpathSync(this.options.coreRoot)) {
+      throw Object.assign(new Error('An existing installation requires explicit takeover'), { code: 'CRABOT_DESKTOP_TAKEOVER_REQUIRED' })
+    }
+    return { ...current, mmAlive: current.record?.mm && identity.sameProcess(current.record.mm, identity.inspectProcess(current.record.mm.pid)) }
+  }
+  private async startCore(): Promise<void> {
+    this.retries = 0
+    await this.verifyInstallation()
+    const current = await this.current()
+    if (current.state === 'running' && current.mmAlive) { await this.host.reconnect(); return }
+    this.host.status('starting', '正在准备内置环境并启动本机服务。')
+    const { startDesktopCore } = await this.load('scripts/desktop/start-core.mjs')
+    const started = Date.now()
+    await startDesktopCore({ root: this.options.coreRoot, dataDir: this.options.dataRoot,
+      onStage: (phase: string) => console.info(JSON.stringify({ component: 'desktop-startup', phase, at: new Date().toISOString(), elapsed_ms: Date.now() - started })) })
+    await this.host.reconnect()
+  }
+  start(): Promise<DesktopHostState> { return this.run(() => this.startCore()) }
+  stop(): Promise<DesktopHostState> {
+    return this.run(async () => {
+      this.host.status('stopping', '正在等待共享实例完成停机。')
+      const { acquireCliLock, releaseCliLock } = await this.load('scripts/lib/cli-lock.mjs')
+      const { stopInstance } = await this.load('scripts/lib/instance-controller.mjs')
+      const lock = await acquireCliLock(this.options.dataRoot, 'desktop-stop')
+      try { await this.current(); await stopInstance(this.options.dataRoot) } finally { releaseCliLock(lock) }
+      this.host.status('stopped', '服务已停止。可在需要时重新启动。')
+    })
+  }
+  reconnect(): Promise<DesktopHostState> {
+    return this.run(async () => {
+      this.retries = 0
+      await this.verifyInstallation()
+      const current = await this.current()
+      if (current.state === 'running' && current.mmAlive) await this.host.reconnect()
+      else this.host.status('stopped', '服务已停止。重新检查不会自动启动服务。')
+    })
+  }
+  watch() {
+    this.polling ??= setInterval(() => {
+      if (this.busy || this.checking) return
+      this.checking = true
+      void this.reconnectIfChanged().finally(() => { this.checking = false })
+    }, 5000)
+  }
+  private async reconnectIfChanged() {
+    const operation = this.operation
+    try {
+      const current = await this.current(), state = this.host.snapshot()
+      if (this.busy) return
+      if (!current.mmAlive) {
+        if (state.phase === 'ready' || state.phase === 'disconnected') this.host.status('stopped', '共享实例已停止。')
+      } else if (state.phase === 'stopped') {
+        this.retries = 0
+        this.host.status('disconnected', '共享实例已启动，正在恢复连接。')
+        await this.connect(operation)
+      } else if (state.phase === 'ready' && current.record.generation !== state.generation) {
+        this.host.status('disconnected', '实例已重新启动，正在恢复连接。')
+        await this.connect(operation)
+      } else if (state.phase === 'ready') {
+        if (await this.host.check()) this.retries = 0
+      } else if (state.phase === 'disconnected' && this.retries < 3) { this.retries++; await this.connect(operation) }
+    } catch (error) {
+      if (!this.busy && this.operation === operation && !['error', 'migration_required'].includes(this.host.snapshot().phase)) this.report(error)
+    }
+  }
+  close() { clearInterval(this.polling); this.host.close() }
+}
