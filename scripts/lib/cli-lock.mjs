@@ -59,6 +59,48 @@ export async function acquireStartupLock(dataDir, command = 'start', waitMs = 50
   return acquire(dataDir, command, waitMs, previous?.id, () => {})
 }
 
+// Resume only the same private relocation intent; this lock performs no stop/move/replay.
+export async function acquireWorkspaceRelocationLock(dataDir, id, waitMs = 5000) {
+  const { readWorkspaceRelocationIntent } = await import('./workspace-relocation-intent.mjs')
+  return acquire(dataDir, 'workspace-relocation', waitMs, undefined, () => {
+    if (readWorkspaceRelocationIntent(dataDir)?.id !== id) throw workspace.failure()
+  })
+}
+
+// Only the explicit interrupted job, including its guarded terminal handoff.
+export async function acquireWorkspaceInterruptedRecoveryLock(dataDir, id, waitMs = 5000) {
+  const records = await import('./workspace-relocation-intent.mjs')
+  const source = await import('./workspace-interrupted-source-records.mjs')
+  const forward = await import('./workspace-interrupted-forward-records.mjs')
+  const binding = () => {
+    if (records.readWorkspaceRelocationIntent(dataDir)) return records.readWorkspaceInterruptedRelocationCheckpoint(dataDir, id).checkpoint_sha256
+    const scope = forward.readWorkspaceInterruptedForwardPreparation(dataDir, id) ?? source.readWorkspaceSourceRecoveryScope(dataDir, id)
+    return JSON.stringify([scope.checkpoint.checkpoint_sha256, scope.released, scope.release])
+  }
+  const original = binding()
+  return acquire(dataDir, 'workspace-interrupted-recovery', waitMs, undefined, () => {
+    if (binding() !== original) throw workspace.failure()
+  }, true)
+}
+
+// A new recovery owner's mutex only. No old launch, bearer, or business action is revived.
+export async function acquireWorkspaceRelocationRecoveryLock(dataDir, id, waitMs = 5000) {
+  const records = await import('./workspace-relocation-intent.mjs')
+  const { sha256CanonicalJson } = await import('../../crabot-shared/dist/canonical-json.js')
+  const binding = () => {
+    try {
+      const fence = records.readCurrentWorkspaceRelocationFinalizing(dataDir)
+      if (!fence || fence.intent_id !== id || records.readWorkspaceRelocationReleased(dataDir, id)) throw workspace.failure()
+      const state = records.readWorkspaceRelocationArchivedState(dataDir, id)
+      return sha256CanonicalJson({ fence, completion: state.completion })
+    } catch { throw workspace.failure() }
+  }
+  const original = binding()
+  return acquire(dataDir, 'workspace-relocation-recovery', waitMs, undefined, () => {
+    if (binding() !== original) throw workspace.failure()
+  })
+}
+
 export function releaseCliLock(path) {
   const lock = handles.get(path)
   if (!lock) return
