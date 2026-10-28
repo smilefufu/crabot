@@ -53,15 +53,65 @@ describe('ChannelManager.createInstance 实例 id 校验', () => {
     )
   })
 
-  it('拒绝含空格、大写、emoji 的实例名', async () => {
+  it('拒绝含空格、emoji 的实例名', async () => {
     const manager = new ChannelManager(dataDir, makeRpc() as any)
     await manager.addImplementation(fakeImpl)
 
-    for (const name of ['微信 客服', 'Telegram', '客服🤖']) {
+    for (const name of ['微信 客服', '客服🤖']) {
       await expect(
         manager.createInstance({ implementation_id: fakeImpl.id, name })
       ).rejects.toThrow(/Invalid instance name/)
     }
+  })
+
+  it('大写混合实例名原样注册、持久化并在重新加载后读取配置', async () => {
+    const rpc = makeRpc()
+    const manager = new ChannelManager(dataDir, rpc as any)
+    await manager.addImplementation(fakeImpl)
+    const instance = await manager.createInstance({
+      implementation_id: fakeImpl.id, name: 'AI客服bot', env: { APP_ID: 'original' },
+    })
+    expect(instance.id).toBe('AI客服bot')
+    expect(instance.name).toBe('AI客服bot')
+    expect(rpc.registerModuleDefinition).toHaveBeenCalledWith(
+      expect.objectContaining({ module_id: 'AI客服bot' }), 'admin',
+    )
+    const restored = new ChannelManager(dataDir, rpc as any)
+    await restored.initialize()
+    expect(restored.getInstance('AI客服bot')?.name).toBe('AI客服bot')
+    expect(restored.getInstance('ai客服bot')).toBeUndefined()
+    expect(await restored.loadLocalConfig('AI客服bot')).toEqual({ APP_ID: 'original' })
+    await expect(restored.createInstance({ implementation_id: fakeImpl.id, name: 'ai客服bot' }))
+      .rejects.toThrow(/already exists/)
+  })
+
+  it.each([['AI客服bot', 'ai客服bot'], ['ai客服bot', 'AI客服bot']])(
+    '已有 %s 时拒绝 %s，配置与注册保持原样', async (existing, duplicate) => {
+      const rpc = makeRpc()
+      const manager = new ChannelManager(dataDir, rpc as any)
+      await manager.addImplementation(fakeImpl)
+      await manager.createInstance({ implementation_id: fakeImpl.id, name: existing, env: { APP_ID: 'original' } })
+      const before = await fs.readFile(path.join(dataDir, 'channel-instances.json'), 'utf8')
+      await expect(manager.createInstance({
+        implementation_id: fakeImpl.id, name: duplicate, env: { APP_ID: 'replacement' },
+      })).rejects.toThrow(/already exists/)
+      expect(manager.listInstances({}).items.map(i => i.id)).toEqual([existing])
+      expect(await manager.loadLocalConfig(existing)).toEqual({ APP_ID: 'original' })
+      expect(await fs.readFile(path.join(dataDir, 'channel-instances.json'), 'utf8')).toBe(before)
+      expect(rpc.registerModuleDefinition).toHaveBeenCalledTimes(1)
+    },
+  )
+
+  it('并发创建仅大小写不同的名称时只保留一个实例', async () => {
+    const rpc = makeRpc()
+    const manager = new ChannelManager(dataDir, rpc as any)
+    await manager.addImplementation(fakeImpl)
+    const results = await Promise.allSettled(['AI客服bot', 'ai客服bot'].map(name =>
+      manager.createInstance({ implementation_id: fakeImpl.id, name }),
+    ))
+    expect(results.filter(r => r.status === 'fulfilled')).toHaveLength(1)
+    expect(manager.listInstances({}).items).toHaveLength(1)
+    expect(rpc.registerModuleDefinition).toHaveBeenCalledTimes(1)
   })
 
   it('同名中文实例重复创建被拒绝', async () => {

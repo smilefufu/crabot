@@ -2,16 +2,16 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { validateInstanceId, INSTANCE_ID_REGEX } from './instance-id.js'
 
-test('接受中文/日文汉字、小写英文、数字、连字符', () => {
-  for (const name of ['微信客服', '飞书测试', '漢字', 'feishu-prod', '客服', '微信2号', 'tg-bot-01']) {
+test('接受中文/日文汉字、大小写英文、数字、连字符并保留原名', () => {
+  for (const name of ['微信客服', '飞书测试', '漢字', 'feishu-prod', '客服', '微信2号', 'tg-bot-01', 'AI客服bot', 'Telegram']) {
     const r = validateInstanceId(name)
     assert.equal(r.ok, true, name)
     if (r.ok) assert.equal(r.id, name)
   }
 })
 
-test('拒绝大写、空格、emoji、路径分隔符、点号', () => {
-  for (const name of ['Telegram', '微信 客服', '客服🤖', 'wechat/prod', 'a.b', 'con:aux']) {
+test('拒绝空格、emoji、路径分隔符、点号', () => {
+  for (const name of ['微信 客服', '客服🤖', 'wechat/prod', 'a.b', 'con:aux']) {
     assert.equal(validateInstanceId(name).ok, false, name)
   }
 })
@@ -43,5 +43,5 @@ test('空串与纯空白拒绝', () => {
 
 test('导出的正则与校验行为一致', () => {
   assert.equal(INSTANCE_ID_REGEX.test('微信客服'), true)
-  assert.equal(INSTANCE_ID_REGEX.test('WeChat'), false)
+  assert.equal(INSTANCE_ID_REGEX.test('WeChat'), true)
 })

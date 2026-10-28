@@ -66,7 +66,7 @@ export function analyzeChannels(channels: OpenClawChannelsConfig | undefined): A
     }
 
     for (const [account_id, account] of accounts) {
-      // 派生实例名非法（account_id 含大写/点号等）→ 预览即标不可迁，
+      // 派生实例名非法（account_id 含空格/点号等）→ 预览即标不可迁，
       // 与执行侧（import-channels）判定一致，避免“预览可迁、执行跳过”。
       if (!isValidChannelInstanceName(source_channel, account_id)) {
         result.push({ source_channel, account_id, channel, migratable: false, skip_reason: 'invalid-name' })

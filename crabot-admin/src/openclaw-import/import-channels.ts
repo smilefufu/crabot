@@ -27,6 +27,7 @@ export async function importChannels(
 ): Promise<ImportItemResult[]> {
   if (!channels) return []
   const results: ImportItemResult[] = []
+  const existingNames = new Set(Array.from(deps.existingChannelNames, name => name.normalize('NFC').toLowerCase()))
 
   for (const { source_channel, account_id } of selected) {
     const name = `${source_channel}-${account_id}`
@@ -43,12 +44,13 @@ export async function importChannels(
       continue
     }
 
-    if (deps.existingChannelNames.has(name)) {
+    const nameKey = name.normalize('NFC').toLowerCase()
+    if (existingNames.has(nameKey)) {
       results.push({ kind: 'channel', name, status: 'skipped', reason: 'conflict' })
       continue
     }
 
-    // 确定性预校验：非法派生名（如 account_id 含大写/点号）在创建前就跳过，
+    // 确定性预校验：非法派生名（如 account_id 含空格/点号）在创建前就跳过，
     // 与预览（analyze-channels）判定一致。运行时错误（磁盘/MM 故障）不在此吞掉——
     // 让其向上传播到 runStep，进入 summary.errors，避免把系统故障伪装成 skipped。
     if (!isValidChannelInstanceName(source_channel, account_id)) {
@@ -57,6 +59,7 @@ export async function importChannels(
     }
 
     await deps.createChannel(mapped.params)
+    existingNames.add(nameKey)
     results.push({ kind: 'channel', name, status: 'imported' })
   }
 

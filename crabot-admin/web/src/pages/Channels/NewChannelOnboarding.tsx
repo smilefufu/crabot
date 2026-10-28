@@ -41,7 +41,7 @@ interface Status {
 }
 
 // 与 crabot-shared/src/instance-id.ts 的 INSTANCE_ID_REGEX 保持一致（web 不依赖该包，字面量复制，改动需双向同步）
-const NAME_PATTERN = /^[\p{Script=Han}a-z0-9-]{2,50}$/u
+const NAME_PATTERN = /^[\p{Script=Han}A-Za-z0-9-]{2,50}$/u
 
 export const NewChannelOnboarding: React.FC = () => {
   const navigate = useNavigate()
@@ -107,7 +107,7 @@ export const NewChannelOnboarding: React.FC = () => {
     // 否则 NFD 输入（如 macOS 组合字符）会被前端拒绝、后端却接受。
     const normalizedName = name.normalize('NFC')
     if (!NAME_PATTERN.test(normalizedName)) {
-      toast.error('实例名可用中文、小写字母、数字、连字符（2-50 字符）')
+      toast.error('实例名可用中文、大小写字母、数字、连字符（2-50 字符）')
       return
     }
     if (normalizedName !== name) {
@@ -266,7 +266,7 @@ export const NewChannelOnboarding: React.FC = () => {
                 style={{ width: '100%' }}
               />
               <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.375rem' }}>
-                可用中文、小写字母、数字、连字符，2-50 字符。这就是 module_id，全局唯一。
+                可用中文、大小写字母、数字、连字符，2-50 字符。这就是 module_id，全局唯一，重名检查不区分大小写。
               </p>
             </div>
 

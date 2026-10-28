@@ -88,7 +88,7 @@ describe('analyzeChannels', () => {
     expect(analyzeChannels(channels)).toEqual([])
   })
 
-  it('账号派生出非法实例名（account_id 含点号/大写）→ 预览即标不可迁 invalid-name', () => {
+  it('账号派生出非法实例名（account_id 含点号）→ 预览即标不可迁 invalid-name', () => {
     const channels: OpenClawChannelsConfig = {
       feishu: { accounts: { 'Bad.Name': { appId: 'cli_x', appSecret: 'secret32' } } },
     }
@@ -98,6 +98,11 @@ describe('analyzeChannels', () => {
     expect(result).toHaveLength(1)
     expect(result[0].migratable).toBe(false)
     expect(result[0].skip_reason).toBe('invalid-name')
+  })
+
+  it('大写账号派生名在预览中可迁移', () => {
+    const result = analyzeChannels({ feishu: { accounts: { Main: { appId: 'a', appSecret: 's' } } } })
+    expect(result[0]).toMatchObject({ account_id: 'Main', migratable: true, credentials: 'available' })
   })
 
   it('空/缺失 → 空数组', () => {
