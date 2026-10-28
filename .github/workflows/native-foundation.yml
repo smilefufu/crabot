@@ -85,3 +85,6 @@ jobs:
           scripts/lib/__tests__/directory-pin.test.mjs
           scripts/lib/__tests__/workspace-windows-metadata.test.mjs
           scripts/lib/__tests__/install-network.test.mjs
+      - name: Verify ordinary Windows owner defaults outside the Bash token context
+        if: runner.os == 'Windows'
+        run: node --test --test-name-pattern='Windows ordinary existing paths' scripts/lib/__tests__/private-file-paths.test.mjs
