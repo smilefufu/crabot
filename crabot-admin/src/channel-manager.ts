@@ -373,6 +373,11 @@ export class ChannelManager {
     if (!instance) {
       throw new Error(`Instance not found: ${id}`)
     }
+    const channelsDir = path.resolve(this.dataDir, 'channels')
+    const instanceDataDir = path.resolve(channelsDir, id)
+    if (path.basename(id) !== id || path.dirname(instanceDataDir) !== channelsDir) {
+      throw new Error(`Invalid instance data path: ${id}`)
+    }
 
     if (instance.module_registered) {
       await this.rpcClient.stopModule(id, 'admin')
@@ -385,9 +390,11 @@ export class ChannelManager {
       }
     }
 
+    // 清理完成前保留在册记录，避免重建同名实例复用残留数据。
+    await fs.rm(instanceDataDir, { recursive: true, force: true })
+    await this.deleteConfigFile(id)
     this.instances.delete(id)
     await this.saveInstances()
-    await this.deleteConfigFile(id)
   }
 
   // ============================================================================
@@ -682,11 +689,7 @@ export class ChannelManager {
 
   private async deleteConfigFile(instanceId: string): Promise<void> {
     const configPath = path.join(this.configsDir, `${instanceId}.json`)
-    try {
-      await fs.unlink(configPath)
-    } catch {
-      // 文件不存在，忽略
-    }
+    await fs.rm(configPath, { force: true })
   }
 
   async upsertInstanceById(
