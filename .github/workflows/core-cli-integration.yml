@@ -49,6 +49,7 @@ jobs:
           pnpm --dir crabot-agent install --frozen-lockfile --ignore-scripts
           pnpm --dir crabot-agent run build
           pnpm --dir crabot-admin install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-admin run build
           pnpm --dir scripts/lib install --frozen-lockfile --ignore-scripts
           node scripts/build-native.mjs
       - name: Prepare finite offline Python fixtures without a full desktop runtime

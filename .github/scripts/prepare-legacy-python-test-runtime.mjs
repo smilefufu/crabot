@@ -11,13 +11,13 @@ const root = fileURLToPath(new URL('../../', import.meta.url)), runtime = path.j
 for (const file of ['.product-runtime', 'product-runtime.json']) {
   if (await fs.lstat(path.join(root, file)).catch(error => { if (error.code !== 'ENOENT') throw error })) throw new Error('Test runtime already exists; preserving it')
 }
-const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => /^(PATH|HOME|USERPROFILE|APPDATA|LOCALAPPDATA|SYSTEMROOT|WINDIR|TEMP|TMP|TMPDIR)$/i.test(key)))
+const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => /^(PATH|HOME|USERPROFILE|APPDATA|LOCALAPPDATA|SYSTEMROOT|WINDIR|PATHEXT|TEMP|TMP|TMPDIR)$/i.test(key)))
 const run = (command, args) => execFileSync(command, args, { env: { ...env, UV_OFFLINE: '1', UV_PYTHON_DOWNLOADS: 'never', UV_NO_CONFIG: '1' }, encoding: 'utf8', timeout: 30000 }).trim()
 const python = process.env.CRABOT_TEST_PYTHON ?? run('uv', ['python', 'find', '3.12.12'])
 const details = JSON.parse(run(python, ['-I', '-S', '-B', '-c', 'import json,sys;print(json.dumps({"home":sys.base_prefix,"version":".".join(map(str,sys.version_info[:3]))}))']))
 if (details.version !== '3.12.12' || process.versions.node !== '22.22.3') throw new Error('Use the fixed test interpreters')
 const uv = process.env.CRABOT_TEST_UV ?? (process.platform === 'win32'
-  ? run('where.exe', ['uv']).split(/\r?\n/)[0] : run('/bin/sh', ['-c', 'command -v uv']))
+  ? run('where.exe', ['uv.exe']).split(/\r?\n/)[0] : run('/bin/sh', ['-c', 'command -v uv']))
 if (run(uv, ['--version']).split(/\s+/)[1] !== '0.13.0') throw new Error('Use the fixed uv test runner')
 const seeds = JSON.parse(await fs.readFile(path.join(root, 'scripts/desktop/python-seed.json'), 'utf8'))
 await fs.mkdir(runtime)
