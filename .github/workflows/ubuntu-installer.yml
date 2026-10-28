@@ -1,0 +1,75 @@
+name: Ubuntu native installer
+on:
+  push:
+    branches: ['feat/desktop-final-acceptance']
+    paths:
+      - 'crabot-desktop/native/ubuntu/**'
+      - 'crabot-desktop/src/ubuntu-*'
+      - 'scripts/desktop/build-ubuntu-installer.mjs'
+      - '.github/scripts/test-ubuntu-*'
+      - '.github/workflows/ubuntu-installer.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ubuntu-native-installer-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  native:
+    name: Native compile Ubuntu ${{ matrix.release }}
+    runs-on: ubuntu-24.04
+    container: ubuntu:${{ matrix.release }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        release: ['24.04', '26.04']
+    steps:
+      - name: Prepare isolated compiler and desktop libraries
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git ca-certificates build-essential pkg-config libgtk-4-dev libjson-glib-dev python3 xvfb xauth dbus-daemon
+          useradd --create-home --uid 1101 crabot-test
+      - uses: actions/checkout@v4
+      - name: Compile without GTK in privileged helper
+        run: |
+          mkdir -p .desktop-build/ubuntu-native
+          cc -std=c11 -Wall -Wextra -Werror -O2 crabot-desktop/native/ubuntu/apparmor-path.test.c -o .desktop-build/ubuntu-native/path-test
+          .desktop-build/ubuntu-native/path-test
+          cc -std=c11 -Wall -Wextra -Werror -O2 -D_FORTIFY_SOURCE=3 -fstack-protector-strong -Wl,-z,relro,-z,now crabot-desktop/native/ubuntu/sandbox-helper.c -o .desktop-build/ubuntu-native/crabot-sandbox-helper $(pkg-config --cflags --libs json-glib-1.0)
+          if ldd .desktop-build/ubuntu-native/crabot-sandbox-helper | grep -E 'libgtk|libwebkit|libchromium'; then exit 1; fi
+          cc -std=c11 -Wall -Wextra -Werror -O2 -D_FORTIFY_SOURCE=3 -fstack-protector-strong -Wl,-z,relro,-z,now crabot-desktop/native/ubuntu/installer.c -o .desktop-build/ubuntu-native/crabot-installer $(pkg-config --cflags --libs gtk4 json-glib-1.0)
+      - name: Compile actual GTK cancellation callback regression
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -O2 crabot-desktop/native/ubuntu/installer-lifecycle.test.c -o .desktop-build/ubuntu-native/installer-lifecycle-test $(pkg-config --cflags --libs gtk4 json-glib-1.0)
+      - name: Reap pending authorization before allowing retry
+        run: |
+          chmod a+rx /__w /__w/crabot /__w/crabot/crabot
+          runuser -u crabot-test -- timeout 30s dbus-run-session -- xvfb-run -a env GDK_BACKEND=x11 GTK_A11Y=none .desktop-build/ubuntu-native/installer-lifecycle-test
+      - name: Exercise ordinary UID native verification and refusal
+        run: |
+          chmod a+rx /__w /__w/crabot /__w/crabot/crabot
+          runuser -u crabot-test -- python3 .github/scripts/test-ubuntu-sandbox-helper.py .desktop-build/ubuntu-native/crabot-sandbox-helper
+          runuser -u crabot-test -- python3 .github/scripts/test-ubuntu-sandbox-helper.py .desktop-build/ubuntu-native/crabot-sandbox-helper --without-headless
+      - name: Open real GTK first window without Chromium or business startup
+        run: |
+          runuser -u crabot-test -- dbus-run-session -- xvfb-run -a env GDK_BACKEND=x11 .desktop-build/ubuntu-native/crabot-installer --smoke-test
+      # Container libraries are not proof of default GNOME, Polkit or kernel enforcement.
+
+  kernel:
+    name: Real restricted kernel Ubuntu 24.04
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile the native helper and finite owned namespace probe
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libjson-glib-dev
+          mkdir -p .desktop-build/ubuntu-kernel
+          cc -std=c11 -Wall -Wextra -Werror -O2 crabot-desktop/native/ubuntu/sandbox-helper.c -o .desktop-build/ubuntu-kernel/crabot-sandbox-helper $(pkg-config --cflags --libs json-glib-1.0)
+          cc -std=c11 -Wall -Wextra -Werror crabot-desktop/native/ubuntu/namespace-probe.test.c -o .desktop-build/ubuntu-kernel/namespace-probe
+      - name: Prove actual default restriction and exact-path registration
+        shell: bash
+        run: python3 .github/scripts/test-ubuntu-sandbox-helper.py .desktop-build/ubuntu-kernel/crabot-sandbox-helper .desktop-build/ubuntu-kernel/namespace-probe
