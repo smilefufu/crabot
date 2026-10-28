@@ -212,11 +212,22 @@ export class ManagerSessionStore {
   async loadCheckpoint(key: ManagerKey): Promise<ManagerResumeCheckpoint | undefined> {
     let raw: string
     try {
-      raw = await fs.readFile(join(this.dirFor(key), CHECKPOINT_FILE), 'utf-8')
+      const file = join(this.dirFor(key), CHECKPOINT_FILE)
+      // Keep Windows read handles inside the synchronous checkpoint replacement boundary.
+      raw = process.platform === 'win32' ? readFileSync(file, 'utf-8') : await fs.readFile(file, 'utf-8')
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
       throw error
     }
+    return ManagerSessionStore.decodeCheckpoint(key, raw)
+  }
+
+  /** Same checkpoint validation without store initialization, history repair or input acknowledgement. */
+  static parseWorkspaceRelocationCheckpoint(key: ManagerKey, raw: string): ManagerResumeCheckpoint {
+    return ManagerSessionStore.decodeCheckpoint(key, raw)
+  }
+
+  private static decodeCheckpoint(key: ManagerKey, raw: string): ManagerResumeCheckpoint {
     const checkpoint = JSON.parse(raw) as ManagerResumeCheckpoint
     if (checkpoint.state?.key !== key || typeof checkpoint.episodeId !== 'string'
       || !Array.isArray(checkpoint.state.recent) || !Array.isArray(checkpoint.envelopes)

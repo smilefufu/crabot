@@ -33,6 +33,26 @@ function makeWorker(workerId: string, overrides: Partial<LedgerWorker> = {}): Le
 }
 
 describe('LedgerStore', () => {
+  it.each(['queued', 'running', 'halted'] as const)('cannot reopen closed Workers as %s through replacement or in-place updates', async status => {
+    const key = 'fixture::closed' as ManagerKey
+    const closed = makeWorker('closed', { manager_key: key, task: { id: 'closed-task', title: 'keep history', status: 'closed', created_at: '2026-10-20T00:00:00.000Z',
+      closed: { at: '2026-10-21T01:00:00.000Z', by: 'migration', note: 'original workspace migration' } } })
+    await store.upsertWorker(key, closed.worker_id, () => closed)
+    const file = join(dir, managerKeyToFilename(key)), before = await fs.readFile(file)
+    await expect(store.upsertWorker(key, closed.worker_id, previous => ({ ...previous!, task: { ...previous!.task, status } }))).rejects.toThrow('closed Worker cannot reopen')
+    await expect(store.upsertWorker(key, closed.worker_id, previous => { previous!.task.status = status; return previous })).rejects.toThrow('closed Worker cannot reopen')
+    expect(await fs.readFile(file)).toEqual(before)
+    expect((await new LedgerStore(dir).findWorker(closed.worker_id))?.worker.task).toEqual(closed.task)
+  })
+
+  it('allows historical observation updates while keeping the original closed disposition', async () => {
+    const key = 'fixture::closed' as ManagerKey
+    await store.upsertWorker(key, 'closed', () => makeWorker('closed', { manager_key: key, task: { id: 'closed-task', title: 'keep history', status: 'closed', created_at: '2026-10-20T00:00:00.000Z',
+      closed: { at: '2026-10-21T01:00:00.000Z', by: 'migration', note: 'original workspace migration' } } }))
+    const before = (await store.findWorker('closed'))!.worker.task
+    await store.upsertWorker(key, 'closed', previous => { previous!.updated_at = '2026-10-21T02:00:00.000Z'; return previous })
+    expect((await new LedgerStore(dir).findWorker('closed'))!.worker.task).toEqual(before)
+  })
 
   it('an established workspace binding is immutable even when a mutator edits its input in place', async () => {
     const key = 'fixture::project' as ManagerKey
@@ -45,6 +65,7 @@ describe('LedgerStore', () => {
     await store.upsertWorker(key, 'old', () => makeWorker('old', { manager_key: key }))
     await expect(store.upsertWorker(key, 'old', previous => ({ ...previous!, workspace_id: 'default' }))).rejects.toThrow('workspace_id is immutable')
   })
+
   let dir: string
   let store: LedgerStore
 
@@ -202,8 +223,8 @@ describe('LedgerStore', () => {
     const now = new Date().toISOString()
     const legacy = makeWorker('w-legacy', {
       manager_key: key,
-      task: { id: 'w-legacy' as never, title: 'old', status: 'completed', created_at: now, completed_at: now },
-      incarnations: [{ impl: 'legacy', seq: 1, state: 'exited', workspace: '/tmp', started_at: now, ended_at: now, ended_reason: 'completed' }],
+      task: { id: 'w-legacy' as never, title: 'old', status: 'halted', created_at: now, halt: { halted_at: now, halt_reason: 'pre_migration' } },
+      incarnations: [{ impl: 'legacy', seq: 1, state: 'exited', workspace: '/tmp', started_at: now, ended_at: now, ended_reason: 'pre_migration' }],
       legacy_source: { kind: 'v2_admin_task', admin_task_id: 'old-task' as never, trace_ids: [], imported_at: now },
     })
     await store.importLegacyWorker(key, legacy)
@@ -214,6 +235,19 @@ describe('LedgerStore', () => {
     const corrupt = new LedgerStore(dir)
     await fs.writeFile(join(dir, managerKeyToFilename(key)), JSON.stringify({ manager_key: key, workers: [{ ...legacy, incarnations: [] }] }))
     await expect(corrupt.getLedger(key)).rejects.toThrow('invalid legacy worker')
+  })
+
+  it('cannot reopen a terminal legacy Worker after normal read-time status migration', async () => {
+    const key = 'fixture::legacy-closed' as ManagerKey, now = new Date().toISOString()
+    const legacy = makeWorker('legacy-closed', { manager_key: key,
+      task: { id: 'legacy-closed', title: 'old completed work', status: 'completed', created_at: now },
+      incarnations: [{ impl: 'legacy', seq: 1, state: 'exited', workspace: '/tmp', started_at: now, ended_at: now, ended_reason: 'pre_migration' }],
+      legacy_source: { kind: 'v2_admin_task', admin_task_id: 'old-task' as never, trace_ids: [], imported_at: now } })
+    await store.importLegacyWorker(key, legacy)
+    expect((await store.findWorker(legacy.worker_id))!.worker.task.status).toBe('closed')
+    const file = join(dir, managerKeyToFilename(key)), before = await fs.readFile(file)
+    await expect(store.upsertWorker(key, legacy.worker_id, previous => { previous!.task.status = 'running'; return previous })).rejects.toThrow('closed Worker cannot reopen')
+    expect(await fs.readFile(file)).toEqual(before)
   })
 
   it('2026-08-31 状态迁移:旧 6 态台账读取时归一为新 4 态并回写', async () => {

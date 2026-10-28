@@ -29,6 +29,18 @@ function validatePayload(payload: StoredPayload): void {
   if (sha256CanonicalJson(original) !== payload.payload_sha256) throw new Error('Authorized voice digest mismatch')
 }
 
+export function decodeVoiceInboxRecord(filename: string, raw: string): VoiceInboxRecord {
+  const record = JSON.parse(raw) as VoiceInboxRecord
+  const key = sha256CanonicalJson([record.channel_id, record.turn_id])
+  if (record.protocol_version !== 2) throw new Error('Incompatible voice WIP inbox; use a separate v2 data directory')
+  if (filename !== key + '.json' || !['accepted', 'managed'].includes(record.phase) || typeof record.confirmed !== 'boolean' || !/^[0-9a-f]{64}$/.test(record.payload_sha256) || (record.phase === 'accepted' && !record.payload)) throw new Error('Corrupt voice ingress record')
+  if (record.payload) {
+    validatePayload(record.payload)
+    if (record.payload.channel_id !== record.channel_id || record.payload.turn_id !== record.turn_id || record.payload.payload_sha256 !== record.payload_sha256) throw new Error('Corrupt voice ingress identity')
+  }
+  return record
+}
+
 /** Whole-turn durable ingress. A managed record keeps dedup facts; text belongs to Manager history. */
 export class VoiceInbox {
   private readonly records = new Map<string, VoiceInboxRecord>()
@@ -40,14 +52,8 @@ export class VoiceInbox {
     if (!fs.existsSync(this.directory)) return
     for (const filename of fs.readdirSync(this.directory)) {
       if (!/^[0-9a-f]{64}\.json$/.test(filename)) continue
-      const record = JSON.parse(fs.readFileSync(path.join(this.directory, filename), 'utf8')) as VoiceInboxRecord
+      const record = decodeVoiceInboxRecord(filename, fs.readFileSync(path.join(this.directory, filename), 'utf8'))
       const key = this.key(record.channel_id, record.turn_id)
-      if (record.protocol_version !== 2) throw new Error('Incompatible voice WIP inbox; use a separate v2 data directory')
-      if (filename !== key + '.json' || !['accepted', 'managed'].includes(record.phase) || typeof record.confirmed !== 'boolean' || !/^[0-9a-f]{64}$/.test(record.payload_sha256) || (record.phase === 'accepted' && !record.payload)) throw new Error('Corrupt voice ingress record')
-      if (record.payload) {
-        validatePayload(record.payload)
-        if (record.payload.channel_id !== record.channel_id || record.payload.turn_id !== record.turn_id || record.payload.payload_sha256 !== record.payload_sha256) throw new Error('Corrupt voice ingress identity')
-      }
       this.records.set(key, record)
     }
   }

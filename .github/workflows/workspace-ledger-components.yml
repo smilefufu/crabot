@@ -1,0 +1,55 @@
+name: Workspace Agent ledger and recovery components
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feat/desktop-workspace-ledger-components']
+  pull_request:
+    paths:
+      - 'crabot-agent/src/core/workspace-*.ts'
+      - 'crabot-agent/src/workers/harness/workspace-relocation-close.ts'
+      - 'crabot-agent/src/workers/harness/ledger-store.ts'
+      - 'crabot-agent/tests/core/workspace-*.test.ts'
+      - '.github/workflows/workspace-ledger-components.yml'
+permissions:
+  contents: read
+jobs:
+  ledgers:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Build this checkout's actual Shared, SDK, Agent and Native
+        shell: bash
+        run: |
+          pnpm --dir crabot-client install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-client run build
+          pnpm --dir crabot-shared install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-shared run build
+          pnpm --dir crabot-agent install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-agent run build
+          node scripts/build-native.mjs
+      - name: Verify temporary original records, partial commits and normal stores
+        working-directory: crabot-agent
+        run: >-
+          node node_modules/vitest/vitest.mjs run
+          tests/core/workspace-relocation-ledgers.test.ts
+          tests/core/workspace-relocation-commit.test.ts
+          tests/core/workspace-relocation-recovery-capture.test.ts
+          tests/core/workspace-relocation-recovery-progress.test.ts
+          tests/core/workspace-relocation-checkpoints.test.ts
+          tests/workers/harness/workspace-relocation-close.test.ts
+          tests/workers/harness/ledger-store.test.ts
+          tests/workers/harness/ledger-cache.test.ts
+          tests/workers/harness/manager-key-ledger.test.ts
+          tests/manager/session-store.test.ts
+          tests/manager/workboard-store.test.ts
+          tests/manager/voice-inbox.test.ts
+          --maxWorkers=1 --minWorkers=1

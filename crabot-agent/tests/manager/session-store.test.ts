@@ -10,6 +10,22 @@ import { resumeManagerMessages } from '../../src/manager/resume-checkpoint.js'
 import { createUserMessage, createAssistantMessage, createBatchToolResultMessage } from '../../src/engine/types.js'
 
 describe('ManagerSessionStore', () => {
+  it('validates a relocation checkpoint without touching history or completing an unknown tool call', () => {
+    const key: ManagerKey = 'wechat::offline-checkpoint'
+    const state = { key, foldedCount: 0, recent: [createAssistantMessage([{ type: 'tool_use', id: 'unknown-call', name: 'Write', input: { path: '/original' } }], 'tool_use')] }
+    const checkpoint: ManagerResumeCheckpoint = { episodeId: 'original-episode', state, envelopes: [], wakeIndex: -1, pending: [], hasEngineMessages: true,
+      turns: [], responses: [], tools: [], pendingToolCallIds: ['unknown-call'], adminChatClaims: [['original-admin-request', 'unclaimed']], transientMessageIds: [], spawnedWorkerIds: ['original-worker'],
+      execution: { needsSpawnRecheck: false, spawnRecheckInjected: false, spawnRecheckOutcomeRecorded: false, postSendRecheckSequence: 0,
+        successfulSendMessageTargets: [], continuedWorkers: [] } }
+    const raw = JSON.stringify(checkpoint, null, 4) + '\n'
+    expect(ManagerSessionStore.parseWorkspaceRelocationCheckpoint(key, raw)).toEqual(checkpoint)
+    expect(ManagerSessionStore.parseWorkspaceRelocationCheckpoint(key, raw).state.recent).toHaveLength(1)
+    expect(() => ManagerSessionStore.parseWorkspaceRelocationCheckpoint('other::manager', raw)).toThrow('invalid resume checkpoint')
+    expect(() => ManagerSessionStore.parseWorkspaceRelocationCheckpoint(key, JSON.stringify({ ...checkpoint, pendingToolCallIds: null }))).toThrow('invalid resume checkpoint')
+    expect(() => ManagerSessionStore.parseWorkspaceRelocationCheckpoint(key, JSON.stringify({ ...checkpoint, execution: {} }))).toThrow('invalid resume checkpoint')
+    expect(JSON.stringify(checkpoint, null, 4) + '\n').toBe(raw)
+  })
+
   let dir: string
   let store: ManagerSessionStore
 
@@ -42,6 +58,27 @@ describe('ManagerSessionStore', () => {
     expect(loaded.lastActiveAt).toBe('2026-07-30T08:00:00.000Z')
     expect(loaded.foldedCount).toBe(12)
   })
+
+  it('reads complete checkpoints while synchronous atomic replacements continue', async () => {
+    const key: ManagerKey = 'wechat::checkpoint-replacement'
+    await store.ensureSession(key)
+    const checkpoint: ManagerResumeCheckpoint = { episodeId: 'atomic-0', state: { key, foldedCount: 0,
+      recent: [createUserMessage('checkpoint body '.repeat(4096))] }, envelopes: [], wakeIndex: -1, pending: [], hasEngineMessages: true,
+      turns: [], responses: [], tools: [], pendingToolCallIds: [], adminChatClaims: [], transientMessageIds: [], spawnedWorkerIds: [],
+      execution: { needsSpawnRecheck: false, spawnRecheckInjected: false, spawnRecheckOutcomeRecorded: false,
+        postSendRecheckSequence: 0, successfulSendMessageTargets: [], continuedWorkers: [] } }
+    store.saveCheckpoint(checkpoint)
+    for (let index = 1; index <= 64; index++) {
+      const reading = store.loadCheckpoint(key)
+      await new Promise<void>(resolve => setImmediate(resolve))
+      let current: ManagerResumeCheckpoint | undefined
+      try { store.saveCheckpoint({ ...checkpoint, episodeId: 'atomic-' + index }) }
+      finally { current = await reading }
+      expect(['atomic-' + (index - 1), 'atomic-' + index]).toContain(current?.episodeId)
+      expect(current?.state.recent).toEqual(checkpoint.state.recent)
+      expect((await store.loadCheckpoint(key))?.episodeId).toBe('atomic-' + index)
+    }
+  }, 30_000)
 
   it('不存在的 key 返回空态,且不建目录', async () => {
     const key: ManagerKey = 'wechat::sess-never-seen'
@@ -122,6 +159,7 @@ describe('ManagerSessionStore', () => {
     await fs.mkdir(join(dir, encodeSegment(key)), { recursive: true })
     const original = JSON.stringify(state) + '\n'
     await fs.writeFile(path, original, { mode: 0o640 })
+    const originalMode = (await fs.stat(path)).mode & 0o777
     const loaded = await store.load(key)
     expect(loaded.recent[1]).toEqual(state.recent[1])
     expect(loaded.recent[2]).toMatchObject({ id: state.recent[2].id, timestamp: state.recent[2].timestamp, toolResults: [
@@ -132,7 +170,9 @@ describe('ManagerSessionStore', () => {
     const backups = (await fs.readdir(join(dir, encodeSegment(key)))).filter(n => n.startsWith('state.json.bak-tool-history-'))
     expect(backups).toHaveLength(1)
     expect(await fs.readFile(join(dir, encodeSegment(key), backups[0]), 'utf-8')).toBe(original)
-    expect((await fs.stat(join(dir, encodeSegment(key), backups[0]))).mode & 0o137).toBe(0)
+    const backupMode = (await fs.stat(join(dir, encodeSegment(key), backups[0]))).mode & 0o777
+    expect(backupMode & ~originalMode).toBe(0)
+    if (process.platform !== 'win32') expect(backupMode & 0o137).toBe(0)
     expect(await store.load(key)).toEqual(loaded)
     expect((await fs.readdir(join(dir, encodeSegment(key)))).filter(n => n.startsWith('state.json.bak-tool-history-'))).toEqual(backups)
   })
