@@ -1,5 +1,6 @@
 param([string]$Root, [string]$Child, [string]$File, [string]$ExplicitFile)
 $ErrorActionPreference = 'Stop'
+$env:PSModulePath = [System.IO.Path]::Combine($PSHOME, 'Modules')
 $sidType = [System.Security.Principal.SecurityIdentifier]
 $current = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 function Role([string]$sid) {
