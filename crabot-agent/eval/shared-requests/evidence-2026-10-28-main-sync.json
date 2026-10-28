@@ -1,0 +1,73 @@
+{
+  "date": "2026-10-28",
+  "purpose": "User-authorised latest-main merge into existing voice branch and local deployment, followed by deployment freeze for isolated TurnSense evaluation",
+  "branch": "fix/voice-preserve-unopened-queued-result",
+  "main_commit": "0f15b6b4",
+  "deployed_source_commit": "8480747f4071f6734c73d70683acdfb70e9227cf",
+  "preparation": {
+    "milliseconds": 207873.43274999998,
+    "payload_bytes": 2135465697,
+    "running_instance_preserved": true,
+    "migration_modules": 0,
+    "data_backup_bytes": 0,
+    "task_workspaces_scanned": false
+  },
+  "switch": {
+    "entry": "scripts/ui-upgrade.mjs",
+    "milliseconds": 61871,
+    "exit_code": 0,
+    "includes_pre_switch_revalidation": true,
+    "http_downtime_not_continuously_sampled": true
+  },
+  "verification": {
+    "source_matches": true,
+    "source_clean": true,
+    "artifact_count": 16,
+    "all_artifacts_match": true,
+    "web_index_matches": true,
+    "web_assets_match": true,
+    "endpoint_count": 3,
+    "endpoints_healthy": true,
+    "active_modules": 7,
+    "originally_stopped_module_restored": true,
+    "all_states_preserved": true
+  },
+  "tests": {
+    "passed_assertions": 2677,
+    "known_failed_assertions": 9,
+    "admin_baseline_failures": {
+      "count": 2,
+      "reproduced_on_pinned_main": true,
+      "files": [
+        "crabot-admin/src/tmp-page-skill-doc.test.ts",
+        "crabot-admin/src/v1-cleanup.test.ts"
+      ]
+    },
+    "agent_baseline_failures": {
+      "count": 7,
+      "reproduced_on_pinned_main": true,
+      "files": [
+        "crabot-agent/tests/inbound/process-admin-chat-message.test.ts",
+        "crabot-agent/tests/inbound/process-direct-batch.test.ts"
+      ]
+    },
+    "agent_full_suite": {
+      "completed": false,
+      "isolated_vitest_hung": true,
+      "stopped_after_seconds": 430,
+      "sample_preserved": true,
+      "not_counted_as_passed": true
+    },
+    "shared_runtime_tests": 152,
+    "shared_test_fixture_type_diagnostics": 4,
+    "production_builds_passed": true
+  },
+  "bounds": {
+    "candidate_models_deployed": false,
+    "apk_or_pairing_changed": false,
+    "speech_service_environment_changed": false,
+    "prompt_changes_made": false,
+    "additional_live_model_or_business_test_requests": false,
+    "further_deployment_frozen": true
+  }
+}
