@@ -79,6 +79,8 @@ export class ConfigStore {
         const output = execFileSync(path.join(system32, 'whoami.exe'), ['/user', '/fo', 'csv', '/nh'], { encoding: 'utf8', windowsHide: true, timeout: 5000 })
         const sid = output.match(/S-1-5-[0-9-]+/)?.[0]
         if (!sid) throw new Error('Cannot establish private Slack credential permissions')
+        // The temporary file is still empty: discard explicit grants before restricting inheritance.
+        execFileSync(path.join(system32, 'icacls.exe'), [tmp, '/reset'], { windowsHide: true, timeout: 5000 })
         execFileSync(path.join(system32, 'icacls.exe'), [tmp, '/inheritance:r', '/grant:r', `*${sid}:F`], { windowsHide: true, timeout: 5000 })
       }
       fs.writeFileSync(tmp, JSON.stringify({ config, bootstrap: this.bootstrap }), { mode: 0o600 })
