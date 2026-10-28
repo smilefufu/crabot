@@ -1,0 +1,99 @@
+name: Desktop manual test installers
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Native offline test installer to build'
+        type: choice
+        default: darwin-arm64
+        options: [darwin-arm64, win32-x64]
+  push:
+    branches: ['feat/desktop-manual-installers']
+    paths: ['.github/workflows/desktop-manual-installers.yml']
+permissions:
+  contents: read
+concurrency:
+  group: desktop-manual-installer-${{ inputs.target || 'darwin-arm64' }}
+  cancel-in-progress: false
+jobs:
+  installer:
+    name: Offline test installer ${{ inputs.target || 'darwin-arm64' }}
+    runs-on: ${{ inputs.target == 'win32-x64' && 'windows-latest' || 'macos-15' }}
+    timeout-minutes: 75
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.13.0'
+      - name: Prepare native helper and frozen build dependencies
+        run: |
+          mkdir -p .desktop-build
+          node scripts/build-native.mjs
+          pnpm --dir crabot-client install --frozen-lockfile
+          pnpm --dir crabot-client run build
+          pnpm install --frozen-lockfile
+          pnpm --dir scripts/lib install --frozen-lockfile
+          pnpm --dir crabot-shared install --frozen-lockfile
+          pnpm --dir crabot-shared run build
+          for module in crabot-core crabot-agent crabot-admin crabot-mcp-tools crabot-channel-telegram crabot-channel-wechat crabot-channel-feishu crabot-channel-dingtalk crabot-channel-slack crabot-channel-voice; do
+            pnpm --dir "$module" install --frozen-lockfile
+            pnpm --dir "$module" run build
+          done
+          pnpm --dir crabot-admin/web install --frozen-lockfile
+          pnpm --dir crabot-desktop install --frozen-lockfile
+          (cd crabot-desktop && node -e "require('electron')")
+      - name: Prepare locked offline runtime
+        run: |
+          node scripts/prepare-scrapling.mjs --release=desktop-ci
+          node scripts/prepare-computer-use.mjs
+          node scripts/prepare-product-runtime.mjs
+      - name: Build same-source offline GUI and Core installer
+        run: |
+          node scripts/desktop/stage-core.mjs --out=.desktop-build/manual/core --version=0.1.0-desktop.1
+          node .github/scripts/verify-release-payload.mjs "$GITHUB_WORKSPACE/.desktop-build/manual/core"
+          node scripts/desktop/package-application.mjs --candidate=true --layout=paired --core=.desktop-build/manual/core --out=.desktop-build/manual/paired
+          node scripts/desktop/package-offline-installer.mjs --candidate=true --distribute=true --paired=.desktop-build/manual/paired --out=.desktop-build/manual/installer
+          node .github/scripts/verify-offline-installer-host.mjs .desktop-build/manual/installer
+      - name: Hash completed installers
+        run: |
+          node --input-type=module <<'NODE'
+          import { createHash } from 'node:crypto';
+          import { createReadStream, promises as fs } from 'node:fs';
+          const root = '.desktop-build/manual/installer/distribution';
+          const files = (await fs.readdir(root)).filter(file => /offline-candidate\.(?:dmg|exe)$/.test(file));
+          if (files.length !== 1) throw new Error('Expected exactly one native offline installer');
+          const sums = [];
+          for (const file of files) {
+            const hash = createHash('sha256');
+            for await (const chunk of createReadStream(root + '/' + file)) hash.update(chunk);
+            sums.push(hash.digest('hex') + '  ' + file);
+          }
+          await fs.writeFile(root + '/SHA256SUMS', sums.join('\n') + '\n');
+          NODE
+      - name: Deliver test installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: crabot-${{ inputs.target || 'darwin-arm64' }}-offline-test-${{ github.sha }}
+          path: |
+            .desktop-build/manual/installer/distribution/*offline-candidate.dmg
+            .desktop-build/manual/installer/distribution/*offline-candidate.exe
+            .desktop-build/manual/installer/distribution/artifacts.json
+            .desktop-build/manual/installer/distribution/SHA256SUMS
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+      - name: Retain build failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: manual-installer-failure-${{ inputs.target || 'darwin-arm64' }}
+          path: .desktop-build/*.log
+          if-no-files-found: ignore
+          retention-days: 7
