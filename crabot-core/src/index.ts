@@ -32,6 +32,7 @@ import {
 } from 'crabot-shared'
 import {
   type ModuleManagerConfig,
+  type ShutdownParams,
   type ModuleRuntime,
   type ModuleStopReason,
   DEFAULT_CONFIG,
@@ -309,6 +310,8 @@ export class ModuleManager {
         this.server!.close(() => resolve())
       })
     }
+
+    await this.portAllocator.flush()
 
     console.log('[ModuleManager] Stopped')
   }
@@ -1093,7 +1096,12 @@ export class ModuleManager {
 
   // --- Shutdown ---
 
-  private async handleShutdown(): Promise<Record<string, never>> {
+  private async handleShutdown(params: ShutdownParams = {}): Promise<Record<string, never>> {
+    if (params.expected_generation !== undefined
+      && (typeof params.expected_generation !== 'string' || !params.expected_generation
+        || params.expected_generation !== process.env.CRABOT_INSTANCE_GENERATION)) {
+      throw Object.assign(new Error('Shutdown generation does not match this instance'), { code: 'STALE_INSTANCE' })
+    }
     setTimeout(() => {
       this.stop().catch(console.error)
     }, 100)
@@ -1213,6 +1221,11 @@ export class ModuleManager {
       ...(adminRpcPort && moduleId !== 'admin-web' ? { CRABOT_ADMIN_ENDPOINT: `http://localhost:${adminRpcPort}` } : {}),
       ...(moduleId === 'admin-web' ? { CRABOT_ADMIN_STARTUP_MODE: 'core-agent-cutover', CRABOT_ADMIN_CUTOVER_BEARER: (() => { const token = crypto.randomBytes(32).toString('base64url'); (runtime as ModuleRuntime & { _pendingCutover?: { token: string; child: ChildProcess; revoked: boolean } })._pendingCutover = { token, child: undefined as unknown as ChildProcess, revoked: false }; return token })() } : {}),
     }
+    if (moduleId !== 'admin-web') {
+      for (const key of Object.keys(childEnv)) {
+        if (['CRABOT_JWT_SECRET', 'CRABOT_ADMIN_PASSWORD', 'CRABOT_ADMIN_CUTOVER_BEARER'].includes(key.toUpperCase())) delete childEnv[key]
+      }
+    }
     delete childEnv.CRABOT_VOICE_RUNTIME_BEARER
     // Runtime credentials bind only the exact core Agent or voice child.
     if (moduleId === 'crabot-agent' || this.isVoiceModule(moduleId)) {
@@ -1322,7 +1335,8 @@ export class ModuleManager {
       child: proc,
       rootPid: proc.pid,
       rootExited: false,
-      reachedRunning: false,
+      // register may settle while recordSpawn is awaiting I/O.
+      reachedRunning: (runtime as ModuleRuntime).status === 'running',
       finalizeStarted: false,
       finalized,
       resolveFinalized,
@@ -1545,7 +1559,7 @@ export class ModuleManager {
       await state.forceTermination
       return
     }
-    state.termination ??= this.terminateChildTree(state, false)
+    state.termination ??= state.forceTermination ?? this.terminateChildTree(state, false)
     await state.termination
   }
 

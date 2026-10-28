@@ -6,6 +6,7 @@
 
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { type PortAllocation } from './types.js'
 
 /**
@@ -30,6 +31,7 @@ export class PortAllocator {
   private readonly storagePath: string
   private readonly allocated: Map<string, number> = new Map() // module_id -> port
   private readonly usedPorts: Set<number> = new Set()
+  private persistence: Promise<void> = Promise.resolve()
 
   constructor(range: PortAllocation, dataDir: string) {
     this.range = range
@@ -100,10 +102,13 @@ export class PortAllocator {
     }
   }
 
+  /** Wait for already queued writes before the MM reports shutdown complete. */
+  async flush(): Promise<void> { await this.persistence }
+
   /**
    * 持久化端口分配
    */
-  private async persist(): Promise<void> {
+  private persist(): Promise<void> {
     const records: PortRecord[] = []
     for (const [moduleId, port] of this.allocated) {
       records.push({
@@ -113,7 +118,17 @@ export class PortAllocator {
       })
     }
 
-    await fs.mkdir(path.dirname(this.storagePath), { recursive: true })
-    await fs.writeFile(this.storagePath, JSON.stringify(records, null, 2))
+    const content = JSON.stringify(records, null, 2)
+    const operation = this.persistence.then(async () => {
+      await fs.mkdir(path.dirname(this.storagePath), { recursive: true })
+      const temporary = `${this.storagePath}.${randomUUID()}.tmp`
+      try {
+        await fs.writeFile(temporary, content, { flag: 'wx' })
+        await fs.rename(temporary, this.storagePath)
+      } finally { await fs.rm(temporary, { force: true }) }
+    })
+    // Preserve allocation order without letting one failed write poison later saves.
+    this.persistence = operation.catch(() => {})
+    return operation
   }
 }

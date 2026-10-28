@@ -1,0 +1,59 @@
+name: Core ordinary lifecycle
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feat/desktop-core-lifecycle']
+  pull_request:
+    paths:
+      - 'crabot-core/**'
+      - '.github/workflows/core-lifecycle.yml'
+permissions:
+  contents: read
+jobs:
+  lifecycle:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.13.0'
+          python-version: '3.13'
+      - name: Build this checkout's SDK, Shared, Core and Native
+        shell: bash
+        run: |
+          pnpm --dir crabot-client install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-client run build
+          pnpm --dir crabot-shared install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-shared run build
+          pnpm --dir crabot-core install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-core run build
+          node scripts/build-native.mjs
+      - name: Verify atomic startup state and child credential boundaries
+        working-directory: crabot-core
+        run: >-
+          node node_modules/vitest/vitest.mjs run
+          src/port-allocator.test.ts src/admin-first-install.test.ts
+          src/module-management-secrets.test.ts src/shutdown-generation.test.ts
+          src/process-tree-exit-race.test.ts
+          --maxWorkers=1 --minWorkers=1
+      - name: Verify actual finite process trees and original lifecycle events
+        working-directory: crabot-core
+        env:
+          UV_OFFLINE: '1'
+          UV_PYTHON_DOWNLOADS: never
+          UV_PYTHON: '3.13'
+        run: >-
+          node node_modules/vitest/vitest.mjs run
+          src/module-manager-lifecycle.test.ts src/process-tree.test.ts
+          src/module-runtime-registry.test.ts src/module-manager-health.test.ts
+          src/module-manager-advanced.test.ts
+          --maxWorkers=1 --minWorkers=1

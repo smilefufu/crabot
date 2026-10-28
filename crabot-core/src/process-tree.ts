@@ -33,7 +33,10 @@ export function isProcessTreeAlive(rootPid: number): boolean {
     process.kill(-rootPid, 0)
     return true
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'EPERM'
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'ESRCH') return false
+    if (code === 'EPERM') return true
+    throw error
   }
 }
 
@@ -50,11 +53,15 @@ async function waitUntilPosixTreeGone(
   return !isProcessTreeAlive(rootPid)
 }
 
-function signalPosixTree(rootPid: number, signal: NodeJS.Signals): void {
+async function signalPosixTree(rootPid: number, signal: NodeJS.Signals, timeoutMs: number, pollIntervalMs: number): Promise<void> {
   try {
     process.kill(-rootPid, signal)
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'ESRCH') return
+    // macOS can deny signals to a zombie group until the parent reaps it.
+    if (code === 'EPERM' && await waitUntilPosixTreeGone(rootPid, Math.max(timeoutMs, 1000), pollIntervalMs)) return
+    throw error
   }
 }
 
@@ -65,9 +72,9 @@ async function terminatePosixTree(
   forceImmediately: boolean,
 ): Promise<void> {
   if (!isProcessTreeAlive(rootPid)) return
-  signalPosixTree(rootPid, forceImmediately ? 'SIGKILL' : 'SIGTERM')
+  await signalPosixTree(rootPid, forceImmediately ? 'SIGKILL' : 'SIGTERM', timeoutMs, pollIntervalMs)
   if (!forceImmediately && !await waitUntilPosixTreeGone(rootPid, timeoutMs, pollIntervalMs)) {
-    signalPosixTree(rootPid, 'SIGKILL')
+    await signalPosixTree(rootPid, 'SIGKILL', timeoutMs, pollIntervalMs)
   }
   if (!await waitUntilPosixTreeGone(rootPid, Math.max(timeoutMs, 1000), pollIntervalMs)) {
     throw new Error(`Process tree ${rootPid} did not exit`)

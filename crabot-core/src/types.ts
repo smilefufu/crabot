@@ -19,6 +19,10 @@ import {
 // 端口分配
 // ============================================================================
 
+export interface ShutdownParams {
+  expected_generation?: string
+}
+
 export interface PortAllocation {
   /** 端口范围起始值 */
   range_start: number // 默认 19001

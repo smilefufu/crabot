@@ -1,5 +1,11 @@
 # Crabot 项目进度
 
+### 桌面化拆分：Core普通启停收口（独立候选）
+
+- 按既有协议补代际防误停、端口完整快照/停止时等待、真实child注册竞态、强停Promise复用与POSIX退出竞态；非Admin子进程不继承管理密码/JWT。原首装权限空存储已在基础批次，继续回归，不重复实现。
+- 批次16未修实现先复现21失败7通过；接入既有最小修复后28项全过。原真实有限Python/Node树、restart/health/orphan等89项全过，强制离线且无业务onStart/模型；自身Core编译通过。原ModuleStopReason/60秒关闭窗/旧空shutdown请求不变，不带workspace恢复授权。
+- 独立四平台CI随后运行；依赖Core runtime 3f761897/40612267363已四平台全部通过，项目f150fdd2/40610408453亦全过。未创建PR或推产品main。
+
 ### 桌面化拆分：Core内置运行时接线（独立候选）
 
 - 合并已验证项目/实例及MCP/Runtime基础，只接Core内置工具、Agent实例级可写Python、Memory只读产品依赖；源码/dev沿原环境准备，必需产品资源损坏不借宿主解释器。

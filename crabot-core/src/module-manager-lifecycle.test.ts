@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import type { ChildProcess } from 'node:child_process'
+import { execFile, type ChildProcess } from 'node:child_process'
+import { promisify } from 'node:util'
 import ModuleManager from './index.js'
 import type { ModuleRuntime } from './types.js'
 import { isProcessTreeAlive } from './process-tree.js'
@@ -61,6 +62,31 @@ async function waitFor<T>(read: () => T | undefined | Promise<T | undefined>, ti
     await new Promise(resolve => setTimeout(resolve, 20))
   }
   throw new Error('timed out waiting for lifecycle state')
+}
+
+async function waitForModuleHealth(mm: any, runtime: ModuleRuntime): Promise<void> {
+  let failures = 0
+  await waitFor(async () => {
+    try { await mm.sendToModule(runtime.port, 'health', {}); return true }
+    catch (error) {
+      // Preserve a bounded failure reason before the outer test deadline can fire.
+      if (++failures <= 2) console.error('[finite lifecycle health]', { module_id: runtime.module_id,
+        code: (error as NodeJS.ErrnoException).code, message: (error as Error).message })
+      if (failures === 2) {
+        let numeric: unknown
+        try {
+          const response = await fetch(`http://127.0.0.1:${runtime.port}/health`, { method: 'POST',
+            headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: 'finite-diagnostic', method: 'health', params: {} }), signal: AbortSignal.timeout(1000) })
+          const result = await response.json() as { data?: { status?: string } }
+          numeric = { status: response.status, health: result.data?.status }
+        } catch (error) { numeric = { code: (error as { cause?: NodeJS.ErrnoException }).cause?.code, name: (error as Error).name } }
+        console.error('[finite lifecycle numeric health] ' + JSON.stringify({ module_id: runtime.module_id, numeric }))
+        const info = await readPidFile(path.join(mm.dataDir, 'python.json')) as { http_stage?: string; python_version?: string } | undefined
+        console.error('[finite lifecycle Python] ' + JSON.stringify({ module_id: runtime.module_id, stage: info?.http_stage, version: info?.python_version }))
+      }
+      return undefined
+    }
+  })
 }
 
 async function readPidFile(pidFile: string): Promise<{
@@ -126,6 +152,25 @@ afterEach(async () => {
 })
 
 describe.skipIf(process.platform === 'win32')('Module Manager child-bound lifecycle', () => {
+  it('constructs the finite loopback HTTP server without reverse DNS', async () => {
+    const directory = path.resolve(`test-data/fixture-no-reverse-${process.pid}`)
+    cleanupDirs.push(directory)
+    const code = `import runpy,socket,socketserver,sys
+fixture,pid_file=sys.argv[1:3]
+def reject_reverse(*args):
+    raise RuntimeError('reverse DNS is not required for the finite loopback fixture')
+def confirm_listener(server):
+    assert server.socket.getsockname()[0]=='127.0.0.1'
+    assert server.socket.getsockname()[1]>0
+    print('finite-loopback-listening',flush=True)
+socket.getfqdn=reject_reverse
+socketserver.BaseServer.serve_forever=confirm_listener
+sys.argv=[fixture,pid_file,'http','0']
+runpy.run_path(fixture,run_name='__main__')`
+    const result = await promisify(execFile)('uv', ['run', '--no-project', 'python', '-c', code, fixture, path.join(directory, 'python.json')], { timeout: 4000 })
+    expect(result.stdout).toContain('finite-loopback-listening')
+  })
+
   it('completes startup orphan recovery before opening the MM listener', async () => {
     const { mm } = makeManager()
     mm.runtimeRegistry = {
@@ -278,18 +323,36 @@ describe.skipIf(process.platform === 'win32')('Module Manager child-bound lifecy
     await forceCleanup(mm, runtime)
   })
 
+  it('retains registration accepted while the actual child runtime record is being persisted', async () => {
+    const { mm, runtime, pidFile, events } = makeManager({ mode: 'http', shutdownTimeout: 1 })
+    runtime.port = mm.portAllocator.allocate(runtime.module_id)
+    runtime.entry = `uv run --no-project python "${fixture}" "${pidFile}" "http" "${runtime.port}"`
+    runtime.skip_health_check = false
+    const persist = mm.runtimeRegistry.recordSpawn.bind(mm.runtimeRegistry)
+    let registeredEarly = false
+    vi.spyOn(mm.runtimeRegistry, 'recordSpawn').mockImplementation(async (input: any) => {
+      expect(input.rootPid).toBeGreaterThan(0)
+      expect(mm.processes.has(runtime.module_id)).toBe(false)
+      await mm.handleRegister({ module_id: runtime.module_id, module_type: 'memory', version: '0.1.0', protocol_version: '0.1.0', port: runtime.port, subscriptions: [] })
+      registeredEarly = true
+      return persist(input)
+    })
+    try {
+      const { child } = await start(mm, runtime)
+      expect(registeredEarly).toBe(true)
+      expect(runtime.status).toBe('running')
+      expect(mm.childStates.get(child).reachedRunning).toBe(true)
+      expect((await mm.runtimeRegistry.listRecords()).some((record: any) => record.root_pid === child.pid)).toBe(true)
+      expect(events.filter(event => event.type === 'module_manager.module_started')).toHaveLength(1)
+      await waitForModuleHealth(mm, runtime)
+    } finally { await forceCleanup(mm, runtime) }
+  })
+
   it('ordinary module stop calls /shutdown before tree-level escalation', async () => {
     const { mm, runtime, pidFile, events } = makeManager({ mode: 'http', shutdownTimeout: 1 })
     runtime.skip_health_check = false
     const { child } = await start(mm, runtime)
-    await waitFor(async () => {
-      try {
-        await mm.sendToModule(runtime.port, 'health', {})
-        return true
-      } catch {
-        return undefined
-      }
-    })
+    await waitForModuleHealth(mm, runtime)
     const sendToModule = mm.sendToModule.bind(mm)
     mm.sendToModule = vi.fn(sendToModule)
 
@@ -310,14 +373,7 @@ describe.skipIf(process.platform === 'win32')('Module Manager child-bound lifecy
     })
     runtime.skip_health_check = false
     await start(mm, runtime)
-    await waitFor(async () => {
-      try {
-        await mm.sendToModule(runtime.port, 'health', {})
-        return true
-      } catch {
-        return undefined
-      }
-    })
+    await waitForModuleHealth(mm, runtime)
 
     const startedAt = Date.now()
     await mm.handleStopModule({ module_id: runtime.module_id })
@@ -331,14 +387,7 @@ describe.skipIf(process.platform === 'win32')('Module Manager child-bound lifecy
     const { mm, runtime, pidFile } = makeManager({ mode: 'http', shutdownTimeout: 1 })
     runtime.skip_health_check = false
     await start(mm, runtime)
-    await waitFor(async () => {
-      try {
-        await mm.sendToModule(runtime.port, 'health', {})
-        return true
-      } catch {
-        return undefined
-      }
-    })
+    await waitForModuleHealth(mm, runtime)
     const sendToModule = mm.sendToModule.bind(mm)
     mm.sendToModule = vi.fn(sendToModule)
 
@@ -372,6 +421,36 @@ describe.skipIf(process.platform === 'win32')('Module Manager child-bound lifecy
     expect(child.pid && isProcessTreeAlive(child.pid)).toBe(false)
     expect(pidAlive(info.pid)).toBe(false)
     expect(stoppedEvents(events, runtime.module_id).map(event => event.payload.reason)).toEqual(['forced'])
+  })
+
+  it('shares an in-flight forced termination with the exit finalizer without starting a second graceful termination', async () => {
+    const { mm, runtime, events } = makeManager({ mode: 'ignore-term' })
+    const { child, info } = await start(mm, runtime), state = mm.childStates.get(child)
+    const terminate = mm.terminateChildTree.bind(mm)
+    let release!: () => void
+    const completion = new Promise<void>(resolve => { release = resolve })
+    const modes: boolean[] = []
+    vi.spyOn(mm, 'terminateChildTree').mockImplementation(async (target: any, force: any) => {
+      modes.push(force)
+      if (!force) throw Object.assign(new Error('A second termination raced the in-flight force'), { code: 'EPERM' })
+      await terminate(target, force)
+      await completion
+    })
+    const stopping = mm.handleStopModule({ module_id: runtime.module_id, force: true })
+    void stopping.catch(() => {})
+    try {
+      await waitFor(() => state.finalizeStarted ? true : undefined)
+      release()
+      await stopping
+      await state.finalized
+      expect(state.finalizeError).toBeUndefined()
+      expect(modes).toEqual([true])
+      expect(isProcessTreeAlive(child.pid!)).toBe(false)
+      expect(pidAlive(info.pid)).toBe(false)
+      expect(stoppedEvents(events, runtime.module_id).map(event => event.payload.reason)).toEqual(['forced'])
+    } finally {
+      release(); await stopping.catch(() => {}); await mm.lifecycleQueues.get(runtime.module_id); await forceCleanup(mm, runtime)
+    }
   })
 
   it('ignores child output that arrives after its log stream is finalized', async () => {
@@ -478,6 +557,7 @@ describe.skipIf(process.platform === 'win32')('Module Manager child-bound lifecy
 
   it('health failure and crash share one restart budget and reuse the current env snapshot', async () => {
     const { mm, runtime, pidFile, events } = makeManager({ autoRestart: true, threshold: 1 })
+    const startedAt = Date.now()
     const initial = await start(mm, runtime, { TEST_MARKER: 'stable-env' })
     runtime.skip_health_check = false
     mm.sendToModule = vi.fn().mockRejectedValue(new Error('unhealthy'))
@@ -492,11 +572,14 @@ describe.skipIf(process.platform === 'win32')('Module Manager child-bound lifecy
         : undefined
     }, 4000)
 
+    console.log('[finite lifecycle recovery]', { stage: 'health', elapsed_ms: Date.now() - startedAt })
     expect(runtime.restart_history?.attempts).toHaveLength(1)
     expect(stoppedEvents(events, runtime.module_id).map(event => event.payload.reason)).toEqual([
       'health_check_failed',
     ])
 
+    const native = require('../../scripts/lib/process-identity.cjs')
+    const observed = [afterHealth.child.pid!, afterHealth.info.pid].map(pid => ({ pid, process: native.inspectProcess(pid) }))
     process.kill(-afterHealth.child.pid!, 'SIGKILL')
     const afterCrash = await waitFor(async () => {
       const info = await readPidFile(pidFile)
@@ -504,8 +587,21 @@ describe.skipIf(process.platform === 'win32')('Module Manager child-bound lifecy
       return info?.pid !== afterHealth.info.pid && info?.marker === 'stable-env' && child
         ? { child, info }
         : undefined
-    }, 6000)
+    }, 6000).catch(async error => {
+      const state = mm.childStates.get(afterHealth.child)
+      let group: string[] | null = null
+      try {
+        const { stdout } = await promisify(execFile)('ps', ['-ax', '-o', 'pid=,ppid=,pgid=,state=,uid='], { timeout: 1000 })
+        group = stdout.split('\n').filter(line => Number(line.trim().split(/\s+/)[2]) === afterHealth.child.pid)
+      } catch { /* Preserve the original failure and unknown group state. */ }
+      console.error('[finite lifecycle crash wait]', { root_pid: afterHealth.child.pid, root_exited: state?.rootExited,
+        exit_code: afterHealth.child.exitCode, signal: afterHealth.child.signalCode, final_reason: state?.finalReason,
+        finalize_started: state?.finalizeStarted, finalize_error_code: state?.finalizeError?.code, group,
+        processes: observed.map(item => ({ ...item, current: native.inspectProcess(item.pid) })) })
+      throw error
+    })
 
+    console.log('[finite lifecycle recovery]', { stage: 'crash', elapsed_ms: Date.now() - startedAt })
     expect(afterCrash.info.marker).toBe('stable-env')
     expect(runtime.restart_history?.attempts).toHaveLength(2)
     expect(stoppedEvents(events, runtime.module_id).map(event => event.payload.reason)).toEqual([
@@ -513,7 +609,7 @@ describe.skipIf(process.platform === 'win32')('Module Manager child-bound lifecy
       'crashed',
     ])
     await forceCleanup(mm, runtime)
-  })
+  }, 15000)
 
   it('manual stop does not consume automatic restart history', async () => {
     const { mm, runtime } = makeManager({ autoRestart: true })
