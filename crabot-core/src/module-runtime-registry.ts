@@ -54,8 +54,19 @@ interface RecordSpawnInput {
 
 interface RecoverOrphansInput {
   moduleId?: string
+  runtimeIds?: ReadonlySet<string>
   currentRuntimeIds: ReadonlySet<string>
   gracefulTimeoutMs: number
+  /** Current private recovery role; guarded calls require an explicit fixed scope. */
+  verify?: () => void | Promise<void>
+}
+
+async function guardedOrphanStep<T>(verify: RecoverOrphansInput['verify'], operation: () => T | Promise<T>): Promise<T> {
+  if (!verify) return operation()
+  await verify()
+  const result = await operation()
+  await verify()
+  return result
 }
 
 export interface ModuleRuntimeRegistryOptions {
@@ -280,66 +291,72 @@ export class ModuleRuntimeRegistry {
   }
 
   async recoverOrphans(input: RecoverOrphansInput): Promise<void> {
-    const records = await this.listRecords()
+    const runtimeIds = input.runtimeIds === undefined ? undefined : new Set(input.runtimeIds)
+    const { verify, moduleId, gracefulTimeoutMs } = input
+    if (verify !== undefined && (typeof verify !== 'function' || runtimeIds === undefined)) throw new Error('Guarded orphan recovery requires an explicit runtime scope')
+    const currentRuntimeIds = verify ? new Set(input.currentRuntimeIds) : input.currentRuntimeIds
+    const records = await guardedOrphanStep(verify, () => this.listRecords())
     for (const record of records) {
       if (record.instance_id !== this.getInstanceId()) continue
-      if (input.moduleId !== undefined && record.module_id !== input.moduleId) continue
-      if (input.currentRuntimeIds.has(record.runtime_id)) continue
+      if (moduleId !== undefined && record.module_id !== moduleId) continue
+      if (runtimeIds !== undefined && !runtimeIds.has(record.runtime_id)) continue
+      if (currentRuntimeIds.has(record.runtime_id)) continue
 
-      const currentIdentity = await this.probeStartIdentity(record.root_pid)
+      const currentIdentity = await guardedOrphanStep(verify, () => this.probeStartIdentity(record.root_pid))
       if (this.platform === 'win32'
         && currentIdentity !== record.process_start_identity) {
-        await this.recoverDetachedWindowsRuntime(record, input.gracefulTimeoutMs)
+        await this.recoverDetachedWindowsRuntime(record, gracefulTimeoutMs, verify)
         continue
       }
       if (!currentIdentity) {
-        if (!await this.isTreeAlive(record.root_pid, record.module_port, true)) {
-          await this.removeRuntime(record.runtime_id)
+        if (!await guardedOrphanStep(verify, () => this.isTreeAlive(record.root_pid, record.module_port, true))) {
+          await guardedOrphanStep(verify, () => this.removeRuntime(record.runtime_id))
           continue
         }
-        await this.terminateTree(record.root_pid, {
-          gracefulTimeoutMs: input.gracefulTimeoutMs,
+        await guardedOrphanStep(verify, () => this.terminateTree(record.root_pid, {
+          gracefulTimeoutMs,
           modulePort: record.module_port,
           requireOwnedProcess: true,
           isRootPidExited: () => true,
-        })
-        await this.removeRuntime(record.runtime_id)
+        }))
+        await guardedOrphanStep(verify, () => this.removeRuntime(record.runtime_id))
         continue
       }
       if (currentIdentity !== record.process_start_identity) {
         // Detached POSIX modules use root_pid as PGID; that numeric PID cannot be
         // reused while any member of the recorded process group still exists.
-        await this.removeRuntime(record.runtime_id)
+        await guardedOrphanStep(verify, () => this.removeRuntime(record.runtime_id))
         continue
       }
 
-      await this.terminateTree(record.root_pid, this.platform === 'win32'
+      await guardedOrphanStep(verify, () => this.terminateTree(record.root_pid, this.platform === 'win32'
         ? {
-            gracefulTimeoutMs: input.gracefulTimeoutMs,
+            gracefulTimeoutMs,
             requireOwnedProcess: true,
           }
         : {
-            gracefulTimeoutMs: input.gracefulTimeoutMs,
+            gracefulTimeoutMs,
             modulePort: record.module_port,
             requireOwnedProcess: true,
-          })
+          }))
       if (this.platform === 'win32'
-        && this.runtimeIdentityMatches(record, await this.probeModuleIdentity(record.module_port))) {
+        && this.runtimeIdentityMatches(record, await guardedOrphanStep(verify, () => this.probeModuleIdentity(record.module_port)))) {
         throw new Error(
           `Cannot recover orphan ${record.module_id}/${record.runtime_id}: recorded runtime still responds after terminating root PID ${record.root_pid}; runtime record: ${this.recordPath(record.runtime_id)}`,
         )
       }
-      await this.removeRuntime(record.runtime_id)
+      await guardedOrphanStep(verify, () => this.removeRuntime(record.runtime_id))
     }
   }
 
   private async recoverDetachedWindowsRuntime(
     record: ModuleRuntimeRecord,
     gracefulTimeoutMs: number,
+    verify?: RecoverOrphansInput['verify'],
   ): Promise<void> {
-    const owners = await this.inspectPortOwners(record.module_port)
+    const owners = await guardedOrphanStep(verify, () => this.inspectPortOwners(record.module_port))
     if (owners.length === 0) {
-      await this.removeRuntime(record.runtime_id)
+      await guardedOrphanStep(verify, () => this.removeRuntime(record.runtime_id))
       return
     }
     if (owners.length !== 1) {
@@ -349,8 +366,8 @@ export class ModuleRuntimeRegistry {
     }
 
     const listener = owners[0]
-    const listenerIdentity = await this.probeStartIdentity(listener.pid)
-    const runtimeIdentity = await this.probeModuleIdentity(record.module_port)
+    const listenerIdentity = await guardedOrphanStep(verify, () => this.probeStartIdentity(listener.pid))
+    const runtimeIdentity = await guardedOrphanStep(verify, () => this.probeModuleIdentity(record.module_port))
     if (listenerIdentity !== listener.process_start_identity
       || !this.runtimeIdentityMatches(record, runtimeIdentity)) {
       throw new Error(
@@ -368,13 +385,13 @@ export class ModuleRuntimeRegistry {
         `${formatOrphanTerminationCandidate(candidate)}\nRun \`crabot start\` in an interactive terminal to approve termination, or stop this process manually.`,
       )
     }
-    if (!await this.confirmTermination(candidate)) {
+    if (!await guardedOrphanStep(verify, () => this.confirmTermination!(candidate))) {
       throw new Error(`${formatOrphanTerminationCandidate(candidate)}\nStartup stopped because orphan termination was not approved.`)
     }
 
-    const ownersAfterConfirmation = await this.inspectPortOwners(record.module_port)
-    const runtimeIdentityAfterConfirmation = await this.probeModuleIdentity(record.module_port)
-    const processIdentityAfterConfirmation = await this.probeStartIdentity(listener.pid)
+    const ownersAfterConfirmation = await guardedOrphanStep(verify, () => this.inspectPortOwners(record.module_port))
+    const runtimeIdentityAfterConfirmation = await guardedOrphanStep(verify, () => this.probeModuleIdentity(record.module_port))
+    const processIdentityAfterConfirmation = await guardedOrphanStep(verify, () => this.probeStartIdentity(listener.pid))
     if (ownersAfterConfirmation.length !== 1
       || ownersAfterConfirmation[0].pid !== listener.pid
       || ownersAfterConfirmation[0].process_start_identity !== listener.process_start_identity
@@ -385,11 +402,11 @@ export class ModuleRuntimeRegistry {
       )
     }
 
-    await this.terminateTree(listener.pid, {
+    await guardedOrphanStep(verify, () => this.terminateTree(listener.pid, {
       gracefulTimeoutMs,
       requireOwnedProcess: true,
-    })
-    await this.removeRuntime(record.runtime_id)
+    }))
+    await guardedOrphanStep(verify, () => this.removeRuntime(record.runtime_id))
   }
 
   private runtimeIdentityMatches(
