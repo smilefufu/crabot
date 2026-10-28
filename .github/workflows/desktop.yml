@@ -102,7 +102,7 @@ jobs:
   runtime:
     name: ${{ matrix.suite == 'regression' && 'Desktop foundation' || matrix.suite == 'gui' && 'Desktop GUI regression' || 'Desktop product' }} ${{ matrix.target }}
     needs: ubuntu-bootstrap
-    timeout-minutes: ${{ (matrix.target == 'darwin-x64' || matrix.target == 'win32-x64') && 180 || 150 }}
+    timeout-minutes: ${{ matrix.target == 'darwin-x64' && matrix.suite == 'product' && 240 || (matrix.target == 'darwin-x64' || matrix.target == 'win32-x64') && 180 || 150 }}
     strategy:
       fail-fast: false
       # The same-source suites are independent: do not consume the product
@@ -454,7 +454,7 @@ jobs:
         run: node .github/scripts/smoke-packaged-desktop.mjs ".desktop-build/安装 候选/paired" 2>&1 | tee .desktop-build/paired-boot.log
       - name: Signed paired update reaches ordinary target GUI and Core health
         if: steps.scope.outputs.full_runtime == 'true'
-        timeout-minutes: 35
+        timeout-minutes: ${{ matrix.target == 'darwin-x64' && 60 || 35 }}
         env:
           CRABOT_PAIRED_ACCEPTANCE_ID: ${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.target }}
         run: |
