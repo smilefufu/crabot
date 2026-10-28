@@ -1,0 +1,32 @@
+name: Windows registry atomic compatibility
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feat/desktop-windows-registry-compatibility']
+  pull_request:
+    paths:
+      - 'crabot-agent/src/engine/bg-entities/registry.ts'
+      - 'crabot-agent/tests/engine/bg-entities/registry-windows-atomic.test.ts'
+      - '.github/workflows/desktop-windows-registry-compatibility.yml'
+permissions:
+  contents: read
+jobs:
+  registry:
+    runs-on: windows-2022
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Build this checkout's actual Shared and Agent
+        shell: bash
+        run: |
+          pnpm --dir crabot-shared install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-shared run build
+          pnpm --dir crabot-agent install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-agent run build
+      - name: Exercise real temporary Windows file locks and all registry regressions
+        working-directory: crabot-agent
+        run: node node_modules/vitest/vitest.mjs run tests/engine/bg-entities/registry-windows-atomic.test.ts tests/engine/bg-entities/registry.test.ts --maxWorkers=1 --minWorkers=1
