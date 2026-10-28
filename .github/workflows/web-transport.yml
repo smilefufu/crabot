@@ -33,6 +33,12 @@ jobs:
           pnpm --dir crabot-client install --frozen-lockfile --ignore-scripts
           pnpm --dir crabot-client run build
           node --test crabot-client/tests/*.test.mjs
+      - name: Build the existing Shared dependency and root type dependencies
+        run: |
+          set -e
+          pnpm --dir crabot-shared install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-shared run build
+          pnpm install --frozen-lockfile --ignore-scripts
       - name: Build the complete Web application from frozen dependencies
         run: |
           set -e
