@@ -15,7 +15,8 @@ export type OnboarderEvent =
 
 export interface OnboarderBeginResult {
   session_id: string
-  ui_mode: 'qrcode' | 'redirect' | 'pending'
+  ui_mode: 'qrcode' | 'redirect' | 'pending' | 'challenge_code'
+  authorization_command?: string
   verification_uri?: string
   /** 推荐轮询间隔（秒） */
   interval?: number
@@ -29,6 +30,7 @@ export interface OnboarderFinishResult {
   env: Record<string, string>
   /** 推荐的实例名（admin 可不采用） */
   suggested_name?: string
+  authorized_identity?: { platform_user_id: string; platform_display_name?: string }
   /**
    * OAuth 类 onboarder 完成后，若仍需用户去平台后台批准 scopes，提供深链。
    * Admin UI 应在创建实例后明显引导用户点击，否则首次 API 调用会因权限缺失报错。
@@ -52,10 +54,12 @@ export interface OnboarderFinishResult {
 export interface Onboarder {
   begin(params?: Record<string, unknown>): Promise<OnboarderBeginResult>
   poll(sessionId: string): AsyncIterable<OnboarderEvent>
+  submit?(sessionId: string, input: { challenge_code: string }): Promise<void>
   finish(sessionId: string, params?: Record<string, unknown>): Promise<OnboarderFinishResult>
   cancel(sessionId: string): void
   startGc?(): void
   stopGc?(): void
+  dispose?(): Promise<void>
 }
 
 export type OnboarderFactory = () => Onboarder

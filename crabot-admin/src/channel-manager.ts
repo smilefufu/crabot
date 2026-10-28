@@ -7,6 +7,8 @@
 import fs from 'fs/promises'
 import fsSync from 'fs'
 import path from 'path'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import yaml from 'js-yaml'
 import { generateTimestamp, RpcCallError, type RpcClient, validateInstanceId, voiceSetupStatus, type VoiceSetupMetadata } from 'crabot-shared'
 import type {
@@ -229,7 +231,11 @@ export class ChannelManager {
 
     // 保存初始环境变量配置
     if (params.env && Object.keys(params.env).length > 0) {
-      await this.saveLocalConfig(instance.id, params.env)
+      try { await this.saveLocalConfig(instance.id, params.env) }
+      catch (error) {
+        if (impl.id === 'channel-slack') { this.instances.delete(instance.id); await this.saveInstances() }
+        throw error
+      }
     }
 
     // builtin 实现：注册到 Module Manager
@@ -609,6 +615,19 @@ export class ChannelManager {
   private async atomicWriteFile(filePath: string, content: string, mode?: number): Promise<void> {
     const tempPath = `${filePath}.tmp`
     try {
+      if (mode === 0o600 && process.platform === 'win32') {
+        // Establish the ACL on an empty temporary file before writing Slack credentials.
+        await fs.writeFile(tempPath, '', { mode })
+        const execute = promisify(execFile)
+        const systemRoot = process.env.SystemRoot || process.env.SYSTEMROOT
+        if (!systemRoot) throw new Error('Cannot locate native Windows ACL tools')
+        const system32 = path.join(systemRoot, 'System32')
+        const { stdout } = await execute(path.join(system32, 'whoami.exe'), ['/user', '/fo', 'csv', '/nh'], { windowsHide: true, timeout: 5000 })
+        const sid = stdout.match(/S-1-5-[0-9-]+/)?.[0]
+        if (!sid) throw new Error('Cannot establish private Slack credential permissions')
+        await execute(path.join(system32, 'icacls.exe'), [tempPath, '/reset'], { windowsHide: true, timeout: 5000 })
+        await execute(path.join(system32, 'icacls.exe'), [tempPath, '/inheritance:r', '/grant:r', `*${sid}:F`], { windowsHide: true, timeout: 5000 })
+      }
       await fs.writeFile(tempPath, content, { encoding: 'utf-8', mode })
       if (mode !== undefined) await fs.chmod(tempPath, mode)
       await fs.rename(tempPath, filePath)

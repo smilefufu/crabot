@@ -7,12 +7,16 @@
 - Follow-up：新大写实例跨实例迁移时，若其渠道记录因大小写冲突被 skip，同一备份中的关联好友/会话引用仍按原 id 导入；当前不增加别名或自动合并身份，关联导入的依赖检查另行处理。
 - 旧实现先复现 14 项失败；修复后 Shared 7、Admin 152、Core 61、Web 21 项相关回归共 241 项通过，Shared 构建、Admin/Core 类型检查和 Web 生产构建通过。完整 diff 已复核；按用户要求走 PR，未重启或部署运行实例，未执行真实飞书授权。
 
-### Slack Channel 首版：实现完成，待 PR 审查和真实 workspace 验收
+### Slack 本地授权向导：实现完成，PR 验证中
 
-- 依照已确认 [spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-10-27-native-slack-channel-design.md) 及 Channel 0.1.6 协议：新增 Socket Mode 原生渠道，支持 DM/公开群/私有群、默认 true 且可热更新并持久化的 @过滤；thread 仅保存关系，普通发送到原会话主界面。
-- 补充 Admin 内置发现/配置保存、dev、源码升级和 macOS/Linux/Windows 发布安装清单；沿用原 Session、身份鉴权与 Agent 普通消息入口，不改飞书或 Agent 工具契约。 Windows 已支持的旧发布包允许缺少新增 Slack；当前包或不完整 Slack 目录仍必须通过依赖清单校验。
-- 已完成 fake Slack 边界、真实本地 HTTP RPC 配置重启与空发布目录安装验证；详细步骤见[实施计划](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-28-native-slack-channel-implementation.md)。未使用真实 Token、调用模型或部署；Token 配对、权限、Agent 实际消费及 Slack 实际投递仍须 workspace 联调。
-- Linux 固定资源清单已逐项下载检查两架构共 154 项；另有 11 个地址 404，替换为官方快照前均核对实际 deb 包名/版本/架构和原 SHA-256，全部依赖版本及校验和保持不变。
+- 依据已确认 [spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-10-28-slack-local-cli-onboarding-design.md) 和已发布正式协议，增加 Admin 的本地 CLI 自动建 App/凭据交接、一次性验证码输入、显式 Friend 身份关联；不自动认主，不改消息/群权限/thread 规则。
+- 官方 CLI 4.11.0 四发布目标载荷均实际下载并与独立 SHA-256 核对；运行期不依赖 CLI，授权进程、私有材料与失败重试按会话收口。进度和验收边界见[实施计划](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-28-slack-local-cli-onboarding-implementation.md)。不部署或调用付费模型。
+- 按已确认的 [CI 拆分设计](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-10-28-slack-ci-separation-design.md)，Slack 四平台原生 hooks/回归与完整发行验收分开；保留原 Release 触发和自动合并门禁。CLI 冒烟保留阶段日志及 5 分钟命令预算；Windows 改用正常控制台启动以避免样式初始化挂起，继续用内存管道、无需用户操作控制台，最新四平台结果以 PR 检查为准。
+
+### Slack Channel 首版：实现及四平台发布验证完成
+
+- Socket Mode 支持 DM/公开群/私有群、默认 true 且可热更新的 @过滤；thread 仅存关系，发送到原会话主界面。沿用现有 Session、Admin 鉴权与 Agent 普通消息入口；固定 Linux 资源只修地址，版本/架构/哈希不变。
+- macOS arm64 真实 workspace 已验证官方 CLI 自动创建/安装、CLI 退出后的独立 DM 收发和新进程恢复同一 Session/历史再收发；群聊、完整 Admin 向导/身份绑定及 Agent 消费仍须分别验收，未部署。详见[真实验证记录](https://github.com/smilefufu/crabot-docs/blob/main/research/2026-10-28-slack-cli-local-onboarding-verification.md)。
 
 ### 飞书历史回填错误提示：局部修复完成，未部署
 

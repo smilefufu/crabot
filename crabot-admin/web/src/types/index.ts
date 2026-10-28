@@ -295,7 +295,7 @@ export interface ChannelOnboardingMethod {
   id: string
   name: string
   description?: string
-  type: 'device_code' | 'redirect' | 'pending'
+  type: 'device_code' | 'redirect' | 'pending' | 'challenge_code'
   handler: string
 }
 
@@ -368,7 +368,8 @@ export interface ChannelConfig {
 
 export interface OnboardBeginResult {
   session_id: string
-  ui_mode: 'qrcode' | 'redirect' | 'pending'
+  ui_mode: 'qrcode' | 'redirect' | 'pending' | 'challenge_code'
+  authorization_command?: string
   verification_uri?: string
   interval?: number
   expires_at?: number
