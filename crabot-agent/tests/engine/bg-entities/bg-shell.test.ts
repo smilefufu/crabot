@@ -16,15 +16,21 @@ import * as resolveBashPathModule from '../../../src/utils/resolve-bash-path'
 
 describe('readProcStartTime', () => {
   it('返回真实启动时间（约 2s 前），而非 now；两次调用稳定一致', async () => {
-    const child = spawn('sleep', ['10'])
+    const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'])
     try {
       await new Promise((r) => setTimeout(r, 2100)) // 让启动时间明显早于 now
+      const observedAt = Date.now()
       const t1 = await readProcStartTime(child.pid!)
       const t2 = await readProcStartTime(child.pid!)
       expect(Number.isNaN(new Date(t1).getTime())).toBe(false) // 可解析
-      expect(t1).toBe(t2) // 稳定（真实启动时间不随调用时刻变）
-      // 关键：返回的是真实启动时间（~2s 前），不是 now。坏 locale 下未强制 LC_ALL=C 会退化为 now → 此断言失败。
-      expect(Date.now() - new Date(t1).getTime()).toBeGreaterThan(1000)
+      if (process.platform === 'win32') {
+        // Windows uses the documented wall-clock fallback, not a kernel birth identity.
+        expect(new Date(t1).getTime()).toBeGreaterThanOrEqual(observedAt)
+        expect(new Date(t2).getTime()).toBeLessThanOrEqual(Date.now())
+      } else {
+        expect(t1).toBe(t2) // 稳定（真实启动时间不随调用时刻变）
+        expect(Date.now() - new Date(t1).getTime()).toBeGreaterThan(1000)
+      }
     } finally {
       child.kill('SIGKILL')
     }
@@ -37,6 +43,11 @@ describe('readProcStartTime', () => {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function nodeCommand(script: string): string {
+  const quotedScript = "'" + script.replaceAll("'", "'\\''") + "'"
+  return `${JSON.stringify(process.execPath.replaceAll('\\', '/'))} -e ${quotedScript}`
 }
 
 let tmpDir: string
@@ -153,14 +164,10 @@ describe('spawnPersistentShell', () => {
       registry,
     })
 
-    // Give process time to write output and exit.
-    await sleep(200)
-
-    const rec = await registry.get(entityId)
-    expect(rec).not.toBeNull()
-
-    const logContent = readFileSync((rec as BgShellRegistryRecord).log_file, 'utf8')
-    expect(logContent).toContain('hello_bg_shell')
+    await vi.waitFor(async () => {
+      const rec = await registry.get(entityId) as BgShellRegistryRecord
+      expect(readFileSync(rec.log_file, 'utf8')).toContain('hello_bg_shell')
+    }, { timeout: 4_000 })
   })
 
   it('registry status becomes completed with exit_code=0 after clean exit', async () => {
@@ -236,15 +243,11 @@ describe('spawnPersistentShell', () => {
       registry,
     })
 
-    // Wait enough for the process to complete and write.
-    await sleep(500)
-
-    const rec = await registry.get(entityId)
-    expect(rec).not.toBeNull()
-
-    const logContent = readFileSync((rec as BgShellRegistryRecord).log_file, 'utf8')
-    expect(logContent).toContain('survived_detach')
-    expect(rec?.status).toBe('completed')
+    await vi.waitFor(async () => {
+      const rec = await registry.get(entityId) as BgShellRegistryRecord
+      expect(readFileSync(rec.log_file, 'utf8')).toContain('survived_detach')
+      expect(rec.status).toBe('completed')
+    }, { timeout: 4_000 })
   })
 })
 
@@ -295,7 +298,9 @@ describe('runShellWithGrace', () => {
     const pidFile = path.join(tmpDir, 'child.pid')
     const controller = new AbortController()
     const running = runShellWithGrace({
-      command: 'sleep 30 &\nprintf \'%s\' "$!" > child.pid\nwait',
+      command: process.platform === 'win32'
+        ? `${nodeCommand(`require('node:fs').writeFileSync('child.pid', String(process.pid)); setTimeout(() => {}, 30000)`)} & wait`
+        : 'sleep 30 &\nprintf \'%s\' "$!" > child.pid\nwait',
       cwd: tmpDir,
       owner: { friend_id: 'user-A' },
       spawned_by_task_id: 'task-aborted-subshell',
@@ -304,7 +309,7 @@ describe('runShellWithGrace', () => {
       abortSignal: controller.signal,
     })
     try {
-      await vi.waitFor(() => expect(existsSync(pidFile)).toBe(true))
+      await vi.waitFor(() => expect(existsSync(pidFile)).toBe(true), { timeout: 4_000 })
     } finally {
       controller.abort()
       await expect(running).resolves.toEqual({ kind: 'aborted' })
@@ -365,7 +370,9 @@ describe('runShellWithGrace', () => {
     const pidFile = path.join(tmpDir, 'daemon.pid')
 
     const result = await runShellWithGrace({
-      command: `( sleep 1; echo daemon-log; sleep 2 ) & echo $! > ${JSON.stringify(pidFile)}; echo started`,
+      command: process.platform === 'win32'
+        ? `${nodeCommand(`require('node:fs').writeFileSync(${JSON.stringify(pidFile.replaceAll('\\', '/'))}, String(process.pid)); process.stdout.on('error', () => {}); setTimeout(() => process.stdout.write('daemon-log\\n'), 1000); setTimeout(() => {}, 10000)`)} & echo started`
+        : `( sleep 1; echo daemon-log; sleep 2 ) & echo $! > ${JSON.stringify(pidFile)}; echo started`,
       cwd: process.cwd(),
       owner: { friend_id: 'user-A' },
       spawned_by_task_id: 'task-inline-background-child-survives',
@@ -374,6 +381,7 @@ describe('runShellWithGrace', () => {
     })
 
     expect(result.kind).toBe('inline')
+    await vi.waitFor(() => expect(existsSync(pidFile)).toBe(true), { timeout: 4_000 })
     expect(readFileSync(pidFile, 'utf8').trim()).toMatch(/^\d+$/)
     const pid = Number(readFileSync(pidFile, 'utf8').trim())
     spawnedPids.push(pid)
@@ -446,8 +454,8 @@ describe('runShellWithGrace', () => {
 
     const result = await runShellWithGrace({
       command: [
-        `python3 -c "import sys,time; time.sleep(0.2); sys.stdout.write('O' * ${stdoutChunk.length})" &`,
-        `python3 -c "import sys,time; time.sleep(0.2); sys.stderr.write('E' * ${stderrChunk.length})" &`,
+        `${nodeCommand(`setTimeout(() => process.stdout.write('O'.repeat(${stdoutChunk.length})), 200)`)} &`,
+        `${nodeCommand(`setTimeout(() => process.stderr.write('E'.repeat(${stderrChunk.length})), 200)`)} &`,
       ].join('\n'),
       cwd: process.cwd(),
       owner: { friend_id: 'user-A' },
