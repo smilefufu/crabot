@@ -71,7 +71,7 @@ export class PermissionTemplateManager {
         is_system: true,
         tool_access: createToolAccessConfig(true),
         cli_access: createCliAccessConfig('write'),
-        storage: { workspace_path: '/', access: 'readwrite' },
+        storage: { scope: 'all', access: 'readwrite' },
         memory_scopes: [],
         created_at: now,
         updated_at: now,
