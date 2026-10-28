@@ -82,7 +82,7 @@ const server = http.createServer(async (req, res) => {
     if (!receipt.usage && !providerError) throw new Error('Judge usage missing after full response EOF')
     if (providerError) {
       record({ type: 'provider_attempt_failed', id, error: String(providerError), upstreamRetryPreserved: isRetryableError(providerError) })
-      if (!receipt.transportError && !isRetryableError(providerError)) stopped = true
+      if (providerError.status === 402 || (!receipt.transportError && !isRetryableError(providerError))) stopped = true
     }
     if (budget.blocked) stopped = true
     if (!res.headersSent) res.writeHead(upstream.status, { 'content-type': upstream.headers.get('content-type') ?? 'application/json' })

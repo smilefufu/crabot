@@ -85,7 +85,7 @@ globalThis.fetch = async (url, options = {}) => {
         emit({ type: 'unknown_usage', id, role, reserve, reserved: budget.reserved, cumulative: budget.used })
         if (!providerError) throw new Error('Provider usage missing after full response EOF')
       }
-      if (providerError && !receipt.transportError && !isRetryableError(providerError)) throw providerError
+      if (providerError && (providerError.status === 402 || (!receipt.transportError && !isRetryableError(providerError)))) throw providerError
       if (budget.blocked) throw new Error('Budget admission stopped after receipt')
       if (providerError) emit({ type: 'provider_attempt_failed', id, error: String(providerError), nativeRetryPreserved: true })
     } catch (error) { budget.fail(id); fatal = String(error); emit({ type: 'fatal', id, error: fatal }) }
