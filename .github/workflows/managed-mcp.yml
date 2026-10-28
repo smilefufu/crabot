@@ -39,6 +39,8 @@ jobs:
           pnpm --dir crabot-agent install --frozen-lockfile --ignore-scripts
           pnpm --dir crabot-agent run build
           node scripts/build-native.mjs
+          pnpm --dir crabot-admin/web install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-admin/web run build
       - name: Verify registration, revision and actual Admin projection
         working-directory: crabot-admin
         run: >-
@@ -56,3 +58,6 @@ jobs:
           --maxWorkers=1 --minWorkers=1
       - name: Verify real finite dependency isolation without package-manager execution
         run: node --test scripts/lib/__tests__/managed-mcp-prepare.test.mjs
+      - name: Verify the existing MCP form and all browser regressions
+        working-directory: crabot-admin/web
+        run: node node_modules/vitest/vitest.mjs run --maxWorkers=1 --minWorkers=1

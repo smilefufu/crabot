@@ -16,6 +16,7 @@ type FormData = {
   command: string
   args: string
   description: string
+  managed_runtime: 'auto' | 'custom' | 'python' | 'node'
   install_method: MCPServerRegistryEntry['install_method'] | ''
 }
 
@@ -24,6 +25,7 @@ const EMPTY_FORM: FormData = {
   command: '',
   args: '',
   description: '',
+  managed_runtime: 'auto',
   install_method: '',
 }
 
@@ -83,6 +85,7 @@ export const MCPServerList: React.FC = () => {
       command: s.command,
       args: (s.args ?? []).join(' '),
       description: s.description ?? '',
+      managed_runtime: s.managed_runtime ?? 'custom',
       install_method: s.install_method ?? '',
     })
     setCreateTab('manual')
@@ -100,6 +103,7 @@ export const MCPServerList: React.FC = () => {
       const payload = {
         name: form.name.trim(),
         command: form.command.trim(),
+        managed_runtime: form.managed_runtime === 'auto' ? undefined : form.managed_runtime === 'custom' ? null : form.managed_runtime,
         args,
         description: form.description.trim() || undefined,
         install_method: (form.install_method || undefined) as MCPServerRegistryEntry['install_method'],
@@ -256,6 +260,17 @@ export const MCPServerList: React.FC = () => {
                   onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
                 />
                 <Select
+                  label="运行环境"
+                  value={form.managed_runtime}
+                  onChange={(e) => setForm((f) => ({ ...f, managed_runtime: e.target.value as FormData['managed_runtime'] }))}
+                  options={[
+                    ...(!editingId ? [{ value: 'auto', label: '自动选择（内置发行的 npx/uvx 默认由 Crabot 管理）' }] : []),
+                    { value: 'node', label: 'Crabot 管理 · Node' },
+                    { value: 'python', label: 'Crabot 管理 · Python' },
+                    { value: 'custom', label: '自定义环境（保留原命令和包来源）' },
+                  ]}
+                />
+                <Select
                   label="安装方式"
                   value={form.install_method ?? ''}
                   onChange={(e) => setForm((f) => ({ ...f, install_method: e.target.value as FormData['install_method'] }))}
@@ -329,7 +344,7 @@ export const MCPServerList: React.FC = () => {
                     </span>
                   </div>
                   <div className="mcp-row__cmd">
-                    {s.name === 'computer-use' && desktop?.standard ? 'computer-use · ' : ''}{s.command}{s.args?.length ? ' ' + s.args.join(' ') : ''}
+                    {s.managed_runtime ? `Crabot 管理 ${s.managed_runtime} · ` : s.is_builtin ? '内置工具 · ' : '自定义环境 · '}{s.name === 'computer-use' && desktop?.standard ? 'computer-use · ' : ''}{s.command}{s.args?.length ? ' ' + s.args.join(' ') : ''}
                   </div>
                   {s.name === 'computer-use' && desktop && (
                     <p className="mcp-row__desc">桌面控制：{desktopStatusText(desktop)} · <Link to="/settings#computer-use">设置桌面控制</Link></p>

@@ -15,13 +15,14 @@ export const mcpService = {
     command: string
     args?: string[]
     env?: Record<string, string>
+    managed_runtime?: 'python' | 'node' | null
     description?: string
     install_method?: MCPServerRegistryEntry['install_method']
   }): Promise<MCPServerRegistryEntry> {
     return api.post<MCPServerRegistryEntry>('/mcp-servers', data)
   },
 
-  async update(id: string, data: Partial<MCPServerRegistryEntry>): Promise<MCPServerRegistryEntry> {
+  async update(id: string, data: Omit<Partial<MCPServerRegistryEntry>, 'managed_runtime'> & { managed_runtime?: 'python' | 'node' | null }): Promise<MCPServerRegistryEntry> {
     return api.patch<MCPServerRegistryEntry>(`/mcp-servers/${id}`, data)
   },
 
