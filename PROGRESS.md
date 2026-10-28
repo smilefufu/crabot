@@ -7,17 +7,29 @@
 - Follow-up：新大写实例跨实例迁移时，若其渠道记录因大小写冲突被 skip，同一备份中的关联好友/会话引用仍按原 id 导入；当前不增加别名或自动合并身份，关联导入的依赖检查另行处理。
 - 旧实现先复现 14 项失败；修复后 Shared 7、Admin 152、Core 61、Web 21 项相关回归共 241 项通过，Shared 构建、Admin/Core 类型检查和 Web 生产构建通过。完整 diff 已复核；按用户要求走 PR，未重启或部署运行实例，未执行真实飞书授权。
 
+### Slack Channel 首版：实现完成，待 PR 审查和真实 workspace 验收
+
+- 依照已确认 [spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-10-27-native-slack-channel-design.md) 及 Channel 0.1.6 协议：新增 Socket Mode 原生渠道，支持 DM/公开群/私有群、默认 true 且可热更新并持久化的 @过滤；thread 仅保存关系，普通发送到原会话主界面。
+- 补充 Admin 内置发现/配置保存、dev、源码升级和 macOS/Linux/Windows 发布安装清单；沿用原 Session、身份鉴权与 Agent 普通消息入口，不改飞书或 Agent 工具契约。 Windows 已支持的旧发布包允许缺少新增 Slack；当前包或不完整 Slack 目录仍必须通过依赖清单校验。
+- 已完成 fake Slack 边界、真实本地 HTTP RPC 配置重启与空发布目录安装验证；详细步骤见[实施计划](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-28-native-slack-channel-implementation.md)。未使用真实 Token、调用模型或部署；Token 配对、权限、Agent 实际消费及 Slack 实际投递仍须 workspace 联调。
+- Linux 固定资源清单已逐项下载检查两架构共 154 项；另有 11 个地址 404，替换为官方快照前均核对实际 deb 包名/版本/架构和原 SHA-256，全部依赖版本及校验和保持不变。
+
+### 飞书历史回填错误提示：局部修复完成，未部署
+
+- 历史列表和单条读取遇到 SDK HTTP 错误时，提示保留飞书业务 code、原始 msg 和可用的 log_id；明确权限错误补充应用身份、消息读取及群消息权限检查。无飞书错误体的网络异常保持原样，不改 RPC 错误码、回填分页或权限判定。
+- 旧实现先复现 4 项失败；修复后飞书全量 285 项、群工作台 Web 4 项及飞书构建通过。覆盖 SDK → 回填 → RPC 序列化和真实 API 客户端 → 页面通知，验证失败不写消息、可再次重试且认证请求头不进入错误回包。私有部署具体根因仍需其业务错误码核对，尚未部署。
+
 ### Channel 停止误报与删除失败丢配置：局部修复完成，未部署
 
 - 停止接口仍返回 running/starting/stopping 时，页面提示正在等待退出；只有 stopped 才报停止成功，error/unknown 不报成功。渠道列表每 2 秒刷新实际状态，停止完成后自动显示删除入口；不覆盖配置编辑内容，离开页面清理轮询。
 - 删除沿用 MM 的先停止、后注销流程；停止/注销失败时返回错误并保留实例和配置。仅 MM 明确返回定义 NOT_FOUND 时允许清理遗留配置，避免吞错后留下仍运行但无配置的渠道。不改 MM 生命周期、停止超时或持久化格式。
 - 旧实现先复现 3 项失败；修复后 Admin 33 项、Web 全量 372 项通过（共 405 项），Admin 类型检查、Web 类型检查及生产构建通过。页面回归覆盖等待真实停止、出现删除入口和删除后移除列表项；未操作真实渠道、未部署，现场具体实例现象仍待用户补充核对。
 
-### WorkBuddy 端到端校准：1/3有效完成，Provider缺usage后停止
+### WorkBuddy 三题校准完成：有效样本85.88分，历史失败保留
 
-- 已按确认spec尝试Code/Web/Office三题及获批的一次Web恢复，总额度120M；Code原始100分并交付，Web/Office因Provider及评测边界错误中断。上游原始运行分33.33不能视为能力总分。
-- 已知399,210 token（Manager264,354、Worker134,856），另2次未知；未继续收费或扩量。首次未知单独预留10M，保留所有失败与Code成果。
-- 5项预算回归及真实生产链路脚本回放通过，get_message评测遗漏已修复并回归；真实Web/Office模型裁判未验收。详见 `crabot-agent/eval/workbuddy/RESULTS.md`；后续先解决Provider稳定性与usage账目。
+- Code复用原100分，Web80、Office77.63（规则68.05/LLM100按原始70/30合分）；有效覆盖3/3、full-pass1/3。原始metrics的有效批次85.88，全历史7次试验52.94；不宣称200题综合能力。
+- Provider真实SSE过载完整EOF仍缺usage已取证；修复评测提前cancel/停机，原生下一次重试成功并完成Office。另修复评分收集把综合分覆盖为规则分的问题；原始判定零模型恢复，未改rubric或重跑Code。
+- 总计已知1,978,930 token，另3次未知共预留30M，同属120M；全部收费结束，未扩量。15项Node及1项Python无费用回归通过。详见 `crabot-agent/eval/workbuddy/RESULTS.md`；粗估30题约18.84M已知用量，全200题约122.44M，当前不自动续跑。
 
 ### LLM 连接恢复通知降噪：局部修复完成，未部署
 

@@ -71,7 +71,7 @@ async def main(args):
         route = {key: value for key, value in os.environ.items() if key.startswith('WORKBUDDY_VERIFIER_LLM_') or key == 'LLM_JUDGE_MAX_CONCURRENT'}
         verifier = CompositeVerifier(task=Task(args.task_dir), trial_paths=TrialPaths(out), environment=environment, override_env=route)
         result = await verifier.verify()
-        await environment.download_dir('/logs/verifier', out / 'verifier')
+        await environment.download_dir('/logs/verifier', out / 'container-verifier')
         (out / 'result.json').write_text(json.dumps(result.model_dump(), indent=2))
         print(json.dumps(result.model_dump()))
     finally:

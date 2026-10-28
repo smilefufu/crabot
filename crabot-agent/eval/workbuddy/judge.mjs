@@ -6,12 +6,15 @@ import { randomUUID, createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { spawn } from 'node:child_process'
 import { Budget, TOTAL_BUDGET } from './budget.mjs'
+import { observeResponse } from './observe.mjs'
 const data = process.env.REPLAY_DATA_DIR, runtime = process.env.REPLAY_RUNTIME_ROOT
 const output = process.env.WORKBUDDY_JUDGE_OUTPUT, python = process.env.WORKBUDDY_PYTHON
 if (!data || !runtime || !output || !python) throw new Error('Explicit runtime, data, output and benchmark Python required')
 fs.mkdirSync(output, { recursive: false, mode: 0o700 })
 const require = createRequire(path.join(runtime, 'crabot-admin/package.json'))
 const { ModelProviderManager } = require('./dist/model-provider-manager.js')
+const agentRequire = createRequire(path.join(runtime, 'crabot-agent/package.json'))
+const { HttpResponseError, isRetryableError } = agentRequire('./dist/engine/retry-utils.js')
 const resolver = new ModelProviderManager(path.join(data, 'admin')); await resolver.initialize()
 const config = JSON.parse(fs.readFileSync(path.join(data, 'admin/agent-configs/crabot-agent.json'), 'utf8'))
 const ref = config.model_config.powerful
@@ -21,7 +24,8 @@ const budget = new Budget(TOTAL_BUDGET, Number(process.env.WORKBUDDY_PRIOR_TOKEN
 const credential = randomUUID()
 const shutdown = new AbortController()
 let queue = Promise.resolve(), sequence = 0, stopped = false
-const record = row => fs.appendFileSync(path.join(output, 'requests.jsonl'), JSON.stringify({ ts: new Date().toISOString(), role: 'judge', ...row }) + '\n', { mode: 0o600 })
+const record = row => fs.appendFileSync(path.join(output, 'requests.jsonl'),
+  JSON.stringify({ ts: new Date().toISOString(), role: 'judge', ...row }).split(conn.apikey).join('[REDACTED]').split(credential).join('[EVAL_TOKEN]') + '\n', { mode: 0o600 })
 const server = http.createServer(async (req, res) => {
   if (req.method !== 'POST' || req.url !== '/v1/chat/completions' || req.headers.authorization !== 'Bearer ' + credential) {
     res.writeHead(403); res.end(); return
@@ -29,7 +33,7 @@ const server = http.createServer(async (req, res) => {
   const before = queue; let release
   queue = new Promise(r => { release = r }); await before
   const id = ++sequence
-  let admitted = false
+  let admitted = false, sent = false
   try {
     if (stopped || req.aborted || res.destroyed) throw new Error('Judge budget stopped or caller disconnected')
     budget.begin(id); admitted = true
@@ -45,36 +49,55 @@ const server = http.createServer(async (req, res) => {
     record({ type: 'request', id, model: body.model, streaming: !!body.stream,
       maxTokens: body.max_tokens, reasoningEffort: body.reasoning_effort,
       requestSha256: createHash('sha256').update(JSON.stringify(body)).digest('hex') })
+    sent = true
     const upstream = await fetch(conn.endpoint.replace(/\/$/, '') + '/chat/completions', {
       method: 'POST', headers: { Authorization: 'Bearer ' + conn.apikey, 'Content-Type': 'application/json' },
       body: JSON.stringify(body), signal: AbortSignal.any([AbortSignal.timeout(1200000), shutdown.signal]),
     })
-    if (!upstream.ok) throw new Error('Judge provider HTTP ' + upstream.status)
-    let usage
-    if (!body.stream) {
-      const text = await upstream.text(); const value = JSON.parse(text); usage = value.usage
-      const count = budget.finish(id, usage); admitted = false
-      record({ type: 'usage', id, ...count, cumulative: budget.used })
-      res.writeHead(200, { 'content-type': 'application/json' }); res.end(text)
-    } else {
-      res.writeHead(200, { 'content-type': 'text/event-stream' }); res.flushHeaders()
-      const decoder = new TextDecoder(); let pending = ''
-      for await (const chunk of upstream.body) {
-        pending += decoder.decode(chunk, { stream: true })
-        const lines = pending.split('\n'); pending = lines.pop()
-        for (const line of lines) if (line.startsWith('data: ') && !line.includes('[DONE]')) {
-          try { const value = JSON.parse(line.slice(6)); if (value.usage) usage = value.usage } catch {}
-        }
-        res.write(chunk)
-      }
-      const count = budget.finish(id, usage); admitted = false
-      record({ type: 'usage', id, ...count, cumulative: budget.used }); res.end()
+    const observed = observeResponse(upstream, undefined, !!body.stream)
+    let text
+    if (!body.stream || !upstream.ok) text = await observed.response.text()
+    else {
+      res.writeHead(upstream.status, { 'content-type': 'text/event-stream' }); res.flushHeaders()
+      for await (const chunk of observed.response.body) res.write(chunk)
     }
+    const receipt = await observed.receipt
+    record({ type: 'wire_receipt', id, ...receipt })
+    let providerError
+    if (receipt.error) {
+      let status = receipt.httpStatus
+      if (status < 400) status = typeof receipt.error.status === 'number' ? receipt.error.status : 502
+      providerError = new HttpResponseError(status, JSON.stringify({ error: receipt.error }), 'judge observer')
+    } else if (!upstream.ok) {
+      providerError = new HttpResponseError(upstream.status, text ?? '', 'judge observer')
+    } else if (receipt.transportError) providerError = new Error(receipt.transportError)
+    admitted = false
+    if (receipt.usage) {
+      const count = budget.finish(id, receipt.usage)
+      record({ type: 'usage', id, ...count, cumulative: budget.used })
+    } else {
+      const reserve = budget.reserveUnknown(id)
+      record({ type: 'unknown_usage', id, reserve, reserved: budget.reserved, cumulative: budget.used })
+    }
+    if (!receipt.usage && !providerError) throw new Error('Judge usage missing after full response EOF')
+    if (providerError) {
+      record({ type: 'provider_attempt_failed', id, error: String(providerError), upstreamRetryPreserved: isRetryableError(providerError) })
+      if (providerError.status === 402 || (!receipt.transportError && !isRetryableError(providerError))) stopped = true
+    }
+    if (budget.blocked) stopped = true
+    if (!res.headersSent) res.writeHead(upstream.status, { 'content-type': upstream.headers.get('content-type') ?? 'application/json' })
+    res.end(text)
   } catch (error) {
-    if (admitted) budget.fail(id)
-    stopped = true; record({ type: 'fatal', id, error: String(error) })
+    if (admitted) {
+      if (sent) {
+        const reserve = budget.reserveUnknown(id)
+        record({ type: 'unknown_usage', id, reserve, reserved: budget.reserved, cumulative: budget.used })
+      } else budget.fail(id)
+    }
+    if (!isRetryableError(error) || budget.blocked) stopped = true
+    record({ type: stopped ? 'fatal' : 'provider_attempt_failed', id, error: String(error) })
     if (!res.headersSent) res.writeHead(503, { 'content-type': 'application/json' })
-    res.end(JSON.stringify({ error: 'Evaluation judge stopped; inspect local receipt.' }))
+    res.end(JSON.stringify({ error: 'Evaluation judge request failed; inspect local receipt.' }))
   } finally { release() }
 })
 await new Promise(resolve => server.listen(0, '0.0.0.0', resolve))

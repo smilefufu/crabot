@@ -5,6 +5,8 @@ import { randomUUID } from 'node:crypto'
 import { UnifiedAgent } from '../../src/unified-agent.ts'
 import { CLI_DOMAINS } from '../../src/types.ts'
 import { Budget } from './budget.mjs'
+import { observeResponse } from './observe.mjs'
+import { HttpResponseError, isRetryableError } from '../../src/engine/retry-utils.ts'
 
 async function main() {
 const readInput = async () => { let s = ''; for await (const c of process.stdin) s += c; return JSON.parse(s) }
@@ -29,7 +31,7 @@ const originalFetch = globalThis.fetch
 let requestQueue = Promise.resolve()
 let scriptedSpawned = false, scriptedWritten = false, scriptedAck = false, scriptedFinal = false, scriptedRead = false
 function script(body) {
-  if (input.scriptedError) return new Response('data: {"choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}\n\ndata: {"error":{"message":"synthetic overloaded","type":"upstream_error","code":502}}\n\n', { headers: { 'content-type': 'text/event-stream' } })
+  if (input.scriptedError || (input.scriptedRecover && requests === 1)) return new Response('data: {"choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}\n\ndata: {"error":{"message":"synthetic overloaded","type":"upstream_error","code":502}}\n\n', { headers: { 'content-type': 'text/event-stream' } })
   const names = (body.tools ?? []).map(t => t.function.name)
   let name, args, text = ''
   if (names.includes('finish_task')) {
@@ -62,41 +64,45 @@ globalThis.fetch = async (url, options = {}) => {
   const body = JSON.parse(options.body)
   const role = body.tools?.some(t => t.function.name === 'finish_task') ? 'worker' : body.tools?.length ? 'manager' : 'compression'
   emit({ type: 'request', id, role, model: body.model, body })
-  let usage, pending = '', ended = false, sawDone = false, providerError
-  const settle = error => {
+  let ended = false
+  const settle = receipt => {
     if (ended) return; ended = true; active--; lastChange = Date.now()
+    emit({ type: 'wire_receipt', id, ...receipt })
+    let providerError
+    if (receipt.error) {
+      let status = receipt.httpStatus
+      if (status < 400) status = typeof receipt.error.status === 'number' ? receipt.error.status : 502
+      providerError = new HttpResponseError(status, JSON.stringify({ error: receipt.error }), 'evaluation observer')
+    } else if (receipt.httpStatus >= 400) {
+      providerError = new HttpResponseError(receipt.httpStatus, receipt.bodyText ?? '', 'evaluation observer')
+    } else if (receipt.transportError) providerError = new Error(receipt.transportError)
     try {
-      if (error) { budget.fail(id); throw error }
-      const count = budget.finish(id, usage)
-      emit({ type: 'usage', id, role, model: body.model, ...count, cumulative: budget.used })
-    } catch (error) { fatal = String(error); emit({ type: 'fatal', id, error: fatal }) }
+      if (receipt.usage) {
+        const count = budget.finish(id, receipt.usage)
+        emit({ type: 'usage', id, role, model: body.model, ...count, cumulative: budget.used })
+      } else {
+        const reserve = budget.reserveUnknown(id)
+        emit({ type: 'unknown_usage', id, role, reserve, reserved: budget.reserved, cumulative: budget.used })
+        if (!providerError) throw new Error('Provider usage missing after full response EOF')
+      }
+      if (providerError && (providerError.status === 402 || (!receipt.transportError && !isRetryableError(providerError)))) throw providerError
+      if (budget.blocked) throw new Error('Budget admission stopped after receipt')
+      if (providerError) emit({ type: 'provider_attempt_failed', id, error: String(providerError), nativeRetryPreserved: true })
+    } catch (error) { budget.fail(id); fatal = String(error); emit({ type: 'fatal', id, error: fatal }) }
     release()
   }
   try {
     const response = input.scripted ? script(body) : await originalFetch(url, options)
-    if (!response.ok || !response.body) { settle(new Error('Provider HTTP ' + response.status)); return response }
-    const decoder = new TextDecoder()
-    const stream = new TransformStream({
-      transform(chunk, controller) {
-        pending += decoder.decode(chunk, { stream: true })
-        const lines = pending.split('\n'); pending = lines.pop()
-        if (lines.some(line => line.trim() === 'data: [DONE]')) sawDone = true
-        for (const line of lines) if (line.startsWith('data: ') && !line.includes('[DONE]')) {
-          try { const v = JSON.parse(line.slice(6)); if (v.usage) usage = v.usage
-            if (v.error) { providerError = JSON.stringify(v.error); emit({ type: 'provider_error', id, error: v.error }) }
-            if (v.choices) emit({ type: 'response_delta', id, choices: v.choices })
-          } catch {}
-        }
-        controller.enqueue(chunk)
-      }, flush() { settle(providerError ? new Error(providerError) : undefined) },
+    if (!response.body) { settle({ httpStatus: response.status, eof: true }); return response }
+    emit({ type: 'response_headers', id, httpStatus: response.status,
+      contentType: response.headers.get('content-type'), requestId: response.headers.get('x-request-id') })
+    const observed = observeResponse(response, value => {
+      if (value.error) emit({ type: 'provider_error', id, error: value.error })
+      if (value.choices) emit({ type: 'response_delta', id, choices: value.choices })
     })
-    const reader = response.body.getReader()
-    const monitored = new ReadableStream({ async pull(controller) {
-      try { const v = await reader.read(); if (v.done) controller.close(); else controller.enqueue(v.value) }
-      catch (e) { settle(e); controller.error(e) }
-    }, async cancel(reason) { settle(sawDone && usage ? undefined : new Error(providerError ?? 'Provider stream cancelled')); await reader.cancel(reason) } })
-    return new Response(monitored.pipeThrough(stream), { status: response.status, headers: response.headers })
-  } catch (e) { settle(e); throw e }
+    void observed.receipt.then(settle)
+    return observed.response
+  } catch (error) { settle({ httpStatus: 0, eof: false, transportError: String(error) }); throw error }
 }
 const now = () => new Date().toISOString()
 const friend = { id: 'eval-human', display_name: '评测用户', permission: 'master', channel_identities: [], created_at: now(), updated_at: now() }

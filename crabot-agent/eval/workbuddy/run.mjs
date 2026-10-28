@@ -65,7 +65,7 @@ if (!scripted) {
 }
 function inputUsed() { return Number(process.env.WORKBUDDY_PRIOR_TOKENS ?? 0) }
 const child = spawn('docker', args, { stdio: ['pipe', 'pipe', 'pipe'] })
-const input = { config, taskId, instruction, scripted, scriptedError: process.env.WORKBUDDY_SMOKE_ERROR === '1', timeoutMs, limit: TOTAL_BUDGET, used: inputUsed(), reserved: Number(process.env.WORKBUDDY_UNKNOWN_RESERVE ?? 0) }
+const input = { config, taskId, instruction, scripted, scriptedError: process.env.WORKBUDDY_SMOKE_ERROR === '1', scriptedRecover: process.env.WORKBUDDY_SMOKE_RECOVER === '1', timeoutMs, limit: TOTAL_BUDGET, used: inputUsed(), reserved: Number(process.env.WORKBUDDY_UNKNOWN_RESERVE ?? 0) }
 child.stdin.on('error', () => {}); child.stdin.end(JSON.stringify(input))
 let buffer = '', result
 const log = fs.createWriteStream(path.join(out, 'console.log'), { mode: 0o600 })

@@ -354,6 +354,35 @@ describe('interactive history reads', () => {
 })
 
 describe('FeishuChannel.backfillHistory', () => {
+  it('keeps SDK error diagnostics through backfill and RPC serialization without writing messages', async () => {
+    const internals = channel as unknown as ChannelInternals
+    const { session } = internals.sessionManager.upsertGroupSessionFromSnapshot({
+      platform_session_id: 'oc_error', title: '产品群', participants: [],
+    })
+    const list = vi.fn().mockRejectedValue(Object.assign(new Error('Request failed with status code 400'), {
+      response: { status: 400, data: {
+        code: 99991672, msg: 'Access denied: im:message.group_msg', error: { log_id: 'backfill-log' },
+      } },
+      config: { headers: { Authorization: 'Bearer secret-marker' } },
+    }))
+    const sdk = (internals.client as unknown as { client: { im: { message: { list: typeof list } } } }).client
+    sdk.im.message = { list }
+
+    const error = await internals.backfillHistory({ session_id: session.id, max_count: 500 }).catch((err) => err)
+    const serialized = JSON.stringify(formatHandlerError(error, 'backfill-request'))
+    const response = JSON.parse(serialized)
+    expect(response.success).toBe(false)
+    expect(response.error.code).toBe('INTERNAL_ERROR')
+    expect(response.error.message).toContain('99991672')
+    expect(response.error.message).toContain('Access denied: im:message.group_msg')
+    expect(response.error.message).toContain('log_id=backfill-log')
+    expect(serialized).not.toContain('secret-marker')
+    expect((await internals.messageStore.query({ sessionId: session.id })).items).toHaveLength(0)
+
+    list.mockResolvedValue({ data: { items: [], has_more: false } })
+    await expect(internals.backfillHistory({ session_id: session.id })).resolves.toMatchObject({ backfilled_count: 0 })
+  })
+
   it('单聊 session 抛 INVALID_ARGUMENT，飞书 listMessages 不被调用', async () => {
     const internals = channel as unknown as ChannelInternals
     const { session } = internals.sessionManager.upsert({

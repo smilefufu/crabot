@@ -23,5 +23,11 @@ export class Budget {
     try { const v = nativeUsage(usage); this.used += v.total; if (this.used + this.reserved > this.limit) this.blocked = true; return v }
     catch (e) { this.blocked = true; throw e }
   }
+  reserveUnknown(id) {
+    if (!this.pending.delete(id)) throw new Error('Unknown or duplicate request receipt')
+    this.reserved += REQUEST_RESERVE
+    if (this.limit - this.used - this.reserved < REQUEST_RESERVE) this.blocked = true
+    return REQUEST_RESERVE
+  }
   fail(id) { this.pending.delete(id); this.blocked = true }
 }
