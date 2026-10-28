@@ -1,0 +1,29 @@
+import { contextBridge, ipcRenderer } from 'electron'
+import { DesktopDirectorySelectionSchema, DesktopDiagnosticsSchema, DesktopHostStateSchema, WorkspaceIdSchema, z, type DesktopBridge } from 'crabot-client'
+
+const stateCall = async (channel: string) => DesktopHostStateSchema.parse(await ipcRenderer.invoke(channel))
+const booleanCall = async (channel: string, value?: unknown) => z.boolean().parse(await ipcRenderer.invoke(channel, value))
+
+const bridge: DesktopBridge = {
+  getState: () => stateCall('desktop:get-state'),
+  onStateChanged: callback => {
+    const receive = (_event: unknown, value: unknown) => {
+      const result = DesktopHostStateSchema.safeParse(value)
+      if (result.success) callback(result.data)
+    }
+    ipcRenderer.on('desktop:state', receive)
+    return () => { ipcRenderer.removeListener('desktop:state', receive) }
+  },
+  startService: () => stateCall('desktop:start'),
+  stopService: () => stateCall('desktop:stop'),
+  reconnect: () => stateCall('desktop:reconnect'),
+  quit: () => booleanCall('desktop:quit'),
+  openUpdateDialog: () => booleanCall('desktop:open-update'),
+  openExternal: value => booleanCall('desktop:open-external', z.string().max(4096).parse(value)),
+  revealDataFolder: () => booleanCall('desktop:reveal-data'),
+  revealWorkspaceFolder: id => booleanCall('desktop:reveal-workspace', WorkspaceIdSchema.parse(id)),
+  selectWorkspaceDirectory: async () => DesktopDirectorySelectionSchema.parse(await ipcRenderer.invoke('desktop:select-workspace-directory')),
+  getDiagnostics: async () => DesktopDiagnosticsSchema.parse(await ipcRenderer.invoke('desktop:diagnostics')),
+  exportDiagnostics: id => booleanCall('desktop:export-diagnostics', z.uuid().parse(id)),
+}
+contextBridge.exposeInMainWorld('crabotDesktop', Object.freeze(bridge))

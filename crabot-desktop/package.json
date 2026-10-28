@@ -3,9 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "main": "dist/main.js",
   "crabotDesktopDevelopment": true,
   "scripts": {
-    "build": "tsc -p tsconfig.json && node build-host-bootstrap.mjs"
+    "build": "tsc -p tsconfig.json && node build-preload.mjs",
+    "start": "node start.mjs"
   },
   "dependencies": {
     "@electron/asar": "3.4.1",
