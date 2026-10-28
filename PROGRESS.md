@@ -1,5 +1,12 @@
 # Crabot 项目进度
 
+### Slack Channel 首版：实现完成，待 PR 审查和真实 workspace 验收
+
+- 依照已确认 [spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-10-27-native-slack-channel-design.md) 及 Channel 0.1.6 协议：新增 Socket Mode 原生渠道，支持 DM/公开群/私有群、默认 true 且可热更新并持久化的 @过滤；thread 仅保存关系，普通发送到原会话主界面。
+- 补充 Admin 内置发现/配置保存、dev、源码升级和 macOS/Linux/Windows 发布安装清单；沿用原 Session、身份鉴权与 Agent 普通消息入口，不改飞书或 Agent 工具契约。 Windows 已支持的旧发布包允许缺少新增 Slack；当前包或不完整 Slack 目录仍必须通过依赖清单校验。
+- 已完成 fake Slack 边界、真实本地 HTTP RPC 配置重启与空发布目录安装验证；详细步骤见[实施计划](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-28-native-slack-channel-implementation.md)。未使用真实 Token、调用模型或部署；Token 配对、权限、Agent 实际消费及 Slack 实际投递仍须 workspace 联调。
+- Linux 固定资源清单已逐项下载检查两架构共 154 项；另有 11 个地址 404，替换为官方快照前均核对实际 deb 包名/版本/架构和原 SHA-256，全部依赖版本及校验和保持不变。
+
 ### 飞书历史回填错误提示：局部修复完成，未部署
 
 - 历史列表和单条读取遇到 SDK HTTP 错误时，提示保留飞书业务 code、原始 msg 和可用的 log_id；明确权限错误补充应用身份、消息读取及群消息权限检查。无飞书错误体的网络异常保持原样，不改 RPC 错误码、回填分页或权限判定。

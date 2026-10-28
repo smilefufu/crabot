@@ -1,11 +1,12 @@
-import React from 'react'
 import { fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import { ToastProvider } from '../../../contexts/ToastContext'
 import type { DialogObjectGroupEntry } from '../../../types'
 import { GroupWorkbench } from './GroupWorkbench'
 
-afterEach(() => vi.unstubAllGlobals())
+afterEach(() => {
+  vi.unstubAllGlobals()
+})
 
 it('shows the backfill API error code, reason and log_id in the real toast', async () => {
   const message = '飞书历史消息读取失败（code=99991672，log_id=backfill-log）：Access denied: im:message.group_msg'
