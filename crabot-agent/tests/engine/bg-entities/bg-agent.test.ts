@@ -160,15 +160,14 @@ describe('spawnPersistentAgent', () => {
       updateConfig() {},
     }
 
-    const id = await spawnPersistentAgent(baseOpts(slowAdapter))
+    let exited = false
+    const id = await spawnPersistentAgent({ ...baseOpts(slowAdapter), onExit: () => { exited = true } })
 
     // Abort immediately after spawn.
     abortControllers.get(id)!.abort()
 
-    await waitFor(async () => {
-      const rec = await registry.get(id)
-      return rec?.status === 'failed' || rec?.status === 'killed'
-    })
+    // Completion follows the registry commit; avoid repeatedly opening its replacement target on Windows.
+    await waitFor(() => exited)
 
     const rec = await registry.get(id)
     // Registry guard prevents overwriting 'killed' with 'failed', but since we
