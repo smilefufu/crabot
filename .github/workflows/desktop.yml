@@ -187,7 +187,7 @@ jobs:
           (cd scripts/lib && node node_modules/vitest/vitest.mjs run __tests__/check.test.mjs __tests__/mm-probe.test.mjs --maxWorkers=1 --minWorkers=1)
       - name: Workspace files and interrupted recovery regressions
         if: matrix.suite == 'regression'
-        timeout-minutes: ${{ matrix.target == 'win32-x64' && 45 || 15 }}
+        timeout-minutes: ${{ matrix.target == 'win32-x64' && 45 || matrix.target == 'darwin-x64' && 25 || 15 }}
         run: node --test scripts/lib/__tests__/workspace-relocation-intent.test.mjs scripts/lib/__tests__/workspace-process-stop.test.mjs scripts/lib/__tests__/workspace-file-plan.test.mjs scripts/lib/__tests__/workspace-root-publish.test.mjs scripts/lib/__tests__/workspace-coordinator-entry.test.mjs scripts/lib/__tests__/workspace-interrupted-role.test.mjs scripts/lib/__tests__/admin-data-compat.test.mjs scripts/lib/__tests__/core-preparation.test.mjs scripts/lib/__tests__/workspace-data-compat.test.mjs scripts/lib/__tests__/workspace-legacy-executions.test.mjs scripts/lib/__tests__/core-preflight.test.mjs scripts/lib/__tests__/installer-compat.test.mjs
       - name: Workspace fixed coordinator and Root regressions
         if: matrix.suite == 'regression'
@@ -239,12 +239,18 @@ jobs:
           cd crabot-core
           node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern "MM consumes a human intent|MM dedicated fixed coordinator|MM delegates capture only|MM sensitive Worker stop" --maxWorkers=1 --minWorkers=1
       # Long recovery suites run at the same commit in workspace-core.yml, with four OS matrices.
+      - name: Workspace native process dispatch regressions
+        if: matrix.suite == 'regression'
+        timeout-minutes: ${{ matrix.target == 'win32-x64' && 30 || 15 }}
+        run: |
+          cd crabot-core
+          node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern "MM delegates actual fixed Agent stop code|fixed coordinator first CLI process observation journal|MM delegates fixed Native observation" --maxWorkers=1 --minWorkers=1
       - name: Workspace coordinator native dispatch and module regressions
         if: matrix.suite == 'regression'
         timeout-minutes: ${{ matrix.target == 'darwin-x64' && 45 || matrix.target == 'win32-x64' && 30 || 15 }}
         run: |
           cd crabot-core
-          node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern "^(?!.*(?:MM consumes a human intent|MM dedicated fixed coordinator|MM delegates capture only|MM sensitive Worker stop|MM launches the actual fixed coordinator|MM submits one fixed workspace stop sequence|MM requires original Admin quiescence|post-relocation validation launches|new runtime health and Root|fixed job archive storage handoff|normal fixed-job Admin completion preparation|fixed terminal release and current Admin resume|completes two actually owned|same MM workspace recovery and later migration|isolated business Agent after workspace relocation))" --maxWorkers=1 --minWorkers=1
+          node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern "^(?!.*(?:current interrupted (?:source|forward) recovery admission|MM delegates actual fixed Agent stop code|fixed coordinator first CLI process observation journal|MM delegates fixed Native observation|MM consumes a human intent|MM dedicated fixed coordinator|MM delegates capture only|MM sensitive Worker stop|MM launches the actual fixed coordinator|MM submits one fixed workspace stop sequence|MM requires original Admin quiescence|post-relocation validation launches|new runtime health and Root|fixed job archive storage handoff|normal fixed-job Admin completion preparation|fixed terminal release and current Admin resume|completes two actually owned|same MM workspace recovery and later migration|isolated business Agent after workspace relocation))" --maxWorkers=1 --minWorkers=1
       - name: Workspace fixed host and actual Admin quiescence regressions
         if: matrix.suite == 'regression'
         timeout-minutes: 15
@@ -460,7 +466,7 @@ jobs:
           node .github/scripts/check-paired-update-report.mjs .desktop-build/paired-update-host.json "$CRABOT_PAIRED_ACCEPTANCE_ID"
       - name: Ordinary Main complete uninstall and retained reinstall
         if: steps.scope.outputs.full_runtime == 'true'
-        timeout-minutes: 20
+        timeout-minutes: ${{ runner.os == 'Windows' && 30 || 20 }}
         run: |
           if [[ "$RUNNER_OS" == Linux ]]; then
             dbus-run-session -- xvfb-run -a node .github/scripts/verify-uninstall-reinstall.mjs ".desktop-build/安装 候选/paired" 2>&1 | tee .desktop-build/uninstall-reinstall-stage.log

@@ -11,6 +11,7 @@ import { TmuxDriver, type TmuxSessionSpec } from '../../src/workers/tmux/driver.
 import type { TmuxControlEndpoint } from '../../src/workers/tmux/control-monitor.js'
 import { CliEventChannel } from '../../src/workers/cli-events.js'
 import { resolveBashPath } from '../../src/utils/resolve-bash-path.js'
+import { expectPrivateRuntimeFile } from './private-runtime-file.js'
 import {
   createTmpPageMcpServerConfig,
   TMP_PAGE_BRIDGE_ENV,
@@ -185,8 +186,7 @@ describe('CodexWorkerAdapter.provision', () => {
 
     const configPath = path.join(ws, '.codex/config.toml')
     const configToml = await fs.readFile(configPath, 'utf-8')
-    if (process.platform === 'win32') expect(require('../../../scripts/lib/process-identity.cjs').isOwnerOnlyFile(configPath)).toBe(true)
-    else expect((await fs.stat(configPath)).mode & 0o777).toBe(0o600)
+    await expectPrivateRuntimeFile(configPath, ws)
     expect(configToml).toContain('notify = ')
     expect(configToml).toContain('events-cli.jsonl')
     expect(configToml).toContain('permission_request')
@@ -288,9 +288,7 @@ describe('CodexWorkerAdapter.provision', () => {
     await adapter.provision({ root: ws }, { skills: [], mcp_servers: [] })
 
     const authPath = path.join(ws, '.codex/auth.json')
-    const stat = await fs.stat(authPath)
-    if (process.platform === 'win32') expect(require('../../../scripts/lib/process-identity.cjs').isOwnerOnlyFile(authPath)).toBe(true)
-    else expect((stat.mode & 0o777)).toBe(0o600)
+    await expectPrivateRuntimeFile(authPath, ws)
   })
 
   it('provision 在 .codex/ 目录下写入 .gitignore 防止整个隔离 HOME 入库', async () => {

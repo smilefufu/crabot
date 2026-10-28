@@ -76,6 +76,11 @@ on:
       - '.github/workflows/workspace-core.yml'
   workflow_dispatch:
     inputs:
+      target:
+        description: 'Focused runner; complete acceptance still requires all platforms'
+        type: choice
+        default: all
+        options: [all, ubuntu-22.04, macos-15, macos-15-intel, windows-2022]
       suite:
         description: 'Focused rerun; complete acceptance still requires the full matrix'
         type: choice
@@ -96,7 +101,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, macos-15, macos-15-intel, windows-2022]
+        os: ${{ fromJSON(inputs.target && inputs.target != 'all' && format('["{0}"]', inputs.target) || '["ubuntu-22.04","macos-15","macos-15-intel","windows-2022"]') }}
         suite: ${{ fromJSON(inputs.suite == 'interrupted-source' && '["interrupted-source"]' || '["finite","business","archive","recovery","recovery-terminal","recovery-services","recovery-admin","owned","owned-recovery","completion"]') }}
     # The locked SQLite node-gyp requires VS2022; do not depend on the floating VS18 image.
     runs-on: ${{ matrix.os }}

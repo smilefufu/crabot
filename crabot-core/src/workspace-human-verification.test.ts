@@ -28,7 +28,7 @@ for (const forward of [false, true]) describe('current interrupted ' + (forward 
     const locks = require('../../scripts/lib/cli-lock.mjs'), lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
     const observers: Array<() => void> = []
     const observe = (context: any) => {
-      if ((mode === 'cold Core after failed health' || mode.endsWith('then cold Core')) && process.env.GITHUB_ACTIONS === 'true' && process.platform === 'darwin') {
+      if ((mode === 'health failure then explicit retry' || mode === 'cold Core after failed health' || mode.endsWith('then cold Core')) && process.env.GITHUB_ACTIONS === 'true' && process.platform === 'darwin') {
         observers.push(observeColdTerminalProgress(f.manager, context.coordinator, context))
       }
     }
