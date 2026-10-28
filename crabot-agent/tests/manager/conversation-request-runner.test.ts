@@ -148,7 +148,8 @@ describe('isolated request admission with real ManagerLoop', () => {
     await expect(runner(() => { throw new Error('process lost after admission') }).execute(key, inputs, args)).rejects.toThrow('process lost')
     const request = await requests.forInputs(key, inputs).create(args as never)
     const admission = path.join(root, request.request_id, 'admission.json')
-    expect((await fs.stat(admission)).mode & 0o777).toBe(0o600)
+    // Windows ACLs are not represented by POSIX mode bits.
+    if (process.platform !== 'win32') expect((await fs.stat(admission)).mode & 0o777).toBe(0o600)
     const next = runner(() => { throw new Error('must not replay') })
     expect((await next.recover(key, request.request_id)).status).toBe('recovery_required')
     expect((await next.execute(key, inputs, args)).status).toBe('recovery_required')
@@ -239,7 +240,8 @@ describe('isolated request admission with real ManagerLoop', () => {
     expect(await executor.routeWorkerEvent(key, result.request_id, event)).toEqual({ consumed: true })
     expect(frames).toHaveLength(2)
     const events = await fs.readdir(path.join(root, result.request_id, 'events'))
-    expect((await fs.stat(path.join(root, result.request_id, 'events', events[0], 'event.json'))).mode & 0o777).toBe(0o600)
+    // Windows ACLs are not represented by POSIX mode bits.
+    if (process.platform !== 'win32') expect((await fs.stat(path.join(root, result.request_id, 'events', events[0], 'event.json'))).mode & 0o777).toBe(0o600)
   })
 
   it('serializes concurrent duplicate events and rejects unrelated Worker IDs', async () => {
