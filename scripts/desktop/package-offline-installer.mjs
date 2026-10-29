@@ -78,7 +78,7 @@ if (args.get('--distribute') === 'true') {
       appId: 'com.crabot.installer', productName: 'Crabot Installer', electronVersion: '44.9.0',
       directories: { app: appDir, output: path.join(output, 'distribution') }, publish: null,
       artifactName: 'Crabot-${version}-${os}-${arch}-offline-candidate.${ext}',
-      mac: { identity: null, icon: path.join(root, 'crabot-desktop/assets/app.png'), minimumSystemVersion: '14.0.0' }, dmg: { sign: false },
+      mac: { identity: null, icon: path.join(root, 'crabot-desktop/assets/app.png'), minimumSystemVersion: '14.0.0' }, dmg: { sign: false, title: '安装 Crabot', backgroundColor: '#ffffff', contents: [{ x: 220, y: 160, type: 'file' }] },
       win: { executableName: 'CrabotInstaller', signAndEditExecutable: false, icon: path.join(root, 'crabot-desktop/assets/app.png') },
       nsis: { oneClick: false, perMachine: false, packElevateHelper: false, allowElevation: false, allowToChangeInstallationDirectory: true,
         script: path.join(root, 'scripts/desktop/windows-offline-installer.nsi'), installerLanguages: ['zh_CN'], deleteAppDataOnUninstall: false, runAfterFinish: false },

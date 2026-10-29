@@ -48,9 +48,10 @@ async function boot() {
   let selected = requested[0]?.slice('--install-root='.length) || locator?.install_root || path.join(homedir(), 'Crabot')
   if (!path.isAbsolute(selected) || /[\r\n\0]/.test(selected)) throw new Error('Invalid installer destination')
   selected = path.resolve(selected)
-  let legacyRequired = false, detectedLegacy: LegacyTakeoverSource | null = null
-  try { detectedLegacy = await discoverLegacyTakeover(locator?.install_root || path.join(homedir(), '.crabot')) }
-  catch { legacyRequired = true }
+  const discoveryRoot = locator?.install_root || path.join(homedir(), '.crabot')
+  let legacyRequired = false, detectedLegacy: LegacyTakeoverSource | null = null, discoveryError: unknown
+  try { detectedLegacy = await discoverLegacyTakeover(discoveryRoot) }
+  catch (error) { legacyRequired = true; discoveryError = error }
   if (detectedLegacy) { legacyRequired = true; selected = detectedLegacy.installation.installRoot; preselected = true }
   if (!locator && !detectedLegacy) {
     const { assertFreshUserInstallation } = await import(pathToFileURL(path.join(directory, 'bootstrap/scripts/lib/legacy-desktop.mjs')).href)
@@ -60,24 +61,32 @@ async function boot() {
       legacyRequired = true
     }
   }
-  if (legacyRequired && !detectedLegacy) await dialog.showMessageBox({ type: 'info', title: '选择原 Crabot 安装位置',
-    message: '发现已有部署，但未能自动确认原安装位置。', detail: '请选择原 Crabot 安装文件夹。将沿用其中的数据，不会在其它空目录创建替代实例。', buttons: ['选择原位置'] })
-  const welcome = preselected ? { response: 0 } : await dialog.showMessageBox({ type: 'info', title: '安装 Crabot', message: '欢迎安装 Crabot',
+  if (legacyRequired && !detectedLegacy) {
+    if (!preselected) selected = discoveryRoot
+    const choice = await dialog.showMessageBox({ type: 'info', title: '核对已有 Crabot',
+      message: '发现已有数据或安装记录，尚未核实可接管的安装来源。',
+      detail: `已检查位置：${discoveryRoot}\n${discoveryError ? failure(discoveryError) + '\n' : ''}只有已支持的标准旧发行可自动接管。源码部署不支持此安装器自动转换，请退出并保留原部署。若原来使用标准发行，请选择包含程序入口的原安装文件夹，不是 data 或 workspace。原数据未作修改。`,
+      buttons: ['选择原位置', '退出安装'], defaultId: 0, cancelId: 1 })
+    if (choice.response !== 0) return
+  }
+  const welcome = preselected || legacyRequired ? { response: 0 } : await dialog.showMessageBox({ type: 'info', title: '安装 Crabot', message: '欢迎安装 Crabot',
     detail: '已包含运行环境，无需额外安装。主要程序和数据将保存在你选择的安装文件夹；工作区可在安装后调整。', buttons: ['继续', '退出'], defaultId: 0, cancelId: 1 })
   if (welcome.response !== 0) return
   while (true) {
-    const chosen = preselected ? { canceled: false, filePaths: [selected] } : await dialog.showOpenDialog({ title: '选择 Crabot 安装文件夹', defaultPath: selected, buttonLabel: '安装到这里', properties: ['openDirectory', 'createDirectory', 'promptToCreate'] })
+    const chosen = preselected ? { canceled: false, filePaths: [selected] } : await dialog.showOpenDialog({ title: legacyRequired ? '选择原 Crabot 安装文件夹' : '选择 Crabot 安装文件夹', defaultPath: selected, buttonLabel: legacyRequired ? '选择此目录' : '安装到这里', properties: ['openDirectory', 'showHiddenFiles', 'createDirectory', 'promptToCreate'] })
     preselected = false
     if (chosen.canceled || chosen.filePaths.length !== 1) return
     selected = chosen.filePaths[0]
     let legacy: LegacyTakeoverSource | null
     try { legacy = await discoverLegacyTakeover(selected) }
     catch (error) {
-      await dialog.showMessageBox({ type: 'error', title: '尚未确认原安装', message: failure(error), detail: '请选择可核实的原 Crabot 安装文件夹；已有数据未作修改。', buttons: ['重新选择'] })
+      const choice = await dialog.showMessageBox({ type: 'error', title: '尚未确认原安装', message: failure(error), detail: '请选择可核实的标准旧发行安装文件夹；源码或不支持的来源请退出并保留原部署。已有数据未作修改。', buttons: ['重新选择', '退出安装'], defaultId: 0, cancelId: 1 })
+      if (choice.response !== 0) return
       continue
     }
     if (legacyRequired && !legacy) {
-      await dialog.showMessageBox({ type: 'error', title: '请选择原安装位置', message: '此位置不是可确认的原 Crabot 安装。', detail: '已有部署需要原位接管，不能用空目录代替原数据。', buttons: ['重新选择'] })
+      const choice = await dialog.showMessageBox({ type: 'error', title: '请选择原安装位置', message: '此位置不是可确认的原 Crabot 安装。', detail: '已有数据不能用空目录代替。若是源码或不支持的来源，请退出并保留原部署。', buttons: ['重新选择', '退出安装'], defaultId: 0, cancelId: 1 })
+      if (choice.response !== 0) return
       continue
     }
     const retainedState = await inspectRetainedDesktopRemoval(selected), removal = retainedState?.record
