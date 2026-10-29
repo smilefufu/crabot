@@ -115,7 +115,12 @@ export async function runSourceUpgrade(crabotHome, logger, { incremental = false
     await runCmd('corepack', ['pnpm', 'run', 'build:cli'], crabotHome, logger, source)
     rootState?.commit()
   }
-  if (desktop) await prepareModule(join(crabotHome, 'crabot-desktop'))
+  if (desktop) {
+    const desktopDir = join(crabotHome, 'crabot-desktop')
+    await prepareModule(desktopDir)
+    // Electron downloads lazily on require; finish it before starting any dev Core.
+    await runCmd(process.execPath, ['-e', "require('electron')"], desktopDir, logger, source)
+  }
 
   // scripts/lib 是独立 package（依赖 proper-lockfile 等），不属于 root workspace，要单独 install。
   // 没有 build 步骤，只装 prod deps。

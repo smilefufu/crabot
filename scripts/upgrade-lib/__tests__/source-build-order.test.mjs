@@ -3,7 +3,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
 
-const observed = vi.hoisted(() => ({ commands: [] }))
+const observed = vi.hoisted(() => ({ commands: [], failElectron: false }))
 vi.mock('../../lib/toolchain.mjs', () => ({ ensureCorepack: async () => '/fixture/corepack.mjs' }))
 vi.mock('../../lib/install-network.mjs', () => ({
   selectPackageSource: async () => ({ url: 'https://packages.example.invalid' }),
@@ -12,13 +12,17 @@ vi.mock('../../lib/install-network.mjs', () => ({
   withPackageSource: async (source, operation) => operation(source.url, {}, 10000),
 }))
 vi.mock('../../lib/scrapling-prepare.mjs', () => ({
-  runBounded: async (command, args, options) => { observed.commands.push({ command, args, cwd: options.cwd }); return { code: 0 } },
+  runBounded: async (command, args, options) => {
+    observed.commands.push({ command, args, cwd: options.cwd })
+    if (observed.failElectron && args.includes("require('electron')")) throw new Error('Electron download failed')
+    return { code: 0 }
+  },
 }))
 vi.mock('../../lib/memory-deps.mjs', () => ({ prepareMemoryDependencies: vi.fn() }))
 import { runSourceUpgrade } from '../source.mjs'
 
 let root
-beforeEach(async () => { root = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-source-order-')); observed.commands.length = 0 })
+beforeEach(async () => { root = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-source-order-')); observed.commands.length = 0; observed.failElectron = false })
 afterEach(async () => { await fs.rm(root, { recursive: true, force: true }) })
 const logger = { info() {}, warn() {} }
 it('builds the local SDK before root and consuming modules snapshot file dependencies', async () => {
@@ -62,4 +66,15 @@ it('developer preparation reuses verified outputs and refreshes file consumers a
   expect(find('crabot-core')).toBeGreaterThan(find('crabot-client'))
   expect(find('crabot-desktop')).toBeGreaterThan(find('crabot-core'))
   expect(observed.commands.filter(call => call.args.includes('install')).every(call => call.args.includes('--force'))).toBe(true)
+})
+
+it('explicit GUI preparation finishes the actual lazy Electron install and propagates its failure', async () => {
+  const desktopDir = path.join(root, 'crabot-desktop')
+  await fs.mkdir(desktopDir)
+  observed.failElectron = true
+  await expect(runSourceUpgrade(root, logger, { incremental: true, desktop: true })).rejects.toThrow('Electron download failed')
+  const probe = observed.commands.find(call => call.args.includes("require('electron')"))
+  expect(probe.command).toBe(process.execPath)
+  expect(probe.cwd).toBe(desktopDir)
+  expect(observed.commands.some(call => call.args.some(value => value.endsWith('prepare-scrapling.mjs')))).toBe(false)
 })
