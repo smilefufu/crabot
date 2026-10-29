@@ -17,7 +17,7 @@ async function fixture(t, missingTray = false, installer = false, pair, omitted 
     'dist/bootstrap/scripts/lib/core-release.mjs': 'export{}', 'dist/bootstrap/scripts/lib/physical-fs.cjs': 'module.exports={}',
     'dist/bootstrap/scripts/lib/process-identity.cjs': 'module.exports={}', 'dist/bootstrap/crabot-native/build/Release/crabot-native.node': 'native fixture', 'dist/bootstrap-log.js': 'export{}', 'dist/preload.cjs': 'module.exports={}', 'dist/assets/tray.png': 'fixture tray bytes',
     'node_modules/crabot-client/dist/index.js': 'export{}', 'node_modules/zod/package.json': '{}', 'node_modules/electron-updater/package.json': '{}', 'node_modules/@electron/asar/package.json': '{}' }
-  for (const file of ['dist/ubuntu-process.js', 'dist/ubuntu-program-probe.js', 'dist/ubuntu-update.js', 'dist/paired-update.js', 'dist/release-intake.js', 'dist/release-signatures.js', 'dist/release-download.js', 'dist/release-transport.js', 'dist/bootstrap/scripts/lib/desktop-management.cjs', 'dist/bootstrap/scripts/desktop/extract-paired-release.py']) files[file] = 'trusted release fixture'
+  for (const file of ['dist/mac-first-launch.js', 'dist/ubuntu-process.js', 'dist/ubuntu-program-probe.js', 'dist/ubuntu-update.js', 'dist/paired-update.js', 'dist/release-intake.js', 'dist/release-signatures.js', 'dist/release-download.js', 'dist/release-transport.js', 'dist/bootstrap/scripts/lib/desktop-management.cjs', 'dist/bootstrap/scripts/desktop/extract-paired-release.py']) files[file] = 'trusted release fixture'
   if (installer) for (const file of ['dist/bootstrap/scripts/desktop/legacy-releases.json', 'dist/bootstrap/scripts/lib/legacy-desktop.mjs',
     'dist/bootstrap/scripts/lib/legacy-release-identity.mjs', 'dist/bootstrap/scripts/lib/legacy-release-files.mjs', 'dist/bootstrap/scripts/lib/mode.mjs',
     'dist/installer-main.js', 'dist/retained-reinstall.js', 'dist/legacy-takeover.js',
@@ -97,7 +97,7 @@ test('an unbounded ASAR header is rejected before invoking the parser', async t 
 })
 
 
-for (const member of ['dist/bootstrap-log.js', 'dist/ubuntu-process.js', 'dist/ubuntu-program-probe.js', 'dist/ubuntu-update.js', 'dist/paired-update.js', 'dist/release-intake.js', 'dist/release-signatures.js', 'dist/release-download.js', 'dist/release-transport.js', 'dist/bootstrap/scripts/lib/desktop-management.cjs', 'dist/bootstrap/scripts/lib/desktop-removal-record.cjs', 'dist/bootstrap/scripts/desktop/extract-paired-release.py']) {
+for (const member of ['dist/mac-first-launch.js', 'dist/bootstrap-log.js', 'dist/ubuntu-process.js', 'dist/ubuntu-program-probe.js', 'dist/ubuntu-update.js', 'dist/paired-update.js', 'dist/release-intake.js', 'dist/release-signatures.js', 'dist/release-download.js', 'dist/release-transport.js', 'dist/bootstrap/scripts/lib/desktop-management.cjs', 'dist/bootstrap/scripts/lib/desktop-removal-record.cjs', 'dist/bootstrap/scripts/desktop/extract-paired-release.py']) {
   test('packaged GUI requires its own trusted release component: ' + member, async t => {
     const archive = await fixture(t)
     const missing = { statFile: (file, name) => { if (name === path.normalize(member)) throw new Error('missing trusted release resource'); return asar.statFile(file, name) } }

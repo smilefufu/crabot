@@ -1243,7 +1243,7 @@ for (const mode of ['verified', 'changed probed root', 'wrong bearer', 'wrong ru
         const second=await verify(${JSON.stringify(role.launch.request)},'finite-Agent-credential');result={ok:true,first,second}}
       catch(error){result={ok:false,code:error.code,stage:error.stage,message:error.message}}
       finally{if(replaced){fs.rmdirSync(${JSON.stringify(selectedRoot)});fs.renameSync(${JSON.stringify(selectedRoot + '-retained')},${JSON.stringify(selectedRoot)})}}
-      fs.writeFileSync(${JSON.stringify(resultFile)},JSON.stringify(result))})();setTimeout(()=>process.exit(0),30000);`
+      fs.writeFileSync(${JSON.stringify(resultFile + ".tmp")},JSON.stringify(result));fs.renameSync(${JSON.stringify(resultFile + ".tmp")},${JSON.stringify(resultFile)})})();setTimeout(()=>process.exit(0),30000);`
     const invocation = { command: process.execPath, args: ['-e', code], cwd: f.root, env: {} }
     gate = (await import('../workspace-runtime-gate.mjs')).createWorkspaceRuntimeGate(); await gate.ready()
     const identity = native.inspectProcess(gate.child.pid), registry = path.join(f.data, 'module-runtime-registry/records')
