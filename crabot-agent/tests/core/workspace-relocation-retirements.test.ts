@@ -54,6 +54,17 @@ describe('Agent-owned exact workspace migration recovery retirements', () => {
     expect(store.workboard(key, 42)).toBe(false)
     await expect(fs.lstat(directory)).rejects.toMatchObject({ code: 'ENOENT' })
   })
+  it('does not impose recovery-directory permissions when no source-restoration history exists', async () => {
+    const management = require('../../../scripts/lib/desktop-management.cjs')
+    const original = management.requireExistingDataRoot
+    management.requireExistingDataRoot = () => { throw new Error('recovery root validation') }
+    try {
+      expect(new WorkspaceRelocationRetirements(data).request(key, sha, nextSha)).toBe(false)
+      await expect(fs.lstat(path.join(data, 'workspace-control'))).rejects.toMatchObject({ code: 'ENOENT' })
+      await fs.mkdir(path.join(data, 'workspace-control/relocation-cancelled'), { recursive: true })
+      expect(() => new WorkspaceRelocationRetirements(data).load()).toThrow('recovery root validation')
+    } finally { management.requireExistingDataRoot = original }
+  })
   it('persists original exact identities once and leaves all new work outside the retired set', async () => {
     const first = await publish(data, plan)
     expect(first.dispatch).toBe('dispatch')

@@ -83,8 +83,9 @@ function readRestoration(dataDir, id, pending) {
 
 /** Completed source-restoration history only; no current role or service release. */
 export function listWorkspaceSourceRestorations(dataDir) {
-  const data = management.requireExistingDataRoot(dataDir), control = path.join(data, 'workspace-control'), parent = path.join(control, 'relocation-cancelled')
+  const control = path.join(path.resolve(dataDir), 'workspace-control'), parent = path.join(control, 'relocation-cancelled')
   if (!present(parent)) return []
+  const data = management.requireExistingDataRoot(dataDir)
   const roots = [control, parent].map(frame), names = fs.readdirSync(parent).sort()
   if (names.some(name => !uuid(name))) throw failure()
   const result = names.map(id => readWorkspaceSourceRestoration(data, id))

@@ -351,9 +351,9 @@ node scripts/debug-agent.mjs modules  # 查看 MM 注册的模块
 ### 前端构建须知
 
 - 前端源码在 `crabot-admin/web/src/`，构建产物在 `crabot-admin/dist/web/`
-- Admin 后端（port 3000）serve 的是构建后的静态文件，不是源码
-- Vite 开发服务器（port 5173）代理 `/api` 和 `/ws` 到后端 port 3000
-- **改了前端代码不生效？** 检查是通过 port 5173（Vite）还是 port 3000（静态文件）访问的
+- Admin后端（dev 13000；release默认3000）serve构建后的静态文件，不是源码
+- Vite开发服务器（5173）代理`/api`和`/ws`到本dev后端13000，不连接release的3000
+- **改了前端代码不生效？** 核对是否访问5173（Vite HMR），而不是13000（dev静态文件）或3000（release）。
 
 ### Agent 专用 Python 环境（agent-venv）
 
