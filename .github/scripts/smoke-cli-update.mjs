@@ -37,7 +37,9 @@ const dataDir = join(temporary, '实例'), installRoot = join(temporary, '程序
 const env = { ...process.env, DATA_DIR: dataDir }
 const run = async (command, args) => (await execute(command, args, { env, timeout: args[0] === 'upgrade' ? 600_000 : 180_000, maxBuffer: 1024 * 1024, windowsHide: true })).stdout
 let disk, updateComplete = false
+const started = Date.now(), stage = phase => console.log('CRABOT_CLI_UPDATE_STAGE ' + JSON.stringify({ platform: process.platform, phase, elapsed_ms: Date.now() - started }))
 try {
+  stage('preparing-previous-fixture')
   let sourceRoot = old
   if (cliCommand) {
     // Explicit synthetic previous release with the current command code; this is
@@ -53,8 +55,10 @@ try {
     await fs.rm(join(sourceRoot, 'core-files.json')); await fs.rm(join(sourceRoot, 'core-release.json'))
     await writeCoreRelease(sourceRoot, { ...metadata, version })
   }
+  stage('installing-previous-core')
   const one = await installStandaloneCli({ sourceRoot, installRoot, dataDir })
   const runtime = product.loadProductRuntime(one.coreRoot, { required: true })
+  stage('preparing-python-environments')
   const agentPath = pythonEnv.ensureProductAgentVenv(runtime, dataDir)
   const mcpPath = pythonEnv.ensureProductMcpVenv(runtime, dataDir, 'stable-custom-mcp-id')
   const environments = [agentPath, mcpPath].map(value => join(value.split(delimiter)[0], process.platform === 'win32' ? 'python.exe' : 'python'))
@@ -70,6 +74,7 @@ try {
   disk = await startDesktopDiskObservation(temporary)
   let two
   if (archiveArgument) {
+    stage('reading-release-archive')
     let archivePath = resolve(archiveArgument), archiveReport
     if (archiveArgument.endsWith('.json')) {
       archiveReport = JSON.parse(await fs.readFile(archivePath, 'utf8'))
@@ -101,6 +106,7 @@ try {
         await fs.writeFile(hook, `const original=globalThis.fetch;globalThis.fetch=(input,options)=>{const u=String(input);if(u==='https://github.com/smilefufu/crabot/releases/latest')return Promise.resolve(new Response(null,{status:302,headers:{location:'https://github.com/smilefufu/crabot/releases/tag/v${targetVersion}'}}));if(u===${JSON.stringify(releaseBase)})return original(${JSON.stringify(url)},options);if(u===${JSON.stringify(releaseBase + '.sha256')})return original(${JSON.stringify(url + '.sha256')},options);throw new Error('Unexpected fixture request');};`)
         const prior = env.NODE_OPTIONS
         env.NODE_OPTIONS = '--import=' + pathToFileURL(hook).href
+        stage('executing-cli-upgrade')
         try { assert.match(await run(one.command, ['upgrade', '--yes']), /服务保持停止/) }
         finally { if (prior === undefined) delete env.NODE_OPTIONS; else env.NODE_OPTIONS = prior }
         const id = readCliSelection(installRoot)
@@ -119,6 +125,7 @@ try {
     const stdout = await run(targetRuntime.executables.node, [join(two.coreRoot, 'scripts/apply-cli-update.mjs'), one.coreRoot, dataDir])
     assert.match(stdout, /服务保持停止/)
   }
+  stage('verifying-upgrade-receipts')
   assert.equal(readCliSelection(installRoot), two.id)
   assert.equal(inspectInstance(dataDir).state, 'stopped')
   assert.equal(readVersionMaintenance(dataDir), null)

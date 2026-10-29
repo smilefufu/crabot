@@ -7,7 +7,7 @@
 - ARM Mac/Win11 desktop.3完整离线候选已直接交付Downloads/Crabot桌面验收包-20261029，原件/副本SHA一致；Mac普通App入口、Applications链接、Core清单与ad-hoc完整性已只读核验并卸载镜像。旧desktop.1/2保留，真实内置Python/Node验证和精确来源/摘要见文档。本机原部署未停机、升级或接管，未启动第二个业务MM；约298GiB空闲，40/30GiB及本任务20GiB保护保持，不动Docker/Spotlight。
 - 三平台纯源码实际准备、冷启动、公共前台/Vite及正常停止通过。Windows9eb/40828644566和ARM Mac e057/40829438173通过实际开发GUI+release双Core、数据/端口/代际与双向启停隔离；Mac两种公开旧程序配合合成停机数据完成普通App接入并保留原密码/文件，Windows完整程序删除后保留data重装及健康收口通过。
 - 最终回归实证旧根.env会在准备及MM二次读取中重新引入生产目录/JWT，两层均仅对新dev关闭。有限真实MM的dev/旧CLI对照先红后绿，Core编译、本机9项入口/1项CI专用跳过和23项边界通过；7d7ec89b/40837581904的Windows实际源码生命周期及10项入口回归全过。历史CLI读取策略及release行为保持；未因dev专用修复重打离线包。
-- 完整产品矩阵40824815154的Linux和ARM Mac已成功，Windows/Intel的更新、卸载及后续组合尚未全部结束；不能用之前分支/局部通过代替最终组合。真实mirror-xinshu的Engine/Worker两链8次响应已通过，GUI/渠道模型与脚本业务仍须分开验收。ARM Mac/Win11由用户手测，缺资源的最低OS/Ubuntu桌面项按许可跳过披露；候选关闭正式自动更新，公开通道及正式信任根未就绪。
+- 完整产品矩阵40824815154的Linux和ARM Mac已成功；Windows签名更新/完整卸载重装成功，尾部CLI/Host因180分钟CI总预算取消，正独立补跑，Intel尾部仍运行。仅调整未来完整CI的Windows产品总预算，不改产品期限/断言；不能用之前分支/局部通过代替最终组合。真实mirror-xinshu的Engine/Worker两链8次响应已通过，GUI/渠道模型与脚本业务仍须分开验收。ARM Mac/Win11由用户手测，缺资源的最低OS/Ubuntu桌面项按许可跳过披露；候选关闭正式自动更新，公开通道及正式信任根未就绪。
 - 安装路径表已区分历史源码/新dev、旧/新release、GUI/CLI及system；新版独立CLI加GUI、旧CLI首次跨代和历史源码/system升级的未覆盖项如实列明。完整测试及最终diff review后才按已有1–50依赖批次和新增源码/Mac批次开PR，每批独立构建验证，不直推产品main、不自行合并。详细证据见[本轮实施结果](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-29-development-macos-implementation.md)。
 
 ### 渠道实例名大写误拒绝：bug 修复完成，未部署

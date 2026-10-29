@@ -106,7 +106,7 @@ jobs:
   runtime:
     name: ${{ matrix.suite == 'regression' && 'Desktop foundation' || matrix.suite == 'gui' && 'Desktop GUI regression' || 'Desktop product' }} ${{ matrix.target }}
     needs: ubuntu-bootstrap
-    timeout-minutes: ${{ matrix.target == 'darwin-x64' && matrix.suite == 'product' && 240 || (matrix.target == 'darwin-x64' || matrix.target == 'win32-x64') && 180 || 150 }}
+    timeout-minutes: ${{ matrix.suite == 'product' && (matrix.target == 'darwin-x64' || matrix.target == 'win32-x64') && 240 || (matrix.target == 'darwin-x64' || matrix.target == 'win32-x64') && 180 || 150 }}
     strategy:
       fail-fast: false
       # The same-source suites are independent: do not consume the product

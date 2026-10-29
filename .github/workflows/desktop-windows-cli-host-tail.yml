@@ -1,0 +1,82 @@
+name: Desktop Windows CLI and Host tail acceptance
+on:
+  push:
+    branches: ['test/desktop-cli-host-tail-20261029']
+permissions:
+  contents: read
+concurrency:
+  group: desktop-windows-cli-host-tail
+  cancel-in-progress: false
+jobs:
+  tail:
+    # Only the existing tail cases cancelled by the full product job budget.
+    # This distinct check does not replace or weaken the complete product suite.
+    name: Windows remaining CLI upgrade and complete Host
+    runs-on: windows-latest
+    timeout-minutes: 75
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.13.0'
+      - name: Prepare exact source and frozen dependencies
+        run: |
+          mkdir -p .desktop-build
+          node scripts/build-native.mjs
+          pnpm --dir crabot-client install --frozen-lockfile
+          pnpm --dir crabot-client run build
+          pnpm install --frozen-lockfile
+          pnpm --dir scripts/lib install --frozen-lockfile
+          pnpm --dir crabot-shared install --frozen-lockfile
+          pnpm --dir crabot-shared run build
+          for module in crabot-core crabot-agent crabot-admin crabot-mcp-tools crabot-channel-telegram crabot-channel-wechat crabot-channel-feishu crabot-channel-dingtalk crabot-channel-slack crabot-channel-voice; do
+            pnpm --dir "$module" install --frozen-lockfile
+            pnpm --dir "$module" run build
+          done
+          pnpm run build:cli
+          pnpm --dir crabot-admin/web install --frozen-lockfile
+          pnpm --dir crabot-admin/web run build
+          pnpm --dir crabot-desktop install --frozen-lockfile
+          (cd crabot-desktop && node -e "require('electron')")
+          pnpm --dir crabot-desktop run build
+      - name: Prepare actual locked product runtime
+        run: |
+          node scripts/prepare-scrapling.mjs --release=desktop-ci
+          node scripts/prepare-computer-use.mjs
+          node scripts/prepare-product-runtime.mjs
+      - name: Assemble and verify same-source CLI Core
+        run: |
+          node scripts/desktop/stage-core.mjs --out=.desktop-build/tail-core --version=0.1.0-desktop.3
+          node .github/scripts/verify-release-payload.mjs "$GITHUB_WORKSPACE/.desktop-build/tail-core"
+      - name: Existing ordinary CLI archive and actual upgrade command
+        run: |
+          node scripts/desktop/archive-core.mjs --candidate=true --core=.desktop-build/tail-core --out=.desktop-build/cli-archive 2>&1 | tee .desktop-build/cli-archive.log
+          node .github/scripts/smoke-cli-update.mjs .desktop-build/tail-core .desktop-build/tail-core .desktop-build/cli-archive/archive.json --cli-command 2>&1 | tee .desktop-build/cli-update.log
+      - name: Existing whole Electron host with real Core and CLI
+        working-directory: crabot-desktop
+        timeout-minutes: 12
+        env:
+          CRABOT_FULL_CORE_TEST: '1'
+        run: node --test tests/full-host.test.mjs 2>&1 | tee ../.desktop-build/full-host.log
+      - name: Retain tail evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-windows-cli-host-tail-${{ github.sha }}
+          path: |
+            .desktop-build/*.log
+            .desktop-build/cli-archive/archive.json
+            .desktop-build/cli-update-disk.json
+            .desktop-build/desktop-resources.json
+            .desktop-build/desktop-initialization-disk.json
+            product-runtime.json
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 7
