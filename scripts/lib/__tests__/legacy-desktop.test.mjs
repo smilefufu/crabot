@@ -155,7 +155,7 @@ test('fresh installer accepts a clean home or empty default root without creatin
 test('offline installer discovery loads outside the checkout without Core or old-code execution', async t => {
   const f = await defaultFixture(t), bootstrap = path.join(f.home, 'installer/bootstrap')
   const repository = fileURLToPath(new URL('../../../', import.meta.url))
-  for (const relative of ['scripts/lib/legacy-desktop.mjs', 'scripts/lib/legacy-release-identity.mjs', 'scripts/lib/legacy-release-files.mjs',
+  for (const relative of ['scripts/lib/legacy-desktop.mjs', 'scripts/lib/source-installation.mjs', 'scripts/lib/legacy-release-identity.mjs', 'scripts/lib/legacy-release-files.mjs',
     'scripts/lib/mode.mjs', 'scripts/lib/process-identity.cjs', 'scripts/desktop/legacy-releases.json', 'crabot-native/build/Release/crabot-native.node']) {
     const target = path.join(bootstrap, relative)
     await fs.mkdir(path.dirname(target), { recursive: true }); await fs.copyFile(path.join(repository, relative), target)

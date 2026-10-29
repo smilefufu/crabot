@@ -30,7 +30,7 @@ const { default: cliLocation } = await import(new URL('./scripts/lib/cli-locatio
 let cliInstallation
 try {
   cliInstallation = cliLocation.assertSelectedCli(__dirname)
-  if (process.platform === 'darwin' && existsSync(resolve(__dirname, 'desktop-host.json'))) {
+  if (process.platform === 'darwin' && cliInstallation?.scope !== 'desktop' && existsSync(resolve(__dirname, 'desktop-host.json'))) {
     const { default: macBinding } = await import(new URL('./scripts/lib/mac-app-binding.cjs', import.meta.url))
     macBinding.applyMacAppEnvironment(__dirname)
   }
