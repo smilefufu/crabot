@@ -40,6 +40,9 @@ jobs:
           test ! -d crabot-desktop/node_modules
       - name: Real cold developer Core
         run: node .github/scripts/smoke-development-coexistence.mjs --source-only 2>&1 | tee .desktop-build/development-source-boot.log
+      - name: Native source startup regression
+        working-directory: scripts/upgrade-lib
+        run: node ../../node_modules/vitest/vitest.mjs run __tests__/startup-entry.test.mjs --maxWorkers=1 --minWorkers=1 2>&1 | tee ../../.desktop-build/development-startup-regression.log
       - name: Retain exact developer evidence
         if: always()
         uses: actions/upload-artifact@v4

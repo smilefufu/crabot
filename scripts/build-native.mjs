@@ -7,8 +7,10 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { downloadProductAsset } from './lib/product-prepare.mjs'
 import { runBounded } from './lib/run-bounded.mjs'
+import { developmentBuildState } from './lib/development-build.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const developmentState = developmentBuildState(join(root, 'crabot-native'), [await fs.readFile(fileURLToPath(import.meta.url), 'utf8')])
 const cache = join(root, '.desktop-build', 'native')
 const version = '22.22.3'
 const headers = await downloadProductAsset({
@@ -54,4 +56,5 @@ if (process.platform === 'win32') {
   await runBounded(process.env.CXX || 'c++', ['-std=c++17', '-O2',
     ...(process.platform === 'darwin' ? ['-mmacosx-version-min=14.0'] : []), cleanupSource, '-o', cleanupBinary])
 }
+developmentState.commit() // Only a successful complete native build is reusable.
 console.log('Native process identity helper built: ' + process.platform + '-' + process.arch)

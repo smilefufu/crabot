@@ -19,18 +19,23 @@ for (const key of Object.keys(process.env)) if (!Object.hasOwn(devEnv, key)) del
 Object.assign(process.env, devEnv)
 
 async function prepare(desktop = false, lockHeld = false) {
-  // Check an already prepared tree before replacing even its native helper.
-  if (existsSync(join(root, 'crabot-native/build/Release/crabot-native.node'))) {
-    const { assertDevelopmentBuildAllowed } = await import('./lib/development.mjs')
-    await assertDevelopmentBuildAllowed(root)
-  }
-  // Native helper is required for read-only ownership checks before source builds.
+  // A Windows DLL cannot be relinked while this process has loaded it.
+  // Keep the pre-rebuild ownership observation in a short-lived Node process.
   const { developmentBuildState } = await import('./lib/development-build.mjs')
+  const { runBounded } = await import('./lib/run-bounded.mjs')
   const native = developmentBuildState(join(root, 'crabot-native'), [readFileSync(join(root, 'scripts/build-native.mjs'), 'utf8')])
-  if (!native.ready || !existsSync(join(root, 'crabot-native/build/Release/crabot-native.node'))) {
-    const { runBounded } = await import('./lib/run-bounded.mjs')
+  const nativeExists = existsSync(join(root, 'crabot-native/build/Release/crabot-native.node'))
+  if (nativeExists) {
+    if (!native.ready) await runBounded(process.execPath, ['--input-type=module', '-e',
+      'const {assertDevelopmentBuildAllowed}=await import(process.argv[1]);await assertDevelopmentBuildAllowed(process.argv[2])',
+      new URL('./lib/development.mjs', import.meta.url).href, root], { env: process.env })
+    else {
+      const { assertDevelopmentBuildAllowed } = await import('./lib/development.mjs')
+      await assertDevelopmentBuildAllowed(root)
+    }
+  }
+  if (!native.ready || !nativeExists) {
     await runBounded(process.execPath, [join(root, 'scripts/build-native.mjs')], { env: process.env })
-    native.commit()
   }
   const { acquireStartupLock, releaseCliLock, cliLockToken } = await import('./lib/cli-lock.mjs')
   if (lockHeld && !cliLockToken(join(process.env.DATA_DIR, 'cli.lock'))) throw new Error('开发准备需要持有本实例操作锁。')

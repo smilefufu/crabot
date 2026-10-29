@@ -5,6 +5,7 @@ import os from 'node:os'
 import net from 'node:net'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { acquireCliLock, releaseCliLock } from '../../lib/cli-lock.mjs'
+import { stopDevelopment } from '../../lib/development.mjs'
 import { spawnSync, spawn } from 'node:child_process'
 const product = fileURLToPath(new URL('../../../', import.meta.url))
 let root, data, home
@@ -158,11 +159,10 @@ it('new developer browser credentials remain schema-compatible before first boot
     const {checkSchema}=require(${JSON.stringify(path.join(product, 'crabot-core/dist/schema-check.js'))});
     const result=checkSchema({moduleDir:${JSON.stringify(path.join(home, 'crabot-admin'))},dataDir:${JSON.stringify(path.join(data, 'admin'))}});
     if(result.kind==='block'){console.error('admin-web schema_mismatch');process.exit(1)}
-    const server=require('node:http').createServer((req,res)=>{res.setHeader('Content-Type','application/json');res.end(JSON.stringify({success:true,data:{status:'healthy'}}))});
+    const server=require('node:http').createServer((req,res)=>{req.resume();res.setHeader('Content-Type','application/json');res.end(JSON.stringify({success:true,data:{status:'healthy'}}));if(req.url==='/shutdown')req.on('end',()=>server.close(()=>process.exit(0)))});
     server.listen(29000,'127.0.0.1');process.on('message',message=>{if(message.type==='crabot-shutdown')server.close(()=>process.exit(0))});
   `)
   const entry = pathToFileURL(path.join(home, 'scripts/lib/development.mjs')).href
-  const { stopDevelopment } = await import(entry)
   let credentialBytes
   for (let iteration = 0; iteration < 2; iteration++) {
     const code = `import{startDevelopment}from${JSON.stringify(entry)};await startDevelopment(${JSON.stringify(home)},{foreground:true,cleanup:code=>process.exit(code)});process.send('ready')`
