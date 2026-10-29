@@ -11,6 +11,12 @@ import { developmentEnvironment } from '../../scripts/lib/development-environmen
 import { inspectDevelopment, stopDevelopment } from '../../scripts/lib/development.mjs'
 
 async function captureDevelopmentLogs(root) {
+  for (const [url, method] of [['http://127.0.0.1:29000/health', 'POST'], ['http://127.0.0.1:13000/api/auth/me', 'GET']]) {
+    try {
+      const response = await fetch(url, { method, ...(method === 'POST' ? { headers: { 'Content-Type': 'application/json' }, body: '{}' } : {}), signal: AbortSignal.timeout(3000) })
+      console.log('CRABOT_DEVELOPMENT_PROBE ' + JSON.stringify({ url, method, status: response.status, body: (await response.text()).slice(0, 4096) }))
+    } catch (error) { console.log('CRABOT_DEVELOPMENT_PROBE ' + JSON.stringify({ url, method, error: error.message })) }
+  }
   for (const file of ['supervisor.boot.log', 'mm.stdout.log', 'mm.stderr.log', 'admin-web.log', 'crabot-agent.log', 'memory-default.log', 'vite-dev.log']) {
     try {
       const bytes = await fs.readFile(path.join(root, 'data/logs', file))
@@ -28,7 +34,8 @@ export async function verifyDevelopmentStartup() {
   try {
     await promisify(execFile)(process.execPath, [path.join(root, 'scripts/dev-background.mjs')], { cwd: root, env, timeout: 180_000, maxBuffer: 2 * 1024 * 1024 })
     assert.equal((await inspectDevelopment(root)).state, 'running')
-    assert.equal((await fetch('http://127.0.0.1:13000/health', { signal: AbortSignal.timeout(5000) })).ok, true)
+    const web = await fetch('http://127.0.0.1:13000/api/auth/me', { signal: AbortSignal.timeout(5000) })
+    assert.equal(web.status, 401); assert.equal((await web.json()).error, 'Unauthorized')
     console.log('CRABOT_DEVELOPMENT_SOURCE_BOOT_READY')
   } finally { await captureDevelopmentLogs(root); await stopDevelopment(root) }
 }

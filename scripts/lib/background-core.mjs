@@ -56,8 +56,10 @@ export async function launchBackgroundCore({ root, dataDir, env, mmPort, webPort
     const state = inspectInstance(dataDir)
     if (state.record?.generation === record.generation && state.record.controller.pid === child.pid && state.record.mm && ['healthy', 'degraded'].includes(await probeHealthStatus(mmPort))) {
       try {
-        const response = await fetch(`http://127.0.0.1:${webPort}/health`, { signal: AbortSignal.timeout(1500) })
-        if (response.ok) return { record: state.record, ready: true }
+        // This existing unauthenticated API response proves the management Web
+        // handler is ready, even before Vite/static UI or a model is configured.
+        const response = await fetch(`http://127.0.0.1:${webPort}/api/auth/me`, { signal: AbortSignal.timeout(1500) })
+        if (response.status === 401 && (await response.json()).error === 'Unauthorized') return { record: state.record, ready: true }
       } catch { /* health is a separate observation, never process-ownership proof */ }
     }
     await new Promise(resolve => setTimeout(resolve, 250))

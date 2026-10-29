@@ -11,7 +11,7 @@ import { createServer } from 'node:net'
 import { inspectInstance, identity } from '../instance-runtime.mjs'
 import { stopInstance } from '../instance-controller.mjs'
 
-for (const coreHealth of ['healthy', 'degraded']) test('detached shared core ' + coreHealth + ' survives its launching frontend being killed; stop remains stopped', async t => {
+for (const coreHealth of ['healthy', 'degraded']) test('detached shared core ' + coreHealth + ' survives its launching frontend being killed; stop remains stopped', { timeout: 15_000 }, async t => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'crabot-background-中文 space-')))
   const data = join(root, 'data'), marker = join(root, 'stopped')
   mkdirSync(data); mkdirSync(join(root, 'crabot-core', 'dist'), { recursive: true }); mkdirSync(join(root, 'scripts'))

@@ -19,7 +19,12 @@ createServer((request, response) => {
   let body = ''
   request.on('data', chunk => { body += chunk })
   request.on('end', () => {
-    if (request.url === '/shutdown') {
+    // Admin Web has no GET /health endpoint; an unbuilt source UI returns 404.
+    if (request.method === 'GET' && request.url === '/health') {
+      response.writeHead(404).end('Web UI not found')
+    } else if (request.method === 'GET' && request.url === '/api/auth/me') {
+      response.writeHead(401, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'Unauthorized' }))
+    } else if (request.url === '/shutdown') {
       const input = JSON.parse(body)
       const valid = input.params?.expected_generation === process.env.CRABOT_INSTANCE_GENERATION
       response.writeHead(valid ? 200 : 409).end(JSON.stringify({ success: valid }))
