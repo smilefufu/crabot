@@ -465,3 +465,13 @@ for (const changed of ['mm-missing', 'generation-mismatch', 'not-ready']) test('
   controller.load = () => assert.fail('No installation lookup or CLI spawn before native GUI/MM confirmation')
   await assert.rejects(controller.verifyLegacyCli(), { code: 'CRABOT_MAINTENANCE_PENDING' })
 })
+
+test('a port conflict reports its actual port without exposing raw error text or stopping another deployment', async t => {
+  const controller = new DesktopController({ coreRoot: '/unused', dataRoot: '/unused', appVersion: 'fixture', platform: process.platform })
+  t.after(() => controller.close())
+  controller.load = async () => { throw new Error('Conflict reporting must not load a stop adapter') }
+  controller.startCore = async () => { throw Object.assign(new Error('private backend details'), { code: 'CRABOT_PORT_BUSY', port: 19000 }) }
+  const state = await controller.start()
+  assert.equal(state.phase, 'error'); assert.equal(state.code, 'CRABOT_PORT_BUSY')
+  assert.match(state.message, /19000.*占用/); assert.equal(state.message.includes('private backend details'), false)
+})

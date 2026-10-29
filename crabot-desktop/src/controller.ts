@@ -39,11 +39,14 @@ export class DesktopController {
     await this.host.reconnect()
   }
   private report(error: unknown) {
-    const value = error as { code?: string }
+    const value = error as { code?: string; port?: number }
     const code = typeof value?.code === 'string' && /^[A-Z0-9_]{1,128}$/.test(value.code) ? value.code : 'DESKTOP_UNAVAILABLE'
     const migration = ['CRABOT_DESKTOP_TAKEOVER_REQUIRED', 'CRABOT_DATA_NOT_PRIVATE', 'CRABOT_LEGACY_INSTANCE'].includes(code)
     let message = '本机服务尚未就绪。可重新检查连接或查看基础诊断，按提示恢复。'
-    if (migration) message = '发现已有部署或数据，需要先检查并确认接管。'
+    if (code === 'CRABOT_PORT_BUSY') {
+      const port = Number.isInteger(value.port) && value.port! > 0 && value.port! <= 65535 ? ` ${value.port}` : ''
+      message = `Crabot需要的本机端口${port}已被占用，服务尚未启动。请核对已有Crabot或其它占用程序后重试；现有程序和数据保留。`
+    } else if (migration) message = '发现已有部署或数据，需要先检查并确认接管。'
     else if (['CRABOT_CORE_INTEGRITY', 'CRABOT_RUNTIME_INVALID'].includes(code)) message = '内置运行文件未通过校验。请保留数据目录，并使用同版或更高版的桌面安装包修复；修复前先确认共享服务已停止。工作依赖不会因此被清空。'
     else if (['CRABOT_PYTHON_ENV_INVALID', 'CRABOT_PYTHON_ENV_MIGRATION_REQUIRED', 'CRABOT_PYTHON_ENV_SELECTION_INVALID'].includes(code)) message = '工作用Python环境需要单独核验，现有依赖已保留。请打开基础诊断并导出报告；重新安装应用不会自动清空或重建该环境。'
     else if (['CRABOT_BACKUP_SPACE', 'CRABOT_UPDATE_SPACE', 'ENOSPC'].includes(code)) message = '磁盘空间不足，当前步骤未能完成。请保留现有数据和维护记录，释放空间后打开基础诊断核对，再继续操作。'

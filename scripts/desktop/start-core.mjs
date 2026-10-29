@@ -36,7 +36,7 @@ export async function startDesktopCore({ root, dataDir, source = process.env, on
     if (!existsSync(entry) || !existsSync(join(root, 'crabot-core/dist/main.js'))) throw new Error('核心文件缺失，请修复安装。')
     await new Promise((resolve, reject) => {
       const probe = createServer()
-      probe.once('error', () => reject(Object.assign(new Error('Crabot 本机端口已被占用，请查看诊断。'), { code: 'CRABOT_PORT_BUSY' })))
+      probe.once('error', () => reject(Object.assign(new Error('Crabot 本机端口已被占用，请查看诊断。'), { code: 'CRABOT_PORT_BUSY', port: mmPort })))
       probe.listen(mmPort, '127.0.0.1', () => probe.close(resolve))
     })
     stage('orphan_preflight')
