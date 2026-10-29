@@ -79,11 +79,14 @@ test('an existing custom command is preserved together with shell preferences', 
   await assert.rejects(fs.lstat(path.join(f.prefix, '.crabot-desktop-cli.json')), { code: 'ENOENT' })
 })
 
-test('a command in another PATH directory requires explicit takeover rather than competing registration', isolatedOnly, async t => {
+test('a command in another PATH directory is retained and reports the independent App command without forced takeover', isolatedOnly, async t => {
   const f = await fixture(t), other = path.join(f.home, 'other-tools')
   await fs.mkdir(other); await fs.writeFile(path.join(other, windows ? 'crabot.cmd' : 'crabot'), 'known-other-entry')
   f.env.PATH = other + path.delimiter + f.env.PATH
-  await assert.rejects(installDesktopCli(f), { code: 'CRABOT_CLI_INSTALL_REQUIRED' })
+  await assert.rejects(installDesktopCli(f), error => error.code === 'CRABOT_CLI_INSTALL_REQUIRED'
+    && error.message.includes(path.join(f.coreRoot, 'bin', windows ? 'crabot.exe' : 'crabot'))
+    && !error.message.includes('先完成旧安装接管'))
+  assert.equal(await fs.readFile(path.join(other, windows ? 'crabot.cmd' : 'crabot'), 'utf8'), 'known-other-entry')
   await assert.rejects(fs.lstat(path.join(f.prefix, windows ? 'crabot.cmd' : 'crabot')), { code: 'ENOENT' })
 })
 

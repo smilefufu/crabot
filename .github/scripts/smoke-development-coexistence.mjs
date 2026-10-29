@@ -32,14 +32,27 @@ export async function verifyDevelopmentCoexistence({ inspectRelease, releaseCli 
     assert.notEqual(first.dataDir, baseline.record.data_dir)
     const electron = createRequire(path.join(root, 'crabot-desktop/package.json'))('electron')
     gui = spawn(electron, [path.join(root, 'crabot-desktop'), '--background'], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] })
-    let ready = false
-    const consume = chunk => { const text = chunk.toString(); output = (output + text).slice(-128_000); if (/"phase":"ready"/.test(output)) ready = true }
-    gui.stdout.on('data', consume); gui.stderr.on('data', consume)
-    const deadline = Date.now() + 180_000
-    while (!ready) {
-      if (gui.exitCode !== null || gui.signalCode !== null || Date.now() >= deadline) throw new Error('Source GUI failed to authenticate its actual developer Core\n' + output)
-      await new Promise(done => setTimeout(done, 100))
+    const readyGenerations = new Set()
+    let buffered = '', launchError
+    const consume = chunk => {
+      const text = chunk.toString(); output = (output + text).slice(-128_000); buffered = (buffered + text).slice(-128_000)
+      let end
+      while ((end = buffered.indexOf('\n')) !== -1) {
+        const line = buffered.slice(0, end); buffered = buffered.slice(end + 1)
+        try { const event = JSON.parse(line); if (event.component === 'desktop' && event.phase === 'ready') readyGenerations.add(event.generation) } catch {}
+      }
     }
+    gui.stdout.on('data', consume)
+    gui.stderr.on('data', chunk => { output = (output + chunk.toString()).slice(-128_000) })
+    gui.on('error', error => { launchError = error })
+    const waitForSourceGui = async generation => {
+      const deadline = Date.now() + 180_000
+      while (!readyGenerations.has(generation)) {
+        if (launchError || gui.exitCode !== null || gui.signalCode !== null || Date.now() >= deadline) throw new Error('Source GUI failed to authenticate its actual developer Core\n' + output)
+        await new Promise(done => setTimeout(done, 100))
+      }
+    }
+    await waitForSourceGui(first.record.generation)
     await sameRelease(baseline.record.generation)
     await stopDevelopment(root)
     assert.equal((await inspectDevelopment(root)).state, 'stopped')
@@ -47,6 +60,7 @@ export async function verifyDevelopmentCoexistence({ inspectRelease, releaseCli 
     await start()
     const second = await inspectDevelopment(root)
     assert.equal(second.state, 'running'); assert.notEqual(second.record.generation, first.record.generation)
+    await waitForSourceGui(second.record.generation)
     await sameRelease(baseline.record.generation)
     await releaseCli('stop')
     assert.equal((await inspectRelease()).state, 'stopped')

@@ -48,12 +48,13 @@ async function ownedDirectory(directory) {
 }
 async function link(file, target, previousTarget, directory = false) {
   const current = await stat(file)
+  const command = directory ? path.join(target, 'bin/crabot.exe') : target
   if (!current) { await fs.symlink(target, file, directory ? 'junction' : undefined); return }
-  if (!current.isSymbolicLink()) fail('发现已有自定义命令入口，请先完成旧安装接管。')
+  if (!current.isSymbolicLink()) fail(`已保留现有自定义入口。可继续从App管理服务；当前应用入口：${command}`)
   const originalTarget = await fs.readlink(file), actual = path.resolve(path.dirname(file), originalTarget)
   const comparable = value => process.platform === 'win32' ? path.toNamespacedPath(value) : value
   if (comparable(actual) === comparable(target)) return
-  if (!previousTarget || comparable(actual) !== comparable(previousTarget)) fail('已有命令入口与受管记录不一致，未作替换。')
+  if (!previousTarget || comparable(actual) !== comparable(previousTarget)) fail(`已保留现有命令入口。可继续从App管理服务；当前应用入口：${command}`)
   const temporary = file + '.crabot-' + randomUUID()
   try {
     await fs.symlink(target, temporary, directory ? 'junction' : undefined)
@@ -94,6 +95,7 @@ export async function installDesktopCli({ coreRoot, dataDir, home = homedir(), e
   const paired = installation.locateDesktopCore(coreRoot)
   if (paired && paired.dataDir !== await fs.realpath(dataDir)) fail('命令必须使用桌面安装内的同一份数据，未修改已有入口。')
   const registeredRoot = paired?.root ?? coreRoot
+  const appCommand = path.join(registeredRoot, 'bin', process.platform === 'win32' ? 'crabot.exe' : 'crabot')
   if (!identity.isOwnedDirectory(home)) fail('无法确认当前用户目录。')
   const windows = process.platform === 'win32'
   const prefix = windows ? path.join(env.LOCALAPPDATA || path.join(home, 'AppData/Local'), 'Crabot/cli') : path.join(home, '.local/bin')
@@ -123,13 +125,13 @@ export async function installDesktopCli({ coreRoot, dataDir, home = homedir(), e
     for (const directory of new Set(directories)) {
       if (allowed.includes(await fs.realpath(directory).catch(() => path.resolve(directory)))) continue
       for (const name of windows ? ['crabot.exe', 'crabot.cmd', 'crabot.bat'] : ['crabot']) {
-        if (await stat(path.join(directory, name))) fail('发现其它位置已有 crabot 命令，请先完成旧安装接管，避免连接到不同实例。')
+        if (await stat(path.join(directory, name))) fail(`已保留其它位置的crabot命令，不会覆盖源码或其它部署。可继续从App管理服务，或使用当前应用命令：${appCommand}`)
       }
     }
     const changes = windows ? [] : await shellChanges(home, env)
     if (windows) {
       const command = await regular(entry), text = paired ? windowsPairedCommand : windowsCommand
-      if (command && command.text !== windowsCommand && command.text !== windowsPairedCommand) fail('发现已有自定义命令入口，请先完成旧安装接管。')
+      if (command && command.text !== windowsCommand && command.text !== windowsPairedCommand) fail(`已保留现有自定义命令。可继续从App管理服务，或使用当前应用命令：${appCommand}`)
       await link(path.join(prefix, '.crabot-desktop-core'), registeredRoot, previousRoot, true)
       if (command?.text !== text) await publish(entry, text, command)
       identity.appendUserPathDirectory(prefix, priorPath)

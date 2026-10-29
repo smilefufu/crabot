@@ -16,7 +16,7 @@ jobs:
   installer:
     name: Offline test installer ${{ inputs.target || 'darwin-arm64' }}
     runs-on: ${{ inputs.target == 'win32-x64' && 'windows-latest' || 'macos-15' }}
-    timeout-minutes: 75
+    timeout-minutes: 120
     defaults:
       run:
         shell: bash
@@ -79,18 +79,6 @@ jobs:
           }
           await fs.writeFile(root + '/SHA256SUMS', sums.join('\n') + '\n');
           NODE
-      - name: Prepare isolated source memory for real coexistence
-        run: |
-          node --input-type=module -e 'import{prepareMemoryDependencies}from"./scripts/lib/memory-deps.mjs";await prepareMemoryDependencies("crabot-memory",{dev:true,relocatable:false,uv:"uv",logger:console})'
-      - name: Real source GUI and release coexistence
-        env:
-          CRABOT_CI_DEVELOPMENT_COEXISTENCE: '1'
-        run: |
-          if [ "${{ runner.os }}" = "macOS" ]; then
-            node .github/scripts/smoke-packaged-desktop.mjs .desktop-build/manual/gui 2>&1 | tee .desktop-build/manual-coexistence.log
-          else
-            node .github/scripts/smoke-packaged-desktop.mjs .desktop-build/manual/paired 2>&1 | tee .desktop-build/manual-coexistence.log
-          fi
       - name: Deliver test installer
         uses: actions/upload-artifact@v4
         with:
@@ -102,10 +90,21 @@ jobs:
             .desktop-build/manual/installer/distribution/*offline-candidate.exe
             .desktop-build/manual/installer/distribution/artifacts.json
             .desktop-build/manual/installer/distribution/SHA256SUMS
-            .desktop-build/manual-coexistence.log
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
+      - name: Prepare isolated source memory for real coexistence
+        run: |
+          node --input-type=module -e 'import{resolve}from"node:path";import{prepareMemoryDependencies}from"./scripts/lib/memory-deps.mjs";await prepareMemoryDependencies(resolve("crabot-memory"),{dev:true,relocatable:false,uv:"uv",logger:console})'
+      - name: Real source GUI and release coexistence
+        env:
+          CRABOT_CI_DEVELOPMENT_COEXISTENCE: '1'
+        run: |
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            node .github/scripts/smoke-packaged-desktop.mjs .desktop-build/manual/gui 2>&1 | tee .desktop-build/manual-coexistence.log
+          else
+            node .github/scripts/smoke-packaged-desktop.mjs .desktop-build/manual/paired 2>&1 | tee .desktop-build/manual-coexistence.log
+          fi
       - name: Retain build failure evidence
         if: failure()
         uses: actions/upload-artifact@v4
