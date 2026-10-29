@@ -370,8 +370,8 @@ export class ManagerLoop {
     (envelopes) => this.provideAutomaticGuidance(envelopes),
     (envelopes) => this.recordHumanInputs(envelopes),
   )
-  /** 自动提供的正文只属于本 episode，沿用临时消息的检查点与清理机制。 */
-  private readonly automaticGuidance = new Set<GuidanceName>()
+  /** 只观察当前 Engine 上下文；不记录曾加载过的指南。 */
+  private guidanceMessages: () => ReadonlyArray<EngineMessage> = () => []
   /** Projection only: message references survive deduplication; nothing is added to wake checkpoints. */
   private readonly quotedByMessage = new WeakMap<ChannelMessage, ReadonlyMap<string, QuotedMessageEntry>>()
   /**
@@ -970,7 +970,6 @@ export class ManagerLoop {
     this.currentToolProfile = toolProfile
     this.mailbox.setActiveProfile(toolProfile)
     this.currentToolFaceState = createManagerToolFaceState(managerToolLoadingModeForKey(this.deps.key))
-    this.automaticGuidance.clear()
     this.needsSpawnRecheck = false
     this.spawnRecheckInjected = false
     this.spawnRecheckOutcomeRecorded = false
@@ -1290,7 +1289,7 @@ export class ManagerLoop {
       if (this.deps.voiceResponseEndOwner !== 'parent') await this.voiceOutput?.finishResponse()
       this.voiceOutput = undefined
       this.currentVoiceReplyContext = undefined
-      this.automaticGuidance.clear()
+      this.guidanceMessages = () => []
       this.currentEpisodeInjected = null
       this.currentWakeEvent = null
       this.currentToolProfile = undefined
@@ -1362,16 +1361,6 @@ export class ManagerLoop {
     if (this.resumeCheckpoint && protectedTail.length > 0) {
       this.resumeCheckpoint = { ...this.resumeCheckpoint, protectedTailMessageId: protectedTail[0].id }
     }
-    const currentTailMessages: EngineMessage[] = [
-      ...this.provideAutomaticGuidance(this.currentEpisodeEnvelopes),
-      ...carriedTexts,
-      ...(eventText === undefined ? [] : [eventText]),
-    ].filter((text) => {
-      const count = reusedTexts.get(text) ?? 0
-      if (count === 0) return true
-      reusedTexts.set(text, count - 1)
-      return false
-    }).map((text) => createUserMessage(text))
     // 当前事件正文在 runAttempt 中参与完整容量检查；它不是不可压缩的系统固定开销。
     const compactionProfile = createManagerCompactionProfile({
       preferredKeepRecent: policy.keepRecent,
@@ -1405,6 +1394,17 @@ export class ManagerLoop {
       })
       historyState = withoutProtectedTail(state, protectedTail.length)
     }
+
+    const currentTailMessages: EngineMessage[] = [
+      ...this.provideAutomaticGuidance(this.currentEpisodeEnvelopes, state.recent),
+      ...carriedTexts,
+      ...(eventText === undefined ? [] : [eventText]),
+    ].filter((text) => {
+      const count = reusedTexts.get(text) ?? 0
+      if (count === 0) return true
+      reusedTexts.set(text, count - 1)
+      return false
+    }).map((text) => createUserMessage(text))
 
     // 入站图片视觉注入:窗口内 human 消息引用的图片读盘转 ImageBlock(VLM 模型才有)。
     // episode 内与 adapter/model 同点解析一次;文件不可读的引用在变换里改写文本标记。
@@ -2278,20 +2278,23 @@ export class ManagerLoop {
     return renderGuidance('manager', name, { requestAware: this.requestAuthorizationForWake(this.effectiveWakeForCurrentEpisode()) !== undefined })
   }
 
-  private provideAutomaticGuidance(envelopes: ReadonlyArray<TimedWakeEnvelope>): string[] {
+  private provideAutomaticGuidance(
+    envelopes: ReadonlyArray<TimedWakeEnvelope>,
+    messages = this.guidanceMessages(),
+  ): string[] {
     if (this.currentToolProfile !== 'normal') return []
     const texts: string[] = []
     for (const { wake } of envelopes) {
       const name = automaticGuidanceForWake(wake)
-      if (!name || this.automaticGuidance.has(name)) continue
-      this.automaticGuidance.add(name)
-      texts.push(this.renderManagerGuidance(name))
+      if (!name) continue
+      const text = this.renderManagerGuidance(name)
+      if (!texts.includes(text) && !messages.some(message => hasFullGuidance(message, text))) texts.push(text)
     }
     return texts
   }
 
   private transientPromptCounts(): Map<string, number> {
-    const counts = new Map([...this.automaticGuidance].map(name => [this.renderManagerGuidance(name), 1]))
+    const counts = new Map<string, number>()
     for (const item of [...this.currentEpisodeEnvelopes, ...(this.currentEpisodeInjected ?? [])]) {
       const prompt = transientSystemPromptForWake(item.wake)
       if (prompt) counts.set(prompt, (counts.get(prompt) ?? 0) + 1)
@@ -2346,6 +2349,7 @@ export class ManagerLoop {
       return face
     }
     const messagesRef = { current: initialMessages as ReadonlyArray<EngineMessage> }
+    this.guidanceMessages = () => messagesRef.current
     const initialIds = new Set(initialMessages.map((message) => message.id))
     const originalDurableIds = new Set(state.recent.map((message) => message.id))
     const executedMessages = new Map<string, EngineMessage>()
@@ -2451,6 +2455,15 @@ export class ManagerLoop {
         const protectedId = this.resumeCheckpoint?.protectedTailMessageId
         const protectedStart = protectedId ? raw.findIndex((message) => message.id === protectedId) : -1
         // 原文保护只作用于输入；输入之间和之后的完整工具组由共享 Engine 原位压缩。
+        // 当前场景必需的完整流程沿用控制上下文保护；不登记到临时删除集合。
+        const requiredGuidance = this.provideAutomaticGuidance([
+          ...this.currentEpisodeEnvelopes, ...(this.currentEpisodeInjected ?? []),
+        ], [])
+        const immutableMessageIds = new Set(this.resumeCheckpoint?.transientMessageIds)
+        for (const text of requiredGuidance) {
+          const message = raw.find(message => hasFullGuidance(message, text))
+          if (message) immutableMessageIds.add(message.id)
+        }
         const protectedMessageIds = new Set(raw.filter((message, index) => isInputMessage(message)
           && ((protectedStart >= 0 && index >= protectedStart) || !originalDurableIds.has(message.id)))
           .map((message) => message.id))
@@ -2462,7 +2475,7 @@ export class ManagerLoop {
             preferredKeepRecent: this.deps.policy.keepRecent,
             mainRequestFixedTokens: fixedTokens,
             protectedMessageIds,
-            immutableMessageIds: new Set(this.resumeCheckpoint?.transientMessageIds),
+            immutableMessageIds,
             onBatchApplied: async (batch) => {
               const recent = [...batch.state.history, ...batch.state.protectedTail].map(durableMessage)
               const next = { ...state,
@@ -3038,14 +3051,18 @@ function isHumanWake(wake: WakeEvent): wake is HumanWake {
   return wake.kind === 'human_messages' || wake.kind === 'attention_flush'
 }
 
-export function needsWorkerEventGuidance(event: HarnessEvent): boolean {
-  return workerEventClass(event) !== 'info' || event.kind === 'query_failed' || event.detail?.turn_pending === true
+function hasFullGuidance(message: EngineMessage, text: string): boolean {
+  if ('toolResults' in message) {
+    return message.toolResults.some(result => !result.is_error
+      && result.content.replace(/^\[\d{2}:\d{2}:\d{2}\]\n/, '') === text)
+  }
+  return message.role === 'user' && (typeof message.content === 'string'
+    ? message.content === text
+    : message.content.some(block => block.type === 'text' && block.text === text))
 }
 
 export function automaticGuidanceForWake(wake: WakeEvent): GuidanceName | undefined {
-  if (wake.kind === 'workboard_idle_review') return 'manager.workboard'
-  if (wake.kind === 'worker_event' && needsWorkerEventGuidance(wake.event)) return 'manager.worker-events'
-  return undefined
+  return wake.kind === 'workboard_idle_review' ? 'manager.workboard' : undefined
 }
 
 function transientSystemPromptForWake(wake: WakeEvent): string | undefined {

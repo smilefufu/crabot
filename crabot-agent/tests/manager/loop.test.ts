@@ -19,7 +19,8 @@ import { createUserMessage, createAssistantMessage, createToolResultMessage, def
 import { ContextManager, createManagerCompactionProfile } from '../../src/engine/context-manager.js'
 import type { LLMAdapter, LLMStreamParams, EngineMessage, ToolDefinition } from '../../src/engine/index.js'
 import type { ManagerEpisodeSpan, ManagerTraceWriter } from '../../src/manager/trace-types.js'
-import { guidanceCatalog, renderGuidance } from '../../src/guidance/catalog.js'
+import { createGuidanceTool, guidanceCatalog, renderGuidance } from '../../src/guidance/catalog.js'
+import { createAdapter, callNonStreaming } from '../../src/engine/llm-adapter.js'
 import { buildPromptCacheKey } from '../../src/engine/prompt-cache-key.js'
 import { HttpResponseError } from '../../src/engine/retry-utils.js'
 import { chunksFromContent } from '../engine/helpers/mock-stream.js'
@@ -379,14 +380,13 @@ describe('ManagerLoop', () => {
     expect(snapshots[1]).toContain('keep-current-input')
     expect(snapshots[1]).toContain('tool completed')
     expect(snapshots.at(-1)).toContain('old history summarized')
-    for (const name of ['manager.worker-events', 'manager.workboard']) {
-      expect(snapshots.at(-1)?.split(`## Guidance: ${name}`)).toHaveLength(2)
-    }
+    expect(snapshots.at(-1)?.split('## Guidance: manager.workboard')).toHaveLength(2)
+    expect(snapshots.at(-1)).not.toContain('## Guidance: manager.worker-events')
     const saved = await store.load(KEY)
     expect(saved.rollingSummary).toBe('old history summarized')
     expect(saved.foldedCount).toBeGreaterThan(0)
     expect(JSON.stringify(saved.recent).split('unique-supplement')).toHaveLength(2)
-    expect(JSON.stringify(saved.recent)).not.toContain('## Guidance:')
+    expect(JSON.stringify(saved.recent)).toContain('## Guidance: manager.workboard')
   })
 
   it.each(['current', 'injected'] as const)('reuses persisted %s event after compaction failure', async (source) => {
@@ -1441,11 +1441,201 @@ describe('ManagerLoop', () => {
     expect(turn1Messages).not.toContain('sched-1')
   })
 
+  it('完整自省指南跨 episode 保留复用，普通人类输入不追加自省流程', async () => {
+    const { adapter, calls, queue } = makeAdapter()
+    queue.push(...Array.from({ length: 4 }, () => ({ stopReason: 'end_turn' as const })))
+    const loop = new ManagerLoop(baseDeps({ store, adapter, hasPendingReply: () => false }))
+    const review = timed({ kind: 'workboard_idle_review' })
+    const guide = renderGuidance('manager', 'manager.workboard')
+    await loop.wakeUp(review)
+    expect((await store.load(KEY)).recent.filter(m => 'content' in m && m.content === guide)).toHaveLength(1)
+    await loop.wakeUp(review)
+    await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('普通输入')] }))
+    for (const call of calls) expect(call.messages.filter(m => 'content' in m && m.content === guide)).toHaveLength(1)
+    expect(calls[2].messages.some(m => 'content' in m && m.content === WORKBOARD_IDLE_REVIEW_PROMPT)).toBe(false)
+    expect(guide).toContain('普通建项、改板、查询及管理员更新任务板不启动本流程')
+  })
+
+  it.each(['previous', 'same-turn'] as const)('手动读取的完整成功回包可用于 %s 自省，显式重复加载仍返回正文', async source => {
+    const { adapter, calls, queue } = makeAdapter()
+    const guide = renderGuidance('manager', 'manager.workboard')
+    queue.push({ toolCalls: [{ name: 'load_guidance', id: 'manual-guide', input: { name: 'manager.workboard' } }], stopReason: 'tool_use' },
+      { stopReason: 'end_turn' }, { stopReason: 'end_turn' })
+    let loop!: ManagerLoop
+    const tool = createGuidanceTool('manager')
+    loop = new ManagerLoop(baseDeps({ store, adapter, hasPendingReply: () => false, toolFace: () => [{ ...tool, call: async (input, context) => {
+      const result = await tool.call(input, context)
+      if (source === 'same-turn') loop.enqueueDuringEpisode(timed({ kind: 'workboard_idle_review' }))
+      return result
+    } }] }))
+    await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('读取指南')] }))
+    if (source === 'previous') await loop.wakeUp(timed({ kind: 'workboard_idle_review' }))
+    expect(calls.slice(1).every(call => !call.messages.some(m => 'content' in m && m.content === guide))).toBe(true)
+    expect(JSON.stringify(calls.at(-1)!.messages).split('## Guidance: manager.workboard')).toHaveLength(2)
+    expect(await tool.call({ name: 'manager.workboard' }, {} as never)).toEqual({ output: guide, isError: false })
+    expect(await tool.call({ name: 'manager.workboard' }, {} as never)).toEqual({ output: guide, isError: false })
+  })
+
+  it('正常压缩移除旧完整指南后再次自省会补供，不依赖历史加载登记', async () => {
+    const { adapter, calls, queue, foldCalls } = makeAdapter()
+    const guide = renderGuidance('manager', 'manager.workboard')
+    const old = await store.load(KEY)
+    await store.save({ ...old, recent: [createUserMessage(guide), ...Array.from({ length: 30 }, (_, i) => compressibleHistoryMessage(`history-${i}`, 1600))] })
+    queue.push({ stopReason: 'end_turn' })
+    const loop = new ManagerLoop(baseDeps({ store, adapter, hasPendingReply: () => false, policy: { keepRecent: 3, hardCapTokens: 12000 } }))
+    await loop.wakeUp(timed({ kind: 'workboard_idle_review' }))
+    expect(foldCalls.length).toBeGreaterThan(0)
+    const inference = calls.filter(call => !call.systemPrompt.includes(FOLD_SYSTEM_PROMPT_MARKER))
+    expect(inference).toHaveLength(1)
+    expect(inference[0].messages.filter(m => 'content' in m && m.content === guide)).toHaveLength(1)
+    expect((await store.load(KEY)).recent.filter(m => 'content' in m && m.content === guide)).toHaveLength(1)
+  })
+
+  it.each(['error', 'cropped', 'stale'] as const)('上下文只有 %s 指南回包时自省仍提供完整当前正文', async kind => {
+    const { adapter, calls, queue } = makeAdapter()
+    const guide = renderGuidance('manager', 'manager.workboard')
+    const old = await store.load(KEY)
+    const content = { error: guide, cropped: guide.slice(0, -1), stale: `${guide}旧版内容` }[kind]
+    await store.save({ ...old, recent: [
+      createAssistantMessage([{ type: 'tool_use', id: 'invalid-guide', name: 'load_guidance', input: { name: 'manager.workboard' } }], 'tool_use'),
+      createToolResultMessage('invalid-guide', content, kind === 'error'),
+    ] })
+    queue.push({ stopReason: 'end_turn' })
+    const loop = new ManagerLoop(baseDeps({ store, adapter, hasPendingReply: () => false }))
+    await loop.wakeUp(timed({ kind: 'workboard_idle_review' }))
+    expect(calls[0].messages.filter(m => 'content' in m && m.content === guide)).toHaveLength(1)
+  })
+
+  it('失败重投保留已提供指南与事件，重试不重复正文或已执行工具', async () => {
+    const requests: LLMStreamParams[] = []
+    const adapter: LLMAdapter = { updateConfig() {}, async *stream(params) {
+      requests.push({ ...params, messages: [...params.messages] })
+      if (requests.length === 1) {
+        yield* chunksFromContent([{ type: 'tool_use', name: 'write_receipt', id: 'once', input: {} }], 'tool_use')
+        return
+      }
+      if (requests.length === 3) throw new Error('permanent fixture failure')
+      yield* chunksFromContent([], 'end_turn')
+    } }
+    const write = vi.fn(async () => ({ output: 'written', isError: false }))
+    const loop = new ManagerLoop(baseDeps({ store, adapter, hasPendingReply: () => false,
+      toolFace: () => [defineTool({ name: 'write_receipt', description: 'fixture', inputSchema: {}, call: write })],
+    }))
+    await loop.wakeUp(timed({ kind: 'workboard_idle_review' }))
+    expect((await loop.wakeUp(workerEventWake('failed-event'))).outcome).toBe('failed')
+    await loop.wakeUp(workerEventWake('retry-event'))
+    const guide = renderGuidance('manager', 'manager.workboard')
+    expect(requests.at(-1)!.messages.filter(m => 'content' in m && m.content === guide)).toHaveLength(1)
+    expect(JSON.stringify(requests.at(-1)!.messages)).toContain('retry-event')
+    expect(write).toHaveBeenCalledOnce()
+  })
+
+  it('同轮压缩保留当前自省的完整流程，不重放已执行工具', async () => {
+    const { adapter, calls, foldCalls, queue } = makeAdapter()
+    const guide = renderGuidance('manager', 'manager.workboard')
+    const old = await store.load(KEY)
+    await store.save({ ...old, recent: [
+      createAssistantMessage([{ type: 'tool_use', id: 'old-guide', name: 'load_guidance', input: { name: 'manager.workboard' } }], 'tool_use'),
+      createToolResultMessage('old-guide', guide, false),
+      ...Array.from({ length: 20 }, (_, i) => compressibleHistoryMessage(`history-${i}`, 600)),
+    ] })
+    queue.push({ toolCalls: [{ name: 'large_result', id: 'large', input: {} }], stopReason: 'tool_use' }, { stopReason: 'end_turn' })
+    const execute = vi.fn(async () => ({ output: 'x'.repeat(80000), isError: false }))
+    const usageAdapter: LLMAdapter = { ...adapter, async *stream(params) {
+      for await (const chunk of adapter.stream(params)) {
+        yield chunk.type === 'message_end' && calls.length === 1 ? { ...chunk, usage: { inputTokens: 39000, outputTokens: 5 } } : chunk
+      }
+    } }
+    const loop = new ManagerLoop(baseDeps({ store, adapter: usageAdapter, hasPendingReply: () => false, contextWindowTokens: () => 40000,
+      toolFace: () => [defineTool({ name: 'large_result', description: 'fixture', inputSchema: {}, call: execute })],
+    }))
+    await loop.wakeUp(timed({ kind: 'workboard_idle_review' }))
+    const inference = calls.filter(call => !call.systemPrompt.includes(FOLD_SYSTEM_PROMPT_MARKER))
+    expect(foldCalls.length).toBeGreaterThan(0)
+    expect(inference).toHaveLength(2)
+    expect(JSON.stringify(inference[0].messages)).toContain('old-guide')
+    expect(JSON.stringify(inference[1].messages).split('## Guidance: manager.workboard')).toHaveLength(2)
+    expect(execute).toHaveBeenCalledOnce()
+  })
+
+  it.each(['anthropic', 'openai', 'openai-responses', 'gemini'] as const)('%s 最终 wire 保留自动及手动指南的历史内容块前缀（含相邻合并与工具循环）', async format => {
+    const bodies: any[] = []
+    const fetchMock = vi.fn(async (_url: unknown, init: RequestInit) => {
+      bodies.push(JSON.parse(String(init.body)))
+      let data: string
+      if (format === 'anthropic') {
+        const events = [
+          { type: 'message_start', message: { id: 'fixture', type: 'message', role: 'assistant', content: [], model: 'fixture', usage: { input_tokens: 1, output_tokens: 0 } } },
+          { type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 0 } },
+          { type: 'message_stop' },
+        ]
+        data = events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join('')
+      } else if (format === 'openai-responses') data = `event: response.completed\ndata: ${JSON.stringify({ response: { id: 'fixture', output: [] } })}\n\n`
+      else if (format === 'gemini') data = `data: ${JSON.stringify({ candidates: [{ content: { role: 'model', parts: [{ text: 'OK' }] }, finishReason: 'STOP' }] })}\n\n`
+      else data = `data: ${JSON.stringify({ id: 'fixture', choices: [{ delta: {}, finish_reason: 'stop' }] })}\n\ndata: [DONE]\n\n`
+      return new Response(data, { headers: { 'Content-Type': 'text/event-stream' } })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    try {
+      const wire = createAdapter({ endpoint: 'https://example.test/v1', apikey: 'fixture', format })
+      if (format === 'anthropic') vi.spyOn((wire as any).client, 'fetch').mockImplementation(fetchMock)
+      for (const mode of ['automatic', 'manual'] as const) {
+        const prior = await store.load(KEY)
+        await store.save({ ...prior, recent: [] })
+        const { adapter, calls, queue } = makeAdapter()
+        queue.push(...(mode === 'manual' ? [{ toolCalls: [{ name: 'load_guidance', id: 'manual', input: { name: 'manager.workboard' } }], stopReason: 'tool_use' as const }] : []),
+          { toolCalls: [{ name: 'inject', id: 'inject', input: {} }], stopReason: 'tool_use' },
+          ...Array.from({ length: 8 }, () => ({ stopReason: 'end_turn' as const })))
+        let loop!: ManagerLoop
+        loop = new ManagerLoop(baseDeps({ store, adapter, hasPendingReply: () => false, toolFace: () => [createGuidanceTool('manager'),
+          defineTool({ name: 'inject', description: 'fixture', inputSchema: {}, call: async () => {
+            loop.enqueueDuringEpisode(timed({ kind: 'workboard_idle_review' }))
+            loop.enqueueDuringEpisode(workerEventWake('mid-turn'))
+            return { output: 'injected', isError: false }
+          } }),
+        ] }))
+        await loop.wakeUp(mode === 'automatic' ? timed({ kind: 'workboard_idle_review' }) : timed({ kind: 'human_messages', messages: [makeChannelMessage('read')] }))
+        for (const kind of ['turn_completed', 'activity_available', 'interaction_required', 'query_failed', 'lifecycle_changed'] as const) {
+          await loop.wakeUp(timed({ kind: 'worker_event', event: { kind, worker_id: 'wire-worker', ts: FIXED_RECEIVED_AT, seq: 1, detail: { has_error: true, review: true } } }))
+        }
+        await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('ordinary-after-review')] }))
+        const firstBody = bodies.length
+        for (const call of calls) {
+          expect(call.systemPrompt).toBe(calls[0].systemPrompt)
+          expect(call.systemPrompt.split('活动变化、空闲或自报完成不能代替证据')).toHaveLength(2)
+          expect(JSON.stringify(call.messages)).not.toContain('## Guidance: manager.worker-events')
+          await callNonStreaming(wire, call)
+        }
+        const requests = bodies.slice(firstBody)
+        // Adapters may merge adjacent user messages. Compare the actual serialized blocks,
+        // excluding only the pre-existing ephemeral cache hints and short wake notices.
+        const blocks = (body: any) => (body.messages ?? body.input ?? body.contents).flatMap((message: any) => {
+          const content = message.content ?? message.parts
+          if (content === undefined) return [JSON.stringify(message)]
+          return (Array.isArray(content) ? content : [{ type: 'text', text: content }]).filter((block: any) => block.text !== WORKBOARD_IDLE_REVIEW_PROMPT).map((block: any) => {
+            const { cache_control, ...value } = block
+            return JSON.stringify({ role: message.role, ...value })
+          })
+        })
+        for (let i = 1; i < requests.length; i++) {
+          expect(requests[i].system ?? requests[i].instructions ?? requests[i].systemInstruction).toEqual(requests[0].system ?? requests[0].instructions ?? requests[0].systemInstruction)
+          const prefix = blocks(requests[i - 1])
+          expect(blocks(requests[i]).slice(0, prefix.length)).toEqual(prefix)
+        }
+        expect(JSON.stringify(requests.at(-1)).split('## Guidance: manager.workboard')).toHaveLength(2)
+        expect(JSON.stringify(requests.at(-1))).not.toContain(JSON.stringify(WORKBOARD_IDLE_REVIEW_PROMPT).slice(1, -1))
+      }
+    } finally {
+      vi.restoreAllMocks()
+      vi.unstubAllGlobals()
+    }
+  })
+
   it.each([
-    ['Worker 结果', workerEventWake('result-worker'), 'manager.worker-events'],
+    ['Worker 结果', workerEventWake('result-worker'), undefined],
     ['任务板更新', timed({ kind: 'workboard_admin_update', noticeRevision: 1 }), undefined],
     ['任务板自省', timed({ kind: 'workboard_idle_review' }), 'manager.workboard'],
-  ] as const)('%s 自动 guidance 只追加到当前上下文，保持 system、缓存键和已有历史不变', async (_name, wake, guideName) => {
+  ] as const)('%s 保持 system 和已有历史，完整指南沿用普通消息保留', async (_name, wake, guideName) => {
     const { adapter, calls, queue } = makeAdapter()
     queue.push({ stopReason: 'end_turn' }, { stopReason: 'end_turn' }, { stopReason: 'end_turn' })
     const loop = new ManagerLoop(baseDeps({ store, adapter, hasPendingReply: () => false,
@@ -1461,17 +1651,19 @@ describe('ManagerLoop', () => {
     expect(calls[1].messages.slice(0, history.length)).toEqual(history)
     if (guide) expect(calls[1].messages.filter(m => 'content' in m && m.content === guide)).toHaveLength(1)
     else expect(JSON.stringify(calls[1].messages)).not.toContain('## Guidance:')
-    expect(JSON.stringify((await store.load(KEY)).recent)).not.toContain('## Guidance:')
+    if (guide) expect(JSON.stringify((await store.load(KEY)).recent)).toContain(guide.split('\n')[0])
     await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('下一次普通输入')] }))
     expect(calls[2].systemPrompt).toBe(calls[0].systemPrompt)
-    expect(JSON.stringify(calls[2].messages)).not.toContain('## Guidance:')
+    if (guide) expect(calls[2].messages.filter(m => 'content' in m && m.content === guide)).toHaveLength(1)
+    else expect(JSON.stringify(calls[2].messages)).not.toContain('## Guidance:')
     const files = await fs.readdir(dataDir, { recursive: true })
     for (const file of files.filter(file => file.includes('episodes/') && file.endsWith('.jsonl'))) {
-      expect(await fs.readFile(join(dataDir, file), 'utf-8')).not.toContain('## Guidance:')
+      const log = await fs.readFile(join(dataDir, file), 'utf-8')
+      expect(log).not.toContain('## Guidance: manager.worker-events')
     }
   })
 
-  it('运行中连续事件按消息尾部提供一次 guidance，既有请求前缀逐条保持不变', async () => {
+  it('运行中连续反馈只追加事件事实，既有请求前缀逐条保持不变', async () => {
     const { adapter, queue, calls } = makeAdapter()
     queue.push(
       { toolCalls: [{ name: 'inject', id: 'inject-1', input: {} }], stopReason: 'tool_use' },
@@ -1494,7 +1686,7 @@ describe('ManagerLoop', () => {
       expect(buildPromptCacheKey(calls[i].model, calls[i].systemPrompt))
         .toBe(buildPromptCacheKey(calls[0].model, calls[0].systemPrompt))
       expect(calls[i].messages.slice(0, calls[i - 1].messages.length)).toEqual(calls[i - 1].messages)
-      expect(calls[i].messages.filter(m => 'content' in m && m.content === renderGuidance('manager', 'manager.worker-events'))).toHaveLength(1)
+      expect(JSON.stringify(calls[i].messages)).not.toContain('## Guidance: manager.worker-events')
       expect(JSON.stringify(calls[i].messages)).not.toContain('## Guidance: manager.workboard')
     }
     expect(JSON.stringify(calls[0].messages)).not.toContain('## Guidance:')
