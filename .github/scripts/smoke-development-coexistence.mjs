@@ -37,7 +37,7 @@ export async function verifyDevelopmentStartup() {
     const web = await fetch('http://127.0.0.1:13000/api/auth/me', { signal: AbortSignal.timeout(5000) })
     assert.equal(web.status, 401); assert.equal((await web.json()).error, 'Unauthorized')
     console.log('CRABOT_DEVELOPMENT_SOURCE_BOOT_READY')
-  } finally { await captureDevelopmentLogs(root); await stopDevelopment(root) }
+  } finally { try { await stopDevelopment(root) } finally { await captureDevelopmentLogs(root) } }
   // Exercise the actual public foreground entry, including incremental preparation.
   const foreground = spawn(process.execPath, [path.join(root, 'scripts/dev.mjs')], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] })
   const exited = once(foreground, 'close')
