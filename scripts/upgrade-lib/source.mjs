@@ -75,6 +75,9 @@ export async function runSourceUpgrade(crabotHome, logger) {
   // Program Files）写 pnpm/yarn 系统 shim，需要管理员权限。我们已经显式用
   // `corepack pnpm ...` 调用，corepack 会按 package.json 的 packageManager
   // 字段按需下载到用户 cache（%LOCALAPPDATA%\node\corepack）执行，不需要 enable。
+  // file: 依赖会复制包内容，先生成 SDK dist，再准备消费方。
+  const clientDir = join(crabotHome, 'crabot-client')
+  if (existsSync(clientDir)) await installAndBuild(clientDir, logger, source)
   await runCmd('corepack', ['pnpm', 'install', '--frozen-lockfile', '--prefer-offline'], crabotHome, logger, source)
 
   const sharedDir = join(crabotHome, SHARED_MODULE)

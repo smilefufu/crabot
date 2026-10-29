@@ -42,7 +42,7 @@
 
 先按[安装与升级路径表](https://github.com/smilefufu/crabot-docs/blob/main/guides/installation-upgrade-paths.md)区分源码/release、GUI/CLI及user/system。桌面版仍是候选，公开main安装脚本取得公开CLI，不会自动安装尚未发布的GUI。
 
-完整桌面包由对应系统离线安装向导安装；独立完整Core通过包内脚本安装，两者内置运行环境。以下保留原公开CLI/源码入口。**本轮路径审计发现源码准备遗漏新共享SDK构建，干净源码安装和升级尚未收齐验收**；源码GUI也没有完整用户安装链，不能仅运行Electron启动脚本就视为支持。
+完整桌面包由对应系统离线安装向导安装；独立完整Core通过包内脚本安装，两者内置运行环境。以下保留原公开CLI/源码入口。**源码准备已补新共享SDK的先行构建，隔离回归和干净SDK编译通过；完整源码安装和GUI接入尚未收齐验收**；源码GUI也没有完整用户安装链，不能仅运行Electron启动脚本就视为支持。
 
 ### 路径 A：二进制安装（只想用）
 
@@ -178,7 +178,7 @@ crabot provider delete my-provider --human
 
 | 已安装类型 | 操作与限制 |
 | --- | --- |
-| 源码user CLI | 保存本地修改并更新选定Git版本；`crabot upgrade`准备构建，在明确stop后切换/迁移，再start和核验。upgrade不自动git pull，准备要求干净工作副本；本轮SDK构建遗漏仍待补验。 |
+| 源码user CLI | 保存本地修改并更新选定Git版本；`crabot upgrade`准备构建，在明确stop后切换/迁移，再start和核验。upgrade不自动git pull，准备要求干净工作副本；SDK顺序已修，完整源码GUI仍待验收。 |
 | 新版独立release CLI | `crabot stop` → `crabot upgrade` → `crabot start` → `crabot status`。 |
 | 旧release CLI | 首次升级到新版内置环境格式须独立验证；新版安装器不直接覆盖旧目录，同格式更新通过不代表此路径已验收。 |
 | 桌面受管 | GUI或 `crabot upgrade` 打开同一更新界面，由用户确认；GUI/Core配对，开发候选关闭正式自动更新。 |
