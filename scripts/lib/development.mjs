@@ -66,8 +66,8 @@ export async function startDevelopment(root, { foreground = false, lockHeld = fa
     const prepared = prepareCoreEnvironment({ root, dataDir: env.DATA_DIR, source: env })
     const preflight = await runCorePreflight({ root, dataDir: env.DATA_DIR, node: process.execPath, env: prepared.env, stdio: 'inherit' })
     if (preflight.exitCode !== 0) throw failure('开发启动前检查失败，原数据保留。')
-    await applyStartupMigrations(root, env.DATA_DIR, prepared.env, log)
     await ensureDevelopmentBrowserAccess(root, prepared.env, log)
+    await applyStartupMigrations(root, env.DATA_DIR, prepared.env, log)
     delete prepared.env.CRABOT_ADMIN_PASSWORD
     if (!foreground) {
       const { launchBackgroundCore } = await import('./background-core.mjs')

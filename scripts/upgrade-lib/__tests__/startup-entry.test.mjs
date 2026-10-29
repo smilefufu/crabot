@@ -3,7 +3,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
 import net from 'node:net'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { acquireCliLock, releaseCliLock } from '../../lib/cli-lock.mjs'
 import { spawnSync, spawn } from 'node:child_process'
 const product = fileURLToPath(new URL('../../../', import.meta.url))
@@ -145,3 +145,45 @@ it.each(['upgrade.mjs', 'ui-upgrade.mjs'])('already current release is read-only
   expect(result.stdout).toContain('already up to date')
   await expect(fs.stat(path.join(data, 'calls.json'))).rejects.toThrow()
 })
+
+it('new developer browser credentials remain schema-compatible before first boot and on restart', async () => {
+  data = path.join(home, 'data')
+  await fs.mkdir(data, { recursive: true }); await scripts()
+  await write('crabot-desktop/package.json', '{"crabotDesktopDevelopment":true}')
+  await write('crabot-admin/schema_version', 'v1\n')
+  await write('crabot-admin/upgrade/scope.mjs', 'export const migrationScope=async()=>({reads:[],writes:[]})')
+  await write('crabot-admin/upgrade/from_v0_to_v1.mjs', '// finite module migration; common engine commits its schema')
+  await fs.copyFile(path.join(product, 'crabot-admin/dist/credentials.js'), path.join(home, 'crabot-admin/dist/credentials.js'))
+  await write('crabot-core/dist/main.js', `
+    const {checkSchema}=require(${JSON.stringify(path.join(product, 'crabot-core/dist/schema-check.js'))});
+    const result=checkSchema({moduleDir:${JSON.stringify(path.join(home, 'crabot-admin'))},dataDir:${JSON.stringify(path.join(data, 'admin'))}});
+    if(result.kind==='block'){console.error('admin-web schema_mismatch');process.exit(1)}
+    const server=require('node:http').createServer((req,res)=>{res.setHeader('Content-Type','application/json');res.end(JSON.stringify({success:true,data:{status:'healthy'}}))});
+    server.listen(29000,'127.0.0.1');process.on('message',message=>{if(message.type==='crabot-shutdown')server.close(()=>process.exit(0))});
+  `)
+  const entry = pathToFileURL(path.join(home, 'scripts/lib/development.mjs')).href
+  const { stopDevelopment } = await import(entry)
+  let credentialBytes
+  for (let iteration = 0; iteration < 2; iteration++) {
+    const code = `import{startDevelopment}from${JSON.stringify(entry)};await startDevelopment(${JSON.stringify(home)},{foreground:true,cleanup:code=>process.exit(code)});process.send('ready')`
+    const child = spawn(process.execPath, ['--input-type=module', '-e', code], { cwd: home, env: env(), stdio: ['ignore', 'pipe', 'pipe', 'ipc'] })
+    let output = ''; child.stdout.on('data', bytes => { output += bytes }); child.stderr.on('data', bytes => { output += bytes })
+    const exited = new Promise(resolve => child.on('close', resolve))
+    try {
+      const ready = new Promise((resolve, reject) => {
+        child.once('message', resolve); child.once('error', reject)
+        exited.then(() => reject(new Error(output)))
+      })
+      expect(await ready).toBe('ready')
+      expect(await fs.readFile(path.join(data, 'admin/SCHEMA_VERSION'), 'utf8')).toBe('v1\n')
+      const bytes = await fs.readFile(path.join(data, 'admin/credentials.json'), 'utf8')
+      if (credentialBytes) expect(bytes).toBe(credentialBytes)
+      else credentialBytes = bytes
+      await stopDevelopment(home, { log() {} })
+      expect(await exited).toBe(0)
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM')
+      await exited
+    }
+  }
+}, 20000)
