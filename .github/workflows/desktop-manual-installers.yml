@@ -51,6 +51,11 @@ jobs:
           node scripts/prepare-scrapling.mjs --release=desktop-ci
           node scripts/prepare-computer-use.mjs
           node scripts/prepare-product-runtime.mjs
+      - name: Prepare isolated source memory for real coexistence
+        run: |
+          node --input-type=module -e 'import{resolve}from"node:path";import{prepareMemoryDependencies}from"./scripts/lib/memory-deps.mjs";await prepareMemoryDependencies(resolve("crabot-memory"),{dev:true,relocatable:false,uv:"uv",logger:console})'
+      - name: Verify cold source Core before packaging
+        run: node .github/scripts/smoke-development-coexistence.mjs --source-only 2>&1 | tee .desktop-build/development-source-boot.log
       - name: Build same-source offline GUI and Core installer
         run: |
           node scripts/desktop/stage-core.mjs --out=.desktop-build/manual/core --version=0.1.0-desktop.2
@@ -93,9 +98,6 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
-      - name: Prepare isolated source memory for real coexistence
-        run: |
-          node --input-type=module -e 'import{resolve}from"node:path";import{prepareMemoryDependencies}from"./scripts/lib/memory-deps.mjs";await prepareMemoryDependencies(resolve("crabot-memory"),{dev:true,relocatable:false,uv:"uv",logger:console})'
       - name: Real source GUI and release coexistence
         env:
           CRABOT_CI_DEVELOPMENT_COEXISTENCE: '1'

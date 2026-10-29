@@ -6,8 +6,31 @@ import { createRequire } from 'node:module'
 import { spawn, execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { once } from 'node:events'
+import { pathToFileURL } from 'node:url'
 import { developmentEnvironment } from '../../scripts/lib/development-environment.mjs'
 import { inspectDevelopment, stopDevelopment } from '../../scripts/lib/development.mjs'
+
+async function captureDevelopmentLogs(root) {
+  for (const file of ['supervisor.boot.log', 'mm.stdout.log', 'mm.stderr.log', 'admin-web.log', 'crabot-agent.log', 'memory-default.log', 'vite-dev.log']) {
+    try {
+      const bytes = await fs.readFile(path.join(root, 'data/logs', file))
+      await fs.writeFile(path.join(root, '.desktop-build/development-' + file), bytes.subarray(-128_000))
+    } catch (error) { if (error.code !== 'ENOENT') console.warn('Source diagnostic unavailable: ' + file) }
+  }
+}
+
+// Isolate a cold source boot before spending time packaging the release App.
+export async function verifyDevelopmentStartup() {
+  if (process.env.GITHUB_ACTIONS !== 'true') throw new Error('Real source boot requires an isolated CI user')
+  const root = await fs.realpath(process.env.GITHUB_WORKSPACE), env = developmentEnvironment(root)
+  assert.equal((await inspectDevelopment(root)).state, 'stopped')
+  try {
+    await promisify(execFile)(process.execPath, [path.join(root, 'scripts/dev-background.mjs')], { cwd: root, env, timeout: 180_000, maxBuffer: 2 * 1024 * 1024 })
+    assert.equal((await inspectDevelopment(root)).state, 'running')
+    assert.equal((await fetch('http://127.0.0.1:13000/health', { signal: AbortSignal.timeout(5000) })).ok, true)
+    console.log('CRABOT_DEVELOPMENT_SOURCE_BOOT_READY')
+  } finally { await captureDevelopmentLogs(root); await stopDevelopment(root) }
+}
 
 export async function verifyDevelopmentCoexistence({ inspectRelease, releaseCli }) {
   if (process.env.GITHUB_ACTIONS !== 'true') throw new Error('Real coexistence requires an isolated CI user')
@@ -81,6 +104,12 @@ export async function verifyDevelopmentCoexistence({ inspectRelease, releaseCli 
       gui.kill('SIGTERM'); await exited
     }
     await fs.writeFile(diagnostics, output)
+    await captureDevelopmentLogs(root)
     if (!stopped) await stopDevelopment(root)
   }
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  assert.equal(process.argv[2], '--source-only')
+  await verifyDevelopmentStartup()
 }
