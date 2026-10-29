@@ -1719,7 +1719,7 @@ export class AdminModule extends ModuleBase {
       }
     }
 
-    const route = () => this.routeWebRequest(req, res, url, agentCliAuth)
+    const route = () => this.routeWebRequest(req, res, url, agentCliAuth, onboardingHuman)
     if (requiresWorkspaceWebAdmission(req.method, pathname)) return this.withWorkspaceWebAccess(res, route)
     return route()
   }
@@ -1782,7 +1782,7 @@ export class AdminModule extends ModuleBase {
     await Promise.all([this.workspaceWebAccess().closeAfterFailedResume(), this.workspaceService.pauseScanning()])
   }
 
-  private async routeWebRequest(req: IncomingMessage, res: ServerResponse, url: URL, agentCliAuth?: AgentCliWebAuth): Promise<void> {
+  private async routeWebRequest(req: IncomingMessage, res: ServerResponse, url: URL, agentCliAuth?: AgentCliWebAuth, onboardingHuman?: string): Promise<void> {
     const pathname = url.pathname
     const workspaceRequest = pathname === '/api/workspaces' || pathname.startsWith('/api/workspaces/')
     // 路由处理
