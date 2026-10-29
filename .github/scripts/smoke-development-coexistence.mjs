@@ -96,35 +96,37 @@ export async function verifyDevelopmentCoexistence({ inspectRelease, releaseCli 
     assert.notEqual(first.dataDir, baseline.record.data_dir)
     const electron = createRequire(path.join(root, 'crabot-desktop/package.json'))('electron')
     gui = spawn(electron, [path.join(root, 'crabot-desktop'), '--background'], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] })
-    const readyGenerations = new Set()
+    const phases = []
     let buffered = '', launchError
     const consume = chunk => {
       const text = chunk.toString(); output = (output + text).slice(-128_000); buffered = (buffered + text).slice(-128_000)
       let end
       while ((end = buffered.indexOf('\n')) !== -1) {
         const line = buffered.slice(0, end); buffered = buffered.slice(end + 1)
-        try { const event = JSON.parse(line); if (event.component === 'desktop' && event.phase === 'ready') readyGenerations.add(event.generation) } catch {}
+        try { const event = JSON.parse(line); if (event.component === 'desktop') phases.push(event.phase) } catch {}
       }
     }
     gui.stdout.on('data', consume)
     gui.stderr.on('data', chunk => { output = (output + chunk.toString()).slice(-128_000) })
     gui.on('error', error => { launchError = error })
-    const waitForSourceGui = async generation => {
+    const waitForSourceGui = async (phase, after = 0) => {
       const deadline = Date.now() + 180_000
-      while (!readyGenerations.has(generation)) {
-        if (launchError || gui.exitCode !== null || gui.signalCode !== null || Date.now() >= deadline) throw new Error('Source GUI failed to authenticate its actual developer Core\n' + output)
+      while (phases.indexOf(phase, after) === -1) {
+        if (launchError || gui.exitCode !== null || gui.signalCode !== null || Date.now() >= deadline) throw new Error('Source GUI did not reach ' + phase + '\n' + output)
         await new Promise(done => setTimeout(done, 100))
       }
+      return phases.indexOf(phase, after) + 1
     }
-    await waitForSourceGui(first.record.generation)
+    const firstReady = await waitForSourceGui('ready')
     await sameRelease(baseline.record.generation)
     await stopDevelopment(root)
     assert.equal((await inspectDevelopment(root)).state, 'stopped')
+    const sourceStopped = await waitForSourceGui('stopped', firstReady)
     await sameRelease(baseline.record.generation)
     await start()
     const second = await inspectDevelopment(root)
     assert.equal(second.state, 'running'); assert.notEqual(second.record.generation, first.record.generation)
-    await waitForSourceGui(second.record.generation)
+    await waitForSourceGui('ready', sourceStopped)
     await sameRelease(baseline.record.generation)
     await releaseCli('stop')
     assert.equal((await inspectRelease()).state, 'stopped')
