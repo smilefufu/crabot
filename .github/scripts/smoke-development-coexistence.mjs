@@ -27,7 +27,7 @@ async function captureDevelopmentLogs(root) {
 }
 
 // Isolate a cold source boot before spending time packaging the release App.
-export async function verifyDevelopmentStartup() {
+export async function verifyDevelopmentStartup({ foreground: verifyForeground = true } = {}) {
   if (process.env.GITHUB_ACTIONS !== 'true') throw new Error('Real source boot requires an isolated CI user')
   const root = await fs.realpath(process.env.GITHUB_WORKSPACE), env = developmentEnvironment(root)
   assert.equal((await inspectDevelopment(root)).state, 'stopped')
@@ -38,6 +38,7 @@ export async function verifyDevelopmentStartup() {
     assert.equal(web.status, 401); assert.equal((await web.json()).error, 'Unauthorized')
     console.log('CRABOT_DEVELOPMENT_SOURCE_BOOT_READY')
   } finally { try { await stopDevelopment(root) } finally { await captureDevelopmentLogs(root) } }
+  if (!verifyForeground) return // The independent clean-source job owns public preparation/Ctrl+C acceptance.
   // Exercise the actual public foreground entry, including incremental preparation.
   const foreground = spawn(process.execPath, [path.join(root, 'scripts/dev.mjs')], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] })
   const exited = once(foreground, 'close')
@@ -153,6 +154,6 @@ export async function verifyDevelopmentCoexistence({ inspectRelease, releaseCli 
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-  assert.equal(process.argv[2], '--source-only')
-  await verifyDevelopmentStartup()
+  assert.ok(['--source-only', '--background-only'].includes(process.argv[2]))
+  await verifyDevelopmentStartup({ foreground: process.argv[2] === '--source-only' })
 }

@@ -98,7 +98,7 @@ jobs:
         run: |
           pnpm run build:cli
           pnpm --dir crabot-admin/web run build
-          node .github/scripts/smoke-development-coexistence.mjs --source-only 2>&1 | tee .desktop-build/development-source-boot.log
+          node .github/scripts/smoke-development-coexistence.mjs --background-only 2>&1 | tee .desktop-build/development-source-boot.log
       - name: Build same-source offline GUI and Core installer
         run: |
           node scripts/desktop/stage-core.mjs --out=.desktop-build/manual/core --version=0.1.0-desktop.3
