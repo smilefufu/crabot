@@ -73,7 +73,7 @@ async function main(): Promise<void> {
   }
 
   // 加载环境变量文件（统一从根目录 .env 读取）
-  const envFiles = [
+  const envFiles = isDevelopmentTree(CRABOT_ROOT) ? [] : [
     path.join(CRABOT_ROOT, '.env'),
   ]
   let envLoaded = false

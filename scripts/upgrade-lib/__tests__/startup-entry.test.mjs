@@ -106,15 +106,17 @@ it('foreground start releases only its startup lock after MM health, while its o
   expect(await fs.readFile(path.join(data, 'mm.pid'), 'utf8')).toBe('2147483000')
 }, 12000)
 
-it.skipIf(process.env.GITHUB_ACTIONS !== 'true')('actual compiled MM releases startup ownership after ingress and its exit preserves later lock/PID evidence', async () => {
+it.each([false, true])('finite compiled MM isolates dev=%s from legacy dotenv and preserves later lock/PID evidence', async isDev => {
   await scripts()
   await fs.cp(path.join(product, 'crabot-core/dist'), path.join(home, 'crabot-core/dist'), { recursive: true })
   await fs.symlink(path.join(product, 'crabot-core/node_modules'), path.join(home, 'crabot-core/node_modules'), 'dir')
   // Limit this main-entry test to MM lifecycle; independent core-module and venv tests cover those.
-  await write('crabot-core/dist/core-modules.js', 'exports.buildCoreModules = () => []')
+  await write('crabot-desktop/package.json', '{"crabotDesktopDevelopment":true}')
+  await write('.env', 'WORKER_WORKSPACES_DIR=legacy-workspaces\nCRABOT_ADMIN_DATA_DIR=legacy-admin\nCRABOT_MEMORY_DATA_DIR=legacy-memory\n')
+  await write('crabot-core/dist/core-modules.js', `exports.buildCoreModules = () => { require('node:fs').writeFileSync(${JSON.stringify(path.join(data, 'mm-environment.json'))}, JSON.stringify(Object.fromEntries(['WORKER_WORKSPACES_DIR','CRABOT_ADMIN_DATA_DIR','CRABOT_MEMORY_DATA_DIR'].map(name=>[name,process.env[name]??null])))); return [] }`)
   await write('crabot-core/dist/agent-venv.js', 'exports.ensureAgentVenv = () => null')
   const port = await new Promise(resolve => { const socket = net.createServer(); socket.listen(0, '127.0.0.1', () => { const port = socket.address().port; socket.close(() => resolve(port)) }) })
-  const child = spawn(process.execPath, [path.join(home, 'crabot-core/dist/main.js')], { cwd: path.join(home, 'crabot-core'), env: { ...env(), PORT: String(port), CRABOT_PORT_OFFSET: '0' }, stdio: ['ignore', 'pipe', 'pipe'] })
+  const child = spawn(process.execPath, [path.join(home, 'crabot-core/dist/main.js')], { cwd: path.join(home, 'crabot-core'), env: { ...env(), PORT: String(port), CRABOT_PORT_OFFSET: '0', CRABOT_DEV: String(isDev), HOME: root, USERPROFILE: root, WORKER_WORKSPACES_DIR: '', CRABOT_ADMIN_DATA_DIR: '', CRABOT_MEMORY_DATA_DIR: '' }, stdio: ['ignore', 'pipe', 'pipe'] })
   let output = ''; child.stdout.on('data', bytes => { output += bytes }); child.stderr.on('data', bytes => { output += bytes })
   const exited = new Promise(resolve => child.on('close', resolve))
   try {
@@ -127,6 +129,8 @@ it.skipIf(process.env.GITHUB_ACTIONS !== 'true')('actual compiled MM releases st
       await new Promise(resolve => setTimeout(resolve, 20))
     }
     expect(healthy, output).toBe(true)
+    const observed = JSON.parse(await fs.readFile(path.join(data, 'mm-environment.json'), 'utf8'))
+    expect(observed).toEqual(isDev ? { WORKER_WORKSPACES_DIR: '', CRABOT_ADMIN_DATA_DIR: '', CRABOT_MEMORY_DATA_DIR: '' } : { WORKER_WORKSPACES_DIR: 'legacy-workspaces', CRABOT_ADMIN_DATA_DIR: 'legacy-admin', CRABOT_MEMORY_DATA_DIR: 'legacy-memory' })
     expect(await fs.readFile(path.join(data, 'mm.pid'), 'utf8')).toBe(String(child.pid))
     const available = await acquireCliLock(data, 'probe', 0); releaseCliLock(available)
     await fs.writeFile(path.join(data, 'cli.lock'), JSON.stringify({ pid: 2147483000, command: 'later fixture' }))
