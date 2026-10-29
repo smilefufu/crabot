@@ -8,3 +8,4 @@
 .desktop-welcome-actions, .desktop-welcome-links { display: flex; gap: 16px; margin: 24px 0; }
 .desktop-welcome-links { font-size: 13px; }
 .desktop-welcome-note { font-size: 12px; }
+.desktop-welcome-steps [aria-current="step"] { color: var(--text-primary); font-weight: 650; }

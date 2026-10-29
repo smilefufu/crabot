@@ -31,6 +31,8 @@ export function DesktopWelcome() {
     })().catch(() => { if (!abort.signal.aborted) { setError('未能读取已有模型配置。可以重新检查，设置与诊断仍可访问。'); setPhase('error') } })
     return () => abort.abort()
   }, [client, navigate, refresh])
+  const selectingModel = providers.length > 0
+  const modelCount = providers.reduce((total, provider) => total + provider.models.filter(model => model.type === 'llm').length, 0)
   const selected = providers.find(provider => provider.id === providerId)
   const models = selected?.models.filter(model => model.type === 'llm') ?? []
   const chosen = models.find(model => model.model_id === modelId)?.model_id ?? models[0]?.model_id ?? ''
@@ -51,11 +53,12 @@ export function DesktopWelcome() {
   return <main className="desktop-welcome">
     <section className="desktop-welcome-card">
       <div className="desktop-welcome-brand">Crabot</div>
-      <h1>让 Crabot 准备好为你工作</h1>
-      <p>运行环境已随应用准备。接入一个模型服务，就可以开始聊天和处理任务。</p>
-      <ol className="desktop-welcome-steps"><li>接入模型服务</li><li>选择默认模型</li><li>发送第一条消息</li></ol>
+      <h1>{selectingModel ? '选择开始使用的模型' : '让 Crabot 准备好为你工作'}</h1>
+      <p>{selectingModel ? '模型服务已保存。确认一个默认模型后，就可以开始聊天。更多服务可稍后在模型设置中添加。' : '运行环境已随应用准备。接入一个模型服务，就可以开始聊天和处理任务。'}</p>
+      <ol className="desktop-welcome-steps"><li aria-current={!selectingModel ? 'step' : undefined}>{selectingModel ? '接入模型服务 ✓' : '接入模型服务'}</li><li aria-current={selectingModel ? 'step' : undefined}>选择默认模型</li><li>发送第一条消息</li></ol>
       {phase === 'checking' ? <p role="status">正在检查已有配置…</p> : <>
         {providers.length > 0 && phase === 'setup' && <div className="desktop-welcome-models">
+          <p role="status">已接入 {providers.length} 个模型服务，共 {modelCount} 个可选模型</p>
           <Select label="模型服务" value={providerId} options={providers.map(provider => ({ value: provider.id, label: provider.name }))}
             disabled={saving} onChange={event => { setProviderId(event.target.value); setModelId('') }} />
           <Select label="默认模型" value={chosen} options={models.map(model => ({ value: model.model_id, label: model.display_name }))}
@@ -63,7 +66,7 @@ export function DesktopWelcome() {
           <Button onClick={() => { void save() }} disabled={saving || mustCheck || !chosen}>{saving ? '正在保存…' : '保存并开始聊天'}</Button>
         </div>}
         <div className="desktop-welcome-actions">
-          <Button variant={providers.length ? 'secondary' : 'primary'} disabled={saving} onClick={() => setCreating(true)}>添加模型服务</Button>
+          {!selectingModel && <Button disabled={saving} onClick={() => setCreating(true)}>添加模型服务</Button>}
           {(phase === 'error' || mustCheck) && <Button variant="secondary" disabled={saving} onClick={() => setRefresh(value => value + 1)}>重新检查配置</Button>}
         </div>
       </>}

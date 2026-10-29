@@ -62,3 +62,16 @@ it('a lost save response preserves the selection and checks facts before allowin
   await waitFor(() => expect(screen.getByText('聊天页面')).toBeInTheDocument())
   expect(mocks.selectDefault).toHaveBeenCalledOnce()
 })
+
+it('advances from adding the first provider to selecting a default and shows saved inventory', async () => {
+  mocks.choices.mockResolvedValueOnce({ items: [] }).mockResolvedValue({ items: [provider] })
+  show()
+  fireEvent.click(await screen.findByRole('button', { name: '添加模型服务' }))
+  fireEvent.click(screen.getByRole('button', { name: '完成显式模型服务配置' }))
+  expect(await screen.findByRole('heading', { name: '选择开始使用的模型' })).toBeInTheDocument()
+  expect(screen.getByRole('status')).toHaveTextContent('已接入 1 个模型服务，共 1 个可选模型')
+  expect(screen.getByText('选择默认模型')).toHaveAttribute('aria-current', 'step')
+  expect(screen.queryByRole('button', { name: '添加模型服务' })).toBeNull()
+  expect(screen.getByLabelText('模型服务')).toHaveValue('provider')
+  expect(mocks.selectDefault).not.toHaveBeenCalled()
+})
