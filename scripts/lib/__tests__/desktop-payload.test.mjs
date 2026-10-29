@@ -2135,3 +2135,44 @@ test('actual installer takeover resumes a partial entry fence before stopping or
   assert.equal(record.phase, 'verifying'); assert.equal(record.legacy_source.entry_fence_id, partial.id)
   assert.equal(await fs.readFile(path.join(f.data, 'fixture/executions'), 'utf8'), 'once\n')
 })
+
+for (const conversionFailure of [false, true]) test('Mac App legacy admission uses external original data and retains health protection; failure=' + conversionFailure, { skip: process.platform !== 'darwin' }, async t => {
+  const f = await legacyProgramFixture(t, { functional: true, conversionFailure })
+  await fs.unlink(path.join(f.data, 'mm.pid'))
+  if (!conversionFailure) await fs.writeFile(path.join(f.target, '.env'), 'CRABOT_ADMIN_WEB_HOST=0.0.0.0\n')
+  const coreRoot = path.join(f.parent, '真正 Crabot.app/Contents/Resources/core'), home = path.join(f.parent, 'home')
+  await fs.mkdir(path.dirname(coreRoot), { recursive: true }); await fs.rename(f.core, coreRoot)
+  await fs.writeFile(path.join(coreRoot, 'desktop-host.json'), JSON.stringify({ schema_version: 1, platform: process.platform, arch: process.arch }))
+  await fs.mkdir(home)
+  const { default: binding } = await import('../mac-app-binding.cjs')
+  binding.writeMacAppBinding({ home, appPath: path.resolve(coreRoot, '../../..'), dataDir: f.data })
+  const node = path.join(coreRoot, '.product-runtime/node/bin/node'), role = path.join(coreRoot, 'scripts/lib/mac-legacy-admission.mjs')
+  const script = `import{pathToFileURL}from'node:url';const[module,sourceRoot,home]=process.argv.slice(1);const role=await import(pathToFileURL(module).href);console.log(JSON.stringify(await role.admitLegacyMacData({sourceRoot,home,inspectEnvironment:async()=>({status:'absent'})})))`
+  const run = () => promisify(execFile)(node, ['--input-type=module', '--eval', script, role, f.target, home], { timeout: 30000, maxBuffer: 65536, env: { ...process.env, HOME: home } })
+  if (conversionFailure) {
+    await assert.rejects(run())
+    assert.equal(await fs.readFile(path.join(f.data, 'fixture/content'), 'utf8'), 'old project data')
+    await assert.rejects(fs.lstat(path.join(f.data, 'desktop-managed.json')), { code: 'ENOENT' })
+    await assert.rejects(run())
+  } else {
+    const result = JSON.parse((await run()).stdout.trim())
+    assert.equal(result.dataDir, f.data); assert.equal(result.verification_pending, true)
+    assert.equal(await fs.readFile(path.join(f.data, 'fixture/executions'), 'utf8'), 'once\n')
+    assert.equal(JSON.parse((await run()).stdout.trim()).maintenance_id, result.maintenance_id)
+    assert.equal(await fs.readFile(path.join(f.data, 'fixture/executions'), 'utf8'), 'once\n')
+    assert.equal(JSON.parse(await fs.readFile(path.join(f.data, 'desktop-managed.json'), 'utf8')).admin_listen_host, '0.0.0.0')
+  }
+  for (const name of ['app', 'releases', 'current-release.json', 'desktop-installation.json']) await assert.rejects(fs.lstat(path.join(f.target, name)), { code: 'ENOENT' })
+  const { readVersionMaintenance, assertVersionMaintenanceAllowsStart } = await import('../version-maintenance.mjs')
+  assert.equal(readVersionMaintenance(f.data).schema_version, 4)
+  assert.throws(() => assertVersionMaintenanceAllowsStart(f.data), { code: 'CRABOT_MAINTENANCE_PENDING' })
+  if (!conversionFailure) {
+    const recovery = `import{pathToFileURL}from'node:url';const[module,data,root,healthy]=process.argv.slice(1);const versions=await import(pathToFileURL(module).href);const done=await versions.recoverLegacyUserVersionMaintenance({dataDir:data,root,appVersion:'1.2.3',verifyTakeover:async()=>{},verifyCompatible:async()=>{},run:async()=>healthy==='yes'});console.log(JSON.stringify({done}))`
+    const recover = healthy => promisify(execFile)(node, ['--input-type=module', '--eval', recovery, path.join(coreRoot, 'scripts/lib/version-maintenance.mjs'), f.data, coreRoot, healthy], { timeout: 30000, maxBuffer: 65536, env: { ...process.env, HOME: home } })
+    await assert.rejects(recover('no'))
+    assert.equal(readVersionMaintenance(f.data).phase, 'verifying')
+    assert.deepEqual(JSON.parse((await recover('yes')).stdout.trim()), { done: true })
+    assert.equal(readVersionMaintenance(f.data), null)
+    assert.equal(await fs.readFile(path.join(f.data, 'fixture/executions'), 'utf8'), 'once\n')
+  }
+})

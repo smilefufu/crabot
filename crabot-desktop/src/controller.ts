@@ -227,7 +227,12 @@ export class DesktopController {
       throw Object.assign(new Error('Legacy takeover service health is unconfirmed'), { code: 'CRABOT_MAINTENANCE_PENDING' })
     }
     const { default: installation } = await this.load('scripts/lib/desktop-installation.cjs')
-    const own = installation.locateDesktopCore(this.options.coreRoot)
+    let own = installation.locateDesktopCore(this.options.coreRoot)
+    if (!own && this.options.platform === 'darwin') {
+      const { default: macBinding } = await this.load('scripts/lib/mac-app-binding.cjs')
+      const bound = macBinding.applyMacAppEnvironment(this.options.coreRoot)
+      if (bound) own = { dataDir: bound.data_dir, coreRoot: this.options.coreRoot, command: path.join(this.options.coreRoot, 'bin/crabot') }
+    }
     if (!own || own.dataDir !== this.options.dataRoot) throw new Error('Legacy takeover installation changed')
     const env: NodeJS.ProcessEnv = { ...process.env, DATA_DIR: own.dataDir, CRABOT_HOME: own.coreRoot, CRABOT_DEV: 'false', CRABOT_PORT_OFFSET: '0', CRABOT_PRODUCT_REQUIRED: '1' }
     for (const name of ['NODE_OPTIONS', 'NODE_PATH', 'ELECTRON_RUN_AS_NODE']) delete env[name]

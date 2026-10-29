@@ -401,10 +401,18 @@ export async function recoverLegacyUserVersionMaintenance({ dataDir, root, appVe
       await verifyTakeover()
       const entry = await legacyUserEntry(record)
       if (entry.phase !== 'data_changing') fail()
-      const prepared = await readLegacyDesktopPrograms(record.install_root)
-      if (prepared.installation.dataRoot !== dataDir || prepared.installation.fingerprint !== record.legacy_source.fingerprint
-        || prepared.coreRoot !== root || prepared.selection.core_id !== record.target_core.inventory_sha256
-        || prepared.selection.version !== appVersion) fail()
+      const { default: macBinding } = await import('./mac-app-binding.cjs')
+      const macApp = process.platform === 'darwin' && macBinding.macAppForCore(root)
+      if (macApp) {
+        const bound = macBinding.applyMacAppEnvironment(root, { env: {} })
+        const release = await verifyCoreRelease(root, { version: appVersion })
+        if (bound.data_dir !== dataDir || release.inventory_sha256 !== record.target_core.inventory_sha256) fail()
+      } else {
+        const prepared = await readLegacyDesktopPrograms(record.install_root)
+        if (prepared.installation.dataRoot !== dataDir || prepared.installation.fingerprint !== record.legacy_source.fingerprint
+          || prepared.coreRoot !== root || prepared.selection.core_id !== record.target_core.inventory_sha256
+          || prepared.selection.version !== appVersion) fail()
+      }
       const selected = pythonSelection.readAgentEnvironmentReference(dataDir)
       if (record.legacy_python.status === 'prepared') {
         pythonSelection.verifyAgentEnvironmentCandidate(dataDir, record.legacy_python.reference)

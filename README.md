@@ -42,7 +42,7 @@
 
 先按[安装与升级路径表](https://github.com/smilefufu/crabot-docs/blob/main/guides/installation-upgrade-paths.md)区分源码/release、GUI/CLI及user/system。桌面版仍是候选，公开main安装脚本取得公开CLI，不会自动安装尚未发布的GUI。
 
-完整桌面包由对应系统离线安装向导安装；独立完整Core通过包内脚本安装，两者内置运行环境。以下保留原公开CLI/源码入口。**源码准备已补新共享SDK的先行构建，隔离回归和干净SDK编译通过；完整源码安装和GUI接入尚未收齐验收**；源码GUI也没有完整用户安装链，不能仅运行Electron启动脚本就视为支持。
+macOS候选采用真正Crabot.app：从DMG拖到Applications后打开，首次启动选择数据位置。Windows/Ubuntu通过一次离线安装，完整运行环境随包提供。源码用于独立开发，使用项目内命令和数据，不覆盖release或历史源码部署。实现和验收状态见路径表；公开main尚不等于本轮候选。
 
 ### 路径 A：二进制安装（只想用）
 
@@ -67,38 +67,23 @@ crabot password    # 修改管理员密码
 
 ### 路径 B：源码运行（改代码 / 贡献）
 
-从源码 clone 后用 `install.sh --from-source` 一键完成环境准备：装工具（Node/uv/pnpm）、装依赖、编译、生成 `.env`、把 `crabot` 命令软链到 `~/.local/bin/`。完成后即可在任意目录用全局 `crabot` 命令。
+源码开发使用Node >=22.14、仓库指定pnpm9、uv和本平台编译工具。新开发命令不注册全局crabot，数据在当前工作副本/data；release和旧源码部署的全局命令、原数据保留。详细工具链和错误处理见[开发指南](https://github.com/smilefufu/crabot-docs/blob/main/guides/development.md)。
 
 ```bash
 git clone https://github.com/smilefufu/crabot.git
 cd crabot
-./install.sh --from-source
-crabot start       # 启动（dist/ 已就绪，无需重新构建）
-crabot stop
-crabot check
+node scripts/dev.mjs build  # 只准备与构建，不启动业务
+pnpm dev                   # 开发Core和Vite HMR
+pnpm dev status
+pnpm dev stop
+pnpm dev desktop           # 显式准备并打开开发GUI
 ```
 
-代码有更新（`git pull`）后，重装依赖 + 重编译：
+macOS/Linux的`./install.sh --from-source`及Windows的`./install.ps1 -FromSource`作为开发准备兼容入口；无桌面开发不强制下载Electron。`dev.sh`仍转发相同Node入口。
 
-```bash
-crabot stop
-git pull
-crabot upgrade     # 增量同步依赖 + 重编译 + 数据迁移
-crabot start
-```
+开发Admin为`http://127.0.0.1:13000`，Vite为`http://127.0.0.1:5173`；release默认Admin仍是3000。首次开发浏览器临时密码为admin123，登录后修改；开发GUI不询问该密码。前端使用Vite HMR，后端修改用`pnpm dev restart`，只停止本dev。
 
-开发模式（前端 Vite HMR，热更新）：
-
-```bash
-./dev.sh             # 启动（http://localhost:5173 是 Vite dev server）
-./dev.sh stop        # 停止
-./dev.sh build       # 仅构建
-```
-
-- 首次跑 `./dev.sh` 前必须先 `./install.sh --from-source`
-- `git pull` 拉到新依赖后 `./dev.sh` 会**自动同步**变更模块（基于 lock mtime），无需手动 install
-- 前端代码修改：浏览器自动刷新
-- 后端代码修改：需重启 `./dev.sh stop && ./dev.sh`
+支持一个dev与一个release同时运行，数据和固定端口独立；占用时报告冲突，不杀占用者或自动改目录。若该源码副本还承载历史长期部署，先保留原部署并使用另一个工作副本开发，不在运行中重编它。旧源码部署继续原`crabot upgrade/start/stop`，不会被新dev入口自动转换成空数据。
 
 ### 首次启动后
 
@@ -148,7 +133,7 @@ crabot permission list        # 查看权限模板
 crabot provider list --json
 ```
 
-> 源码安装成功后全局命令指向该源码的cli.mjs；仓库根脚本也可从源码目录使用。完整命令列表：`crabot --help`。
+> 以下crabot业务管理命令面向release或保留的历史源码部署。新源码开发的生命周期使用项目内pnpm dev，不抢占全局命令。完整命令列表：`crabot --help`。
 
 ### 人类直接使用 CLI
 
@@ -178,7 +163,8 @@ crabot provider delete my-provider --human
 
 | 已安装类型 | 操作与限制 |
 | --- | --- |
-| 源码user CLI | 保存本地修改并更新选定Git版本；`crabot upgrade`准备构建，在明确stop后切换/迁移，再start和核验。upgrade不自动git pull，准备要求干净工作副本；SDK顺序已修，完整源码GUI仍待验收。 |
+| 历史源码user CLI | 保留原命令/data；保存本地修改并更新选定Git版本，按原crabot upgrade和停机纪律准备、迁移、启动核验，不自动git pull或转为新dev。 |
+| 新源码开发 | pnpm dev stop → 更新源码 → pnpm dev；不升级或导入release业务数据。 |
 | 新版独立release CLI | `crabot stop` → `crabot upgrade` → `crabot start` → `crabot status`。 |
 | 旧release CLI | 首次升级到新版内置环境格式须独立验证；新版安装器不直接覆盖旧目录，同格式更新通过不代表此路径已验收。 |
 | 桌面受管 | GUI或 `crabot upgrade` 打开同一更新界面，由用户确认；GUI/Core配对，开发候选关闭正式自动更新。 |
@@ -190,7 +176,7 @@ crabot provider delete my-provider --human
 
 **提示 `uv 未安装`、或找不到 `crabot` 命令？**
 
-安装脚本把 `~/.local/bin` 写进了 shell profile（`~/.bashrc` / `~/.zshrc`）。新开的终端自动生效；源码模式下的根目录 `crabot` 脚本已内置 PATH 兜底不受影响。只有在**当前终端直接调用 `uv` 或全局 `crabot`** 时需要先执行：
+已有CLI安装可能把 `~/.local/bin` 写入shell profile（`~/.bashrc` / `~/.zshrc`），新终端生效。新源码开发不注册全局crabot；当前终端找不到uv或已有用户CLI时，先核对实际安装位置，可补充：
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"

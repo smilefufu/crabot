@@ -26,7 +26,7 @@ import { createDesktopReleaseTransport } from './release-transport.js'
 import { desktopReleasePublicKeys } from './release-trust.js'
 import { verifyUpdateDownload } from './update-package.js'
 
-app.setName('Crabot')
+app.setName(app.isPackaged ? 'Crabot' : 'Crabot Dev')
 if (process.platform === 'linux') app.setDesktopName('crabot.desktop')
 protocol.registerSchemesAsPrivileged([{ scheme: 'app', privileges: { standard: true, secure: true, supportFetchAPI: true } }])
 const directory = path.dirname(fileURLToPath(import.meta.url))
@@ -190,7 +190,21 @@ async function boot() {
     const { prepareMacAppData } = await import('./mac-first-launch.js')
     const selected = await prepareMacAppData({ appPath: path.resolve(path.dirname(process.execPath), '../..'), coreRoot,
       home: homedir(), dialog, version: app.getVersion(),
-      load: name => import(new URL('./bootstrap/scripts/lib/' + name, import.meta.url).href) })
+      load: name => import(new URL('./bootstrap/scripts/lib/' + name, import.meta.url).href),
+      discoverLegacy: async root => {
+        const { discoverUserSourceDeployment } = await loadCore('scripts/lib/source-installation.mjs')
+        if (root === path.join(homedir(), '.crabot') && discoverUserSourceDeployment()) return null
+        const { discoverLegacyDesktopTakeover } = await loadCore('scripts/lib/legacy-desktop-discovery.mjs')
+        const legacy = await discoverLegacyDesktopTakeover({ root, source: {} })
+        if (!legacy && existsSync(path.join(root, 'data')) && !existsSync(path.join(root, 'desktop-installation.json'))) {
+          throw Object.assign(new Error('此处有数据，但尚未核实对应的受支持旧发行程序。'), { code: 'CRABOT_LEGACY_UNSUPPORTED' })
+        }
+        return legacy
+      },
+      adoptLegacy: async (root, dataDir) => {
+        const { runMacLegacyHandoff } = await import('./mac-legacy-handoff.js')
+        await runMacLegacyHandoff(coreRoot, root, dataDir, app.getVersion())
+      } })
     if (!selected) { quitting = true; app.quit(); return }
     dataRoot = selected
     const binding = (await loadCore('scripts/lib/mac-app-binding.cjs')).default
@@ -335,17 +349,17 @@ async function boot() {
   function updateMenus() {
     const cliItem = () => ({ label: installingCli ? '正在安装 crabot 命令…' : '安装 crabot 命令…',
       enabled: app.isPackaged && !installingCli && controller?.host.snapshot().phase !== 'migration_required', click: () => { void installCli() } })
-    const uninstallItem = () => ({ label: pendingUninstall ? '正在卸载 Crabot…' : '卸载 Crabot…',
-      enabled: !!requestUninstall && !pendingUninstall && !quitting, click: () => { void requestUninstall?.() } })
+    const uninstallItems = () => process.platform === 'darwin' && !installation ? [] : [{ label: pendingUninstall ? '正在卸载 Crabot…' : '卸载 Crabot…',
+      enabled: !!requestUninstall && !pendingUninstall && !quitting, click: () => { void requestUninstall?.() } }]
     const startupItem = () => ({ label: '登录后在后台启动' + (startupState.approvalRequired ? '（待系统允许）' : ''), type: 'checkbox' as const,
       checked: startupState.enabled || startupState.approvalRequired, enabled: startupState.supported && controller?.host.snapshot().phase !== 'migration_required',
       click: (item: Electron.MenuItem) => { void changeStartup(item.checked) } })
     tray?.setContextMenu(Menu.buildFromTemplate([{ label: '打开 Crabot', click: show }, { type: 'separator' },
       { label: '启动服务', click: () => { void controller!.start() } }, { label: '停止服务', click: () => { void controller!.stop() } },
-      { type: 'separator' }, startupItem(), cliItem(), uninstallItem(), { label: '检查更新…', click: () => { void updates!.open() } }, { label: '退出 Crabot', click: () => { void quit() } }]))
+      { type: 'separator' }, startupItem(), cliItem(), ...uninstallItems(), { label: '检查更新…', click: () => { void updates!.open() } }, { label: '退出 Crabot', click: () => { void quit() } }]))
     Menu.setApplicationMenu(Menu.buildFromTemplate([
       { label: 'Crabot', submenu: [{ label: '打开 Crabot', click: show }, startupItem(),
-        cliItem(), uninstallItem(),
+        cliItem(), ...uninstallItems(),
         { label: '检查更新…', click: () => { void updates!.open() } }, { type: 'separator' }, { label: '退出 Crabot', accelerator: 'CommandOrControl+Q', click: () => { void quit() } }] },
       { label: '文件', submenu: [{ label: '保存当前附件…', accelerator: 'CommandOrControl+S', enabled: artifacts?.hasFocused(), click: () => { artifacts?.saveFocused() } }] },
       { role: 'editMenu' }, { role: 'viewMenu' }, { role: 'windowMenu' },
@@ -387,7 +401,7 @@ void boot().catch(async error => {
   bootstrapStage('failed', { code })
   await app.whenReady()
   let message = 'Crabot 界面启动失败，请修复安装。'
-  if (['CRABOT_MAC_APP_BINDING', 'CRABOT_DATA_MISSING', 'CRABOT_DESKTOP_TAKEOVER_REQUIRED'].includes(error?.code)) message = error.message
+  if (['CRABOT_MAC_APP_BINDING', 'CRABOT_MAC_ADMISSION', 'CRABOT_DATA_MISSING', 'CRABOT_DESKTOP_TAKEOVER_REQUIRED'].includes(error?.code)) message = error.message
   if (['CRABOT_DESKTOP_REMOVAL', 'CRABOT_DESKTOP_REMOVAL_PENDING'].includes(error?.code)) message = 'Crabot 卸载尚未完成。请继续卸载，或使用同版/更高版离线安装器修复。用户数据已保留。'
   else if (['CRABOT_DESKTOP_INSTALLATION', 'CRABOT_CORE_INTEGRITY'].includes(error?.code)) message = 'Crabot 安装位置、内置文件或版本对未通过校验，请使用同版或更高版安装包修复。已有数据保留。'
   await dialog.showMessageBox({ type: 'error', message })

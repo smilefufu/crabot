@@ -5,12 +5,13 @@ import { randomBytes } from 'node:crypto'
 import { OperationProgressSchema } from './operation-progress.js'
 const directory = path.dirname(fileURLToPath(import.meta.url))
 // Fixed display/cancellation only; this component owns no install/removal work.
-export function createOperationProgressWindow(kind: 'installation' | 'removal', abort: AbortController) {
-  if (kind !== 'installation' && kind !== 'removal') throw new Error('Unknown progress operation')
+export function createOperationProgressWindow(kind: 'installation' | 'removal' | 'admission', abort: AbortController) {
+  if (kind !== 'installation' && kind !== 'removal' && kind !== 'admission') throw new Error('Unknown progress operation')
   const removal = kind === 'removal', prefix = removal ? 'removal' : 'installer'
-  const title = removal ? '卸载 Crabot' : '安装 Crabot'
-  const heading = removal ? '正在卸载 Crabot' : '正在安装 Crabot'
-  const initialMessage = removal ? '正在核验原安装，用户数据将保留…' : '正在核验离线安装组件…'
+  const admission = kind === 'admission'
+  const title = admission ? '接入已有数据' : removal ? '卸载 Crabot' : '安装 Crabot'
+  const heading = admission ? '正在接入已有 Crabot 数据' : removal ? '正在卸载 Crabot' : '正在安装 Crabot'
+  const initialMessage = admission ? '正在核对旧部署，程序保留在当前 App 中…' : removal ? '正在核验原安装，用户数据将保留…' : '正在核验离线安装组件…'
   const bridge = removal ? 'crabotRemove' : 'crabotInstall'
 
   const nonce = randomBytes(24).toString('base64url')

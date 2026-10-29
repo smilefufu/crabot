@@ -336,14 +336,15 @@ node scripts/debug-agent.mjs modules  # 查看 MM 注册的模块
 ### dev.sh（推荐的开发方式）
 
 ```bash
-./dev.sh          # 启动：构建 TS + 启动 Module Manager + 启动 Vite HMR (port 5173)
-./dev.sh stop     # 停止所有进程
+./dev.sh          # 转发统一Node开发入口：增量准备 + 本dev MM/Vite (HMR 5173)
+./dev.sh stop     # 精确停止本dev，保留release
 ./dev.sh build    # 只构建不启动
-./dev.sh vite     # 只启动 Vite（后端已在运行时）
+./dev.sh vite     # 核对本dev的Vite入口（由MM管理）
 ```
 
 - 前端改代码 → 浏览器自动刷新（Vite HMR）
-- 后端改代码 → 需要 `./dev.sh stop && ./dev.sh`（重新构建）
+- 后端改代码 → `pnpm dev restart`（同一实例锁内停止、增量准备并启动）
+- `pnpm dev desktop`显式准备开发GUI；`pnpm dev status/stop`只控制本工作副本，不抢全局crabot。开发指南见crabot-docs/guides/development.md。
 - **launcher.sh 不适合开发**：没有构建步骤，代码改了不生效
 - `dev.sh` 只启动 Module Manager，由 MM 拉起 Admin / Agent / Memory 子进程；**不再启动任何 LLM 代理进程**
 
@@ -363,15 +364,15 @@ node scripts/debug-agent.mjs modules  # 查看 MM 注册的模块
 
 ### 实例隔离（单实例约束）
 
-Crabot **强制单实例运行**。每个用户 / 每台机器（dev 模式）最多跑一个 Crabot MM。多用户场景请走 system mode（见下方）。
+Crabot每种环境各自单实例：同一用户支持一个release加一个dev同时运行；不支持多个dev工作副本同时运行。历史源码部署保留原数据/命令，不自动转dev。多用户服务器走system mode。
 
 - 生产 user mode（`install.sh` 默认装的 `~/.crabot`）：永远 OFFSET=0，DATA_DIR=`~/.crabot/data`
 - 生产 system mode：每个 Linux 用户由 `crabot init` 自动绑定唯一 OFFSET，DATA_DIR=`~/.crabot/data-<OFF>`
-- dev 模式（`./dev.sh`）：永远 OFFSET=0，DATA_DIR=`$REPO_ROOT/data`
+- 新dev（`pnpm dev` / `./dev.sh`）：固定内部OFFSET=10000，MM29000/Admin RPC29001/Web13000/tmp29099/Vite5173，DATA_DIR=`$REPO_ROOT/data`；覆盖继承的生产定位，不按名称/端口杀进程。
 
 `CRABOT_PORT_OFFSET` **不再是用户级配置入口**——它只在 system mode 下由 `crabot init` 内部自动分配，写入员工 shell rc + `~/.crabot/instance.json` 后**不要再手动改**。
 
-单实例约束的实现：`scripts/start.mjs` / `dev.sh` 启动前检查 `$DATA_DIR/mm.pid`，活进程 → 报错"already running"；stale → 清理后继续。
+实例控制共用操作锁、instance-runtime.json和真实OS进程身份/代际；dev只接受当前工作副本且端口匹配的实例。未登记、归属不明或另一部署不发送停止信号；不按名称/端口批量杀进程。
 
 ### System Mode 多用户部署
 

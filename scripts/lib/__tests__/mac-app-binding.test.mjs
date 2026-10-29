@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, renameSync, existsSync, chmodSync, realpathSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, renameSync, existsSync, chmodSync, realpathSync, symlinkSync, readlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import binding from '../mac-app-binding.cjs'
@@ -46,4 +46,21 @@ test('old 0755 data remains usable while broad locator access and in-App data ar
   assert.throws(() => binding.writeMacAppBinding({ ...f, dataDir: f.appPath }), /App之外/)
   chmodSync(binding.bindingFile(f.home), 0o644)
   assert.throws(() => binding.readMacAppBinding({ home: f.home }), /无法核验/)
+})
+
+test('Mac admission replaces only the known old release CLI and preserves custom/source commands', mac, async t => {
+  const { adoptKnownMacCli } = await import('../mac-legacy-admission.mjs')
+  const f = fixture(t), prefix = join(f.home, '.local/bin'), source = join(f.root, 'old-release')
+  mkdirSync(prefix, { recursive: true, mode: 0o755 })
+  const command = join(prefix, 'crabot')
+  symlinkSync(join(f.root, 'source/cli.mjs'), command)
+  assert.equal(await adoptKnownMacCli(source, f.core, f.home), false)
+  assert.equal(readlinkSync(command), join(f.root, 'source/cli.mjs'))
+  rmSync(command); symlinkSync(join(source, 'cli.mjs'), command)
+  assert.equal(await adoptKnownMacCli(source, f.core, f.home), true)
+  assert.equal(readlinkSync(command), join(f.core, 'bin/crabot'))
+  assert.deepEqual(JSON.parse(readFileSync(join(prefix, '.crabot-desktop-cli.json'), 'utf8')), { schema_version: 1, core_root: f.core })
+  rmSync(join(prefix, '.crabot-desktop-cli.json'))
+  assert.equal(await adoptKnownMacCli(source, f.core, f.home), true)
+  assert.equal(JSON.parse(readFileSync(join(prefix, '.crabot-desktop-cli.json'), 'utf8')).core_root, f.core)
 })

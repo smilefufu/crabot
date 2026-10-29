@@ -71,6 +71,18 @@ const { verifyCoreRelease } = await import(pathToFileURL(path.join(core, 'script
 stage('core-verification')
 await verifyCoreRelease(core)
 stage('core-verified')
+let macBindingFile
+if (process.platform === 'darwin' && location.schema_version === 1) {
+  // Isolated CI preselects data through the real locator API. Native first-use
+  // dialogs are covered separately; this smoke still runs the ordinary sealed App.
+  const management = (await import(pathToFileURL(path.join(core, 'scripts/lib/desktop-management.cjs')))).default
+  const binding = (await import(pathToFileURL(path.join(core, 'scripts/lib/mac-app-binding.cjs')))).default
+  if (binding.readMacAppBinding()) throw new Error('CI user already has a Mac App binding')
+  management.ensurePrivateDataRoot(data)
+  management.initializeDesktopManagement(data)
+  binding.writeMacAppBinding({ appPath: binding.macAppForCore(core), dataDir: data })
+  macBindingFile = binding.bindingFile(homedir())
+}
 const env = { ...process.env, DATA_DIR: data }
 delete env.ELECTRON_RUN_AS_NODE; delete env.NODE_OPTIONS; delete env.NODE_PATH; delete env.CRABOT_DEV; delete env.CRABOT_PORT_OFFSET
 let node = path.join(core, process.platform === 'win32' ? '.product-runtime/node/node.exe' : '.product-runtime/node/bin/node')
@@ -125,7 +137,7 @@ function launch() {
 }
 try {
   let gui = launch(); await gui.phase('ready')
-  const first = await inspectInstance()
+  let first = await inspectInstance()
   assert.equal(first.state, 'running'); assert.equal(await fs.realpath(first.record.install_root), await fs.realpath(core))
   const firstStatus = JSON.parse(await cli('status', '--json')), afterStatus = await inspectInstance()
   assert.equal(firstStatus.running, true, JSON.stringify({ cli_status: firstStatus, before_status: first, after_status: afterStatus }))
@@ -133,7 +145,7 @@ try {
   const registrationEnv = { ...env, HOME: cliHome, SHELL: process.platform === 'darwin' ? '/bin/zsh' : '/bin/bash',
     LOCALAPPDATA: path.join(cliHome, 'AppData/Local'), PATH: process.platform === 'win32' ? path.join(process.env.SystemRoot, 'System32') : '/usr/bin:/bin' }
   delete registrationEnv.ZDOTDIR
-  const registrationCode = 'import{pathToFileURL}from"node:url";import path from"node:path";const[root,dataDir,home]=process.argv.slice(1);const management=(await import(pathToFileURL(path.join(root,"scripts/lib/desktop-management.cjs")))).default;management.ensurePrivateDataRoot(home);const{installDesktopCli}=await import(pathToFileURL(path.join(root,"scripts/lib/desktop-cli-install.mjs")));console.log(JSON.stringify(await installDesktopCli({coreRoot:root,dataDir,home})))'
+  const registrationCode = 'import{pathToFileURL}from"node:url";import path from"node:path";const[root,dataDir,home]=process.argv.slice(1);const management=(await import(pathToFileURL(path.join(root,"scripts/lib/desktop-management.cjs")))).default;management.ensurePrivateDataRoot(home);if(process.platform==="darwin"){const binding=(await import(pathToFileURL(path.join(root,"scripts/lib/mac-app-binding.cjs")))).default;if(binding.macAppForCore(root))binding.writeMacAppBinding({appPath:binding.macAppForCore(root),dataDir,home})}const{installDesktopCli}=await import(pathToFileURL(path.join(root,"scripts/lib/desktop-cli-install.mjs")));console.log(JSON.stringify(await installDesktopCli({coreRoot:root,dataDir,home})))'
   const registration = JSON.parse((await promisify(execFile)(node, ['--input-type=module', '-e', registrationCode, core, data, cliHome],
     { env: registrationEnv, timeout: 90_000, maxBuffer: 2 * 1024 * 1024 })).stdout)
   const commandEnv = { ...registrationEnv, DATA_DIR: data, CRABOT_REGISTERED_CLI: registration.command }
@@ -149,6 +161,10 @@ try {
   const release = JSON.parse(await fs.readFile(path.join(core, 'core-release.json'), 'utf8'))
   assert.equal(await registeredCliVersion(), release.version)
   stage('registered-cli-verified')
+  if (process.env.CRABOT_CI_DEVELOPMENT_COEXISTENCE === '1') {
+    const { verifyDevelopmentCoexistence } = await import('./smoke-development-coexistence.mjs')
+    first = await verifyDevelopmentCoexistence({ inspectRelease: inspectInstance, releaseCli: cli })
+  }
   gui.child.kill('SIGKILL'); await gui.exited()
   assert.equal((await inspectInstance()).state, 'running')
   gui = launch(); await gui.phase('ready')
@@ -217,6 +233,11 @@ try {
   await cli('stop')
   assert.equal((await inspectInstance()).state, 'stopped', 'Unverified processes keep their disposable data for investigation')
   for (const exit of exits) if (exit.status === 'rejected') throw exit.reason
+  if (macBindingFile) {
+    const current = JSON.parse(await fs.readFile(macBindingFile, 'utf8'))
+    if (current.data_dir !== data || current.app_path !== path.resolve(core, '../../..')) throw new Error('CI Mac binding changed')
+    await fs.unlink(macBindingFile)
+  }
   await fs.rm(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   stage('cleanup-completed')
 }

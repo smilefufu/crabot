@@ -56,3 +56,43 @@ test('native picker includes hidden directories and unknown source data is prese
   assert.ok(f.directories[0].properties.includes('showHiddenFiles'))
   assert.equal(existsSync(binding.bindingFile(f.home)), false)
 })
+
+test('supported legacy release needs explicit consent and retains the original data instead of installing another App', mac, async t => {
+  const f = fixture(t), oldRoot = join(f.root, 'old'), dataRoot = join(oldRoot, 'data')
+  mkdirSync(dataRoot, { recursive: true }); writeFileSync(join(dataRoot, 'old-chat'), 'keep')
+  const calls = []
+  f.options.discoverLegacy = async () => ({ installation: { installRoot: oldRoot, dataRoot, version: 'v2026.10.15.1' } })
+  f.options.adoptLegacy = async (root, data) => { calls.push([root, data]); assert.equal(binding.readMacAppBinding({ home: f.home }).data_dir, dataRoot) }
+  assert.equal(await exports.prepareMacAppData(f.options), dataRoot)
+  assert.equal(calls.length, 1); assert.equal(f.messages[0].title, '接入已有 Crabot')
+  assert.equal(readFileSync(join(dataRoot, 'old-chat'), 'utf8'), 'keep')
+  assert.equal(existsSync(join(dataRoot, 'Contents')), false)
+})
+test('canceling legacy admission neither binds nor converts old data', mac, async t => {
+  const f = fixture(t, { response: 2 }), oldRoot = join(f.root, 'old'), dataRoot = join(oldRoot, 'data')
+  mkdirSync(dataRoot, { recursive: true })
+  f.options.discoverLegacy = async () => ({ installation: { installRoot: oldRoot, dataRoot, version: 'v2026.10.15.1' } })
+  f.options.adoptLegacy = async () => { throw new Error('must not convert after cancellation') }
+  assert.equal(await exports.prepareMacAppData(f.options), null)
+  assert.equal(existsSync(binding.bindingFile(f.home)), false)
+})
+
+test('unresolved original location offers a hidden-folder picker before legacy admission', mac, async t => {
+  const f = fixture(t), oldRoot = join(f.root, '.old-install'), dataRoot = join(oldRoot, 'data')
+  mkdirSync(dataRoot, { recursive: true }); let discoveries = 0, adopted = 0
+  f.options.discoverLegacy = async () => { if (++discoveries === 1) throw new Error('原程序位置尚未确定'); return { installation: { installRoot: oldRoot, dataRoot, version: 'v2026.10.15.1' } } }
+  f.options.dialog.showMessageBox = async value => { f.messages.push(value); return { response: value.title === '核对已有数据' ? 1 : 0 } }
+  f.options.dialog.showOpenDialog = async value => { f.directories.push(value); return { canceled: false, filePaths: [oldRoot] } }
+  f.options.adoptLegacy = async () => { adopted++ }
+  assert.equal(await exports.prepareMacAppData(f.options), dataRoot)
+  assert.equal(discoveries, 2); assert.equal(adopted, 1)
+  assert.ok(f.directories[0].properties.includes('showHiddenFiles'))
+})
+test('bound interrupted admission cannot fall back to creating independent empty data', mac, async t => {
+  const f = fixture(t), dataRoot = join(f.root, 'old-data'); mkdirSync(dataRoot)
+  binding.writeMacAppBinding({ home: f.home, appPath: f.appPath, dataDir: dataRoot })
+  f.options.discoverLegacy = async () => { throw new Error('原维护仍需核验') }
+  await assert.rejects(exports.prepareMacAppData(f.options), /原维护仍需核验/)
+  assert.equal(f.messages.length, 0)
+  assert.equal(binding.readMacAppBinding({ home: f.home }).data_dir, dataRoot)
+})
