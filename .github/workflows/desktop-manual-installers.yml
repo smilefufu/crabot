@@ -7,10 +7,14 @@ on:
         type: choice
         default: darwin-arm64
         options: [darwin-arm64, win32-x64]
+      source_only:
+        description: 'Run only the real source development acceptance, without rebuilding installers'
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
-  group: desktop-manual-installer-${{ inputs.target || 'darwin-arm64' }}
+  group: desktop-manual-installer-${{ inputs.target || 'darwin-arm64' }}${{ inputs.source_only && '-source' || '' }}
   cancel-in-progress: false
 jobs:
   source:
@@ -46,6 +50,7 @@ jobs:
           if-no-files-found: error
           retention-days: 7
   installer:
+    if: inputs.source_only != true
     name: Offline test installer ${{ inputs.target || 'darwin-arm64' }}
     runs-on: ${{ inputs.target == 'win32-x64' && 'windows-latest' || 'macos-15' }}
     timeout-minutes: 120
