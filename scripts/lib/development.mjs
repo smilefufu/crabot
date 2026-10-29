@@ -17,6 +17,16 @@ export async function inspectDevelopment(root) {
   return { ...current, dataDir: env.DATA_DIR, ports: developmentPorts, logs: join(env.DATA_DIR, 'logs') }
 }
 
+// Create only a new developer data directory with the platform-native private
+// permissions. Existing project data keeps its original permissions and files.
+export async function ensureDevelopmentDataRoot(root) {
+  const { DATA_DIR } = developmentEnvironment(root)
+  if (!existsSync(DATA_DIR)) {
+    const management = (await import('./desktop-management.cjs')).default
+    management.ensurePrivateDataRoot(DATA_DIR)
+  }
+}
+
 // Status adds a bounded health observation; control paths remain identity-only.
 export async function readDevelopmentStatus(root) {
   const current = await inspectDevelopment(root)
@@ -62,6 +72,7 @@ export async function startDevelopment(root, { foreground = false, lockHeld = fa
   const env = developmentEnvironment(root)
   const { acquireStartupLock, releaseCliLock, cliLockToken } = await import('./cli-lock.mjs')
   if (lockHeld && !cliLockToken(join(env.DATA_DIR, 'cli.lock'))) throw failure('开发启动需要持有本实例操作锁。')
+  await ensureDevelopmentDataRoot(root)
   const { prepareCoreEnvironment, applyStartupMigrations } = await import('./core-preparation.mjs')
   const { runCorePreflight } = await import('./core-preflight.mjs')
   const lock = lockHeld ? undefined : await acquireStartupLock(env.DATA_DIR, 'dev-start')

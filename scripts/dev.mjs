@@ -34,6 +34,8 @@ async function prepare(desktop = false, lockHeld = false) {
   }
   const { acquireStartupLock, releaseCliLock, cliLockToken } = await import('./lib/cli-lock.mjs')
   if (lockHeld && !cliLockToken(join(process.env.DATA_DIR, 'cli.lock'))) throw new Error('开发准备需要持有本实例操作锁。')
+  const { ensureDevelopmentDataRoot } = await import('./lib/development.mjs')
+  await ensureDevelopmentDataRoot(root)
   const lock = lockHeld ? undefined : await acquireStartupLock(process.env.DATA_DIR, 'dev-build')
   try {
     const { assertDevelopmentBuildAllowed } = await import('./lib/development.mjs')

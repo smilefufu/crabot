@@ -8,7 +8,7 @@ import { once } from 'node:events'
 import { createServer } from 'node:net'
 import { developmentEnvironment, developmentPorts, isDevelopmentTree } from '../development-environment.mjs'
 import { developmentBuildState } from '../development-build.mjs'
-import { inspectDevelopment, readDevelopmentStatus, stopDevelopment, assertDevelopmentPortsAvailable, assertDevelopmentBuildAllowed } from '../development.mjs'
+import { inspectDevelopment, readDevelopmentStatus, stopDevelopment, assertDevelopmentPortsAvailable, assertDevelopmentBuildAllowed, ensureDevelopmentDataRoot } from '../development.mjs'
 import { createInstanceRuntime, recordMmProcess, clearInstanceRuntime, readInstanceRuntime } from '../instance-runtime.mjs'
 
 function fixture(t) {
@@ -114,4 +114,18 @@ test('a registered source deployment blocks rebuilding its live root even when m
     for (const [key, value] of Object.entries(original)) if (value === undefined) delete process.env[key]; else process.env[key] = value
     clearInstanceRuntime(data, record.generation); child.kill(); await exited
   }
+})
+
+
+test('new developer data uses native private permissions and existing data is never rewritten', async t => {
+  const root = fixture(t), data = join(root, 'data')
+  await ensureDevelopmentDataRoot(root)
+  const management = (await import('../desktop-management.cjs')).default
+  assert.equal(management.requirePrivateDataRoot(data), data)
+  const file = join(data, 'preserved'); writeFileSync(file, 'developer history')
+  // Deliberately deny revalidation: an existing directory must not be converted.
+  const original = management.ensurePrivateDataRoot
+  management.ensurePrivateDataRoot = () => { throw new Error('unexpected permission conversion') }
+  try { await ensureDevelopmentDataRoot(root); assert.equal(readFileSync(file, 'utf8'), 'developer history') }
+  finally { management.ensurePrivateDataRoot = original }
 })
