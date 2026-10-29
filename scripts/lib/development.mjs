@@ -34,6 +34,11 @@ export async function assertDevelopmentBuildAllowed(root) {
   try { registeredRoot = JSON.parse(readFileSync(join(data, 'instance-runtime.json'), 'utf8')).install_root }
   catch (error) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error }
   if (registeredRoot ? registeredRoot !== realpathSync(root) : discoverUserSourceDeployment()?.root !== realpathSync(root)) return
+  if (registeredRoot) {
+    const { inspectInstance } = await import('./instance-runtime.mjs')
+    if (inspectInstance(data).state !== 'stopped') throw failure('这个源码工作副本仍承载旧部署。请使用独立工作副本开发，或先通过原命令显式停止；原数据与命令保持。')
+    return
+  }
   let pid
   try { pid = Number(readFileSync(join(data, 'mm.pid'), 'utf8').trim()) } catch (error) { if (error.code === 'ENOENT') return; throw error }
   if (!Number.isInteger(pid) || pid <= 0) return

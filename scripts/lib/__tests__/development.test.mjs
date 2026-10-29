@@ -8,7 +8,7 @@ import { once } from 'node:events'
 import { createServer } from 'node:net'
 import { developmentEnvironment, developmentPorts, isDevelopmentTree } from '../development-environment.mjs'
 import { developmentBuildState } from '../development-build.mjs'
-import { inspectDevelopment, readDevelopmentStatus, stopDevelopment, assertDevelopmentPortsAvailable } from '../development.mjs'
+import { inspectDevelopment, readDevelopmentStatus, stopDevelopment, assertDevelopmentPortsAvailable, assertDevelopmentBuildAllowed } from '../development.mjs'
 import { createInstanceRuntime, recordMmProcess, clearInstanceRuntime, readInstanceRuntime } from '../instance-runtime.mjs'
 
 function fixture(t) {
@@ -92,5 +92,26 @@ test('developer status reports its own real health separately from process owner
   } finally {
     if (record) clearInstanceRuntime(data, record.generation)
     child.kill(); await exited
+  }
+})
+
+
+test('a registered source deployment blocks rebuilding its live root even when mm.pid is its controller', async t => {
+  const root = fixture(t), home = fixture(t), data = join(home, '.crabot/data')
+  mkdirSync(data, { recursive: true }); mkdirSync(join(root, 'crabot-core/dist'), { recursive: true })
+  const entry = join(root, 'crabot-core/dist/main.js'); writeFileSync(entry, 'setInterval(()=>{},1000)')
+  const child = spawn(process.execPath, [entry], { stdio: 'ignore' }), exited = once(child, 'exit')
+  await once(child, 'spawn')
+  const record = createInstanceRuntime({ root, dataDir: data, mmPort: 19000 })
+  recordMmProcess(data, record.generation, child.pid)
+  const original = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE }
+  process.env.HOME = home; process.env.USERPROFILE = home
+  try {
+    assert.equal(readFileSync(join(data, 'mm.pid'), 'utf8'), String(process.pid))
+    await assert.rejects(assertDevelopmentBuildAllowed(root), { code: 'CRABOT_DEV_INSTANCE' })
+    assert.equal(child.exitCode, null, 'The guard never stops the existing deployment')
+  } finally {
+    for (const [key, value] of Object.entries(original)) if (value === undefined) delete process.env[key]; else process.env[key] = value
+    clearInstanceRuntime(data, record.generation); child.kill(); await exited
   }
 })
