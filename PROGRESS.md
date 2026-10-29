@@ -1,5 +1,11 @@
 # Crabot 项目进度
 
+### 主控常驻职责与指南生命周期：实现完成，PR 验证中
+
+- 依据已确认 [Spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-10-29-manager-core-guidance-lifecycle-design.md)，将普通沟通、委托、Worker 反馈判断和验收交付规则归并常驻；取消 `manager.worker-events` 独立目录与事件注入。语音、群聊/独立请求、系统线程及每日反思边界不变。
+- 完整指南按普通历史保留，自动提供根据当前完整正文去重，包含带时间戳的手动工具回包；正常压缩后缺失再补供，当前自省必需流程沿既有控制上下文保护。旧检查点只按原临时 ID 清理，短唤醒提示仍按原生命周期收口。
+- 旧实现先复现 5 项失败；四适配器最终 wire 的内容块前缀、跨回合/同轮复用、正常压缩、新旧检查点及失败重投回归通过。验证明细及已复现的基线失败见[实施计划](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-29-manager-core-guidance-lifecycle-implementation.md)。无配置/持久化迁移，未改评测、Provider/sub2api 或部署；结构验证不代表模型行为或缓存收益。
+
 ### 渠道实例名大写误拒绝：bug 修复完成，未部署
 
 - 允许 `AI客服bot` 等大小写 ASCII 混合名称，保留输入；创建、OpenClaw 导入和 MM 动态注册按 NFC 后的小写比较键查重，不新增大小写别名解析。

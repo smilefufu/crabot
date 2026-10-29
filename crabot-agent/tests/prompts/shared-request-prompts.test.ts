@@ -88,7 +88,7 @@ describe('approved shared request prompt projections', () => {
     expect(assembleManagerSystemPrompt({ ...inputs, requestAuthorization: 'request' })).toBe(ordinary)
   })
 
-  it('projects both lazy and automatic guidance, preserving private and worker wording', async () => {
+  it('keeps request provenance in permanent rules and lazy delegation, preserving worker wording', async () => {
     const old = renderGuidance('manager', 'manager.delegation')
     const bound = renderGuidance('manager', 'manager.delegation', { requestAware: true })
     expect(bound).toContain('另一人的新指令先独立核验')
@@ -97,8 +97,12 @@ describe('approved shared request prompt projections', () => {
     expect(old).not.toContain('另一人的新指令')
     const tool = createGuidanceTool('manager', { requestAware: true })
     expect((await tool.call({ name: 'manager.delegation' })).output).toBe(bound)
-    const events = renderGuidance('manager', 'manager.worker-events', { requestAware: true })
-    expect(events.indexOf('先沿系统保留的请求关联')).toBeLessThan(events.indexOf('1. 使用本回合证据'))
+    for (const requestAuthorization of ['shared', 'request'] as const) {
+      const prompt = assembleManagerSystemPrompt({ ...group, requestAuthorization })
+      expect(prompt).toContain('先沿系统保留的请求关联')
+      expect(prompt).toContain('明确私发的正文不进入共享交付、任务板或记忆候选')
+      expect(prompt).not.toContain('manager.worker-events')
+    }
     expect(renderGuidance('worker', 'worker.project-context', { requestAware: true })).toBe(renderGuidance('worker', 'worker.project-context'))
   })
 })
