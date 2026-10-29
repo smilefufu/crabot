@@ -142,7 +142,7 @@ export async function verifyDevelopmentCoexistence({ inspectRelease, releaseCli 
   } finally {
     if (gui && gui.exitCode === null && gui.signalCode === null) {
       const exited = once(gui, 'exit', { signal: AbortSignal.timeout(30_000) })
-      gui.kill('SIGTERM'); await exited
+      gui.kill('SIGKILL'); await exited // Fixture cleanup, not the user-facing Quit acceptance.
     }
     await fs.writeFile(diagnostics, output)
     await captureDevelopmentLogs(root)

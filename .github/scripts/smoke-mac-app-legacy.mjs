@@ -108,7 +108,7 @@ try {
     } finally {
       await fs.writeFile(path.join(repository, '.desktop-build/mac-app-legacy-' + version + '.log'), output)
       if (inspectInstance(data).state === 'running') await stopInstance(data)
-      if (gui && gui.exitCode === null && gui.signalCode === null) gui.kill('SIGTERM')
+      if (gui && gui.exitCode === null && gui.signalCode === null) gui.kill('SIGKILL') // Only this fixture GUI; its Core was stopped above.
       if (exited) await exited
       if (passed) await fs.rm(home, { recursive: true, force: true })
     }
