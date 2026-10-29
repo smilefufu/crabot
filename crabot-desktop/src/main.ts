@@ -18,7 +18,7 @@ import { collectDiagnostics } from './diagnostics.js'
 import { openBootstrapLog, logBootstrapException } from './bootstrap-log.js'
 import { ArtifactWindows } from './artifact-window.js'
 import { LoginStartup, type StartupState } from './login-startup.js'
-import { externalUrl, isAppUrl, isTrustedFrame } from './window-security.js'
+import { externalUrl, isAppUrl, isTrustedFrame, allowsDesktopClipboardWrite } from './window-security.js'
 import { UpdateDialog } from './update-dialog.js'
 import { createUpdateDriver } from './update-driver.js'
 import { createPairedUpdateHost } from './paired-update-host.js'
@@ -256,8 +256,10 @@ async function boot() {
     } })
   artifacts = new ArtifactWindows(controller.host, () => { if (!quitting) updateMenus() })
   const privateSession = session.fromPartition('persist:crabot-desktop')
-  privateSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false))
-  privateSession.setPermissionCheckHandler(() => false)
+  privateSession.setPermissionRequestHandler((contents, permission, callback, details) =>
+    callback(allowsDesktopClipboardWrite(contents, window?.webContents, permission, details)))
+  privateSession.setPermissionCheckHandler((contents, permission, origin, details) =>
+    isAppUrl(origin) && allowsDesktopClipboardWrite(contents, window?.webContents, permission, details))
   attachLocalPages(privateSession, path.join(coreRoot, 'crabot-admin/dist/web'))
   attachDesktopNetwork(privateSession, controller.host, () => window?.webContents)
   window = new BrowserWindow({ width: 1180, height: 800, minWidth: 800, minHeight: 560, show: false, title: 'Crabot',

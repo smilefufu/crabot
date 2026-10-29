@@ -15,6 +15,8 @@ export function SlackLocalOnboarding() {
   const [begin, setBegin] = useState<OnboardBeginResult>()
   const [code, setCode] = useState('')
   const [error, setError] = useState('')
+  const [copied, setCopied] = useState(false)
+  const commandField = useRef<HTMLTextAreaElement>(null)
   const [now, setNow] = useState(Date.now())
   const [instanceId, setInstanceId] = useState('')
   const [identity, setIdentity] = useState<Identity>()
@@ -105,7 +107,7 @@ export function SlackLocalOnboarding() {
     const instanceName = name.normalize('NFC')
     if (!/^[\p{Script=Han}A-Za-z0-9-]{2,50}$/u.test(instanceName)) { setError('名称可用中文、大小写英文字母、数字和连字符，2–50 字符'); return }
     const current = ++generation.current
-    setName(instanceName); setError(''); setCode(''); setPhase('starting')
+    setName(instanceName); setError(''); setCopied(false); setCode(''); setPhase('starting')
     try {
       const result = await channelService.onboardBegin(IMPLEMENTATION, METHOD, { instance_name: instanceName })
       if (!active.current || current !== generation.current) {
@@ -118,6 +120,19 @@ export function SlackLocalOnboarding() {
     } catch (value) {
       if (!active.current || current !== generation.current) return
       setError(value instanceof Error ? value.message : '准备授权失败'); setPhase('error')
+    }
+  }
+  async function copyCommand() {
+    const current = generation.current
+    setError(''); setCopied(false)
+    try {
+      await navigator.clipboard.writeText(begin?.authorization_command ?? '')
+      if (active.current && current === generation.current) setCopied(true)
+    } catch {
+      if (!active.current || current !== generation.current) return
+      commandField.current?.focus()
+      commandField.current?.select()
+      setError('自动复制未完成，已选中纯文本命令；请按 ⌘C / Ctrl+C 后粘贴到 Slack。')
     }
   }
   async function submit() {
@@ -147,7 +162,7 @@ export function SlackLocalOnboarding() {
     session.current = undefined
     if (id) await channelService.onboardCancel(IMPLEMENTATION, METHOD, id).catch(() => {})
     if (!active.current || generation.current !== cancelledGeneration) return
-    setBegin(undefined); setCode(''); setError(''); setPhase('idle')
+    setBegin(undefined); setCode(''); setError(''); setCopied(false); setPhase('idle')
   }
   async function bind() {
     if (!identity || !friendId || binding) return
@@ -171,8 +186,12 @@ export function SlackLocalOnboarding() {
     </>}
     {phase === 'waiting' && <>
       <ol><li>复制以下一次性命令，在目标 workspace 的任意聊天中发送。</li><li>在 Slack 弹窗中确认权限。</li><li>将 Slack 给出的验证码填回下方。</li></ol>
-      <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{begin?.authorization_command}</pre>
-      <Button variant="secondary" onClick={() => { void navigator.clipboard.writeText(begin?.authorization_command ?? '').catch(() => setError('复制失败，请手动复制上方命令')) }}>复制授权命令</Button>
+      <label htmlFor="slack-authorization-command">一次性授权命令</label>
+      <textarea id="slack-authorization-command" ref={commandField} className="input" rows={3} readOnly spellCheck={false}
+        value={begin?.authorization_command ?? ''} onFocus={event => event.currentTarget.select()}
+        onCopy={event => { event.clipboardData.setData('text/plain', event.currentTarget.value); event.preventDefault() }} />
+      <Button variant="secondary" onClick={() => { void copyCommand() }}>复制授权命令</Button>
+      {copied && <p role="status">已复制纯文本命令</p>}
       {remaining !== undefined && <p>本轮等待时间：{remaining} 秒；平台票据也可能提前失效。</p>}
       <label htmlFor="slack-challenge">一次性验证码</label>
       <input id="slack-challenge" className="input" autoComplete="off" spellCheck={false} value={code} onChange={e => setCode(e.target.value)} />

@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
 import { SlackLocalOnboarding } from './SlackLocalOnboarding'
 import { channelService } from '../../services/channel'
@@ -9,6 +9,7 @@ vi.mock('../../components/Layout/MainLayout', () => ({ MainLayout: ({ children }
 vi.mock('../../services/channel', () => ({ channelService: { onboardBegin: vi.fn(), onboardPoll: vi.fn(), onboardSubmit: vi.fn(), onboardFinish: vi.fn(), onboardCancel: vi.fn(async () => ({})), getHealth: vi.fn(async () => ({ details: { platform_connected: true } })) } }))
 vi.mock('../../services/friend', () => ({ friendService: { listFriends: vi.fn(async () => ({ items: [{ id: 'master', display_name: '已有主人', permission: 'master' }] })), linkIdentity: vi.fn(async () => ({})) } }))
 let poll: (event: OnboardPollEvent) => void
+afterEach(() => { vi.unstubAllGlobals() })
 beforeEach(() => {
   vi.clearAllMocks()
   vi.mocked(channelService.onboardBegin).mockResolvedValue({ session_id: 'session-one', ui_mode: 'challenge_code', authorization_command: '/slackauthticket fixture-ticket', expires_at: Date.now() + 600000 })
@@ -24,6 +25,33 @@ async function start() {
   await screen.findByLabelText('一次性验证码')
 }
 describe('Slack local setup experience', () => {
+  it('copies the exact authorization command as plain text and confirms success', async () => {
+    const writeText = vi.fn(async () => {})
+    vi.stubGlobal('navigator', { clipboard: { writeText } })
+    await start()
+    const command = screen.getByRole('textbox', { name: '一次性授权命令' })
+    expect(command).toHaveValue('/slackauthticket fixture-ticket')
+    expect(command).toHaveAttribute('readonly')
+    fireEvent.click(screen.getByRole('button', { name: '复制授权命令' }))
+    await screen.findByText('已复制纯文本命令')
+    expect(writeText).toHaveBeenCalledWith('/slackauthticket fixture-ticket')
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+  it.each(['denied', 'unavailable'])('selects a plain-text fallback when clipboard is %s', async state => {
+    vi.stubGlobal('navigator', state === 'denied' ? { clipboard: { writeText: vi.fn(async () => { throw new Error('denied') }) } } : {})
+    await start()
+    fireEvent.click(screen.getByRole('button', { name: '复制授权命令' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('已选中纯文本命令')
+    const command = screen.getByRole('textbox', { name: '一次性授权命令' }) as HTMLTextAreaElement
+    expect(command).toHaveFocus()
+    expect(command.selectionStart).toBe(0)
+    expect(command.selectionEnd).toBe(command.value.length)
+    const setData = vi.fn()
+    fireEvent.copy(command, { clipboardData: { setData } })
+    expect(setData).toHaveBeenCalledOnce()
+    expect(setData).toHaveBeenCalledWith('text/plain', '/slackauthticket fixture-ticket')
+  })
+
   it('preserves uppercase instance names when starting authorization, matching the updated contract', async () => {
     render(<MemoryRouter><SlackLocalOnboarding /></MemoryRouter>)
     fireEvent.change(screen.getByLabelText('渠道名称'), { target: { value: 'Slack-one' } })

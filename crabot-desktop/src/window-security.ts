@@ -23,3 +23,11 @@ export function externalUrl(value: unknown): string | null {
     return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password ? url.href : null
   } catch { return null }
 }
+
+export function allowsDesktopClipboardWrite(contents: WebContents | null, expected: WebContents | undefined,
+  permission: string, details: { isMainFrame: boolean; requestingUrl?: string }): boolean {
+  if (!contents || contents.isDestroyed()) return false
+  return permission === 'clipboard-sanitized-write' && contents.id === expected?.id
+    && details.isMainFrame === true && isAppUrl(details.requestingUrl ?? '')
+    && isTrustedFrame(contents?.mainFrame, expected)
+}
