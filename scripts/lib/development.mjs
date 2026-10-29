@@ -17,6 +17,13 @@ export async function inspectDevelopment(root) {
   return { ...current, dataDir: env.DATA_DIR, ports: developmentPorts, logs: join(env.DATA_DIR, 'logs') }
 }
 
+// Status adds a bounded health observation; control paths remain identity-only.
+export async function readDevelopmentStatus(root) {
+  const current = await inspectDevelopment(root)
+  const { probeHealthStatus } = await import('./mm-probe.mjs')
+  return { ...current, health: current.state === 'running' ? await probeHealthStatus(developmentPorts.mm) : null }
+}
+
 // Read only known deployment locations, before changing this source tree.
 export async function assertDevelopmentBuildAllowed(root) {
   const current = await inspectDevelopment(root)

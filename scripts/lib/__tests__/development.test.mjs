@@ -8,8 +8,8 @@ import { once } from 'node:events'
 import { createServer } from 'node:net'
 import { developmentEnvironment, developmentPorts, isDevelopmentTree } from '../development-environment.mjs'
 import { developmentBuildState } from '../development-build.mjs'
-import { inspectDevelopment, stopDevelopment, assertDevelopmentPortsAvailable } from '../development.mjs'
-import { createInstanceRuntime, clearInstanceRuntime, readInstanceRuntime } from '../instance-runtime.mjs'
+import { inspectDevelopment, readDevelopmentStatus, stopDevelopment, assertDevelopmentPortsAvailable } from '../development.mjs'
+import { createInstanceRuntime, recordMmProcess, clearInstanceRuntime, readInstanceRuntime } from '../instance-runtime.mjs'
 
 function fixture(t) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'crabot-dev-中文 space-')))
@@ -74,4 +74,23 @@ test('a source-only development marker does not bypass a sealed or required rele
   assert.equal(isDevelopmentTree(root, { CRABOT_DEV: 'true', CRABOT_PRODUCT_REQUIRED: '1' }), false)
   writeFileSync(join(root, 'core-release.json'), '{}')
   assert.equal(isDevelopmentTree(root, { CRABOT_DEV: 'true' }), false)
+})
+
+test('developer status reports its own real health separately from process ownership', { timeout: 10000 }, async t => {
+  const root = fixture(t), data = join(root, 'data'); mkdirSync(data)
+  assert.equal((await readDevelopmentStatus(root)).health, null)
+  const child = spawn(process.execPath, ['-e', `const http=require('node:http');const server=http.createServer((req,res)=>{res.setHeader('Content-Type','application/json');res.end(JSON.stringify({success:true,data:{status:'degraded'}}))});server.listen(29000,'127.0.0.1',()=>process.send('ready'));`], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] })
+  const exited = once(child, 'exit')
+  let record
+  try {
+    await Promise.race([once(child, 'message'), exited.then(() => { throw new Error('Finite health fixture exited before listening') })])
+    record = createInstanceRuntime({ root, dataDir: data, mmPort: 29000 })
+    recordMmProcess(data, record.generation, child.pid)
+    const status = await readDevelopmentStatus(root)
+    assert.equal(status.state, 'running'); assert.equal(status.health, 'degraded')
+    assert.equal(status.record.generation, record.generation); assert.equal(status.dataDir, data)
+  } finally {
+    if (record) clearInstanceRuntime(data, record.generation)
+    child.kill(); await exited
+  }
 })

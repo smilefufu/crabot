@@ -15,6 +15,7 @@ async function captureDevelopmentLogs(root) {
     try {
       const bytes = await fs.readFile(path.join(root, 'data/logs', file))
       await fs.writeFile(path.join(root, '.desktop-build/development-' + file), bytes.subarray(-128_000))
+      console.log('CRABOT_DEVELOPMENT_DIAGNOSTIC ' + JSON.stringify({ file, tail: bytes.subarray(-32_000).toString('utf8') }))
     } catch (error) { if (error.code !== 'ENOENT') console.warn('Source diagnostic unavailable: ' + file) }
   }
 }

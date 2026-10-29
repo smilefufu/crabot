@@ -45,7 +45,7 @@ async function prepare(desktop = false, lockHeld = false) {
 async function main() {
   if (command === 'build') { await prepare(); return }
   const dev = await import('./lib/development.mjs')
-  if (command === 'status') { console.log(JSON.stringify(await dev.inspectDevelopment(root), null, 2)); return }
+  if (command === 'status') { console.log(JSON.stringify(await dev.readDevelopmentStatus(root), null, 2)); return }
   if (command === 'stop') { await dev.stopDevelopment(root); return }
   if (command === 'restart') {
     const { acquireCliLock, releaseCliLock } = await import('./lib/cli-lock.mjs')

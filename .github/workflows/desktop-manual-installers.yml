@@ -13,6 +13,38 @@ concurrency:
   group: desktop-manual-installer-${{ inputs.target || 'darwin-arm64' }}
   cancel-in-progress: false
 jobs:
+  source:
+    name: Source cold boot ${{ inputs.target || 'darwin-arm64' }}
+    runs-on: ${{ inputs.target == 'win32-x64' && 'windows-latest' || 'macos-15' }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.13.0'
+      - name: Prepare actual headless developer checkout
+        run: |
+          mkdir -p .desktop-build
+          node scripts/dev.mjs build 2>&1 | tee .desktop-build/development-build.log
+          test ! -d crabot-desktop/node_modules
+      - name: Real cold developer Core
+        run: node .github/scripts/smoke-development-coexistence.mjs --source-only 2>&1 | tee .desktop-build/development-source-boot.log
+      - name: Retain exact developer evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: developer-source-${{ inputs.target || 'darwin-arm64' }}-${{ github.sha }}
+          path: .desktop-build/*.log
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
   installer:
     name: Offline test installer ${{ inputs.target || 'darwin-arm64' }}
     runs-on: ${{ inputs.target == 'win32-x64' && 'windows-latest' || 'macos-15' }}
@@ -55,10 +87,13 @@ jobs:
         run: |
           node --input-type=module -e 'import{resolve}from"node:path";import{prepareMemoryDependencies}from"./scripts/lib/memory-deps.mjs";await prepareMemoryDependencies(resolve("crabot-memory"),{dev:true,relocatable:false,uv:"uv",logger:console})'
       - name: Verify cold source Core before packaging
-        run: node .github/scripts/smoke-development-coexistence.mjs --source-only 2>&1 | tee .desktop-build/development-source-boot.log
+        run: |
+          pnpm run build:cli
+          pnpm --dir crabot-admin/web run build
+          node .github/scripts/smoke-development-coexistence.mjs --source-only 2>&1 | tee .desktop-build/development-source-boot.log
       - name: Build same-source offline GUI and Core installer
         run: |
-          node scripts/desktop/stage-core.mjs --out=.desktop-build/manual/core --version=0.1.0-desktop.2
+          node scripts/desktop/stage-core.mjs --out=.desktop-build/manual/core --version=0.1.0-desktop.3
           node .github/scripts/verify-release-payload.mjs "$GITHUB_WORKSPACE/.desktop-build/manual/core"
           if [ "${{ runner.os }}" = "macOS" ]; then
             node scripts/desktop/package-application.mjs --candidate=true --core=.desktop-build/manual/core --out=.desktop-build/manual/gui
@@ -113,5 +148,6 @@ jobs:
         with:
           name: manual-installer-failure-${{ inputs.target || 'darwin-arm64' }}
           path: .desktop-build/*.log
-          if-no-files-found: ignore
+          include-hidden-files: true
+          if-no-files-found: error
           retention-days: 7
