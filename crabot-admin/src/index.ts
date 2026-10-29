@@ -946,7 +946,7 @@ export class AdminModule extends ModuleBase {
     })
 
     this.onboardingManager = new OnboardingManager()
-    this.slackOnboarding = new SlackOnboardingSessions(this.adminConfig.data_dir)
+    this.slackOnboarding = new SlackOnboardingSessions(this.adminConfig.data_dir, (channelId, identity) => this.ensureSlackOnboardingMaster(channelId, identity))
 
     this.versionService = new VersionService({
       crabotHome: CRABOT_HOME,
@@ -7298,6 +7298,18 @@ export class AdminModule extends ModuleBase {
   // Channel onboarding 自动认主 + 引导推送
   // ============================================================================
 
+  private async ensureSlackOnboardingMaster(
+    channelId: ModuleId,
+    identity: { platform_user_id: string; platform_display_name?: string },
+  ): Promise<{ friend_id: FriendId; display_name: string } | undefined> {
+    const linked = this.resolveFriendByChannelIdentity(channelId, identity.platform_user_id)
+    const master = this.findMasterFriend()
+    if ((linked && linked.permission !== 'master') || master?.channel_identities.some(
+      item => item.channel_id === channelId && item.platform_user_id !== identity.platform_user_id,
+    )) return undefined
+    return this.ensureMasterForOnboarding(channelId, identity.platform_user_id, identity.platform_display_name)
+  }
+
   /**
    * 扫码 onboarding 完成后，把 (channel_id, owner_open_id) 写入 master Friend。
    * 没有 master 则创建一个；有则合并 channel_identities。
@@ -7306,20 +7318,22 @@ export class AdminModule extends ModuleBase {
   private async ensureMasterForOnboarding(
     channelId: ModuleId,
     ownerOpenId: string,
+    ownerDisplayName?: string,
   ): Promise<{ friend_id: FriendId; display_name: string; created: boolean } | undefined> {
     try {
       const existing = this.findMasterFriend()
       const now = generateTimestamp()
       if (!existing) {
-        // 无 master：创建一个，display_name 留空。Admin Web onboarding 卡片引导用户填。
+        // 新建时采用平台已提供的昵称；飞书未提供时仍由完成卡片引导填写。
+        const displayName = ownerDisplayName ?? ONBOARDING_MASTER_DEFAULT_DISPLAY_NAME
         const initialIdentity: ChannelIdentity = {
           channel_id: channelId,
           platform_user_id: ownerOpenId,
-          platform_display_name: ONBOARDING_MASTER_DEFAULT_DISPLAY_NAME,
+          platform_display_name: displayName,
         }
         const friend: Friend = {
           id: generateId(),
-          display_name: ONBOARDING_MASTER_DEFAULT_DISPLAY_NAME,
+          display_name: displayName,
           permission: 'master',
           channel_identities: [initialIdentity],
           created_at: now,
@@ -7340,6 +7354,8 @@ export class AdminModule extends ModuleBase {
         existing.display_name || undefined,
       )
       if (!merge.changed) {
+        // A preceding persistence failure can leave the identity in memory; retry must still persist it.
+        await this.saveData()
         return { friend_id: existing.id, display_name: existing.display_name, created: false }
       }
       if (merge.removedIdentity) {

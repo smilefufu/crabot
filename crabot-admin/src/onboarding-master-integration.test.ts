@@ -133,6 +133,45 @@ describe('Onboarding auto-master + push integration', () => {
     })
   })
 
+  describe('Slack uses the same Master identity and permission path as Feishu', () => {
+    it('persists the verified Slack nickname and resolves Master permissions without receiving a private message', async () => {
+      const a = admin as any
+      const master = await a.ensureSlackOnboardingMaster('slack-one', { platform_user_id: 'UOWNER', platform_display_name: 'FuFu Z.' })
+      expect(master.display_name).toBe('FuFu Z.')
+      const saved = JSON.parse(await fs.readFile(`${TEST_DATA_DIR}/friends.json`, 'utf8'))
+      expect(saved).toEqual([expect.objectContaining({ id: master.friend_id, permission: 'master', display_name: 'FuFu Z.', channel_identities: [{ channel_id: 'slack-one', platform_user_id: 'UOWNER', platform_display_name: 'FuFu Z.' }] })])
+      a.friends.clear()
+      a.channelIdentityIndex.clear()
+      await a.loadData()
+      const { friend } = await a.handleResolveFriend({ channel_id: 'slack-one', platform_user_id: 'UOWNER' })
+      // Only the channel transport is isolated; exercise real identity, target and permission resolution.
+      vi.spyOn(a, 'resolveChannelSession').mockImplementation(async (...args: unknown[]) => ({ channel_id: args[0], id: args[1], type: args[1] === 'group-one' ? 'group' : 'private' }))
+      const permissions = await a.resolvePrincipalPermissions({ sender_friend_id: friend.id, channel_id: 'slack-one', session_id: 'not-yet-created-dm', session_type: 'private' })
+      expect(permissions.sources.friend_template_id).toBe('master_private')
+      expect(permissions.sources.fallback).toBeUndefined()
+      const group = await a.resolvePrincipalPermissions({ sender_friend_id: friend.id, channel_id: 'slack-one', session_id: 'group-one', session_type: 'group' })
+      expect(group.sources.session_template_id).toBe('group_default')
+      expect(group.sources.friend_template_id).toBeUndefined()
+    })
+    it('keeps a verified identity already bound to a normal Friend instead of silently elevating it', async () => {
+      const a = admin as any
+      const { friend } = a.handleCreateFriend({ display_name: '普通用户', permission: 'normal', channel_identities: [{ channel_id: 'slack-one', platform_user_id: 'UOWNER', platform_display_name: '普通用户' }] })
+      await a.saveData()
+      const before = await fs.readFile(`${TEST_DATA_DIR}/friends.json`, 'utf8')
+      expect(await a.ensureSlackOnboardingMaster('slack-one', { platform_user_id: 'UOWNER' })).toBeUndefined()
+      expect(a.friends.get(friend.id).permission).toBe('normal')
+      expect(await fs.readFile(`${TEST_DATA_DIR}/friends.json`, 'utf8')).toBe(before)
+    })
+    it('does not replace a different Master identity already managed for this channel', async () => {
+      const a = admin as any
+      const { friend } = a.handleCreateFriend({ display_name: '原主人', permission: 'master', channel_identities: [{ channel_id: 'slack-one', platform_user_id: 'UOLD', platform_display_name: '原主人' }] })
+      expect(await a.ensureSlackOnboardingMaster('slack-one', { platform_user_id: 'UOWNER' })).toBeUndefined()
+      expect(a.friends.get(friend.id)).toEqual(friend)
+      expect((await a.handleResolveFriend({ channel_id: 'slack-one', platform_user_id: 'UOLD' })).friend.id).toBe(friend.id)
+      expect((await a.handleResolveFriend({ channel_id: 'slack-one', platform_user_id: 'UOWNER' })).friend).toBeNull()
+    })
+  })
+
   describe('pushOnboardingGuide', () => {
     it('channel module 未就绪超时返回 false', async () => {
       const a = admin as any

@@ -1,14 +1,17 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
-import type { Onboarder, OnboarderBeginResult, OnboarderFinishResult } from 'crabot-shared'
+import type { Onboarder, OnboarderBeginResult, OnboarderFinishResult, FriendId, ModuleId } from 'crabot-shared'
 import type { ChannelManager } from './channel-manager.js'
 import { buildOnboardFinishResponse } from './onboard-finish-response.js'
+interface OnboardingMaster { friend_id: FriendId; display_name: string }
+type EnsureMaster = (channelId: ModuleId, identity: NonNullable<OnboarderFinishResult['authorized_identity']>) => Promise<OnboardingMaster | undefined>
 interface Receipt {
   owner: string
   name: string
   config_hash: string
   authorized_identity?: OnboarderFinishResult['authorized_identity']
+  master?: OnboardingMaster
   completed?: boolean
   cleanup_confirmed?: boolean
 }
@@ -20,7 +23,7 @@ const hash = (env: Record<string, string>) => createHash('sha256').update(JSON.s
 export class SlackOnboardingSessions {
   private owners = new Map<string, string>()
   private finishes = new Map<string, { name: string; result: Promise<unknown> }>()
-  constructor(private readonly dataDir: string) {}
+  constructor(private readonly dataDir: string, private readonly ensureMaster: EnsureMaster) {}
   private file(id: string): string {
     if (!/^[a-f0-9-]{36}$/.test(id)) throw new SlackOnboardingHttpError(404, 'session_not_found', '授权会话不存在')
     return path.join(this.dataDir, 'slack-onboarding-receipts', `${id}.json`)
@@ -99,6 +102,14 @@ export class SlackOnboardingSessions {
     catch { throw new SlackOnboardingHttpError(500, 'unknown', '实例已创建；本地授权材料清理未确认完成，请重试完成，勿重新授权') }
     receipt!.cleanup_confirmed = true
     await this.save(id, receipt!)
-    return buildOnboardFinishResponse({ finishResult: { env: {}, authorized_identity: receipt!.authorized_identity }, instance: instance as never, masterFriendId: undefined, masterDisplayName: undefined, pushSent: false })
+    // Store a successful claim in the existing receipt: replay must not undo later manual identity changes.
+    if (!receipt!.master && receipt!.authorized_identity) {
+      const master = await this.ensureMaster(instance.id, receipt!.authorized_identity).catch(error => {
+        console.warn('[Admin] Slack onboarding auto-master failed:', error)
+        return undefined
+      })
+      if (master) { receipt!.master = { friend_id: master.friend_id, display_name: master.display_name }; await this.save(id, receipt!) }
+    }
+    return buildOnboardFinishResponse({ finishResult: { env: {}, authorized_identity: receipt!.authorized_identity }, instance: instance as never, masterFriendId: receipt!.master?.friend_id, masterDisplayName: receipt!.master?.display_name, pushSent: false })
   }
 }

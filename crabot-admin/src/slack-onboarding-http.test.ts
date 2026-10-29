@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
@@ -14,7 +14,7 @@ const token = (sub: string) => {
   const payload = Buffer.from(JSON.stringify({ sub, e: 0, iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + 3600 })).toString('base64url')
   return `${header}.${payload}.${createHmac('sha256', secret).update(`${header}.${payload}`).digest('base64url')}`
 }
-let server: http.Server, base: string, root: string, app: any
+let server: http.Server, base: string, root: string, app: any, instance: any
 const onboarder = {
   begin: vi.fn(async () => ({ session_id: sessionId, ui_mode: 'challenge_code', authorization_command: '/slackauthticket fixture' })),
   submit: vi.fn(async (_id: string, input: { challenge_code: string }) => { if (!input || typeof input.challenge_code !== 'string') throw Object.assign(new Error('请输入验证码'), { status: 400, code: 'invalid_input' }) }),
@@ -27,13 +27,22 @@ beforeAll(async () => {
   await writeCredentials(root, await newCredentialsFromPassword('fixture-password', { is_temp: false, changed_via: 'start' }))
   // Exercise actual Admin routing/auth/body parsing with isolated HTTP transport and storage.
   app = Object.create(AdminModule.prototype)
-  Object.assign(app, { adminConfig: { data_dir: root, web_port: 0 }, jwtSecret: secret, voiceAdmin: { handleWeb: async () => false }, onboardingManager: { get: (impl: string, method: string) => impl === 'channel-slack' && method === 'local-cli' ? onboarder : undefined }, slackOnboarding: new SlackOnboardingSessions(root) })
-  let instance: any
+  Object.assign(app, { adminConfig: { data_dir: root, web_port: 0 }, jwtSecret: secret, voiceAdmin: { handleWeb: async () => false, validateIdentity() {} }, onboardingManager: { get: (impl: string, method: string) => impl === 'channel-slack' && method === 'local-cli' ? onboarder : undefined }, friends: new Map(), channelIdentityIndex: new Map() })
   app.channelManager = { listInstances: () => ({ items: instance ? [instance] : [] }), getInstance: () => instance, loadLocalConfig: async () => ({ SLACK_BOT_TOKEN: 'xoxb-fixture', SLACK_APP_TOKEN: 'xapp-fixture' }), createInstance: vi.fn(async ({ name }: { name: string }) => { instance = { id: name, name, implementation_id: 'channel-slack' }; return instance }) }
-  app.ensureMasterForOnboarding = vi.fn(() => { throw new Error('Slack must not claim Master') })
+  app.saveData = vi.fn(async () => { await fs.writeFile(path.join(root, 'friends.json'), JSON.stringify([...app.friends.values()])) })
   server = http.createServer((req, res) => { void app.handleWebRequest(req, res).catch(() => { res.writeHead(500); res.end() }) })
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
   base = `http://127.0.0.1:${(server.address() as { port: number }).port}`
+})
+beforeEach(async () => {
+  vi.clearAllMocks()
+  app.saveData.mockReset().mockImplementation(async () => { await fs.writeFile(path.join(root, 'friends.json'), JSON.stringify([...app.friends.values()])) })
+  instance = undefined
+  app.friends.clear()
+  app.channelIdentityIndex.clear()
+  await app.saveData()
+  await fs.rm(path.join(root, 'slack-onboarding-receipts'), { recursive: true, force: true })
+  app.slackOnboarding = new SlackOnboardingSessions(root, (channelId, identity) => app.ensureSlackOnboardingMaster(channelId, identity))
 })
 afterAll(async () => { await new Promise<void>(resolve => server.close(() => resolve())); await fs.rm(root, { recursive: true, force: true }) })
 async function request(action: string, subject?: string, extra: Record<string, unknown> = {}) {
@@ -49,7 +58,8 @@ describe('real Admin browser HTTP boundary', () => {
     const response = await fetch(`${base}/api/channels/onboard/poll?implementation_id=channel-slack&method_id=local-cli&session_id=${sessionId}&token=${token('human-b')}`)
     expect(response.status).toBe(403)
   })
-  it('serves submit/SSE and idempotent creation without returning tokens or auto Master effects', async () => {
+  it('automatically claims the verified owner through HTTP, persists it, and resolves the real identity without a DM', async () => {
+    await request('begin', 'human-a')
     const invalid = await request('submit', 'human-a')
     expect(invalid.status).toBe(400); expect(await invalid.json()).toMatchObject({ code: 'invalid_input' })
     const accepted = await request('submit', 'human-a', { input: { challenge_code: 'fixture' } })
@@ -60,10 +70,55 @@ describe('real Admin browser HTTP boundary', () => {
     expect(first.status).toBe(200)
     const result = await first.json()
     expect(result.authorized_identity).toEqual({ platform_user_id: 'UOWNER' })
-    expect(JSON.stringify(result)).not.toMatch(/xoxb-|xapp-|master_friend_id|SLACK_BOT_TOKEN/)
+    expect(JSON.stringify(result)).not.toMatch(/xoxb-|xapp-|SLACK_BOT_TOKEN/)
     expect((await request('finish', 'human-a', { name: 'Slack-test' })).status).toBe(200)
     expect(app.channelManager.createInstance).toHaveBeenCalledTimes(1)
-    expect(app.ensureMasterForOnboarding).not.toHaveBeenCalled()
+    expect(result.master_friend_id).toBeTruthy()
+    const resolved = await app.handleResolveFriend({ channel_id: 'Slack-test', platform_user_id: 'UOWNER' })
+    expect(resolved.friend).toMatchObject({ id: result.master_friend_id, permission: 'master' })
+    expect(JSON.parse(await fs.readFile(path.join(root, 'friends.json'), 'utf8'))).toEqual([resolved.friend])
     expect(onboarder.finish).not.toHaveBeenCalledWith(sessionId, { created_instance_id: 'attacker' })
   })
+  it('reuses the existing Master and ignores browser-supplied owner identity', async () => {
+    const { friend } = app.handleCreateFriend({ display_name: '原主人', permission: 'master', channel_identities: [{ channel_id: 'feishu-old', platform_user_id: 'ou_owner', platform_display_name: '原主人' }] })
+    await request('begin', 'human-a')
+    const response = await request('finish', 'human-a', { name: 'Slack-test', authorized_identity: { platform_user_id: 'UFORGED' } })
+    const result = await response.json()
+    expect(result).toMatchObject({ master_friend_id: friend.id, master_display_name: '原主人' })
+    expect(app.friends.size).toBe(1)
+    expect(app.friends.get(friend.id).channel_identities).toEqual([
+      ...friend.channel_identities,
+      { channel_id: 'Slack-test', platform_user_id: 'UOWNER', platform_display_name: '原主人' },
+    ])
+    expect((await app.handleResolveFriend({ channel_id: 'Slack-test', platform_user_id: 'UFORGED' })).friend).toBeNull()
+  })
+  it('reports failed owner persistence separately and retries it without recreating the App or channel', async () => {
+    await request('begin', 'human-a')
+    app.saveData.mockRejectedValueOnce(new Error('fixture disk error'))
+    const first = await (await request('finish', 'human-a', { name: 'Slack-test' })).json()
+    expect(first.instance.id).toBe('Slack-test')
+    expect(first.master_friend_id).toBeUndefined()
+    expect(JSON.parse(await fs.readFile(path.join(root, 'friends.json'), 'utf8'))).toEqual([])
+    const retry = await (await request('finish', 'human-a', { name: 'Slack-test' })).json()
+    const saved = JSON.parse(await fs.readFile(path.join(root, 'friends.json'), 'utf8'))
+    expect(saved).toHaveLength(1)
+    expect(saved[0]).toMatchObject({ id: retry.master_friend_id, permission: 'master' })
+    expect(app.channelManager.createInstance).toHaveBeenCalledTimes(1)
+    expect(onboarder.begin).toHaveBeenCalledTimes(1)
+  })
+  it('does not re-claim a successfully completed owner after restart and a later manual unlink', async () => {
+    await request('begin', 'human-a')
+    const first = await (await request('finish', 'human-a', { name: 'Slack-test' })).json()
+    expect(first.master_friend_id).toBeTruthy()
+    const friend = app.friends.get(first.master_friend_id)
+    app.friends.set(friend.id, { ...friend, channel_identities: [] })
+    app.channelIdentityIndex.clear()
+    await app.saveData()
+    app.slackOnboarding = new SlackOnboardingSessions(root, (channelId, identity) => app.ensureSlackOnboardingMaster(channelId, identity))
+    const retry = await (await request('finish', 'human-a', { name: 'Slack-test' })).json()
+    expect(retry).toEqual(first)
+    expect((await app.handleResolveFriend({ channel_id: 'Slack-test', platform_user_id: 'UOWNER' })).friend).toBeNull()
+    expect(app.channelManager.createInstance).toHaveBeenCalledTimes(1)
+  })
+
 })

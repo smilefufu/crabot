@@ -21,7 +21,8 @@ describe('Slack Admin -> real module RPC -> persistent restart',()=>{
       finish: vi.fn(async () => ({ env: { SLACK_BOT_TOKEN: 'xoxb-fixture', SLACK_APP_TOKEN: 'xapp-fixture' } })),
       poll: vi.fn(), cancel: vi.fn(),
     }
-    const sessions = new SlackOnboardingSessions(dir)
+    const ensureMaster = vi.fn(async () => undefined)
+    const sessions = new SlackOnboardingSessions(dir, ensureMaster)
     const begin = await sessions.begin('human:0', onboarder, { instance_name: 'Slack-Mixed' }, manager)
     await sessions.finish('human:0', begin.session_id, 'Slack-Mixed', onboarder, manager)
     expect(manager.getInstance('Slack-Mixed')?.id).toBe('Slack-Mixed')
@@ -29,6 +30,7 @@ describe('Slack Admin -> real module RPC -> persistent restart',()=>{
     expect((await manager.loadLocalConfig('Slack-Mixed'))?.SLACK_BOT_TOKEN).toBe('xoxb-fixture')
     await expect(sessions.begin('human:0', onboarder, { instance_name: 'slack-mixed' }, manager)).rejects.toMatchObject({ status: 409 })
     expect(onboarder.begin).toHaveBeenCalledTimes(1)
+    expect(ensureMaster).not.toHaveBeenCalled()
     await expect(manager.createInstance({ implementation_id: 'channel-slack', name: 'slack-mixed' })).rejects.toThrow('already exists')
     expect(manager.listInstances().items.map(item => item.id)).toEqual(['Slack-Mixed'])
   })

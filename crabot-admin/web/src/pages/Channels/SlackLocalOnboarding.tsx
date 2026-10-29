@@ -3,8 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { MainLayout } from '../../components/Layout/MainLayout'
 import { Button } from '../../components/Common/Button'
 import { channelService } from '../../services/channel'
-import { friendService } from '../../services/friend'
-import type { Friend, OnboardBeginResult, OnboardPollEvent } from '../../types'
+import type { OnboardBeginResult, OnboardPollEvent } from '../../types'
 const IMPLEMENTATION = 'channel-slack', METHOD = 'local-cli'
 type Phase = 'idle' | 'starting' | 'waiting' | 'submitting' | 'configuring' | 'creating' | 'finish_error' | 'created' | 'error'
 type Identity = { platform_user_id: string; platform_display_name?: string }
@@ -20,10 +19,7 @@ export function SlackLocalOnboarding() {
   const [now, setNow] = useState(Date.now())
   const [instanceId, setInstanceId] = useState('')
   const [identity, setIdentity] = useState<Identity>()
-  const [friends, setFriends] = useState<Friend[]>([])
-  const [friendId, setFriendId] = useState('')
-  const [bound, setBound] = useState(false)
-  const [binding, setBinding] = useState(false)
+  const [master, setMaster] = useState<{ id: string; displayName: string }>()
   const [connected, setConnected] = useState(false)
   const active = useRef(true), generation = useRef(0)
   const session = useRef<string | undefined>(undefined)
@@ -75,14 +71,11 @@ export function SlackLocalOnboarding() {
     try {
       const result = await channelService.onboardFinish(IMPLEMENTATION, METHOD, sessionId, instanceName)
       if (!active.current || generation.current !== current) return
-      session.current = undefined
+      if (result.master_friend_id) session.current = undefined
       setInstanceId(result.instance.id)
       setIdentity(result.authorized_identity)
+      setMaster(result.master_friend_id ? { id: result.master_friend_id, displayName: result.master_display_name ?? '' } : undefined)
       setPhase('created')
-      try {
-        const result = await friendService.listFriends({ page_size: 200 })
-        if (active.current && generation.current === current) setFriends(result.items)
-      } catch { if (active.current) setError('读取对话对象失败，可稍后在「对话对象」中绑定身份') }
     } catch (value) {
       if (!active.current || generation.current !== current) return
       setError(value instanceof Error ? value.message : '实例创建失败')
@@ -164,15 +157,6 @@ export function SlackLocalOnboarding() {
     if (!active.current || generation.current !== cancelledGeneration) return
     setBegin(undefined); setCode(''); setError(''); setCopied(false); setPhase('idle')
   }
-  async function bind() {
-    if (!identity || !friendId || binding) return
-    setBinding(true); setError('')
-    try {
-      await friendService.linkIdentity(friendId, { channel_id: instanceId, ...identity, platform_display_name: identity.platform_display_name ?? identity.platform_user_id })
-      if (active.current) setBound(true)
-    } catch (value) { if (active.current) setError(value instanceof Error ? value.message : '绑定失败，原身份关联保持不变') }
-    finally { if (active.current) setBinding(false) }
-  }
   const busy = ['starting', 'submitting', 'configuring', 'creating'].includes(phase)
   return <MainLayout><div style={{ maxWidth: 720, margin: '0 auto', padding: '1.5rem 2rem' }}>
     <h1>Slack · 本地授权</h1>
@@ -181,7 +165,7 @@ export function SlackLocalOnboarding() {
       <p>Crabot 会在你的 workspace 创建和配置一个自己的 Slack App，保持本地直连。授权包含 App 管理能力，CLI 只在接入时运行。</p>
       <label htmlFor="slack-instance-name">渠道名称</label>
       <input id="slack-instance-name" className="input" value={name} onChange={e => setName(e.target.value)} placeholder="如：slack-bot" />
-      <p>你只需在 Slack 确认一次授权，并填回验证码；无需手工配置 Bot 或填写 Token。</p>
+      <p>你只需在 Slack 确认一次授权，并填回验证码；完成后将自动认主，无需手工配置 Bot 或填写 Token。</p>
       <Button onClick={start} disabled={!name.trim()}>开始授权</Button>
     </>}
     {phase === 'waiting' && <>
@@ -204,15 +188,13 @@ export function SlackLocalOnboarding() {
     {phase === 'created' && <>
       <p>App 已配置，渠道 <strong>{instanceId}</strong> 已创建。</p>
       <p role="status">{connected ? 'Slack 渠道已连接' : '渠道尚未确认连接，可到渠道设置查看状态'}；真实消息收发尚未验证。</p>
-      {identity && !bound && <>
-        <p>确认授权用户：{identity.platform_display_name ?? identity.platform_user_id}。请选择要关联的现有对话对象，也可稍后处理。连接成功不代表该用户已获 Agent 授权。</p>
-        <label htmlFor="slack-friend">关联对话对象</label>
-        <select id="slack-friend" className="select" disabled={binding} value={friendId} onChange={e => setFriendId(e.target.value)}><option value="">请选择，不自动认主</option>{friends.map(friend => <option key={friend.id} value={friend.id}>{friend.display_name || friend.id}</option>)}</select>
-        <Button disabled={!friendId || binding} onClick={bind}>{binding ? '保存中…' : '确认关联'}</Button>
+      {master ? <p>已自动认主：{master.displayName || identity?.platform_display_name || identity?.platform_user_id || '主人'}。可以直接开始聊天，无需再次关联。</p> : <>
+        <p role="alert">渠道已创建，但自动认主未完成。可重试认主；若已有身份绑定冲突，请在「对话对象」中核对，原关联不会被覆盖。</p>
+        <Button onClick={() => { if (session.current) void finish(session.current, name, generation.current) }}>重试认主</Button>
+        <p><a href="/friends">管理对话对象</a></p>
       </>}
-      {bound && <p>身份关联已保存。</p>}
-      <p>在 Slack 中打开 Crabot (local) 私聊；群聊请先邀请 Bot 加入，再 @Crabot 发起。群聊默认仅响应 @，可在渠道设置修改。thread 暂不做专门路由。</p>
-      <Button onClick={() => navigate(`/channels/config?selected=${encodeURIComponent(instanceId)}`)}>{bound ? '完成并查看渠道' : '稍后关联，查看渠道'}</Button>
+      <p>可选消息测试：在 Slack 中打开此 Bot 私聊，发送一条消息。群聊请先邀请 Bot 加入，再 @Bot 发起；群聊默认仅响应 @，可在渠道设置修改。</p>
+      <Button onClick={() => navigate(`/channels/config?selected=${encodeURIComponent(instanceId)}`)}>完成并查看渠道</Button>
     </>}
     {phase === 'idle' && <p><a href="/channels/config?implementation_id=channel-slack">已有 Token？使用手动配置</a></p>}
   </div></MainLayout>
