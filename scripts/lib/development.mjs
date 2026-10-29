@@ -79,7 +79,7 @@ export async function startDevelopment(root, { foreground = false, lockHeld = fa
   try {
     if ((await inspectDevelopment(root)).state !== 'stopped') throw failure('本开发实例已经运行；使用pnpm dev status或stop。')
     await assertDevelopmentPortsAvailable()
-    const prepared = prepareCoreEnvironment({ root, dataDir: env.DATA_DIR, source: env })
+    const prepared = prepareCoreEnvironment({ root, dataDir: env.DATA_DIR, source: env, loadInstallationEnv: false })
     const preflight = await runCorePreflight({ root, dataDir: env.DATA_DIR, node: process.execPath, env: prepared.env, stdio: 'inherit' })
     if (preflight.exitCode !== 0) throw failure('开发启动前检查失败，原数据保留。')
     await ensureDevelopmentBrowserAccess(root, prepared.env, log)

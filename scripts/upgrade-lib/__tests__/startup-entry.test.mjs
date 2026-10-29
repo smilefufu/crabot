@@ -151,6 +151,8 @@ it('new developer browser credentials remain schema-compatible before first boot
   data = path.join(home, 'data')
   await fs.mkdir(data, { recursive: true }); await scripts()
   await write('crabot-desktop/package.json', '{"crabotDesktopDevelopment":true}')
+  const legacyEnvironment = 'WORKER_WORKSPACES_DIR=legacy-workspaces\nWORKSPACE_DIR=legacy-work\nCRABOT_ADMIN_DATA_DIR=legacy-admin\nCRABOT_MEMORY_DATA_DIR=legacy-memory\nCRABOT_JWT_SECRET=legacy-secret\n'
+  await write('.env', legacyEnvironment)
   await write('crabot-admin/schema_version', 'v1\n')
   await write('crabot-admin/upgrade/scope.mjs', 'export const migrationScope=async()=>({reads:[],writes:[]})')
   await write('crabot-admin/upgrade/from_v0_to_v1.mjs', '// finite module migration; common engine commits its schema')
@@ -159,6 +161,7 @@ it('new developer browser credentials remain schema-compatible before first boot
     const {checkSchema}=require(${JSON.stringify(path.join(product, 'crabot-core/dist/schema-check.js'))});
     const result=checkSchema({moduleDir:${JSON.stringify(path.join(home, 'crabot-admin'))},dataDir:${JSON.stringify(path.join(data, 'admin'))}});
     if(result.kind==='block'){console.error('admin-web schema_mismatch');process.exit(1)}
+    require('node:fs').writeFileSync(${JSON.stringify(path.join(data, 'observed-environment.json'))}, JSON.stringify(Object.fromEntries(['WORKER_WORKSPACES_DIR','WORKSPACE_DIR','CRABOT_ADMIN_DATA_DIR','CRABOT_MEMORY_DATA_DIR','CRABOT_JWT_SECRET','DATA_DIR','CRABOT_ADMIN_WEB_PORT'].map(name=>[name,process.env[name]??null]))));
     const server=require('node:http').createServer((req,res)=>{req.resume();res.setHeader('Content-Type','application/json');res.end(JSON.stringify({success:true,data:{status:'healthy'}}));if(req.url==='/shutdown')req.on('end',()=>server.close(()=>process.exit(0)))});
     server.listen(29000,'127.0.0.1');process.on('message',message=>{if(message.type==='crabot-shutdown')server.close(()=>process.exit(0))});
   `)
@@ -175,6 +178,11 @@ it('new developer browser credentials remain schema-compatible before first boot
         exited.then(() => reject(new Error(output)))
       })
       expect(await ready).toBe('ready')
+      const observed = JSON.parse(await fs.readFile(path.join(data, 'observed-environment.json'), 'utf8'))
+      for (const name of ['WORKER_WORKSPACES_DIR', 'WORKSPACE_DIR', 'CRABOT_ADMIN_DATA_DIR', 'CRABOT_MEMORY_DATA_DIR']) expect(observed[name]).toBeNull()
+      expect(observed.CRABOT_JWT_SECRET).not.toBe('legacy-secret')
+      expect(await fs.realpath(observed.DATA_DIR)).toBe(await fs.realpath(data)); expect(observed.CRABOT_ADMIN_WEB_PORT).toBe('13000')
+      expect(await fs.readFile(path.join(home, '.env'), 'utf8')).toBe(legacyEnvironment)
       expect(await fs.readFile(path.join(data, 'admin/SCHEMA_VERSION'), 'utf8')).toBe('v1\n')
       const bytes = await fs.readFile(path.join(data, 'admin/credentials.json'), 'utf8')
       if (credentialBytes) expect(bytes).toBe(credentialBytes)
