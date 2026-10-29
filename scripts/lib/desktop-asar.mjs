@@ -27,7 +27,7 @@ export function verifyDesktopAsar(asar, archive, platform = process.platform, se
   const paths = platform === 'win32' ? path.win32 : path.posix
   for (const file of desktopMaintenanceBootstrap) asar.statFile(archive, paths.normalize('dist/bootstrap/' + file))
   for (const file of [...operationProgressFiles, ...systemEntryFiles]) asar.statFile(archive, paths.normalize(file))
-  for (const file of ['dist/main.js', 'dist/bootstrap-log.js', 'dist/preload.cjs', 'dist/ubuntu-program-probe.js', 'dist/ubuntu-update.js', 'dist/paired-update.js', 'dist/release-intake.js', 'dist/release-signatures.js', 'dist/release-download.js', 'dist/release-transport.js',
+  for (const file of ['dist/main.js', 'dist/mac-first-launch.js', 'dist/bootstrap-log.js', 'dist/preload.cjs', 'dist/ubuntu-program-probe.js', 'dist/ubuntu-update.js', 'dist/paired-update.js', 'dist/release-intake.js', 'dist/release-signatures.js', 'dist/release-download.js', 'dist/release-transport.js',
     'dist/bootstrap/scripts/lib/desktop-management.cjs', 'dist/bootstrap/scripts/desktop/extract-paired-release.py', 'dist/bootstrap/scripts/lib/desktop-installation.cjs', 'dist/bootstrap/scripts/lib/desktop-removal-record.cjs',
     'dist/bootstrap/scripts/lib/core-release.mjs', 'dist/bootstrap/scripts/lib/physical-fs.cjs',
     'dist/bootstrap/scripts/lib/process-identity.cjs', 'dist/bootstrap/crabot-native/build/Release/crabot-native.node', 'dist/assets/tray.png', 'node_modules/crabot-client/dist/index.js',

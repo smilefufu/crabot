@@ -50,10 +50,14 @@ async function boot() {
   selected = path.resolve(selected)
   const discoveryRoot = locator?.install_root || path.join(homedir(), '.crabot')
   let legacyRequired = false, detectedLegacy: LegacyTakeoverSource | null = null, discoveryError: unknown
-  try { detectedLegacy = await discoverLegacyTakeover(discoveryRoot) }
-  catch (error) { legacyRequired = true; discoveryError = error }
+  const { discoverUserSourceDeployment } = await import(pathToFileURL(path.join(directory, 'bootstrap/scripts/lib/source-installation.mjs')).href)
+  const sourceDeployment = !locator && discoverUserSourceDeployment({ home: homedir(), source: process.env })
+  if (!sourceDeployment) {
+    try { detectedLegacy = await discoverLegacyTakeover(discoveryRoot) }
+    catch (error) { legacyRequired = true; discoveryError = error }
+  }
   if (detectedLegacy) { legacyRequired = true; selected = detectedLegacy.installation.installRoot; preselected = true }
-  if (!locator && !detectedLegacy) {
+  if (!locator && !detectedLegacy && !sourceDeployment) {
     const { assertFreshUserInstallation } = await import(pathToFileURL(path.join(directory, 'bootstrap/scripts/lib/legacy-desktop.mjs')).href)
     try { await assertFreshUserInstallation({ home: homedir(), source: process.env }) }
     catch (error) {

@@ -6,7 +6,7 @@ import path from 'node:path'
 import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
 import { access, mkdir, readFile, writeFile, rename, rm } from 'node:fs/promises'
-import { mkdirSync, readFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, existsSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import type { DesktopDiagnostics } from 'crabot-client'
 import { pathToFileURL, fileURLToPath } from 'node:url'
@@ -180,17 +180,35 @@ async function boot() {
     coreRoot = installation.coreRoot
   }
   bootstrapStage('installation-bound')
+  const macApp = app.isPackaged && process.platform === 'darwin' && !installation
+  if (macApp) {
+    // All self-contained Mac launches share this small profile while claiming
+    // the GUI lock, even before the first data location has been selected.
+    configureProfile(path.join(app.getPath('appData'), 'Crabot/bootstrap'))
+    if (!claimInstance()) return
+    await app.whenReady()
+    const { prepareMacAppData } = await import('./mac-first-launch.js')
+    const selected = await prepareMacAppData({ appPath: path.resolve(path.dirname(process.execPath), '../..'), coreRoot,
+      home: homedir(), dialog, version: app.getVersion(),
+      load: name => import(new URL('./bootstrap/scripts/lib/' + name, import.meta.url).href) })
+    if (!selected) { quitting = true; app.quit(); return }
+    dataRoot = selected
+    const binding = (await loadCore('scripts/lib/mac-app-binding.cjs')).default
+    binding.applyMacAppEnvironment(coreRoot)
+    verifyBinding = () => { binding.applyMacAppEnvironment(coreRoot) }
+    configureProfile(dataRoot)
+  }
   try {
     const { resolveCliDataDir } = await loadCore('scripts/lib/instance.mjs')
     const resolved = path.resolve(resolveCliDataDir({ homeDir: path.join(homedir(), '.crabot') }))
     if (installation && resolved !== dataRoot) throw Object.assign(new Error('Installed data binding changed'), { code: 'CRABOT_DESKTOP_INSTALLATION' })
     dataRoot = resolved
     const management = (await loadCore('scripts/lib/desktop-management.cjs')).default
-    dataRoot = installation ? management.requireExistingDataRoot(dataRoot) : management.ensurePrivateDataRoot(dataRoot)
+    dataRoot = installation || existsSync(dataRoot) ? management.requireExistingDataRoot(dataRoot) : management.ensurePrivateDataRoot(dataRoot)
     if (!installation) configureProfile(dataRoot)
   } catch (error) { initialError = error }
   bootstrapStage('data-location-checked')
-  if (!installation && !claimInstance()) return
+  if (!installation && !macApp && !claimInstance()) return
   await app.whenReady()
   if (process.platform === 'win32') app.setAppUserModelId('com.crabot.desktop')
   bootstrapStage('app-ready', { app_version: app.getVersion() })
@@ -369,6 +387,7 @@ void boot().catch(async error => {
   bootstrapStage('failed', { code })
   await app.whenReady()
   let message = 'Crabot 界面启动失败，请修复安装。'
+  if (['CRABOT_MAC_APP_BINDING', 'CRABOT_DATA_MISSING', 'CRABOT_DESKTOP_TAKEOVER_REQUIRED'].includes(error?.code)) message = error.message
   if (['CRABOT_DESKTOP_REMOVAL', 'CRABOT_DESKTOP_REMOVAL_PENDING'].includes(error?.code)) message = 'Crabot 卸载尚未完成。请继续卸载，或使用同版/更高版离线安装器修复。用户数据已保留。'
   else if (['CRABOT_DESKTOP_INSTALLATION', 'CRABOT_CORE_INTEGRITY'].includes(error?.code)) message = 'Crabot 安装位置、内置文件或版本对未通过校验，请使用同版或更高版安装包修复。已有数据保留。'
   await dialog.showMessageBox({ type: 'error', message })

@@ -298,6 +298,14 @@ export class DesktopController {
     const current = await this.current()
     if (current.state === 'running' && current.mmAlive) { await this.host.reconnect(); return }
     this.host.status('starting', '正在准备内置环境并启动本机服务。')
+    if (!this.options.packaged && process.env.CRABOT_DEV === 'true') {
+      const node = process.env.CRABOT_DEVELOPMENT_NODE
+      if (!node) throw new Error('请通过pnpm dev desktop打开开发界面。')
+      // Standalone Node owns the dev producer; Electron never acts as Core Node.
+      await promisify(execFile)(node, [path.join(this.options.coreRoot, 'scripts/dev-background.mjs')], {
+        env: process.env, timeout: 180_000, maxBuffer: 1024 * 1024, windowsHide: true })
+      await this.host.reconnect(); return
+    }
     const { startDesktopCore } = await this.load('scripts/desktop/start-core.mjs')
     const started = Date.now()
     await startDesktopCore({ root: this.options.coreRoot, dataDir: this.options.dataRoot,

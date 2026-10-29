@@ -1,4 +1,5 @@
 import product from '../lib/product-runtime.cjs'
+import { isDevelopmentTree } from '../lib/development-environment.mjs'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { createRequire } from 'node:module'
@@ -15,7 +16,7 @@ export async function preflightRestart(home, dataRoot) {
     try { createRequire(path.join(home, 'scripts/lib/package.json')).resolve('proper-lockfile') }
     catch { throw new Error('Target CLI dependencies are missing; prepare upgrade before restarting') }
   }
-  const runtime = product.loadProductRuntime(home, { required: process.env.CRABOT_PRODUCT_REQUIRED === '1' })
+  const runtime = isDevelopmentTree(home) ? null : product.loadProductRuntime(home, { required: process.env.CRABOT_PRODUCT_REQUIRED === '1' })
   if (!runtime && await fs.stat(path.join(home, 'crabot-memory/pyproject.toml')).then(() => true, () => false)) await preparedMemoryPython(path.join(home, 'crabot-memory'))
   if (await fs.stat(path.join(home, 'scripts/check-release.mjs')).then(() => true, () => false)) await verifyReleasePackage(home)
   const preview = await previewMigrations(home, dataRoot)

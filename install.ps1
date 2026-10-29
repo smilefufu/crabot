@@ -431,12 +431,11 @@ if ($FromSource) {
     $sourceRoot = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
     Push-Location $sourceRoot
     try {
-        @'
-import { runSourceUpgrade } from './scripts/upgrade-lib/source.mjs'
-await runSourceUpgrade(process.cwd(), console)
-'@ | node --input-type=module
-        Assert-NativeSuccess 'Source preparation/build'
+        node scripts/dev.mjs build
+        Assert-NativeSuccess 'Development preparation/build'
     } finally { Pop-Location }
+    Write-Info "Development prepared. Run 'pnpm dev' in the source directory. Existing crabot commands and data are unchanged."
+    return
 } else {
     Write-Info "Release install..."
     Assert-CrabotStopped $InstallDir

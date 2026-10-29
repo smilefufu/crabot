@@ -33,6 +33,7 @@ async function fixture(t) {
         product.loadProductRuntime=load;return load(...args);
       };
     }
+    if(process.env.TEST_ELECTRON_CLIENT==='1') Object.defineProperty(process,'execPath',{value:'/different/Electron'});
     const data=process.env.TEST_DATA;
     async function manual(nonce, action) {
       const metadata=JSON.parse(readFileSync(join(data,'desktop-session.json'),'utf8'));
@@ -99,10 +100,10 @@ async function fixture(t) {
   })
   const [ready] = await once(mm, 'message'); assert.equal(ready.type, 'ready')
   server = identity.inspectProcess(ready.pid)
-  async function client(action, trusted = true, slowPreflight = false) {
+  async function client(action, trusted = true, slowPreflight = false, electronClient = false) {
     const entry = trusted ? uiEntry : join(root, 'impostor-ui.mjs')
     if (!trusted) writeFileSync(entry, readFileSync(uiEntry))
-    const child = spawn(process.execPath, [entry], { env: { ...process.env, TEST_DATA: data, ...(slowPreflight ? { TEST_SLOW_PREFLIGHT: '1' } : {}), ...(action ? { TEST_ACTION: action } : {}) },
+    const child = spawn(process.execPath, [entry], { env: { ...process.env, TEST_DATA: data, ...(slowPreflight ? { TEST_SLOW_PREFLIGHT: '1' } : {}), ...(electronClient ? { TEST_ELECTRON_CLIENT: '1' } : {}), ...(action ? { TEST_ACTION: action } : {}) },
       stdio: ['ignore', 'ignore', 'inherit', 'ipc'] })
     clients.add(child)
     const [result] = await once(child, 'message')
@@ -164,6 +165,12 @@ test('local runtime verification precedes the five-second peer handshake budget'
   const f = await fixture(t), started = Date.now()
   const { result } = await f.client(undefined, true, true)
   assert.ok(Date.now() - started >= 5200)
+  assert.equal(result.session?.type, 'session', JSON.stringify(result))
+  assert.equal(await f.validate(result.session), true)
+})
+
+test('source client verifies the actual MM standalone Node rather than its own Electron execPath', async t => {
+  const f = await fixture(t), { result } = await f.client(undefined, true, false, true)
   assert.equal(result.session?.type, 'session', JSON.stringify(result))
   assert.equal(await f.validate(result.session), true)
 })

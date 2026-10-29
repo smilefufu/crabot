@@ -5,14 +5,16 @@ import { fileURLToPath } from 'node:url'
 export default defineConfig({
   plugins: [react()],
   server: {
+    host: '127.0.0.1',
     port: 5173,
+    strictPort: true,
     proxy: {
       '/api': {
-        target: 'http://localhost:3000',
+        target: `http://127.0.0.1:${process.env.CRABOT_ADMIN_WEB_PORT || '13000'}`,
         changeOrigin: true,
       },
       '/ws': {
-        target: 'ws://localhost:3000',
+        target: `ws://127.0.0.1:${process.env.CRABOT_ADMIN_WEB_PORT || '13000'}`,
         ws: true,
       },
     },

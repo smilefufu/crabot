@@ -64,7 +64,8 @@ async function main(): Promise<void> {
   // 前置到 PATH，让 agent shell 的 python3/pip3 落到实例 venv 而非系统 python。
   // uv 不可用或创建失败时返回 null，保持原 PATH（等价历史行为）。
   const { loadProductRuntime, productEnvironment } = require('../../scripts/lib/product-runtime.cjs')
-  const productRuntime = loadProductRuntime(CRABOT_ROOT, { required: process.env.CRABOT_PRODUCT_REQUIRED === '1' })
+  const { isDevelopmentTree } = require('../../scripts/lib/development-environment.mjs')
+  const productRuntime = isDevelopmentTree(CRABOT_ROOT) ? null : loadProductRuntime(CRABOT_ROOT, { required: process.env.CRABOT_PRODUCT_REQUIRED === '1' })
   if (productRuntime) Object.assign(process.env, productEnvironment(productRuntime, DATA_DIR))
   const agentVenvPath = ensureAgentVenv(DATA_DIR, undefined, productRuntime)
   if (agentVenvPath && !productRuntime) {

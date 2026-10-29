@@ -7,6 +7,7 @@ import { homedir } from 'node:os'
 import { verifyLegacyReleaseEntries } from './legacy-release-identity.mjs'
 import identity from './process-identity.cjs'
 import { detectMode } from './mode.mjs'
+import { discoverUserSourceDeployment } from './source-installation.mjs'
 
 const fail = message => { throw Object.assign(new Error(message), { code: 'CRABOT_LEGACY_UNSUPPORTED' }) }
 const hash = text => createHash('sha256').update(text).digest('hex')
@@ -47,6 +48,7 @@ export async function discoverDefaultLegacyUserInstall({ home = homedir(), sourc
 // Fresh installation must not bypass an old deployment just because its data
 // happens to be empty. Recognition remains read-only; takeover is separate.
 export async function assertFreshUserInstallation(options = {}) {
+  if (discoverUserSourceDeployment(options)) return
   let existing
   try { existing = await discoverDefaultLegacyUserInstall(options) }
   catch (error) {

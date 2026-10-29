@@ -33,7 +33,7 @@ export function buildCoreModules(o: BuildCoreModulesOpts): CoreModule[] {
       module_type: 'admin',
       version: '0.1.0',
       protocol_version: '0.1.0',
-      entry: o.isDev ? 'npx tsx --watch src/main.ts' : `node "${path.join(o.adminDir, 'dist/main.js')}"`,
+      entry: `node "${path.join(o.adminDir, 'dist/main.js')}"`,
       cwd: o.adminDir,
       auto_start: o.isDev || fs.existsSync(path.join(o.adminDir, 'dist', 'main.js')),
       auto_restart: true,
@@ -107,12 +107,12 @@ export function buildCoreModules(o: BuildCoreModulesOpts): CoreModule[] {
     modules.push({
       module_id: 'vite-dev',
       module_type: 'devtool',
-      entry: 'npx vite --port {PORT} --clearScreen false',
+      entry: `node "${path.join(o.adminDir, 'web/node_modules/vite/bin/vite.js')}" --port 5173 --strictPort --clearScreen false`,
       cwd: path.join(o.adminDir, 'web'),
       auto_start: true,
       start_priority: 30,  // Admin(10), Agent(20) 之后
       skip_health_check: true,
-      env: {} as Record<string, string>,
+      env: { CRABOT_ADMIN_WEB_PORT: o.adminWebPort } as Record<string, string>,
     })
   }
 

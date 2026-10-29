@@ -5,6 +5,7 @@ import { runBounded } from '../lib/scrapling-prepare.mjs'
 import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { developmentBuildState } from '../lib/development-build.mjs'
 
 const SHARED_MODULE = 'crabot-shared'
 const JS_MODULES = [
@@ -68,7 +69,19 @@ async function installAndBuild(moduleDir, logger, source) {
   await runCmd('corepack', ['pnpm', 'run', 'build'], moduleDir, logger, source)
 }
 
-export async function runSourceUpgrade(crabotHome, logger) {
+export async function runSourceUpgrade(crabotHome, logger, { incremental = false, desktop = false } = {}) {
+  const dependencies = incremental ? ['crabot-client', SHARED_MODULE].filter(name => existsSync(join(crabotHome, name)))
+    .map(name => developmentBuildState(join(crabotHome, name)).signature) : []
+  async function prepareModule(directory) {
+    if (!incremental) return installAndBuild(directory, logger, source)
+    const state = developmentBuildState(directory, dependencies)
+    const output = directory === join(crabotHome, 'crabot-admin/web') ? join(directory, '../dist/web') : join(directory, 'dist')
+    if (state.ready && existsSync(output)) { logger.info(`已准备：${directory}`); return }
+    // file dependencies snapshot dist; rebuilding a shared package must relink consumers.
+    await runCmd('corepack', ['pnpm', 'install', '--frozen-lockfile', '--prefer-offline', '--force'], directory, logger, source)
+    await runCmd('corepack', ['pnpm', 'run', 'build'], directory, logger, source)
+    state.commit()
+  }
   const source = await selectPackageSource('npm', { logger })
   privateCorepack = await ensureCorepack(crabotHome, { source, logger })
   // 注意：不调 `corepack enable` —— 它会尝试往 Node 安装目录（Windows 下是
@@ -77,27 +90,32 @@ export async function runSourceUpgrade(crabotHome, logger) {
   // 字段按需下载到用户 cache（%LOCALAPPDATA%\node\corepack）执行，不需要 enable。
   // file: 依赖会复制包内容，先生成 SDK dist，再准备消费方。
   const clientDir = join(crabotHome, 'crabot-client')
-  if (existsSync(clientDir)) await installAndBuild(clientDir, logger, source)
-  await runCmd('corepack', ['pnpm', 'install', '--frozen-lockfile', '--prefer-offline'], crabotHome, logger, source)
+  if (existsSync(clientDir)) await prepareModule(clientDir)
+  const rootState = incremental ? developmentBuildState(crabotHome, dependencies) : null
+  if (!rootState?.ready || !existsSync(join(crabotHome, 'dist/cli/main.js'))) await runCmd('corepack', ['pnpm', 'install', '--frozen-lockfile', '--prefer-offline', ...(incremental ? ['--force'] : [])], crabotHome, logger, source)
 
   const sharedDir = join(crabotHome, SHARED_MODULE)
   if (existsSync(sharedDir)) {
-    await installAndBuild(sharedDir, logger, source)
+    await prepareModule(sharedDir)
   }
 
   for (const mod of JS_MODULES) {
     const dir = join(crabotHome, mod)
     if (!existsSync(dir)) continue
-    await installAndBuild(dir, logger, source)
+    await prepareModule(dir)
   }
 
   // 前端
   const webDir = join(crabotHome, 'crabot-admin', 'web')
   if (existsSync(webDir)) {
-    await installAndBuild(webDir, logger, source)
+    await prepareModule(webDir)
   }
 
-  await runCmd('corepack', ['pnpm', 'run', 'build:cli'], crabotHome, logger, source)
+  if (!rootState?.ready || !existsSync(join(crabotHome, 'dist/cli/main.js'))) {
+    await runCmd('corepack', ['pnpm', 'run', 'build:cli'], crabotHome, logger, source)
+    rootState?.commit()
+  }
+  if (desktop) await prepareModule(join(crabotHome, 'crabot-desktop'))
 
   // scripts/lib 是独立 package（依赖 proper-lockfile 等），不属于 root workspace，要单独 install。
   // 没有 build 步骤，只装 prod deps。
@@ -108,7 +126,7 @@ export async function runSourceUpgrade(crabotHome, logger) {
 
   const memoryDir = join(crabotHome, PY_MODULE)
   if (existsSync(memoryDir)) {
-    await prepareMemoryDependencies(memoryDir, { dev: true, logger, uv: findUv(), relocatable: true })
+    await prepareMemoryDependencies(memoryDir, { dev: true, logger, uv: findUv(), relocatable: !incremental })
   }
   // 使用磁盘上的新准备入口，避免 UI git pull 后仍复用旧模块函数。
   await runCmd(process.execPath, [join(crabotHome, 'scripts', 'prepare-scrapling.mjs')], crabotHome, logger)

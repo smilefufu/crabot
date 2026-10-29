@@ -3,6 +3,7 @@ import { once } from 'node:events'
 import { mkdirSync, openSync, closeSync, realpathSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import product from './product-runtime.cjs'
+import { isDevelopmentTree } from './development-environment.mjs'
 import { createInstanceRuntime, inspectInstance, identity } from './instance-runtime.mjs'
 import { probeHealthStatus } from './mm-probe.mjs'
 import { cliLockToken, hasInheritedCliLock } from './cli-lock.mjs'
@@ -16,7 +17,7 @@ export async function launchBackgroundCore({ root, dataDir, env, mmPort, webPort
   root = realpathSync(root); dataDir = realpathSync(dataDir)
   const current = inspectInstance(dataDir)
   if (current.state !== 'stopped') throw new Error('Crabot is already running; attach or stop it first')
-  const runtime = product.loadProductRuntime(root, { required: env.CRABOT_PRODUCT_REQUIRED === '1' })
+  const runtime = isDevelopmentTree(root, env) ? null : product.loadProductRuntime(root, { required: env.CRABOT_PRODUCT_REQUIRED === '1' })
   if (process.versions.electron && !runtime) throw new Error('Desktop requires the standalone product Node runtime')
   const node = runtime?.executables.node ?? process.execPath
   const logs = join(dataDir, 'logs'); mkdirSync(logs, { recursive: true })

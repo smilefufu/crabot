@@ -101,3 +101,11 @@ describe('buildCoreModules：DATA_DIR 顶层契约', () => {
     expect(env.PYTHONIOENCODING).toBe('utf-8')
   })
 })
+
+it('dev Admin uses the verifiable compiled entry and Vite uses its own strict port/backend', () => {
+  const modules = buildCoreModules({ ...OPTS, isDev: true, port: 29000, adminRpcPort: '29001', adminWebPort: '13000' })
+  expect(modules.find(module => module.module_id === 'admin-web')?.entry).toBe(`node "${join(OPTS.adminDir, 'dist/main.js')}"`)
+  const vite = modules.find(module => module.module_id === 'vite-dev')!
+  expect(vite.entry).toContain('--port 5173 --strictPort')
+  expect(vite.env).toEqual({ CRABOT_ADMIN_WEB_PORT: '13000' })
+})

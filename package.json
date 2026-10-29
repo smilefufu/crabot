@@ -4,6 +4,7 @@
   "type": "module",
   "packageManager": "pnpm@9.15.9",
   "scripts": {
+    "dev": "node scripts/dev.mjs",
     "build:cli": "tsc -p tsconfig.cli.json",
     "build": "pnpm run build:cli && node scripts/gen-skill-ref.mjs",
     "test": "vitest run",

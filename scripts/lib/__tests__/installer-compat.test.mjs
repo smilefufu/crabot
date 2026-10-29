@@ -364,3 +364,19 @@ test('system bundled installer leaves retained code cwd and follows the prepared
     if (converted) assert.equal(readFileSync(join(old, 'cli.mjs'), 'utf8'), 'retained old entry')
   }
 })
+
+test('source user preparation does not touch a preexisting global command or production data', unix, t => {
+  const home = fixture(t), source = join(home, 'source'); mkdirSync(source)
+  mkdirSync(join(home, '.local/bin'), { recursive: true }); mkdirSync(join(home, '.crabot/data'), { recursive: true })
+  writeFileSync(join(home, '.local/bin/crabot'), 'existing release command')
+  writeFileSync(join(home, '.crabot/data/retained'), 'existing business data')
+  const result = bash(`FROM_SOURCE=true; SYSTEM_MODE=false; SOURCE_DIR="$TEST_SOURCE"
+ensure_node() { :; }; ensure_uv() { :; }; detect_platform() { echo darwin-arm64; }
+node() { if [ "$1" = -p ]; then case "$2" in process.platform) echo darwin;; process.arch) echo arm64;; esac; else test "$1" = scripts/dev.mjs && test "$2" = build; fi; }
+configure_path() { echo UNEXPECTED_PATH_CHANGE; return 91; }
+main`, { HOME: home, TEST_SOURCE: source })
+  assert.equal(result.status, 0, result.stdout + result.stderr)
+  assert.doesNotMatch(result.stdout, /UNEXPECTED_PATH_CHANGE/)
+  assert.equal(readFileSync(join(home, '.local/bin/crabot'), 'utf8'), 'existing release command')
+  assert.equal(readFileSync(join(home, '.crabot/data/retained'), 'utf8'), 'existing business data')
+})

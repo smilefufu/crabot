@@ -6,6 +6,7 @@ import { randomBytes } from 'node:crypto'
 import { runMigrations, previewMigrations } from '../upgrade-lib/migrate.mjs'
 import { runScript } from '../upgrade-lib/runner.mjs'
 import product from './product-runtime.cjs'
+import { isDevelopmentTree } from './development-environment.mjs'
 import workspace from './workspace-maintenance.cjs'
 import management from './desktop-management.cjs'
 import cliLocation from './cli-location.cjs'
@@ -28,7 +29,7 @@ export function prepareCoreEnvironment({ root, dataDir, source = process.env, lo
     }
   }
   env.CRABOT_JWT_SECRET ||= randomBytes(32).toString('hex')
-  const runtime = product.loadProductRuntime(root, { required: env.CRABOT_PRODUCT_REQUIRED === '1' })
+  const runtime = isDevelopmentTree(root, env) ? null : product.loadProductRuntime(root, { required: env.CRABOT_PRODUCT_REQUIRED === '1' })
   const prepared = runtime ? product.productEnvironment(runtime, dataDir, env) : env
   if (!runtime) {
     const local = join(homedir(), '.local/bin')

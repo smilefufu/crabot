@@ -16,7 +16,7 @@ const compiled = ts.transpileModule(source.replaceAll('import.meta.url', JSON.st
 const home = path.resolve('/fixture/user'), existing = path.join(home, '.crabot')
 const required = () => Object.assign(new Error('Existing data'), { code: 'CRABOT_DESKTOP_TAKEOVER_REQUIRED' })
 
-async function runInstaller({ defaultError, recognized = false, selectionError } = {}) {
+async function runInstaller({ defaultError, recognized = false, sourceDeployment = false, selectionError } = {}) {
   const messages = [], directories = [], discovery = []
   let finish
   const done = new Promise(resolve => { finish = resolve })
@@ -59,6 +59,7 @@ async function runInstaller({ defaultError, recognized = false, selectionError }
     },
   }
   const load = name => {
+    if (name.endsWith('/bootstrap/scripts/lib/source-installation.mjs')) return { discoverUserSourceDeployment: () => sourceDeployment ? { root: path.join(home, 'source') } : null }
     if (name.endsWith('/bootstrap/scripts/lib/desktop-payload.mjs')) return {}
     if (name.endsWith('/bootstrap/scripts/lib/mode.mjs')) return { detectMode: () => 'user' }
     if (name.endsWith('/bootstrap/scripts/lib/legacy-desktop.mjs')) return { assertFreshUserInstallation: async () => { throw required() } }
@@ -125,4 +126,13 @@ test('the offline installer DMG contains an installer icon without a drag-to-App
   assert.equal(result.contents.length, 1)
   assert.equal(result.backgroundColor, '#ffffff')
   assert.ok(result.contents.every(entry => entry.path !== '/Applications' && entry.type !== 'link'))
+})
+
+test('recognized source deployment can independently install release instead of entering takeover selection', { timeout: 5000 }, async () => {
+  const result = await runInstaller({ sourceDeployment: true })
+  assert.equal(result.code, 2)
+  assert.equal(result.discovery.length, 0)
+  assert.equal(result.directories.length, 1)
+  assert.equal(result.directories[0].defaultPath, path.join(home, 'Crabot'))
+  assert.equal(result.messages.some(message => message.title === '核对已有 Crabot'), false)
 })

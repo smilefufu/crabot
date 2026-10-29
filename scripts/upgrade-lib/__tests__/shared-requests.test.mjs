@@ -25,38 +25,30 @@ async function setup() {
   await fs.writeFile(path.join(root, 'admin', 'friends.json'), '[]')
 }
 async function devLaunch() {
-  const source = await fs.readFile(path.join(home, 'dev.sh'), 'utf8')
-  const start = source.indexOf('  # 4. 单实例预检'), end = source.indexOf('\n}\n', start)
-  expect(start).toBeGreaterThan(0); expect(end).toBeGreaterThan(start)
-  const fixture = path.join(root, 'dev-mm-fixture.mjs')
-  await fs.writeFile(fixture, `import fs from 'node:fs/promises'; import path from 'node:path'; import { pathToFileURL } from 'node:url';
-    const [home, data] = process.argv.slice(2);
-    await fs.writeFile(path.join(data, 'mm.pid'), String(process.pid));
-    const { prepareSharedRequests } = await import(pathToFileURL(path.join(home, 'scripts/upgrade-lib/shared-requests.mjs')));
-    await prepareSharedRequests(home, data, { info() {}, error() {} });
-    console.log('DEV_MM_READY');`)
-  const shell = `set -euo pipefail
-    log_info() { :; }
-    log_error() { echo "$@" >&2; }
-    node() {
-      case "$1" in
-        "$SCRIPT_DIR/crabot-core/dist/orphan-recovery-preflight.js") return 0 ;;
-        "$SCRIPT_DIR/scripts/prepare-shared-requests.mjs") "$NODE_BIN" "$@" ;;
-        dist/main.js) echo DEV_MM_SPAWN; "$NODE_BIN" "$DEV_MM_FIXTURE" "$SCRIPT_DIR" "$DATA_DIR" ;;
-        *) return 99 ;;
-      esac
-    }
-    launch() {
-      ${source.slice(start, end)}
-    }
-    launch
-    # The finite MM fixture exited normally; do not signal its already-finished PID.
-    trap - EXIT
-    rm -f "$DATA_DIR/mm.pid"`
-  return spawnSync('bash', ['-c', shell], { env: { ...process.env, SCRIPT_DIR: home, DATA_DIR: root, NODE_BIN: process.execPath, DEV_MM_FIXTURE: fixture }, encoding: 'utf8', timeout: 10000 })
+  const codeRoot = path.dirname(root)
+  for (const name of ['crabot-admin', 'crabot-agent']) {
+    await fs.mkdir(path.join(codeRoot, name), { recursive: true })
+    await fs.symlink(path.join(home, name, 'dist'), path.join(codeRoot, name, 'dist'), process.platform === 'win32' ? 'junction' : 'dir')
+  }
+  await fs.writeFile(path.join(codeRoot, 'crabot-agent/shared_request_version'), '1\n')
+  await fs.mkdir(path.join(codeRoot, 'crabot-core/dist'), { recursive: true })
+  await fs.writeFile(path.join(codeRoot, 'package.json'), '{"type":"module"}')
+  await fs.writeFile(path.join(codeRoot, 'crabot-core/dist/orphan-recovery-preflight.js'), '')
+  await fs.writeFile(path.join(codeRoot, 'crabot-core/dist/main.js'), `
+    import {createServer} from 'node:http';import {readFileSync} from 'node:fs';import {join} from 'node:path';
+    console.log('DEV_MM_SPAWN');
+    const ready=JSON.parse(readFileSync(join(process.env.DATA_DIR,'agent/shared-request-upgrade.json'),'utf8'));
+    if(ready.status!=='ready')throw new Error('MM started before request preparation');
+    process.on('message',message=>{if(message.type==='crabot-shutdown')process.exit(0)});
+    const server=createServer((request,response)=>response.end(JSON.stringify({success:true,data:{status:'healthy'}})));
+    server.listen(Number(process.env.PORT),'127.0.0.1',()=>{console.log('DEV_MM_READY');setTimeout(()=>process.exit(0),500)});`)
+  const entry = pathToFileURL(path.join(home, 'scripts/lib/development.mjs')).href
+  return spawnSync(process.execPath, ['--input-type=module', '-e',
+    `import {startDevelopment} from ${JSON.stringify(entry)};await startDevelopment(${JSON.stringify(codeRoot)},{foreground:true,cleanup:code=>process.exit(code)})`],
+    { env: process.env, encoding: 'utf8', timeout: 15000 })
 }
-beforeEach(async () => { root = await fs.mkdtemp(path.join(os.tmpdir(), 'request-migration-')) })
-afterEach(async () => { await fs.rm(root, { recursive: true, force: true }) })
+beforeEach(async () => { const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'request-migration-')); root = path.join(directory, 'data'); await fs.mkdir(root) })
+afterEach(async () => { await fs.rm(path.dirname(root), { recursive: true, force: true }) })
 it('first dev launch prepares before its live MM PID, and the MM fallback sees ready', async () => {
   if (process.platform === 'win32') return
   await setup()

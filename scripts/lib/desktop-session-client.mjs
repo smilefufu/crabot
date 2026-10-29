@@ -7,6 +7,7 @@ import identity from './process-identity.cjs'
 import transport from './local-auth-transport.cjs'
 import frameTransport from './desktop-frames.cjs'
 import product from './product-runtime.cjs'
+import { isDevelopmentTree } from './development-environment.mjs'
 import { inspectInstance } from './instance-runtime.mjs'
 
 const ProcessSchema = z.strictObject({ pid: z.number().int().positive(), parent: z.number().int().nonnegative(),
@@ -26,8 +27,8 @@ function readDiscovery(dataRoot, record) {
   const server = description.server
   if (server.owner !== record.mm.owner || server.parent !== record.mm.pid
     || !identity.sameProcess(server, identity.inspectProcess(server.pid))) fail('DESKTOP_UNAUTHORIZED')
-  const runtime = product.loadProductRuntime(record.install_root, { required: existsSync(join(record.install_root, 'desktop-host.json')) })
-  if (realpathSync(server.executable) !== realpathSync(runtime?.executables.node ?? process.execPath)) fail('DESKTOP_UNAUTHORIZED')
+  const runtime = isDevelopmentTree(record.install_root) ? null : product.loadProductRuntime(record.install_root, { required: existsSync(join(record.install_root, 'desktop-host.json')) })
+  if (realpathSync(server.executable) !== realpathSync(runtime?.executables.node ?? record.mm.executable)) fail('DESKTOP_UNAUTHORIZED')
   const args = identity.inspectProcessArguments(server.pid)
   if (args.length !== 2 || realpathSync(args[1]) !== realpathSync(join(record.install_root, 'crabot-admin', 'dist', 'main.js'))
     || !identity.sameProcess(server, identity.inspectProcess(server.pid))) fail('DESKTOP_UNAUTHORIZED')

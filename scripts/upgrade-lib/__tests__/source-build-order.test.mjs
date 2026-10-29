@@ -40,3 +40,26 @@ it('retains the original source preparation when no local SDK exists', async () 
   expect(observed.commands[0].args).toContain('install')
   expect(observed.commands.some(call => call.cwd === path.join(root, 'crabot-client'))).toBe(false)
 })
+
+it('developer preparation reuses verified outputs and refreshes file consumers after SDK changes', async () => {
+  for (const name of ['crabot-client', 'crabot-shared', 'crabot-core', 'crabot-admin', 'crabot-admin/web', 'crabot-desktop']) {
+    const directory = path.join(root, name)
+    await fs.mkdir(path.join(directory, 'src'), { recursive: true })
+    await fs.mkdir(name === 'crabot-admin/web' ? path.join(directory, '../dist/web') : path.join(directory, 'dist'), { recursive: true })
+    await fs.writeFile(path.join(directory, 'package.json'), '{}')
+  }
+  await fs.mkdir(path.join(root, 'dist/cli'), { recursive: true }); await fs.writeFile(path.join(root, 'dist/cli/main.js'), '')
+  await runSourceUpgrade(root, logger, { incremental: true })
+  expect(observed.commands.some(call => call.cwd === path.join(root, 'crabot-desktop'))).toBe(false)
+  observed.commands.length = 0
+  await runSourceUpgrade(root, logger, { incremental: true })
+  expect(observed.commands.some(call => call.args.includes('install') || call.args.includes('build') || call.args.includes('build:cli'))).toBe(false)
+  await fs.writeFile(path.join(root, 'crabot-client/src/new.ts'), 'export const added = true')
+  observed.commands.length = 0
+  await runSourceUpgrade(root, logger, { incremental: true, desktop: true })
+  const find = directory => observed.commands.findIndex(call => call.cwd === path.join(root, directory) && call.args.includes('install'))
+  expect(find('crabot-client')).toBeGreaterThanOrEqual(0)
+  expect(find('crabot-core')).toBeGreaterThan(find('crabot-client'))
+  expect(find('crabot-desktop')).toBeGreaterThan(find('crabot-core'))
+  expect(observed.commands.filter(call => call.args.includes('install')).every(call => call.args.includes('--force'))).toBe(true)
+})

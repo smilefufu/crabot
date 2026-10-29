@@ -525,12 +525,17 @@ main() {
 
   if [ "$FROM_SOURCE" = true ]; then
     section "Source Install"
-    (cd "$SOURCE_DIR" && node --input-type=module <<'JS'
+    if [ "$SYSTEM_MODE" = true ]; then
+      (cd "$SOURCE_DIR" && node --input-type=module <<'JS'
 import { runSourceUpgrade } from './scripts/upgrade-lib/source.mjs'
 await runSourceUpgrade(process.cwd(), console)
 JS
-    )
-    info "Source install complete."
+      )
+    else
+      (cd "$SOURCE_DIR" && node scripts/dev.mjs build)
+      info "Development preparation complete. Run 'pnpm dev' in the source directory."
+      return
+    fi
   else
     section "Release Install"
     local version="$CRABOT_RELEASE_VERSION" stage="$CRABOT_RELEASE_ROOT" entry

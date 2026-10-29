@@ -6,6 +6,7 @@
 import './_preflight.mjs'
 
 import { existsSync } from 'node:fs'
+import { isDevelopmentTree } from './lib/development-environment.mjs'
 import { createInterface } from 'node:readline'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -36,7 +37,7 @@ if (existsSync(resolve(ROOT, 'core-release.json'))) await verifyCoreRelease(ROOT
 assertVersionMaintenanceAllowsStart(resolveCliDataDir({ homeDir: HOME_CRABOT }))
 
 // auto-init：缺 instance.json → 同步调 crabot init（在 const OFFSET 读取前）
-if (!hasInstance(HOME_CRABOT) && !management.readDesktopManagement(resolveCliDataDir({ homeDir: HOME_CRABOT }))) {
+if (!isDevelopmentTree(ROOT) && !hasInstance(HOME_CRABOT) && !management.readDesktopManagement(resolveCliDataDir({ homeDir: HOME_CRABOT }))) {
   console.log('[crabot] first run, auto-running init...')
   const initEntry = resolve(__dirname, 'init.mjs')
   const r = spawnSync(process.execPath, [initEntry], { stdio: 'inherit', env: { ...process.env } })
