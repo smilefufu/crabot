@@ -268,6 +268,7 @@ import {
 } from './dialog-objects.js'
 import { createMemoryV2RestRouter } from './memory-v2-rest.js'
 import { OnboardingManager } from './onboarding-manager.js'
+import { SlackOnboardingSessions, isSlackLocalOnboarding, SlackOnboardingHttpError } from './slack-onboarding-sessions.js'
 import {
   mergeMasterChannelIdentity,
   buildOnboardingPushMessage,
@@ -745,6 +746,7 @@ export class AdminModule extends ModuleBase {
 
   // Channel 配置入口管理（onboarding_methods）
   private onboardingManager: OnboardingManager
+  private slackOnboarding: SlackOnboardingSessions
 
   // MCP Server 管理器
   private mcpServerManager!: MCPServerManager
@@ -944,6 +946,7 @@ export class AdminModule extends ModuleBase {
     })
 
     this.onboardingManager = new OnboardingManager()
+    this.slackOnboarding = new SlackOnboardingSessions(this.adminConfig.data_dir)
 
     this.versionService = new VersionService({
       crabotHome: CRABOT_HOME,
@@ -1423,6 +1426,8 @@ export class AdminModule extends ModuleBase {
   }
 
   protected override async onStop(): Promise<void> {
+    const onboardingStop = this.onboardingManager.shutdown()
+    void onboardingStop.catch(() => {})
     await this.workspaceService.close()
     try { await this.desktopSessions?.close() }
     catch { console.warn('[DesktopAuth] Listener stopped; discovery cleanup incomplete, record retained') }
@@ -1466,6 +1471,7 @@ export class AdminModule extends ModuleBase {
         this.webServer!.close(() => resolve())
       })
     }
+    await onboardingStop
   }
 
   protected override async getHealthStatus(): Promise<'healthy' | 'degraded' | 'unhealthy'> {
@@ -1650,6 +1656,7 @@ export class AdminModule extends ModuleBase {
     if (pathname.startsWith('/api/')) correlateHttpRequest(req, res)
     if (pathname === '/api/workspaces/relocation/recover' || /^\/api\/workspaces\/relocation\/jobs\/[^/]+\/recovery$/.test(pathname)) res.setHeader('Cache-Control', 'no-store')
     let agentCliAuth: AgentCliWebAuth | undefined
+    let onboardingHuman: string | undefined
 
     if (!this.cutoverActivated && (pathname === '/api/chat/messages' || pathname === '/api/chat/tasks' || pathname.startsWith('/api/chat/messages/') || pathname.startsWith('/api/chat/tasks/'))) {
       sendJson(res, 503, { error: 'Core Agent cutover is incomplete' })
@@ -1685,6 +1692,7 @@ export class AdminModule extends ModuleBase {
         }
       } else {
         const payload = await this.verifyAuthenticatedToken(token)
+        if (payload && payload.sub !== 'internal' && payload.sub !== 'agent-cli') onboardingHuman = `${payload.sub}:${payload.e ?? 0}`
         if (!payload) {
         if (basicPayload?.sub === 'admin' && basicPayload.desktop !== undefined) {
           sendJson(res, 401, { error: 'DESKTOP_UNAUTHORIZED', message: 'Desktop session is unavailable; reconnect locally' })
@@ -2795,7 +2803,23 @@ export class AdminModule extends ModuleBase {
         const body = await this.readJsonBody<{ implementation_id?: string; method_id?: string; params?: Record<string, unknown> }>(req).catch(() => ({} as { implementation_id?: string; method_id?: string; params?: Record<string, unknown> }))
         const onboarder = this.resolveOnboarder(res, body.implementation_id, body.method_id)
         if (!onboarder) return
-        await wrapJsonHandler(res, 'onboard begin failed', () => onboarder.begin(body.params))
+        if (isSlackLocalOnboarding(body.implementation_id, body.method_id)) {
+          try { sendJson(res, 200, await this.slackOnboarding.begin(onboardingHuman, onboarder, { ...body.params, __admin_proxy: proxyManager.getConfig() }, this.channelManager)) }
+          catch (error) { this.sendSlackOnboardingError(res, error) }
+        } else await wrapJsonHandler(res, 'onboard begin failed', () => onboarder.begin(body.params))
+        return
+      }
+      if (req.method === 'POST' && pathname === '/api/channels/onboard/submit') {
+        const body = await this.readJsonBody<{ implementation_id?: string; method_id?: string; session_id?: string; input?: { challenge_code: string } }>(req).catch(() => undefined)
+        if (!body) { sendJson(res, 400, { code: 'invalid_input', error: '验证码请求格式无效' }); return }
+        const onboarder = this.resolveOnboarder(res, body.implementation_id, body.method_id)
+        if (!onboarder) return
+        if (!onboarder.submit) { sendJson(res, 400, { code: 'method_not_supported', error: '此入口不支持验证码提交' }); return }
+        try {
+          if (isSlackLocalOnboarding(body.implementation_id, body.method_id)) await this.slackOnboarding.assertOwner(onboardingHuman, body.session_id ?? '')
+          await onboarder.submit(body.session_id ?? '', body.input!)
+          sendJson(res, 200, { accepted: true })
+        } catch (error) { this.sendSlackOnboardingError(res, error) }
         return
       }
       if (req.method === 'GET' && pathname === '/api/channels/onboard/poll') {
@@ -2807,6 +2831,10 @@ export class AdminModule extends ModuleBase {
         if (!sessionId) {
           sendJson(res, 400, { error: 'session_id is required' })
           return
+        }
+        if (isSlackLocalOnboarding(implementationId, methodId)) {
+          try { await this.slackOnboarding.assertOwner(onboardingHuman, sessionId) }
+          catch (error) { this.sendSlackOnboardingError(res, error); return }
         }
         res.writeHead(200, {
           'Content-Type': 'text/event-stream',
@@ -2834,6 +2862,11 @@ export class AdminModule extends ModuleBase {
         if (!onboarder) return
         if (!body.session_id || !body.name) {
           sendJson(res, 400, { error: 'session_id and name are required' })
+          return
+        }
+        if (isSlackLocalOnboarding(body.implementation_id, body.method_id)) {
+          try { sendJson(res, 200, await this.slackOnboarding.finish(onboardingHuman, body.session_id, body.name, onboarder, this.channelManager)) }
+          catch (error) { this.sendSlackOnboardingError(res, error) }
           return
         }
         await wrapJsonHandler(res, 'onboard finish failed', async () => {
@@ -2873,6 +2906,13 @@ export class AdminModule extends ModuleBase {
       if (req.method === 'POST' && pathname === '/api/channels/onboard/cancel') {
         const body = await this.readJsonBody<{ implementation_id?: string; method_id?: string; session_id?: string }>(req).catch(() => ({} as { implementation_id?: string; method_id?: string; session_id?: string }))
         if (body.implementation_id && body.method_id && body.session_id) {
+          if (isSlackLocalOnboarding(body.implementation_id, body.method_id)) {
+            try {
+              const onboarder = this.onboardingManager.get(body.implementation_id, body.method_id)
+              if (onboarder) await this.slackOnboarding.cancel(onboardingHuman, body.session_id, onboarder)
+              sendJson(res, 200, { ok: true }); return
+            } catch (error) { this.sendSlackOnboardingError(res, error); return }
+          }
           this.onboardingManager.get(body.implementation_id, body.method_id)?.cancel(body.session_id)
         }
         sendJson(res, 200, { ok: true })
@@ -3330,6 +3370,14 @@ export class AdminModule extends ModuleBase {
       res.writeHead(404)
       res.end('Web UI not found. Run "npm run build:web" in crabot-admin to build it.')
     }
+  }
+
+  private sendSlackOnboardingError(res: ServerResponse, error: unknown): void {
+    const value = error as { status?: number; code?: string; message?: string }
+    const codes = ['invalid_input', 'session_not_found', 'session_busy', 'session_completed', 'method_not_supported', 'forbidden', 'unknown']
+    if ((error instanceof SlackOnboardingHttpError || codes.includes(value?.code ?? '')) && [400, 403, 404, 409, 500].includes(value.status ?? 0)) {
+      sendJson(res, value.status!, { code: value.code, error: value.message })
+    } else sendJson(res, 500, { code: 'unknown', error: 'Slack 授权操作失败，请检查当前网络/代理及本机权限后重试' })
   }
 
   private resolveOnboarder(

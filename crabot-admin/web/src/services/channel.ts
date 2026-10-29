@@ -116,9 +116,14 @@ export const channelService = {
     return { close }
   },
 
+  async onboardSubmit(implementationId: string, methodId: string, sessionId: string, challengeCode: string) {
+    return api.post<{ accepted: true }>('/channels/onboard/submit', { implementation_id: implementationId, method_id: methodId, session_id: sessionId, input: { challenge_code: challengeCode } })
+  },
+
   async onboardFinish(implementationId: string, methodId: string, sessionId: string, name: string) {
     return api.post<{
       instance: ChannelInstance
+      authorized_identity?: { platform_user_id: string; platform_display_name?: string }
       master_friend_id?: string
       master_display_name?: string
       scope_grant_url?: string

@@ -2151,8 +2151,8 @@ export interface ChannelOnboardingMethod {
   name: string
   /** 用户可读说明 */
   description?: string
-  /** UI 类型词表：device_code / redirect / pending */
-  type: 'device_code' | 'redirect' | 'pending'
+  /** UI 类型词表：device_code / redirect / pending / challenge_code */
+  type: 'device_code' | 'redirect' | 'pending' | 'challenge_code'
   /** handler 文件，相对模块根目录；导出 createOnboarder() 工厂 */
   handler: string
 }

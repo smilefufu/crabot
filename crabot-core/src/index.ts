@@ -1338,8 +1338,9 @@ export class ModuleManager {
       })
     }
 
-    // 检查 ID 冲突
-    if (this.modules.has(def.module_id)) {
+    // 名称保留大小写，冲突检查独立折叠，避免日志/数据目录在不同文件系统上碰撞。
+    const idKey = def.module_id.normalize('NFC').toLowerCase()
+    if (Array.from(this.modules.keys()).some(id => id.normalize('NFC').toLowerCase() === idKey)) {
       throw Object.assign(new Error('Module ID already exists'), {
         code: 'MODULE_MANAGER_DUPLICATE_ID',
       })

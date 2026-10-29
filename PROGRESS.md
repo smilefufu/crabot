@@ -16,12 +16,23 @@
 - Master跨盘拒绝已按既有“全部允许”契约修复：生产仅内置模板一处值改显式all，额外设计审批门禁已撤回。实际Admin解析/HTTP148通过，缓存刷新3通过/2 Windows专用跳过，Admin类型检查通过；原生40698071972及D3独立源c32ea959/40698370702四平台全部成功。Agent边界18通过/1跳过，另1项已有worker-authorization基线失败不混修。最终与交付树产品源码一致；仍未建桌面PR、未合并产品main、未正式发行。
 - 用户允许缺测试机的最低OS/Ubuntu真实桌面项暂跳过并标未验收，macOS/Win11由用户手测，本机保持源码部署。mirror-xinshu真实Engine/普通Worker两链路8次响应通过，输入6181/输出839 token，不冒充GUI/渠道整链。完整验收和最终审查后才建依赖PR，不直推产品main；当前免费开发签名不阻挡真机测试。磁盘约307GiB，40/30GiB启动/停止及本任务材料20GiB保护保持，不重复本机构建完整运行包，不动部署、Docker或Spotlight。
 
-### Slack Channel 首版：实现完成，待 PR 审查和真实 workspace 验收
+### 渠道实例名大写误拒绝：bug 修复完成，未部署
 
-- 依照已确认 [spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-10-27-native-slack-channel-design.md) 及 Channel 0.1.6 协议：新增 Socket Mode 原生渠道，支持 DM/公开群/私有群、默认 true 且可热更新并持久化的 @过滤；thread 仅保存关系，普通发送到原会话主界面。
-- 补充 Admin 内置发现/配置保存、dev、源码升级和 macOS/Linux/Windows 发布安装清单；沿用原 Session、身份鉴权与 Agent 普通消息入口，不改飞书或 Agent 工具契约。 Windows 已支持的旧发布包允许缺少新增 Slack；当前包或不完整 Slack 目录仍必须通过依赖清单校验。
-- 已完成 fake Slack 边界、真实本地 HTTP RPC 配置重启与空发布目录安装验证；详细步骤见[实施计划](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-28-native-slack-channel-implementation.md)。未使用真实 Token、调用模型或部署；Token 配对、权限、Agent 实际消费及 Slack 实际投递仍须 workspace 联调。
-- Linux 固定资源清单已逐项下载检查两架构共 154 项；另有 11 个地址 404，替换为官方快照前均核对实际 deb 包名/版本/架构和原 SHA-256，全部依赖版本及校验和保持不变。
+- 允许 `AI客服bot` 等大小写 ASCII 混合名称，保留输入；创建、OpenClaw 导入和 MM 动态注册按 NFC 后的小写比较键查重，不新增大小写别名解析。
+- 原生备份完全同 id 沿用 skip/overwrite；仅大小写不同的 id 在 skip 时跳过、overwrite 时拒绝且不写实例/配置，避免隐式改名破坏引用。存量数据不迁移，其余字符/长度限制不变。正式命名协议、MM 冲突说明和旧设计记录已同步修订。
+- Follow-up：新大写实例跨实例迁移时，若其渠道记录因大小写冲突被 skip，同一备份中的关联好友/会话引用仍按原 id 导入；当前不增加别名或自动合并身份，关联导入的依赖检查另行处理。
+- 旧实现先复现 14 项失败；修复后 Shared 7、Admin 152、Core 61、Web 21 项相关回归共 241 项通过，Shared 构建、Admin/Core 类型检查和 Web 生产构建通过。完整 diff 已复核；按用户要求走 PR，未重启或部署运行实例，未执行真实飞书授权。
+
+### Slack 本地授权向导：实现完成，PR 验证中
+
+- 依据已确认 [spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-10-28-slack-local-cli-onboarding-design.md) 和已发布正式协议，增加 Admin 的本地 CLI 自动建 App/凭据交接、一次性验证码输入、显式 Friend 身份关联；不自动认主，不改消息/群权限/thread 规则。
+- 官方 CLI 4.11.0 四发布目标载荷均实际下载并与独立 SHA-256 核对；运行期不依赖 CLI，授权进程、私有材料与失败重试按会话收口。进度和验收边界见[实施计划](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-28-slack-local-cli-onboarding-implementation.md)。不部署或调用付费模型。
+- 按已确认的 [CI 拆分设计](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-10-28-slack-ci-separation-design.md)，Slack 四平台原生 hooks/回归与完整发行验收分开；保留原 Release 触发和自动合并门禁。CLI 冒烟保留阶段日志及 5 分钟命令预算；Windows 改用正常控制台启动以避免样式初始化挂起，继续用内存管道、无需用户操作控制台，最新四平台结果以 PR 检查为准。
+
+### Slack Channel 首版：实现及四平台发布验证完成
+
+- Socket Mode 支持 DM/公开群/私有群、默认 true 且可热更新的 @过滤；thread 仅存关系，发送到原会话主界面。沿用现有 Session、Admin 鉴权与 Agent 普通消息入口；固定 Linux 资源只修地址，版本/架构/哈希不变。
+- macOS arm64 真实 workspace 已验证官方 CLI 自动创建/安装、CLI 退出后的独立 DM 收发和新进程恢复同一 Session/历史再收发；群聊、完整 Admin 向导/身份绑定及 Agent 消费仍须分别验收，未部署。详见[真实验证记录](https://github.com/smilefufu/crabot-docs/blob/main/research/2026-10-28-slack-cli-local-onboarding-verification.md)。
 
 ### 飞书历史回填错误提示：局部修复完成，未部署
 
@@ -100,9 +111,17 @@
 - 后续独立评估升级准备产物/旧代码保留策略（只清理已证明可淘汰的材料）、安装根为挂载点时跨设备切换、运行中预览数据变动时的提示与重试；不据理论风险扩大本次实现或自动删除旧备份。
 - 准备和测试期间原本机实例保持运行，未执行现场迁移、启停或安装APK。用户2026-10-19已明确授权本轮在CI和审查通过后本机升级及重启；操作前报告实际影响与预计时长，不重复请求已有授权。实现和验证记录见[实施计划](crabot-docs/superpowers/plans/2026-10-18-scoped-upgrade-migrations-implementation.md)。
 
-### 任务工作区管理：已归并桌面化冻结范围
+### 任务工作区管理：独立 follow-up
 
-- 项目workspace、目录/空间列表和Admin在线迁移/故障恢复已并入顶部桌面化验收，不再作为重复的独立待设计项；完整验收未结束前不宣称已交付。
+- 用户要求在Web和GUI中查看任务目录及空间占用，识别可清理内容并进行受控清理，避免任务产物长期占用上百GB；不默认删除仍在使用的目录或业务成果。
+- 支持在界面设置任务工作区根目录，允许独立磁盘/目录，不能要求一直放在`.crabot/data`内。当前已有`WORKER_WORKSPACES_DIR`环境变量覆盖，缺少产品化管理入口；后续独立设计需处理原任务路径、归属授权及既有目录兼容。
+- 本次仅记录待办，不迁移/清理任务工作区，不并入升级减重实现。
+
+### 桌面化方案：Spec 已确认，实施计划已整理，未开始实现
+
+- 用户确认[中文 Spec](crabot-docs/superpowers/specs/2026-10-17-desktop-application-design.md)及五项补充决定：macOS 14+ 双架构、Windows 11 x64、Ubuntu Desktop 24.04/26.04 x64；Linux 桌面控制分会话声明支持；优先主要界面；默认后台下载、用户发起安装；登录自启动默认关闭。
+- 已整理[分阶段实施计划](crabot-docs/superpowers/plans/2026-10-17-desktop-application-implementation.md)：P0 协议基线 → P1 内置环境 → P2 共用实例/CLI → P3 SDK/通信 → P4 桌面认证与窗口 → P5 引导/主要界面 → P6 迁移/更新 → P7 最终发行验收，各阶段列明步骤、验证方式与退出条件。
+- 当前仅完成文档；正式协议、实现代码、构建、迁移、部署和运行实例均未改动，各实施阶段尚未开始。
 
 ### 任务默认目录文件授权：独立修复待审查
 
