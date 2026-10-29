@@ -38,6 +38,39 @@ export async function verifyDevelopmentStartup() {
     assert.equal(web.status, 401); assert.equal((await web.json()).error, 'Unauthorized')
     console.log('CRABOT_DEVELOPMENT_SOURCE_BOOT_READY')
   } finally { await captureDevelopmentLogs(root); await stopDevelopment(root) }
+  // Exercise the actual public foreground entry, including incremental preparation.
+  const foreground = spawn(process.execPath, [path.join(root, 'scripts/dev.mjs')], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] })
+  const exited = once(foreground, 'close')
+  let output = '', failure
+  foreground.stdout.on('data', bytes => { output = (output + bytes).slice(-128_000) })
+  foreground.stderr.on('data', bytes => { output = (output + bytes).slice(-128_000) })
+  foreground.once('error', error => { failure = error })
+  try {
+    const deadline = Date.now() + 180_000
+    while (true) {
+      if (failure || foreground.exitCode !== null || foreground.signalCode !== null || Date.now() >= deadline) throw new Error('Foreground source entry did not become ready\n' + output)
+      const state = await inspectDevelopment(root)
+      if (state.state === 'running') {
+        try {
+          const web = await fetch('http://127.0.0.1:5173/api/auth/me', { signal: AbortSignal.timeout(1500) })
+          if (web.status === 401 && (await web.json()).error === 'Unauthorized') break
+        } catch {}
+      }
+      await new Promise(done => setTimeout(done, 100))
+    }
+    // Windows CI cannot send a console Ctrl+C through ChildProcess.kill; its
+    // exact public stop exercises the same controller/MM shutdown path.
+    if (process.platform === 'win32') await stopDevelopment(root)
+    else foreground.kill('SIGINT')
+    assert.equal((await Promise.race([exited, new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error('Foreground source entry did not exit normally')), 45_000); timer.unref() })]))[0], 0)
+    assert.equal((await inspectDevelopment(root)).state, 'stopped')
+    console.log('CRABOT_DEVELOPMENT_FOREGROUND_READY_AND_STOPPED ' + JSON.stringify({ vite_proxy: true, ctrl_c: process.platform !== 'win32', exact_stop: process.platform === 'win32' }))
+  } finally {
+    await fs.writeFile(path.join(root, '.desktop-build/development-foreground.log'), output)
+    await captureDevelopmentLogs(root)
+    await stopDevelopment(root)
+    if (foreground.exitCode === null && foreground.signalCode === null) foreground.kill('SIGTERM')
+  }
 }
 
 export async function verifyDevelopmentCoexistence({ inspectRelease, releaseCli }) {

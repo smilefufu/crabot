@@ -133,6 +133,9 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
+      - name: Published CLI data into ordinary Mac App
+        if: runner.os == 'macOS'
+        run: node .github/scripts/smoke-mac-app-legacy.mjs .desktop-build/manual/gui 2>&1 | tee .desktop-build/mac-app-legacy-stage.log
       - name: Real source GUI and release coexistence
         env:
           CRABOT_CI_DEVELOPMENT_COEXISTENCE: '1'
