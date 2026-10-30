@@ -113,11 +113,11 @@ SectionEnd
   const after = await probe('fixed-path', leaf, small, false)
   assert.ok(after.includes('content=' + contents), 'The shipped private path must retain the long entry')
   assert.ok(!after.includes('copy-error'))
-  const complete = await probe('full-package', leaf, archive, true)
+  const complete = process.argv.includes('--probe-bcj') ? '' : await probe('full-package', leaf, archive, true)
   assert.ok(!complete.includes('copy-error'), 'The full package must not enter the Retry branch')
   console.log('CRABOT_WINDOWS_WRAPPER_VERIFY ' + JSON.stringify({ result: complete, verification: await fs.readFile(verified, 'utf8').catch(error => error.message) }))
   if (process.argv.includes('--probe-bcj')) {
-    const listing = await run(sevenZip, ['l', '-slt', archive]);
+    const listing = await run(sevenZip, ['l', '-slt', archive, '*t64-arm.exe', '*w64-arm.exe', '-r']);
     console.log('CRABOT_WINDOWS_ARCHIVE_METHODS ' + listing.stdout.split(/\r?\n\r?\n/).filter(block => /[tw]64-arm\.exe/.test(block)).join('\n'));
     const unpacked = path.join(root, 'modern-extraction'), repacked = path.join(root, 'compatible.7z');
     await run(sevenZip, ['x', archive, '-o' + unpacked, '-y']);
