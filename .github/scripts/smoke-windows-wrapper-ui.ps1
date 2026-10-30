@@ -24,6 +24,7 @@ public class WrapperUI {
 }
 '@
 $process = Start-Process $Installer -ArgumentList "/D=$target" -PassThru
+$null = $process.Handle
 $owned = [Collections.Generic.HashSet[uint32]]::new()
 [void]$owned.Add([uint32]$process.Id)
 $clicked = 0
@@ -47,6 +48,7 @@ try {
     if ($install.Count -ne 1) { throw "Expected the actual host's Install button" }
     [WrapperUI]::Click($install[0])
     $confirmed = $true
+    Write-Output "CRABOT_WINDOWS_WRAPPER_UI install_confirmed"
     continue
    }
    if ($confirmed -and $all.Contains('Crabot 已安装')) {
@@ -54,6 +56,7 @@ try {
     if ($finish.Count -ne 1) { throw "Expected the actual host's Finish button" }
     [WrapperUI]::Click($finish[0])
     $verified = $true
+    Write-Output "CRABOT_WINDOWS_WRAPPER_UI installation_completed"
     break
    }
    if ($all.Contains('安装尚未完成')) { throw "Real installation failed: $all" }
@@ -64,6 +67,7 @@ try {
      if ($label -match '下一步|安装|Next|Install') {
       [WrapperUI]::Click($next)
       $clicked++
+      Write-Output "CRABOT_WINDOWS_WRAPPER_UI outer_page=$clicked"
       Start-Sleep -Milliseconds 400
      }
     }
