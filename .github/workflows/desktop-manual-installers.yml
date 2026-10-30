@@ -1,210 +1,31 @@
-name: Desktop manual test installers
+name: Windows actual installer UI acceptance
 on:
   workflow_dispatch:
-    inputs:
-      target:
-        description: 'Native Mac/Windows installer or Linux source-only acceptance'
-        type: choice
-        default: darwin-arm64
-        options: [darwin-arm64, win32-x64, linux-x64]
-      source_only:
-        description: 'Run only the real source development acceptance, without rebuilding installers'
-        type: boolean
-        default: false
 permissions:
   contents: read
-concurrency:
-  group: desktop-manual-installer-${{ inputs.target || 'darwin-arm64' }}${{ inputs.source_only && '-source' || '' }}
-  cancel-in-progress: false
+  actions: read
 jobs:
-  source:
-    name: Source cold boot ${{ inputs.target || 'darwin-arm64' }}
-    runs-on: ${{ inputs.target == 'win32-x64' && 'windows-latest' || inputs.target == 'linux-x64' && 'ubuntu-24.04' || 'macos-15' }}
-    timeout-minutes: 30
-    env:
-      UV_PYTHON: '3.12'
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22.22.3'
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - uses: astral-sh/setup-uv@v6
-        with:
-          version: '0.13.0'
-      - name: Prepare actual headless developer checkout
-        run: |
-          mkdir -p .desktop-build
-          node scripts/dev.mjs build 2>&1 | tee .desktop-build/development-build.log
-          test ! -d crabot-desktop/node_modules
-      - name: Real cold developer Core
-        run: node .github/scripts/smoke-development-coexistence.mjs --source-only 2>&1 | tee .desktop-build/development-source-boot.log
-      - name: Native source startup regression
-        working-directory: scripts/upgrade-lib
-        run: node ../../node_modules/vitest/vitest.mjs run __tests__/startup-entry.test.mjs --maxWorkers=1 --minWorkers=1 2>&1 | tee ../../.desktop-build/development-startup-regression.log
-      - name: Retain exact developer evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: developer-source-${{ inputs.target || 'darwin-arm64' }}-${{ github.sha }}
-          path: .desktop-build/*.log
-          include-hidden-files: true
-          if-no-files-found: error
-          retention-days: 7
-  installer:
-    if: inputs.source_only != true && inputs.target != 'linux-x64'
-    name: Offline test installer ${{ inputs.target || 'darwin-arm64' }}
-    runs-on: ${{ inputs.target == 'win32-x64' && 'windows-latest' || 'macos-15' }}
-    timeout-minutes: 120
-    env:
-      UV_PYTHON: '3.12'
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22.22.3'
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - uses: astral-sh/setup-uv@v6
-        with:
-          version: '0.13.0'
-      - name: Prepare native helper and frozen build dependencies
-        run: |
-          mkdir -p .desktop-build
-          node scripts/build-native.mjs
-          pnpm --dir crabot-client install --frozen-lockfile
-          pnpm --dir crabot-client run build
-          pnpm install --frozen-lockfile
-          pnpm --dir scripts/lib install --frozen-lockfile
-          pnpm --dir crabot-shared install --frozen-lockfile
-          pnpm --dir crabot-shared run build
-          for module in crabot-core crabot-agent crabot-admin crabot-mcp-tools crabot-channel-telegram crabot-channel-wechat crabot-channel-feishu crabot-channel-dingtalk crabot-channel-slack crabot-channel-voice; do
-            pnpm --dir "$module" install --frozen-lockfile
-            pnpm --dir "$module" run build
-          done
-          pnpm --dir crabot-admin/web install --frozen-lockfile
-          pnpm --dir crabot-desktop install --frozen-lockfile
-          (cd crabot-desktop && node -e "require('electron')")
-      - name: Windows official installed launcher and folder picker regression
-        if: runner.os == 'Windows'
-        run: |
-          node --test scripts/lib/__tests__/legacy-windows-launcher.test.mjs scripts/lib/__tests__/legacy-desktop.test.mjs scripts/lib/__tests__/legacy-entry-fence.test.mjs
-          node --test crabot-desktop/tests/installer-discovery-dialogs.test.mjs
-      - name: Prepare locked offline runtime
-        run: |
-          node scripts/prepare-scrapling.mjs --release=desktop-ci
-          node scripts/prepare-computer-use.mjs
-          node scripts/prepare-product-runtime.mjs
-      - name: Prepare isolated source memory for real coexistence
-        run: |
-          node --input-type=module -e 'import{resolve}from"node:path";import{prepareMemoryDependencies}from"./scripts/lib/memory-deps.mjs";await prepareMemoryDependencies(resolve("crabot-memory"),{dev:true,relocatable:false,uv:"uv",logger:console})'
-      - name: Verify cold source Core before packaging
-        run: |
-          pnpm run build:cli
-          pnpm --dir crabot-admin/web run build
-          node .github/scripts/smoke-development-coexistence.mjs --background-only 2>&1 | tee .desktop-build/development-source-boot.log
-      - name: Build same-source offline GUI and Core installer
-        run: |
-          node scripts/desktop/stage-core.mjs --out=.desktop-build/manual/core --version=0.1.0-desktop.6
-          node .github/scripts/verify-release-payload.mjs "$GITHUB_WORKSPACE/.desktop-build/manual/core"
-          if [ "${{ runner.os }}" = "macOS" ]; then
-            node scripts/desktop/package-application.mjs --candidate=true --core=.desktop-build/manual/core --out=.desktop-build/manual/gui
-            node scripts/desktop/package-installers.mjs --candidate=true --project=.desktop-build/manual/gui --out=.desktop-build/manual/distribution
-          else
-            node scripts/desktop/package-application.mjs --candidate=true --layout=paired --core=.desktop-build/manual/core --out=.desktop-build/manual/paired
-            node scripts/desktop/package-offline-installer.mjs --candidate=true --distribute=true --paired=.desktop-build/manual/paired --out=.desktop-build/manual/installer
-            node .github/scripts/verify-offline-installer-host.mjs .desktop-build/manual/installer
-          fi
-      - name: Hash completed installers
-        run: |
-          node --input-type=module <<'NODE'
-          import { createHash } from 'node:crypto';
-          import { createReadStream, promises as fs } from 'node:fs';
-          const root = process.platform === 'darwin' ? '.desktop-build/manual/distribution' : '.desktop-build/manual/installer/distribution';
-          const files = (await fs.readdir(root)).filter(file => /candidate\.(?:dmg|exe)$/.test(file));
-          if (files.length !== 1) throw new Error('Expected exactly one native test installer');
-          const sums = [];
-          for (const file of files) {
-            const hash = createHash('sha256');
-            for await (const chunk of createReadStream(root + '/' + file)) hash.update(chunk);
-            sums.push(hash.digest('hex') + '  ' + file);
-          }
-          await fs.writeFile(root + '/SHA256SUMS', sums.join('\n') + '\n');
-          NODE
-      - name: Deliver test installer
-        uses: actions/upload-artifact@v4
-        with:
-          name: crabot-${{ inputs.target || 'darwin-arm64' }}-offline-test-${{ github.sha }}
-          path: |
-            .desktop-build/manual/distribution/*candidate.dmg
-            .desktop-build/manual/distribution/installers.json
-            .desktop-build/manual/distribution/SHA256SUMS
-            .desktop-build/manual/installer/distribution/*offline-candidate.exe
-            .desktop-build/manual/installer/distribution/artifacts.json
-            .desktop-build/manual/installer/distribution/SHA256SUMS
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 7
-      - name: Native Windows wrapper extraction regression
-        if: runner.os == 'Windows'
-        run: node .github/scripts/smoke-windows-wrapper.mjs .desktop-build/manual/installer 2>&1 | tee .desktop-build/windows-wrapper.log
-      - name: Published Windows CLI v2026.10.14.1 into GUI preserving existing data
-        if: runner.os == 'Windows'
-        run: node .github/scripts/verify-legacy-user-takeover.mjs .desktop-build/manual/paired .desktop-build/manual/installer v2026.10.14.1 2>&1 | tee .desktop-build/windows-v14-takeover.log
-      - name: Published CLI data into ordinary Mac App
-        if: runner.os == 'macOS'
-        run: node .github/scripts/smoke-mac-app-legacy.mjs .desktop-build/manual/gui 2>&1 | tee .desktop-build/mac-app-legacy-stage.log
-      - name: Real source GUI and release coexistence
-        env:
-          CRABOT_CI_DEVELOPMENT_COEXISTENCE: '1'
-        run: |
-          if [ "${{ runner.os }}" = "macOS" ]; then
-            node .github/scripts/smoke-packaged-desktop.mjs .desktop-build/manual/gui 2>&1 | tee .desktop-build/manual-coexistence.log
-          else
-            node .github/scripts/smoke-packaged-desktop.mjs .desktop-build/manual/paired 2>&1 | tee .desktop-build/manual-coexistence.log
-          fi
-      - name: Retain build failure evidence
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: manual-installer-failure-${{ inputs.target || 'darwin-arm64' }}
-          path: .desktop-build/*.log
-          include-hidden-files: true
-          if-no-files-found: error
-          retention-days: 7
-  windows-ui:
-    name: Actual Windows EXE installation
-    if: inputs.target == 'win32-x64' && inputs.source_only != true
-    needs: installer
+  actual-installer:
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: crabot-win32-x64-offline-test-${{ github.sha }}
+          name: crabot-win32-x64-offline-test-4835eff33b76e21c702ad7c7437c0adf1e087fda
+          run-id: 41007892155
+          github-token: ${{ github.token }}
           path: .desktop-build/wrapper-ui
-      - name: Install the exact candidate through its real EXE interface
+      - name: Install with the actual EXE without Retry
         shell: pwsh
         run: |
           $files = @(Get-ChildItem .desktop-build/wrapper-ui -Recurse -Filter '*desktop.6*offline-candidate.exe')
           if ($files.Count -ne 1) { throw 'Expected the exact Windows desktop.6 installer' }
           & .github/scripts/smoke-windows-wrapper-ui.ps1 -Installer $files[0].FullName | Tee-Object .desktop-build/windows-wrapper-ui.log
-      - name: Retain actual installer evidence
+      - name: Keep actual installer evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-wrapper-ui-acceptance-${{ github.sha }}
+          name: windows-wrapper-ui-acceptance
           path: .desktop-build/windows-wrapper-ui.log
           if-no-files-found: warn
