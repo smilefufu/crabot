@@ -1,4 +1,8 @@
-param([Parameter(Mandatory=$true)][string]$Installer)
+param(
+ [Parameter(Mandatory=$true)][string]$Installer,
+ [string]$TemporaryDirectory,
+ [ValidateSet('complete','retry','space')][string]$Expected = 'complete'
+)
 $ErrorActionPreference = 'Stop'
 $Installer = (Resolve-Path $Installer).Path
 # A simulated user profile must inherit the real user's private temp ACL,
@@ -31,6 +35,10 @@ public class WrapperUI {
  public static void Click(IntPtr hwnd) { SendMessage(hwnd,0xF5,IntPtr.Zero,IntPtr.Zero); }
 }
 '@
+if ($TemporaryDirectory) {
+ $env:TEMP = (Resolve-Path $TemporaryDirectory).Path
+ $env:TMP = $env:TEMP
+}
 $process = Start-Process $Installer -ArgumentList "/D=$target" -PassThru
 $null = $process.Handle
 $owned = [Collections.Generic.HashSet[uint32]]::new()
@@ -52,7 +60,18 @@ try {
    $all = $text -join "`n"
    $description = ($text | Where-Object { $_ } | Select-Object -First 12) -join ' | '
    if ($description -and $observed.Add($description)) { Write-Output "CRABOT_WINDOWS_WRAPPER_UI window=$description" }
-   if ($all -match '无法关闭|cannot be closed|Can.t modify') { throw "Outer EXE entered the reported Retry dialog: $all" }
+   if ($all -match '无法关闭|cannot be closed|Can.t modify') {
+    if ($Expected -ne 'retry') { throw "Outer EXE entered the reported Retry dialog: $all" }
+    $verified = $true
+    Write-Output 'CRABOT_WINDOWS_WRAPPER_UI expected_old_retry_reproduced'
+    break
+   }
+   if ($all -match '系统临时目录' -and $all -match '空间不足') {
+    if ($Expected -ne 'space') { throw "Unexpected TEMP capacity rejection: $all" }
+    $verified = $true
+    Write-Output 'CRABOT_WINDOWS_WRAPPER_UI expected_capacity_rejection'
+    break
+   }
    if ([WrapperUI]::Text($window) -eq '安装位置') {
     $hostProcess = Get-CimInstance Win32_Process -Filter ("ProcessId=" + [WrapperUI]::Pid($window))
     if (!$hostProcess.CommandLine.Contains("--install-root=$target\.")) { throw 'Installer lost the selected destination argument' }
@@ -103,6 +122,11 @@ try {
   Start-Sleep -Milliseconds 250
  }
  if (!$verified) { throw 'Timed out waiting for the actual installer completion' }
+ if ($Expected -ne 'complete') {
+  if ($confirmed -or (Test-Path $target)) { throw 'Expected rejection occurred after actual target installation started' }
+  @{ expected=$Expected; reproduced=$true; actual_installation_started=$false } | ConvertTo-Json -Compress | Write-Output
+  return
+ }
  if (!(Test-Path $target)) { throw 'Installer reported completion without the selected root' }
  $installed = Get-Content (Join-Path $target 'desktop-installation.json') -Raw | ConvertFrom-Json
  if ($installed.install_root -ne $target) { throw 'The actual installation used a different destination' }

@@ -1,19 +1,31 @@
-name: Windows extraction native probe
+name: Windows actual installer UI acceptance
 on:
   workflow_dispatch:
 permissions:
   contents: read
+  actions: read
 jobs:
-  decoder:
+  actual-installer:
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/download-artifact@v4
         with:
-          node-version: 22.22.3
-      - uses: pnpm/action-setup@v4
+          name: crabot-win32-x64-offline-test-4835eff33b76e21c702ad7c7437c0adf1e087fda
+          run-id: 41007892155
+          github-token: ${{ github.token }}
+          path: .desktop-build/wrapper-ui
+      - name: Reproduce desktop.6 Retry on isolated 4 GiB TEMP
+        shell: pwsh
+        run: |
+          $files = @(Get-ChildItem .desktop-build/wrapper-ui -Recurse -Filter '*desktop.6*offline-candidate.exe')
+          if ($files.Count -ne 1) { throw 'Expected the exact Windows desktop.6 installer' }
+          & .github/scripts/smoke-windows-wrapper-capacity.ps1 -Installer $files[0].FullName -Expected retry | Tee-Object .desktop-build/windows-wrapper-ui.log
+      - name: Keep actual installer evidence
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          version: 10.17.1
-      - run: pnpm --dir crabot-desktop install --frozen-lockfile
-      - run: node .github/scripts/probe-windows-direct-extraction.mjs
+          name: windows-wrapper-ui-acceptance
+          path: .desktop-build/windows-wrapper-ui.log
+          if-no-files-found: warn
