@@ -3,6 +3,12 @@
 !include "common.nsh"
 !include "MUI2.nsh"
 !include "extractAppPackage.nsh"
+; This is a fresh private bootstrap directory, not an installed app update.
+; Extract once instead of invoking the updater's Shell CopyFiles/retry path.
+!macroundef extractUsing7za
+!macro extractUsing7za FILE
+  Nsis7z::Extract "${FILE}"
+!macroend
 RequestExecutionLevel user
 InstallDir "$PROFILE\Crabot"
 Var CrabotTarget
@@ -25,6 +31,14 @@ Function .onInit
   StrCmp $0 0 TempUnknown
   System::Int64Op ${APP_64_UNPACKED_SIZE} * 1024
   Pop $2
+  ; The embedded archive also occupies TEMP while its files are unpacked.
+  FileOpen $3 "$EXEPATH" r
+  IfErrors TempUnknown
+  FileSeek $3 0 END $4
+  FileClose $3
+  IfErrors TempUnknown
+  System::Int64Op $2 + $4
+  Pop $2
   System::Int64Op $2 + 536870912
   Pop $2
   System::Int64Op $1 < $2
@@ -43,12 +57,14 @@ FunctionEnd
 Section "安装 Crabot"
   StrCpy $CrabotTarget "$INSTDIR"
   InitPluginsDir
-  ; Keep the private destination shorter than the extractor staging path.
-  ; Shell CopyFiles otherwise drops long payload paths before the GUI starts.
+  ; Only this unique temporary host is removed; the selected root is separate.
   StrCpy $INSTDIR "$PLUGINSDIR\i"
   SetOutPath "$INSTDIR"
   !insertmacro extractEmbeddedAppPackage
+  ClearErrors
   ExecWait '"$INSTDIR\${APP_EXECUTABLE_FILENAME}" "--install-root=$CrabotTarget\."' $0
+  IfErrors 0 +2
+  StrCpy $0 1
   SetOutPath "$EXEDIR"
   RMDir /r "$PLUGINSDIR\i"
   StrCpy $INSTDIR "$CrabotTarget"
