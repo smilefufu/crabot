@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { AgentHandler } from '../../src/agent/agent-handler.js'
+import { ConfigLoader } from '../../src/core/config-loader.js'
 import { BgEntityRegistry } from '../../src/engine/bg-entities/registry.js'
 import { createSkillTool } from '../../src/engine/tools/skill-tool.js'
 import { resolveSceneAnchorLabel } from '../../src/mcp/crab-memory.js'
@@ -123,9 +124,12 @@ describe('AgentHandler', () => {
   })
 
   describe('resolveSceneAnchorLabel', () => {
+    const accessContext = { actor_kind: 'conversation' as const, memory_enabled: true }
+    beforeEach(() => { vi.spyOn(ConfigLoader, 'getRuntimeBearer').mockReturnValue('test-runtime-token') })
+    afterEach(() => { vi.mocked(ConfigLoader.getRuntimeBearer).mockRestore() })
     it('preserves an existing scene label when a profile already exists', async () => {
       const rpcClient = {
-        call: vi.fn().mockResolvedValue({
+        callSensitive: vi.fn().mockResolvedValue({
           profile: {
             label: 'Crabot 开发群',
           },
@@ -136,21 +140,23 @@ describe('AgentHandler', () => {
         rpcClient: rpcClient as any,
         memoryPort: 3002,
         moduleId: 'agent-test',
+        accessContext,
         scene: { type: 'group_session', channel_id: 'wechat', session_id: 'group-1' },
       })
 
       expect(label).toBe('Crabot 开发群')
-      expect(rpcClient.call).toHaveBeenCalledWith(
+      expect(rpcClient.callSensitive).toHaveBeenCalledWith(
         3002,
         'get_scene_profile',
-        { scene: { type: 'group_session', channel_id: 'wechat', session_id: 'group-1' } },
+        { scene: { type: 'group_session', channel_id: 'wechat', session_id: 'group-1' }, access_context: accessContext },
         'agent-test',
+        { authorizationBearer: 'test-runtime-token' },
       )
     })
 
     it('falls back to the default label when no profile exists yet', async () => {
       const rpcClient = {
-        call: vi.fn().mockResolvedValue({
+        callSensitive: vi.fn().mockResolvedValue({
           profile: null,
         }),
       }
@@ -159,6 +165,7 @@ describe('AgentHandler', () => {
         rpcClient: rpcClient as any,
         memoryPort: 3002,
         moduleId: 'agent-test',
+        accessContext,
         scene: { type: 'friend', friend_id: 'friend-1' },
       })
 

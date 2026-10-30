@@ -13,6 +13,7 @@ import { join } from 'path'
 import { createHash } from 'crypto'
 
 import { UnifiedAgent } from '../../src/unified-agent.js'
+import { ExecutionAdmissions } from '../../src/core/execution-admissions.js'
 import type { PrincipalResolverDeps } from '../../src/manager/principal.js'
 import { buildManagerStack, type BootstrapDeps, type ManagerStack } from '../../src/manager/bootstrap.js'
 import { SYSTEM_TASKS_MANAGER_KEY } from '../../src/manager/registry.js'
@@ -69,6 +70,7 @@ function buildAgent(managerStack?: unknown): AgentUnderTest {
   agent.configStale = false
   agent.runtimeClosing = false
   agent.cliSubagentHarvestSchedules = new Map()
+  agent.executionAdmissions = new ExecutionAdmissions()
   if (managerStack !== undefined) {
     // composite reader 需要 adapters Map；mock 栈缺省时补空表（native 走 source-scoped reason）。
     if (typeof managerStack === 'object' && managerStack !== null && !('adapters' in managerStack)) {

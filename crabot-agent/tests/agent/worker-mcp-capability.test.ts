@@ -32,7 +32,7 @@ function permissions(overrides: Partial<ResolvedPermissions['tool_access']>): Re
   return {
     tool_access: { memory: true, messaging: false, task: false, mcp_skill: true, file_io: true, browser: true, shell: true, remote_exec: false, desktop: false, ...overrides },
     cli_access: { provider: 'none', agent: 'none', mcp: 'none', skill: 'none', schedule: 'none', channel: 'none', friend: 'none', permission: 'none', config: 'none', undo: 'none' },
-    storage: null,
+    storage: { scope: 'all', access: 'readwrite' },
     memory_scopes: [],
   }
 }
@@ -111,11 +111,14 @@ describe('worker MCP server permission filter', () => {
 describe('UnifiedAgent worker capability production wiring', () => {
   it('真实装配经 spawn/handoff 把当前 MCP 配置按固定 principal 快照送到目标 provision', async () => {
     const dataDir = await useTmpDataDir('worker-mcp-capability-')
-    const agent = new UnifiedAgent(makeAgentConfig({
+    const config = makeAgentConfig({
       configured: true,
       moduleId: 'worker-mcp-capability-test',
       port: 19992,
-    }))
+    })
+    // Handoff also observes the real Worker background registry.
+    config.agent_config!.roles = ['worker']
+    const agent = new UnifiedAgent(config)
     const internals = agent as unknown as {
       agentConfig?: AgentLayerConfig
       managerStack: ManagerStack

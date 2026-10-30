@@ -160,7 +160,7 @@ export async function useTmpDataDir(prefix: string): Promise<DataDirGuard> {
       else process.env.DATA_DIR = prevDataDir
       if (prevAgentDataDir === undefined) delete process.env.CRABOT_AGENT_DATA_DIR
       else process.env.CRABOT_AGENT_DATA_DIR = prevAgentDataDir
-      await fs.rm(root, { recursive: true, force: true })
+      await fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 })
     },
   }
 }

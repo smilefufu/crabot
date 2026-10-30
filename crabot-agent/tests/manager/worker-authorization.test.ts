@@ -13,6 +13,7 @@ function tools(master = false, valid = true) {
     findWorker: vi.fn(async (id: string) => id === 'a' ? { managerKey: A, worker: a } : id === 'b' ? { managerKey: B, worker: b } : undefined),
     listWorkers: vi.fn(async () => [a]), listAllWorkers: vi.fn(async () => [{ managerKey: A, worker: a }, { managerKey: B, worker: b }]),
     sendToWorker: vi.fn(), queryWorker: vi.fn(), killWorker: vi.fn(), getWorkerTerminal: vi.fn(), spawnWorker: vi.fn(),
+    getWorkerExecutionObservation: vi.fn(async () => ({ state: 'unknown' })),
   }
   const auth = master ? { kind: 'friend_master' as const, manager_key: A, friend_id: 'f', generation: 1 } : undefined
   return { harness, list: buildWorkerTools({ harness: harness as never, context: () => ({ managerKey: A, reportTo: { channel_id: 'wechat', session_id: 'a' } }), authorization: () => auth, validateMasterAuthorization: async () => valid }) }
