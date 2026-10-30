@@ -7,35 +7,17 @@ New-Item $root -ItemType Directory | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Outer extraction failed' }
 $payload = Get-ChildItem "$root/wrapper" -Recurse -Filter 'app-64.7z' | Select-Object -ExpandProperty FullName
 if (@($payload).Count -ne 1) { throw 'Expected embedded x64 package' }
-$source = Join-Path $root '7z-out'
-$target = Join-Path $root 'crabot-installer'
-& 7z x $payload "-o$source" -y | Out-Null
-if ($LASTEXITCODE -ne 0) { throw 'Payload extraction failed' }
-$files = @(Get-ChildItem $source -Recurse -File)
-$longest = @($files | Sort-Object { $_.FullName.Length } -Descending | Select-Object -First 10 | ForEach-Object { @{ length=$_.FullName.Length; relative=$_.FullName.Substring($source.Length+1) } })
-$tooLong = @($files | Where-Object { $_.FullName.Length -ge 260 }).Count
-Add-Type @'
-using System;
-using System.Runtime.InteropServices;
-public class CopyProbe {
- [StructLayout(LayoutKind.Sequential,CharSet=CharSet.Unicode)] public struct SHFILEOPSTRUCT {
-  public IntPtr hwnd; public uint wFunc; [MarshalAs(UnmanagedType.LPWStr)] public string pFrom;
-  [MarshalAs(UnmanagedType.LPWStr)] public string pTo; public ushort fFlags;
-  [MarshalAs(UnmanagedType.Bool)] public bool aborted; public IntPtr hNameMappings;
-  [MarshalAs(UnmanagedType.LPWStr)] public string title;
- }
- [DllImport("shell32.dll",CharSet=CharSet.Unicode)] public static extern int SHFileOperation(ref SHFILEOPSTRUCT operation);
-}
-'@
-New-Item $target -ItemType Directory | Out-Null
-$operation = New-Object CopyProbe+SHFILEOPSTRUCT
-$operation.wFunc = 2
-$operation.pFrom = "$source\*" + [char]0 + [char]0
-$operation.pTo = $target + [char]0 + [char]0
-$operation.fFlags = 0x614
-$code = [CopyProbe]::SHFileOperation([ref]$operation)
-$report = @{ source_files=$files.Count; paths_over_259=$tooLong; longest=$longest; copy_error=$code; copy_error_hex=('{0:X}' -f $code); aborted=$operation.aborted; copied_files=@(Get-ChildItem $target -Recurse -File).Count }
-$report | ConvertTo-Json -Depth 5 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE/wrapper-diagnostic.json"
+$fixture = Join-Path $root 'fixture'
+$relative = 'resources/offline/core/.scrapling-runtime-desktop-ci-b21869a0a229da99-8413626c/packages/playwright/driver/package/lib/tools/skills/playwright-component-testing/references/gallery-spec.md'
+New-Item (Join-Path $fixture (Split-Path $relative)) -ItemType Directory -Force | Out-Null
+[IO.File]::WriteAllText((Join-Path $fixture $relative), 'real-package-path-regression')
+[IO.File]::WriteAllText((Join-Path $fixture 'CrabotInstaller.exe'), 'host-placeholder')
+$payload = Join-Path $root 'fixture.7z'
+Push-Location $fixture
+& 7z a -t7z $payload '*' | Out-Null
+Pop-Location
+if ($LASTEXITCODE -ne 0) { throw 'Fixture archive failed' }
+$report = @{}
 # Run the pinned NSIS macro itself, not just the underlying Shell API.
 $bundle = Join-Path $root 'nsis.7z'
 Invoke-WebRequest 'https://github.com/electron-userland/electron-builder-binaries/releases/download/nsis-3.0.4.1/nsis-3.0.4.1.7z' -OutFile $bundle
@@ -64,12 +46,17 @@ LangString appCannotBeClosed 1033 "Cannot close installer"
 OutFile "@EXE@"
 Var ProbeLog
 Section
- ReadEnvStr $INSTDIR CRABOT_PROBE_TARGET
+ InitPluginsDir
+ ReadEnvStr $0 CRABOT_PROBE_LEAF
+ StrCpy $INSTDIR "$PLUGINSDIR\$0"
  CreateDirectory "$INSTDIR"
  SetOutPath "$INSTDIR"
- FileOpen $ProbeLog "$INSTDIR\probe.txt" w
- InitPluginsDir
+ ReadEnvStr $1 CRABOT_PROBE_LOG
+ FileOpen $ProbeLog "$1" w
+ FileWrite $ProbeLog "target=$INSTDIR$\r$\n"
  !insertmacro extractUsing7za "@PAYLOAD@"
+ IfFileExists "$INSTDIR\resources\offline\core\.scrapling-runtime-desktop-ci-b21869a0a229da99-8413626c\packages\playwright\driver\package\lib\tools\skills\playwright-component-testing\references\gallery-spec.md" 0 +2
+  FileWrite $ProbeLog "long-file-present$\r$\n"
  FileWrite $ProbeLog "completed$\r$\n"
  FileClose $ProbeLog
 SectionEnd
@@ -78,18 +65,11 @@ $probe = $probe.Replace('@PLUGIN@', $plugin.DirectoryName).Replace('@MACRO@',$ma
 [IO.File]::WriteAllText("$root/probe.nsi", $probe)
 & $nsis /V2 "$root/probe.nsi"
 if ($LASTEXITCODE -ne 0) { throw 'NSIS diagnostic compile failed' }
-foreach ($kind in @('normal','long-profile')) {
- $env:CRABOT_PROBE_TARGET = Join-Path $root "nsis-$kind"
- $oldTemp=$env:TEMP; $oldTmp=$env:TMP
- if ($kind -eq 'long-profile') {
-  $env:TEMP = Join-Path $root 'ordinary-windows-user-profile/AppData/Local/Temp'
-  $env:TMP = $env:TEMP
-  New-Item $env:TEMP -ItemType Directory -Force | Out-Null
- }
+foreach ($kind in @('crabot-installer','i')) {
+ $env:CRABOT_PROBE_LEAF=$kind
+ $env:CRABOT_PROBE_LOG=Join-Path $root "$kind.txt"
  $process=Start-Process "$root/probe.exe" -Wait -PassThru
- $env:TEMP=$oldTemp; $env:TMP=$oldTmp
- $log=[IO.File]::ReadAllText("$env:CRABOT_PROBE_TARGET/probe.txt")
- $report["nsis_$kind"] = @{ exit=$process.ExitCode; log=$log; files=@(Get-ChildItem $env:CRABOT_PROBE_TARGET -Recurse -File).Count }
+ $log=[IO.File]::ReadAllText($env:CRABOT_PROBE_LOG)
+ $report[$kind]=@{exit=$process.ExitCode;log=$log}
  $report | ConvertTo-Json -Depth 5 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE/wrapper-diagnostic.json"
- if ($report["nsis_$kind"].files -ne $files.Count + 1) { throw "NSIS did not extract all real files for $kind" }
 }
