@@ -71,6 +71,15 @@ try {
    }
    if ($all.Contains('安装尚未完成')) {
     $details = & "$env:SystemRoot/System32/WindowsPowerShell/v1.0/powershell.exe" -NoProfile -NonInteractive -File (Join-Path $PSScriptRoot 'read-windows-dialog.ps1') -Handle $window.ToInt64()
+    $entries = @((Get-ChildItem $target -Force -ErrorAction SilentlyContinue).Name)
+    $registration = Join-Path $env:LOCALAPPDATA 'Crabot/desktop-integration'
+    $menu = Join-Path $env:APPDATA 'Microsoft/Windows/Start Menu/Programs'
+    $facts = @($target,$registration,$menu,(Join-Path $menu 'Crabot.lnk')) | ForEach-Object {
+     if (Test-Path -LiteralPath $_) { @{ path=$_; owner=(Get-Acl -LiteralPath $_).Owner; children=@((Get-ChildItem -LiteralPath $_ -Force -ErrorAction SilentlyContinue).Name) } }
+    }
+    $metadata = Get-Content (Join-Path $target 'desktop-installation.json') -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json
+    $registry = if ($metadata) { Get-ItemProperty -LiteralPath ("HKCU:/Software/Microsoft/Windows/CurrentVersion/Uninstall/Crabot-" + $metadata.installation_id) -ErrorAction SilentlyContinue }
+    Write-Output ('CRABOT_WINDOWS_INSTALL_FAILURE_STATE ' + (@{ entries=$entries; filesystem=$facts; installation=$metadata; uninstall=$registry } | ConvertTo-Json -Depth 6 -Compress))
     throw "Real installation failed: $all`n$details"
    }
    if ($clicked -lt 2) {
