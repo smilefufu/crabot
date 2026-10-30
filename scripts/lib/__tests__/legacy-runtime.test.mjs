@@ -240,3 +240,17 @@ test('Windows surviving listener blocks admission after its recorded root exits'
   assert.equal(server.listening, true)
   assert.equal(await fs.readFile(module.file, 'utf8'), module.bytes)
 })
+
+for (const operation of ['start-identity', 'stopped-modules']) test('Windows runtime observation does not require PowerShell in inherited PATH: ' + operation, { skip: process.platform !== 'win32', timeout: 30_000 }, async t => {
+  const f = await fixture(t), module = await recordedModule(t, f)
+  await module.stop()
+  const previous = process.env.PATH
+  t.after(() => { if (previous === undefined) delete process.env.PATH; else process.env.PATH = previous })
+  process.env.PATH = path.join(process.env.SystemRoot, 'System32')
+  if (operation === 'start-identity') assert.equal(await probeProcessStartIdentity(module.child.pid), null)
+  else {
+    t.mock.method(identity, 'listProcessIds', () => [])
+    assert.equal((await discoverLegacyRuntime(f.installation)).state, 'stopped')
+    assert.equal(await fs.readFile(module.file, 'utf8'), module.bytes)
+  }
+})
