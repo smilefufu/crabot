@@ -37,8 +37,13 @@ $code = [CopyProbe]::SHFileOperation([ref]$operation)
 $report = @{ source_files=$files.Count; paths_over_259=$tooLong; longest=$longest; copy_error=$code; copy_error_hex=('{0:X}' -f $code); aborted=$operation.aborted; copied_files=@(Get-ChildItem $target -Recurse -File).Count }
 $report | ConvertTo-Json -Depth 5 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE/wrapper-diagnostic.json"
 # Run the pinned NSIS macro itself, not just the underlying Shell API.
-$nsis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
-if (!(Test-Path $nsis)) { choco install nsis --yes --no-progress | Out-Null; if ($LASTEXITCODE -ne 0) { throw 'NSIS preparation failed' } }
+$bundle = Join-Path $root 'nsis.7z'
+Invoke-WebRequest 'https://github.com/electron-userland/electron-builder-binaries/releases/download/nsis-3.0.4.1/nsis-3.0.4.1.7z' -OutFile $bundle
+if ((Get-FileHash $bundle -Algorithm SHA256).Hash.ToLowerInvariant() -ne '9877df902530f96357d13a7a31ae2b9df67f48b11ffc9a1700a7c961574ec5fa') { throw 'NSIS SHA256 mismatch' }
+& 7z x $bundle "-o$root/nsis" -y | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'NSIS extraction failed' }
+$env:NSISDIR = "$root/nsis"
+$nsis = "$root/nsis/Bin/makensis.exe"
 $plugin = Get-ChildItem "$root/wrapper" -Recurse -Filter 'nsis7z.dll' | Select-Object -First 1
 if (!$plugin) { throw 'Embedded NSIS extraction plugin absent' }
 $macroFile = Join-Path $root 'extractAppPackage.nsh'
@@ -69,7 +74,7 @@ Section
  FileClose $ProbeLog
 SectionEnd
 '@
-$probe = $probe.Replace('@PLUGIN@', $plugin.DirectoryName).Replace('@MACRO@',$macroFile).Replace('@EXE@',"$root/probe.exe").Replace('@PAYLOAD@',$payload)
+$probe = $probe.Replace('@PLUGIN@', $plugin.DirectoryName).Replace('@MACRO@',$macroFile).Replace('@EXE@',"$root/probe.exe").Replace('@PAYLOAD@',$payload.Replace('$','$$'))
 [IO.File]::WriteAllText("$root/probe.nsi", $probe)
 & $nsis /V2 "$root/probe.nsi"
 if ($LASTEXITCODE -ne 0) { throw 'NSIS diagnostic compile failed' }
@@ -86,4 +91,5 @@ foreach ($kind in @('normal','long-profile')) {
  $log=[IO.File]::ReadAllText("$env:CRABOT_PROBE_TARGET/probe.txt")
  $report["nsis_$kind"] = @{ exit=$process.ExitCode; log=$log; files=@(Get-ChildItem $env:CRABOT_PROBE_TARGET -Recurse -File).Count }
  $report | ConvertTo-Json -Depth 5 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE/wrapper-diagnostic.json"
+ if ($report["nsis_$kind"].files -ne $files.Count + 1) { throw "NSIS did not extract all real files for $kind" }
 }
