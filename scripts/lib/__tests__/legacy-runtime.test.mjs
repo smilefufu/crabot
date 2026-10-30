@@ -6,6 +6,8 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import identity from '../process-identity.cjs'
+import { randomUUID } from 'node:crypto'
+import { probeProcessStartIdentity } from '../module-process-start.cjs'
 import { discoverLegacyUserInstall } from '../legacy-desktop.mjs'
 import { materializeLegacyRelease } from './fixtures/legacy-release.mjs'
 import { fenceLegacyEntries } from '../legacy-entry-fence.mjs'
@@ -26,7 +28,7 @@ test('real old entry hashes plus no launcher or module records establish a stopp
   assert.equal((await discoverLegacyRuntime(f.installation)).state, 'stopped')
   await fs.mkdir(path.join(f.data, 'module-runtime-registry/records'), { recursive: true })
   await fs.writeFile(path.join(f.data, 'module-runtime-registry/records/unsettled.json'), '{}')
-  await assert.rejects(discoverLegacyRuntime(f.installation), /运行记录尚未收口/)
+  await assert.rejects(discoverLegacyRuntime(f.installation), { code: 'CRABOT_LEGACY_RUNTIME_UNVERIFIED' })
   assert.equal(await fs.readFile(path.join(f.root, 'VERSION'), 'utf8'), 'v2026.10.15.1\n')
 })
 
@@ -112,4 +114,125 @@ test('Linux relative legacy argv is resolved against each actual target cwd, not
   assert.equal(observed.controller.pid, controller.pid); assert.equal(observed.mm.pid, ready.mm_pid)
   assert.equal(observed.state, 'running'); assert.equal(observed.launch_kind, 'foreground')
   assert.deepEqual(requests, ['/get_module_definition'])
+})
+
+async function recordedModule(t, f) {
+  const child = spawn(process.execPath, ['-e', "const s=require('node:net').createServer();s.listen(0,'127.0.0.1',()=>process.send({port:s.address().port}));process.on('message',()=>s.close(()=>process.exit(0)))"],
+    { detached: process.platform !== 'win32', stdio: ['ignore', 'ignore', 'inherit', 'ipc'] })
+  t.after(async () => {
+    if (child.exitCode !== null || child.signalCode !== null) return
+    const exited = once(child, 'exit'); child.kill(); await exited
+  })
+  const [ready] = await once(child, 'message')
+  const registry = path.join(f.data, 'module-runtime-registry'), instanceId = randomUUID(), runtimeId = randomUUID()
+  await fs.mkdir(path.join(registry, 'records'), { recursive: true })
+  await fs.writeFile(path.join(registry, 'instance-id'), instanceId + '\n')
+  const record = { schema_version: 1, instance_id: instanceId, runtime_id: runtimeId, module_id: 'admin-web',
+    root_pid: child.pid, process_start_identity: await probeProcessStartIdentity(child.pid), module_port: ready.port, created_at: new Date().toISOString() }
+  const file = path.join(registry, 'records', runtimeId + '.json'), bytes = JSON.stringify(record)
+  await fs.writeFile(file, bytes)
+  return { child, file, bytes, record, stop: async () => { const exited = once(child, 'exit'); child.send('stop'); await exited } }
+}
+
+test('stale MM PID and exited module records establish stopped discovery without deleting records', { timeout: 30_000 }, async t => {
+  const f = await fixture(t), module = await recordedModule(t, f)
+  await module.stop()
+  await fs.writeFile(path.join(f.data, 'mm.pid'), String(module.child.pid))
+  t.mock.method(identity, 'listProcessIds', () => [])
+  assert.equal((await discoverLegacyRuntime(f.installation)).state, 'stopped')
+  assert.equal(await fs.readFile(module.file, 'utf8'), module.bytes)
+})
+
+test('a module still running without its MM blocks stopped discovery and is never terminated', { timeout: 30_000 }, async t => {
+  const f = await fixture(t), module = await recordedModule(t, f)
+  t.mock.method(identity, 'listProcessIds', () => [])
+  await assert.rejects(discoverLegacyRuntime(f.installation), { code: 'CRABOT_LEGACY_RUNTIME_UNVERIFIED' })
+  assert.notEqual(await probeProcessStartIdentity(module.child.pid), null)
+  assert.equal(await fs.readFile(module.file, 'utf8'), module.bytes)
+})
+
+for (const change of ['reused-pid', 'unknown-start']) test('module start identity observation: ' + change, { timeout: 30_000 }, async t => {
+  const f = await fixture(t), module = await recordedModule(t, f)
+  t.mock.method(identity, 'listProcessIds', () => [])
+  if (change === 'reused-pid') {
+    await module.stop()
+    const changed = { ...module.record, root_pid: process.pid }
+    await fs.writeFile(module.file, JSON.stringify(changed))
+    assert.equal((await discoverLegacyRuntime(f.installation)).state, 'stopped')
+    assert.deepEqual(JSON.parse(await fs.readFile(module.file)), changed)
+  } else {
+    const { default: start } = await import('../module-process-start.cjs')
+    let probes = 0
+    t.mock.method(start, 'probeProcessStartIdentity', async () => { probes++; throw new Error('fixture unavailable') })
+    await assert.rejects(discoverLegacyRuntime(f.installation), { code: 'CRABOT_LEGACY_RUNTIME_UNVERIFIED' })
+    assert.equal(await fs.readFile(module.file, 'utf8'), module.bytes)
+    assert.equal(probes, 1)
+  }
+})
+
+test('stopped record removal requires the lifecycle lock and preserves unrelated data', { timeout: 30_000 }, async t => {
+  const f = await fixture(t), module = await recordedModule(t, f)
+  await module.stop()
+  const { removeStoppedLegacyModuleRecords } = await import('../legacy-module-records.mjs')
+  await assert.rejects(removeStoppedLegacyModuleRecords(f.data), { code: 'CRABOT_LEGACY_RUNTIME_UNVERIFIED' })
+  assert.equal(await fs.readFile(module.file, 'utf8'), module.bytes)
+  const { acquireExistingCliLock, releaseCliLock } = await import('../cli-lock.mjs')
+  const lock = await acquireExistingCliLock(f.data, 'legacy-module-regression')
+  try { await removeStoppedLegacyModuleRecords(f.data) } finally { releaseCliLock(lock) }
+  await assert.rejects(fs.lstat(module.file), { code: 'ENOENT' })
+  assert.equal(await fs.readFile(path.join(f.data, 'module-runtime-registry/instance-id'), 'utf8'), module.record.instance_id + '\n')
+  assert.equal(await fs.readFile(path.join(f.root, 'VERSION'), 'utf8'), 'v2026.10.15.1\n')
+})
+
+test('a changed record is not removed after stopped observation', { timeout: 30_000 }, async t => {
+  const f = await fixture(t), module = await recordedModule(t, f)
+  await module.stop()
+  const { removeStoppedLegacyModuleRecords } = await import('../legacy-module-records.mjs')
+  const { acquireExistingCliLock, releaseCliLock } = await import('../cli-lock.mjs')
+  const lock = await acquireExistingCliLock(f.data, 'legacy-module-regression'), read = fs.readFile
+  let reads = 0
+  t.mock.method(fs, 'readFile', async (...args) => {
+    if (args[0] === module.file && ++reads === 2) await fs.writeFile(module.file, module.bytes + ' ')
+    return read(...args)
+  })
+  try { await assert.rejects(removeStoppedLegacyModuleRecords(f.data), { code: 'CRABOT_LEGACY_RUNTIME_UNVERIFIED' }) }
+  finally { releaseCliLock(lock) }
+  assert.equal(await fs.readFile(module.file, 'utf8'), module.bytes + ' ')
+})
+
+test('a surviving module child blocks admission after its actual root exits', { timeout: 30_000 }, async t => {
+  const f = await fixture(t)
+  const childSource = "const s=require('node:net').createServer();s.listen(0,'127.0.0.1',()=>process.send({port:s.address().port,pid:process.pid}))"
+  const source = `const c=require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(childSource)}],{stdio:['ignore','ignore','inherit','ipc']});c.on('message',m=>process.send(m));process.on('message',()=>process.exit(0))`
+  const root = spawn(process.execPath, ['-e', source], { detached: process.platform !== 'win32', stdio: ['ignore', 'ignore', 'inherit', 'ipc'] })
+  const [ready] = await once(root, 'message'), child = identity.inspectProcess(ready.pid)
+  t.after(async () => {
+    if (root.exitCode === null && root.signalCode === null) { const exited = once(root, 'exit'); root.kill(); await exited }
+    if (identity.sameProcess(child, identity.inspectProcess(child.pid))) process.kill(child.pid, 'SIGTERM')
+  })
+  const instanceId = randomUUID(), runtimeId = randomUUID(), directory = path.join(f.data, 'module-runtime-registry')
+  await fs.mkdir(path.join(directory, 'records'), { recursive: true })
+  await fs.writeFile(path.join(directory, 'instance-id'), instanceId)
+  const record = { schema_version: 1, instance_id: instanceId, runtime_id: runtimeId, module_id: 'memory-default', root_pid: root.pid,
+    process_start_identity: await probeProcessStartIdentity(root.pid), module_port: ready.port, created_at: new Date().toISOString() }
+  const file = path.join(directory, 'records', runtimeId + '.json'), bytes = JSON.stringify(record)
+  await fs.writeFile(file, bytes)
+  const exited = once(root, 'exit'); root.send('exit'); await exited
+  assert.equal(await probeProcessStartIdentity(root.pid), null)
+  t.mock.method(identity, 'listProcessIds', () => [])
+  await assert.rejects(discoverLegacyRuntime(f.installation), { code: 'CRABOT_LEGACY_RUNTIME_UNVERIFIED' })
+  assert.equal(identity.sameProcess(child, identity.inspectProcess(child.pid)), true)
+  assert.equal(await fs.readFile(file, 'utf8'), bytes)
+})
+
+test('Windows surviving listener blocks admission after its recorded root exits', { skip: process.platform !== 'win32', timeout: 30_000 }, async t => {
+  const f = await fixture(t), module = await recordedModule(t, f)
+  await module.stop()
+  const net = await import('node:net'), server = net.createServer()
+  server.listen(module.record.module_port, '127.0.0.1'); await once(server, 'listening')
+  t.after(() => new Promise(resolve => server.close(resolve)))
+  t.mock.method(identity, 'listProcessIds', () => [])
+  await assert.rejects(discoverLegacyRuntime(f.installation), { code: 'CRABOT_LEGACY_RUNTIME_UNVERIFIED' })
+  assert.equal(server.listening, true)
+  assert.equal(await fs.readFile(module.file, 'utf8'), module.bytes)
 })

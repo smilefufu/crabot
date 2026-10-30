@@ -2,6 +2,7 @@
 // startup-source fencing, shutdown, backup and any installation/data mutation.
 import { promises as fs, realpathSync } from 'node:fs'
 import path from 'node:path'
+import { readStoppedLegacyModuleRecords } from './legacy-module-records.mjs'
 import { discoverLegacyUserInstall } from './legacy-desktop.mjs'
 import { inspectLegacyEntryFence } from './legacy-entry-fence.mjs'
 import { withVerifiedLegacyProcessGraph, assertLegacyProcessesCurrent } from './legacy-process-graph.mjs'
@@ -28,10 +29,7 @@ async function verifiedLegacyRuntime(installation, use, { signal, entryFenceId }
   } catch (error) { if (error.code !== 'ENOENT') throw error }
   return withVerifiedLegacyProcessGraph(root, async (snapshot, rpc) => {
     if (snapshot.state === 'stopped') {
-      const records = await fs.readdir(path.join(data, 'module-runtime-registry/records')).catch(error => {
-        if (error.code === 'ENOENT') return []; throw error
-      })
-      if (records.some(file => file.endsWith('.json'))) fail('旧模块运行记录尚未收口，不能确认停止。')
+      await readStoppedLegacyModuleRecords(data)
       return use({ state: 'stopped', installation: recognized }, null)
     }
     const agent = await rpc.getDefinition('crabot-agent')

@@ -10,6 +10,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createRequire } from 'node:module'
 import asar from '@electron/asar'
 import identity from '../process-identity.cjs'
+import { stoppedLegacyModules } from './fixtures/stopped-legacy-modules.mjs'
 import installation from '../desktop-installation.cjs'
 import { writeCoreRelease, verifyCoreRelease } from '../core-release.mjs'
 import { sealDesktopPayload, verifyDesktopPayload, prepareDesktopInstallation, commitDesktopInstallation } from '../desktop-payload.mjs'
@@ -1858,7 +1859,7 @@ async function legacyProgramFixture(t, options = {}) {
   const { materializeLegacyRelease } = await import('./fixtures/legacy-release.mjs')
   const { discoverLegacyUserInstall } = await import('../legacy-desktop.mjs')
   const data = path.join(f.target, 'data')
-  await fs.mkdir(data, { recursive: true, mode: 0o700 }); await materializeLegacyRelease(f.target)
+  await fs.mkdir(data, { recursive: true, mode: 0o700 }); await materializeLegacyRelease(f.target, options.legacyVersion)
   await fs.mkdir(path.join(data, 'fixture')); await fs.writeFile(path.join(data, 'fixture/SCHEMA_VERSION'), 'v1')
   await fs.writeFile(path.join(data, 'fixture/content'), 'old project data')
   // Online preparation neither trusts nor uses a PID hint to stop business.
@@ -1981,24 +1982,26 @@ for (const changed of ['insufficient-space', 'corrupt-proof', 'prepared-cancella
 })
 
 
-for (const conversionFailure of [false, true]) test('actual target Node takes over stopped legacy data once and retains dedicated health protection; failure=' + conversionFailure, async t => {
-  const f = await legacyProgramFixture(t, { functional: true, conversionFailure })
+for (const conversionFailure of [false, true, 'stale-modules']) test('actual target Node takes over stopped legacy data once and retains dedicated health protection; failure=' + conversionFailure, async t => {
+  const f = await legacyProgramFixture(t, { functional: true, conversionFailure: conversionFailure === true, legacyVersion: conversionFailure === 'stale-modules' ? 'v2026.10.14.1' : undefined })
   await fs.unlink(path.join(f.data, 'mm.pid'))
   const { prepareLegacyDesktopPrograms } = await import('../legacy-desktop-programs.mjs')
   const prepared = await prepareLegacyDesktopPrograms({ payload: f.payload, installation: f.legacy })
   const node = path.join(prepared.coreRoot, windows ? '.product-runtime/node/node.exe' : '.product-runtime/node/bin/node')
   const module = path.join(prepared.coreRoot, 'scripts/lib/legacy-desktop-takeover.mjs')
+  const stale = conversionFailure === 'stale-modules' ? await stoppedLegacyModules(f.data) : undefined
   // Interpreter inspection is substituted; the sealed target Node, locks,
   // old entry bytes and actual scoped migration/rollback run here. No MM starts.
   const script = `import{pathToFileURL}from'node:url';const [module,prepared]=process.argv.slice(1);const {convertLegacyDesktopData}=await import(pathToFileURL(module).href);const value=await convertLegacyDesktopData({prepared:JSON.parse(prepared),inspectEnvironment:async()=>({status:'absent'})});console.log(JSON.stringify(value))`
   const run = () => promisify(execFile)(node, ['--input-type=module', '--eval', script, module, JSON.stringify(prepared)], { timeout: 30_000, maxBuffer: 65536 })
-  if (conversionFailure) {
+  if (conversionFailure === true) {
     await assert.rejects(run())
     assert.equal(await fs.readFile(path.join(f.data, 'fixture/content'), 'utf8'), 'old project data')
     await assert.rejects(fs.lstat(path.join(f.data, 'fixture/executions')), { code: 'ENOENT' })
     await assert.rejects(run())
   } else {
     const result = JSON.parse((await run()).stdout.trim())
+    if (stale) assert.deepEqual(await fs.readdir(stale.records), [])
     assert.equal(result.verification_pending, true); assert.equal(result.health_verified, false)
     assert.equal(await fs.readFile(path.join(f.data, 'fixture/content'), 'utf8'), 'converted by bundled Node')
     assert.equal(await fs.readFile(path.join(f.data, 'fixture/executions'), 'utf8'), 'once\n')
@@ -2184,10 +2187,11 @@ test('actual installer takeover resumes a partial entry fence before stopping or
   assert.equal(await fs.readFile(path.join(f.data, 'fixture/executions'), 'utf8'), 'once\n')
 })
 
-for (const conversionFailure of [false, true, 'pre-conversion-stop', 'core-changed-during-conversion']) test('Mac App legacy admission uses external original data and retains health protection; failure=' + conversionFailure, { skip: process.platform !== 'darwin' }, async t => {
-  const f = await legacyProgramFixture(t, { functional: true, conversionFailure: conversionFailure === true, coreTamper: conversionFailure === 'core-changed-during-conversion' })
+for (const conversionFailure of [false, true, 'pre-conversion-stop', 'core-changed-during-conversion', 'stale-modules']) test('Mac App legacy admission uses external original data and retains health protection; failure=' + conversionFailure, { skip: process.platform !== 'darwin' }, async t => {
+  const f = await legacyProgramFixture(t, { functional: true, conversionFailure: conversionFailure === true, coreTamper: conversionFailure === 'core-changed-during-conversion', legacyVersion: conversionFailure === 'stale-modules' ? 'v2026.10.14.1' : undefined })
   if (conversionFailure !== 'pre-conversion-stop') await fs.unlink(path.join(f.data, 'mm.pid'))
-  if (!conversionFailure) await fs.writeFile(path.join(f.target, '.env'), 'CRABOT_ADMIN_WEB_HOST=0.0.0.0\n')
+  if (!conversionFailure || conversionFailure === 'stale-modules') await fs.writeFile(path.join(f.target, '.env'), 'CRABOT_ADMIN_WEB_HOST=0.0.0.0\n')
+  const stale = conversionFailure === 'stale-modules' ? await stoppedLegacyModules(f.data) : undefined
   const coreRoot = path.join(f.parent, '真正 Crabot.app/Contents/Resources/core'), home = path.join(f.parent, 'home')
   await fs.mkdir(path.dirname(coreRoot), { recursive: true }); await fs.rename(f.core, coreRoot)
   await fs.writeFile(path.join(coreRoot, 'desktop-host.json'), JSON.stringify({ schema_version: 1, platform: process.platform, arch: process.arch }))
@@ -2218,13 +2222,14 @@ for (const conversionFailure of [false, true, 'pre-conversion-stop', 'core-chang
     assert.equal(await fs.readFile(path.join(f.data, 'fixture/executions'), 'utf8'), 'once\n')
     return
   }
-  if (conversionFailure) {
+  if (conversionFailure === true) {
     await assert.rejects(run())
     assert.equal(await fs.readFile(path.join(f.data, 'fixture/content'), 'utf8'), 'old project data')
     await assert.rejects(fs.lstat(path.join(f.data, 'desktop-managed.json')), { code: 'ENOENT' })
     await assert.rejects(run())
   } else {
     const result = JSON.parse((await run()).stdout.trim())
+    if (stale) assert.deepEqual(await fs.readdir(stale.records), [])
     assert.ok(result.core_scans <= 9, 'Keep initial and final admission integrity checks without callback rescan: ' + result.core_scans)
     assert.equal(result.dataDir, f.data); assert.equal(result.verification_pending, true)
     assert.equal(await fs.readFile(path.join(f.data, 'fixture/executions'), 'utf8'), 'once\n')
@@ -2236,7 +2241,7 @@ for (const conversionFailure of [false, true, 'pre-conversion-stop', 'core-chang
   const { readVersionMaintenance, assertVersionMaintenanceAllowsStart } = await import('../version-maintenance.mjs')
   assert.equal(readVersionMaintenance(f.data).schema_version, 4)
   assert.throws(() => assertVersionMaintenanceAllowsStart(f.data), { code: 'CRABOT_MAINTENANCE_PENDING' })
-  if (!conversionFailure) {
+  if (!conversionFailure || conversionFailure === 'stale-modules') {
     const recovery = `import{pathToFileURL}from'node:url';const[module,data,root,healthy]=process.argv.slice(1);const versions=await import(pathToFileURL(module).href);const done=await versions.recoverLegacyUserVersionMaintenance({dataDir:data,root,appVersion:'1.2.3',verifyTakeover:async()=>{},verifyCompatible:async()=>{},run:async()=>healthy==='yes'});console.log(JSON.stringify({done}))`
     const recover = healthy => promisify(execFile)(node, ['--input-type=module', '--eval', recovery, path.join(coreRoot, 'scripts/lib/version-maintenance.mjs'), f.data, coreRoot, healthy], { timeout: 30000, maxBuffer: 65536, env: { ...process.env, HOME: home } })
     await assert.rejects(recover('no'))
