@@ -18,11 +18,11 @@ public class WrapperUI {
  [DllImport("user32.dll")] public static extern bool EnumWindows(Visitor callback,IntPtr unused);
  [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr hwnd,Visitor callback,IntPtr unused);
  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd,out uint pid);
- [DllImport("user32.dll",CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr hwnd,StringBuilder text,int length);
+ [DllImport("user32.dll",CharSet=CharSet.Unicode,EntryPoint="SendMessageTimeoutW")] public static extern IntPtr ReadText(IntPtr hwnd,uint message,IntPtr length,StringBuilder text,uint flags,uint timeout,out IntPtr result);
  [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr hwnd,int id);
  [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr hwnd);
  [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hwnd,uint message,IntPtr wparam,IntPtr lparam);
- public static string Text(IntPtr hwnd) { var text=new StringBuilder(4096);GetWindowText(hwnd,text,text.Capacity);return text.ToString(); }
+ public static string Text(IntPtr hwnd) { var text=new StringBuilder(4096);IntPtr result;ReadText(hwnd,0xD,(IntPtr)text.Capacity,text,2,500,out result);return text.ToString(); }
  public static IntPtr[] Windows() { var result=new List<IntPtr>();EnumWindows((hwnd,unused)=>{result.Add(hwnd);return true;},IntPtr.Zero);return result.ToArray(); }
  public static IntPtr[] Children(IntPtr hwnd) { var result=new List<IntPtr>();EnumChildWindows(hwnd,(child,unused)=>{result.Add(child);return true;},IntPtr.Zero);return result.ToArray(); }
  public static uint Pid(IntPtr hwnd) { uint pid;GetWindowThreadProcessId(hwnd,out pid);return pid; }
@@ -36,6 +36,7 @@ $owned = [Collections.Generic.HashSet[uint32]]::new()
 $clicked = 0
 $verified = $false
 $confirmed = $false
+$observed = [Collections.Generic.HashSet[string]]::new()
 $deadline = (Get-Date).AddMinutes(15)
 try {
  while ((Get-Date) -lt $deadline) {
@@ -47,6 +48,8 @@ try {
    $children = [WrapperUI]::Children($window)
    $text = @([WrapperUI]::Text($window)) + @($children | ForEach-Object { [WrapperUI]::Text($_) })
    $all = $text -join "`n"
+   $description = ($text | Where-Object { $_ } | Select-Object -First 12) -join ' | '
+   if ($description -and $observed.Add($description)) { Write-Output "CRABOT_WINDOWS_WRAPPER_UI window=$description" }
    if ($all -match '无法关闭|cannot be closed|Can.t modify') { throw "Outer EXE entered the reported Retry dialog: $all" }
    if ($all.Contains('将 Crabot 安装到所选文件夹？')) {
     if (!$all.Contains($target)) { throw "Installer lost the selected destination: $all" }
