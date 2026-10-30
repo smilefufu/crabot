@@ -146,3 +146,12 @@ for (const sourceDeployment of [false, true]) test('Windows folder selection doe
   assert.ok(!picker.properties.includes('promptToCreate'), 'Windows file creation prompt conflicts with the directory picker')
   assert.equal(result.code, 2)
 })
+
+for (const code of ['CRABOT_LEGACY_RUNTIME_UNVERIFIED', 'CRABOT_LEGACY_STOP_UNKNOWN']) test('takeover failures show their bounded underlying diagnostic code: ' + code, async () => {
+  const cause = Object.assign(new Error('sensitive fixture details must not be displayed'), { code })
+  const error = Object.assign(new Error('Takeover failed', { cause }), { code: 'CRABOT_MAINTENANCE_PENDING' })
+  const result = await runInstaller({ defaultError: error })
+  const message = result.messages.find(item => item.title === '核对已有 Crabot')
+  assert.ok(message.detail.includes(code))
+  assert.ok(!message.detail.includes(cause.message))
+})

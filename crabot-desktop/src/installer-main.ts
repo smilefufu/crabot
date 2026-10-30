@@ -28,7 +28,12 @@ function failure(error: unknown) {
   if (code === 'CRABOT_DESKTOP_PROGRAM_REFERENCES') return '原 Crabot 程序仍在使用或尚未确认退出。请先关闭原应用和相关程序，再使用此安装包继续。'
   if (code === 'CRABOT_DESKTOP_REMOVAL') return '保留数据修复尚未完成。原数据和维护记录已保留，请在原安装位置使用对应离线安装包继续。'
   if (code === 'CRABOT_LEGACY_UNSUPPORTED' && error instanceof Error && error.message.length <= 512) return error.message
-  if (code === 'CRABOT_MAINTENANCE_PENDING') return '旧安装接管尚未核验完成，原数据和保护记录已保留。请在原安装位置使用同一安装包继续。'
+  if (code === 'CRABOT_MAINTENANCE_PENDING') {
+    const reason = (error as { cause?: { code?: string } })?.cause?.code
+    if (reason === 'CRABOT_LEGACY_RUNTIME_UNVERIFIED') return '无法确认旧版服务的运行状态，接管未完成。原数据和记录已保留。诊断代码：CRABOT_LEGACY_RUNTIME_UNVERIFIED'
+    if (reason === 'CRABOT_LEGACY_STOP_UNKNOWN') return '旧版服务的停止结果尚未确认，接管未完成。原数据和记录已保留。诊断代码：CRABOT_LEGACY_STOP_UNKNOWN'
+    return '旧安装接管尚未核验完成，原数据和保护记录已保留。请在原安装位置使用同一安装包继续。'
+  }
   if (code === 'CRABOT_INSTALL_REGISTRATION') return '系统应用入口与已有文件冲突。原文件已保留，请核对原安装后重试。'
   return '安装尚未完成，现有文件和准备记录已保留。请核对所选位置及访问权限，再使用同一安装包继续。'
 }

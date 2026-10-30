@@ -1922,6 +1922,21 @@ for (const changed of ['copy', 'after-prepare']) test('legacy preparation and ha
   await assert.rejects(fs.lstat(path.join(f.target, '.desktop-takeover')), { code: 'ENOENT' })
 })
 
+test('legacy handoff retains the target failure code before data migration', async t => {
+  const f = await legacyProgramFixture(t, { functional: true })
+  const { prepareLegacyDesktopPrograms } = await import('../legacy-desktop-programs.mjs')
+  const { runPreparedLegacyDesktopTakeover } = await import('../legacy-desktop-handoff.mjs')
+  const prepared = await prepareLegacyDesktopPrograms({ payload: f.payload, installation: f.legacy })
+  await assert.rejects(runPreparedLegacyDesktopTakeover({ prepared,
+    registerEntries: () => assert.fail('Unverified old runtime must not reach registration') }), error => {
+    assert.equal(error.code, 'CRABOT_MAINTENANCE_PENDING')
+    assert.equal(error.cause?.code, 'CRABOT_LEGACY_RUNTIME_UNVERIFIED')
+    return true
+  })
+  assert.equal(await fs.readFile(path.join(f.data, 'fixture/content'), 'utf8'), 'old project data')
+  await assert.rejects(fs.lstat(path.join(f.data, 'desktop-maintenance.json')), { code: 'ENOENT' })
+})
+
 for (const changed of ['source', 'external-data', 'missing-data', 'unknown-program', 'cancelled', 'redirected-app']) test('legacy online staging rejects changed or unsupported inputs without touching data: ' + changed, { skip: process.platform === 'win32' && changed === 'redirected-app' }, async t => {
   const f = await legacyProgramFixture(t), abort = new AbortController()
   const { prepareLegacyDesktopPrograms } = await import('../legacy-desktop-programs.mjs')

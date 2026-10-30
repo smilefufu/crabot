@@ -41,7 +41,12 @@ try {
       send({ type: 'register-entries', prepared }).catch(reject)
     }) })
   await send({ type: 'handoff', result })
-} catch (error) { process.exitCode = 1; console.error(error) }
+} catch (error) {
+  process.exitCode = 1
+  const code = typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{0,127}$/.test(error.code) ? error.code : 'CRABOT_MAINTENANCE_PENDING'
+  try { await send({ type: 'failure', code }) } catch {}
+  console.error(error)
+}
 finally { if (process.connected) process.disconnect() }
 `
 export async function runPreparedLegacyDesktopTakeover({ prepared, entryFenceId, registerEntries, signal, progress = () => {} }) {
@@ -82,6 +87,9 @@ export async function runPreparedLegacyDesktopTakeover({ prepared, entryFenceId,
         if (message.type === 'progress' && phases.includes(message.phase) && !registered && !registering) {
           if (message.phase === 'switching' || message.phase === 'converting') critical = true
           try { progress(message.phase) } catch (error) { stop(error) }
+        } else if (message.type === 'failure' && !result && Object.keys(message).sort().join(',') === 'code,type'
+          && typeof message.code === 'string' && /^[A-Z][A-Z0-9_]{0,127}$/.test(message.code)) {
+          failed = Object.assign(new Error(message.code), { code: message.code })
         } else if (message.type === 'register-entries' && !registering && !registered) {
           const own = installation.readDesktopInstallation(prepared.installation.installRoot)
           const expected = { installRoot: own.root, installation_id: own.record.installation_id,
