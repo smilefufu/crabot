@@ -1,6 +1,12 @@
 param([Parameter(Mandatory=$true)][string]$Installer)
 $ErrorActionPreference = 'Stop'
 $Installer = (Resolve-Path $Installer).Path
+$homeRoot = Join-Path $env:RUNNER_TEMP ('wrapper-home-' + [guid]::NewGuid().ToString('N'))
+$env:USERPROFILE = $homeRoot
+$env:HOME = $homeRoot
+$env:APPDATA = Join-Path $homeRoot 'AppData/Roaming'
+$env:LOCALAPPDATA = Join-Path $homeRoot 'AppData/Local'
+New-Item $env:APPDATA,$env:LOCALAPPDATA -ItemType Directory -Force | Out-Null
 $target = Join-Path $env:RUNNER_TEMP ('crabot wrapper UI ' + [guid]::NewGuid().ToString('N'))
 Add-Type @'
 using System;

@@ -121,9 +121,6 @@ jobs:
             node scripts/desktop/package-offline-installer.mjs --candidate=true --distribute=true --paired=.desktop-build/manual/paired --out=.desktop-build/manual/installer
             node .github/scripts/verify-offline-installer-host.mjs .desktop-build/manual/installer
           fi
-      - name: Native Windows wrapper extraction regression
-        if: runner.os == 'Windows'
-        run: node .github/scripts/smoke-windows-wrapper.mjs .desktop-build/manual/installer 2>&1 | tee .desktop-build/windows-wrapper.log
       - name: Hash completed installers
         run: |
           node --input-type=module <<'NODE'
@@ -154,6 +151,9 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
+      - name: Native Windows wrapper extraction regression
+        if: runner.os == 'Windows'
+        run: node .github/scripts/smoke-windows-wrapper.mjs .desktop-build/manual/installer 2>&1 | tee .desktop-build/windows-wrapper.log
       - name: Published CLI data into ordinary Mac App
         if: runner.os == 'macOS'
         run: node .github/scripts/smoke-mac-app-legacy.mjs .desktop-build/manual/gui 2>&1 | tee .desktop-build/mac-app-legacy-stage.log

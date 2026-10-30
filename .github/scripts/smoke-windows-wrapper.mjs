@@ -27,7 +27,7 @@ for (const key of ['NODE_OPTIONS', 'NODE_PATH', 'ELECTRON_RUN_AS_NODE']) delete 
 const run = (file, args, options = {}) => execute(file, args, { env, timeout: 600_000, maxBuffer: 1024 * 1024, ...options })
 const quote = value => value.split('$').join('$$').replaceAll('"', '$\\"')
 try {
-  await run(sevenZip, ['x', path.join(distribution, installers[0]), '-o' + path.join(root, 'wrapper'), '-y'])
+  await run('7z.exe', ['x', path.join(distribution, installers[0]), '-o' + path.join(root, 'wrapper'), '-y'])
   async function find(directory, name) {
     for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
       const file = path.join(directory, entry.name)
