@@ -211,7 +211,8 @@ describe('callNonStreaming', () => {
         ...defaultParams,
         onRetry: () => undefined,
       })
-      await vi.advanceTimersByTimeAsync(1_000)
+      await vi.advanceTimersByTimeAsync(0)
+      await vi.advanceTimersToNextTimerAsync()
       const result = await resultPromise
 
       expect(attempt).toBe(2)
@@ -230,9 +231,7 @@ describe('callNonStreaming', () => {
         async *stream(): AsyncGenerator<StreamChunk> {
           attempt++
           yield { type: 'message_start', messageId: 'msg' }
-          const e = new Error('socket dropped') as Error & { code?: string }
-          e.code = 'ETIMEDOUT'
-          throw e
+          throw new HttpResponseError(503, 'temporarily unavailable', 'test')
         },
         updateConfig() {},
       }
@@ -422,9 +421,9 @@ describe('callNonStreaming', () => {
       expect(attempt).toBe(2)
       expect(modelsSeen).toEqual(['old-model', 'new-model'])
 
-      // attempt 2（adapterB）失败（通用 429，attempt index 1 → 2s 退避）：信号已 aborted、
-      // generation 未变，退避必须照常等待——2s 内不得发起第三次 attempt
-      await vi.advanceTimersByTimeAsync(1_999)
+      // attempt 2（adapterB）失败（通用 429；配置切换不消耗配额，因此仍为 index 0 → 1s 退避）：信号已 aborted、
+      // generation 未变，退避必须照常等待——1s 内不得发起第三次 attempt
+      await vi.advanceTimersByTimeAsync(999)
       expect(attempt).toBe(2)
       await vi.advanceTimersByTimeAsync(1)
       const result = await resultPromise
@@ -471,11 +470,9 @@ describe('callNonStreaming', () => {
         async *stream(params: LLMStreamParams): AsyncGenerator<StreamChunk> {
           attempt++
           yield { type: 'message_start', messageId: 'msg' }
-          // 网络类错误（非 429）才不会被通用 429 的 3 次上限提前掐断，
-          // 能活到 maxRetries 耗尽边界——本用例测的正是这个边界上的变更消费
-          const e = new Error('dead provider A') as Error & { code?: string }
-          e.code = 'ETIMEDOUT'
-          throw e
+          // HTTP 503 使用有限重试预算；ETIMEDOUT 走独立的长连接恢复，
+          // 不适用于本用例要验证的最后一次有限重试边界。
+          throw new HttpResponseError(503, 'dead provider A', 'test')
         },
         updateConfig() {},
       }
@@ -522,6 +519,8 @@ describe('callNonStreaming', () => {
       const adapter: LLMAdapter = {
         async *stream(): AsyncGenerator<StreamChunk> {
           attempt++
+          // Fail this invariant in finite time even if configuration churn loops.
+          if (attempt > 11) throw new Error('config churn exceeded the 11-attempt budget')
           yield { type: 'message_start', messageId: 'msg' }
           throw new HttpResponseError(429, 'always failing', 'test')
         },
@@ -531,7 +530,7 @@ describe('callNonStreaming', () => {
       const expectation = expect(callNonStreaming(adapter, {
         ...defaultParams,
         configGeneration: () => generation,
-        onConfigChanged: async () => { generation += 1 },
+        onConfigChanged: async () => undefined,
       })).rejects.toThrow(/次尝试/)
 
       // 每次退避间隙都推进 generation（模拟抖动），推进足够多的假时间让全部 attempt 跑完
