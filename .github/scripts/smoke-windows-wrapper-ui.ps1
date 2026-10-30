@@ -28,7 +28,8 @@ $owned = [Collections.Generic.HashSet[uint32]]::new()
 [void]$owned.Add([uint32]$process.Id)
 $clicked = 0
 $verified = $false
-$deadline = (Get-Date).AddMinutes(10)
+$confirmed = $false
+$deadline = (Get-Date).AddMinutes(15)
 try {
  while ((Get-Date) -lt $deadline) {
   # Track only this newly launched installer's descendants on the isolated runner.
@@ -42,12 +43,20 @@ try {
    if ($all -match '无法关闭|cannot be closed|Can.t modify') { throw "Outer EXE entered the reported Retry dialog: $all" }
    if ($all.Contains('将 Crabot 安装到所选文件夹？')) {
     if (!$all.Contains($target)) { throw "Installer lost the selected destination: $all" }
-    $cancel = @($children | Where-Object { [WrapperUI]::Text($_) -eq '取消' })
-    if ($cancel.Count -ne 1) { throw "Expected the actual host's Cancel button" }
-    [WrapperUI]::Click($cancel[0])
+    $install = @($children | Where-Object { [WrapperUI]::Text($_) -eq '安装' })
+    if ($install.Count -ne 1) { throw "Expected the actual host's Install button" }
+    [WrapperUI]::Click($install[0])
+    $confirmed = $true
+    continue
+   }
+   if ($confirmed -and $all.Contains('Crabot 已安装')) {
+    $finish = @($children | Where-Object { [WrapperUI]::Text($_) -eq '完成' })
+    if ($finish.Count -ne 1) { throw "Expected the actual host's Finish button" }
+    [WrapperUI]::Click($finish[0])
     $verified = $true
     break
    }
+   if ($all.Contains('安装尚未完成')) { throw "Real installation failed: $all" }
    if ($clicked -lt 2) {
     $next = [WrapperUI]::GetDlgItem($window,1)
     if ($next -ne [IntPtr]::Zero -and [WrapperUI]::IsWindowEnabled($next)) {
@@ -65,10 +74,10 @@ try {
   if ($process.HasExited) { throw "Outer installer exited before the real GUI host was usable (code $($process.ExitCode))" }
   Start-Sleep -Milliseconds 250
  }
- if (!$verified) { throw 'Timed out waiting for the actual installer host confirmation' }
- if (Test-Path $target) { throw 'The cancelled confirmation unexpectedly created the selected installation root' }
- @{ actual_exe_ui=$true; next_pages=$clicked; reported_retry_dialog=$false; host_confirmation=$true; selected_path_with_spaces=$true; cancelled_before_data_write=$true; business_mm_started=$false } | ConvertTo-Json -Compress | Write-Output
+ if (!$verified) { throw 'Timed out waiting for the actual installer completion' }
+ if (!(Test-Path $target)) { throw 'Installer reported completion without the selected root' }
+ @{ actual_exe_ui=$true; next_pages=$clicked; reported_retry_dialog=$false; host_confirmation=$true; selected_path_with_spaces=$true; actual_installation_completed=$true; business_mm_started=$false } | ConvertTo-Json -Compress | Write-Output
 } finally {
- # Stop only tracked runner test processes. No application is installed/launched.
+ # Stop only tracked runner test processes. The installed business App is not launched.
  foreach ($id in $owned) { Stop-Process -Id $id -ErrorAction SilentlyContinue }
 }
