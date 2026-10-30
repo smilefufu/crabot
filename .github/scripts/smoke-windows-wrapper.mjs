@@ -55,11 +55,33 @@ try {
   await run(sevenZip, ['a', '-t7z', small, '.'], { cwd: fixture })
   const verify = path.join(root, 'verify.mjs'), verified = path.join(root, 'verified.json')
   await fs.writeFile(verify, `import { promises as fs } from 'node:fs'; import path from 'node:path';
-import { verifyDesktopPayload } from ${JSON.stringify(pathToFileURL(path.join(repo, 'scripts/lib/desktop-payload.mjs')).href)};
+import { createHash } from 'node:crypto';
+import { createReadStream } from 'node:fs';
 try {
+const { verifyDesktopPayload } = await import(${JSON.stringify(pathToFileURL(path.join(repo, 'scripts/lib/desktop-payload.mjs')).href)});
 const payload = await verifyDesktopPayload(path.join(process.argv[2], 'resources/offline'));
 await fs.writeFile(process.argv[3], JSON.stringify({ complete: true, bytes: String(payload.bytes) }));
-} catch (error) { await fs.writeFile(process.argv[3], JSON.stringify({ complete: false, error: error.stack })); process.exitCode = 1; }`)
+} catch (error) {
+const core = path.join(process.argv[2], 'resources/offline/core');
+const expected = JSON.parse(await fs.readFile(path.join(core, 'core-files.json'), 'utf8')).files;
+const actual = new Set(), differences = [];
+async function walk(directory) { for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+const file = path.join(directory, entry.name), name = path.relative(core, file).split(path.sep).join('/');
+if (entry.isDirectory()) await walk(file); else if (!['core-files.json', 'core-release.json', 'desktop-host.json'].includes(name)) actual.add(name);
+} }
+await walk(core);
+for (const name of actual) if (!Object.hasOwn(expected, name)) differences.push({ extra: name });
+for (const [name, wanted] of Object.entries(expected)) {
+if (!actual.has(name)) { differences.push({ missing: name }); continue; }
+const file = path.join(core, name), stat = await fs.lstat(file);
+if (stat.size !== wanted.size) differences.push({ name, size: stat.size, expected_size: wanted.size });
+}
+if (!differences.length) for (const [name, wanted] of Object.entries(expected)) {
+const digest = createHash('sha256'); for await (const chunk of createReadStream(path.join(core, name))) digest.update(chunk);
+if (digest.digest('hex') !== wanted.sha256) { differences.push({ changed: name }); if (differences.length >= 20) break; }
+}
+await fs.writeFile(process.argv[3], JSON.stringify({ complete: false, error: error.stack, expected: Object.keys(expected).length, actual: actual.size, differences: differences.slice(0, 20) })); process.exitCode = 1;
+}`)
   async function probe(name, selectedLeaf, input, full) {
     const log = path.join(root, name + '.txt'), script = path.join(root, name + '.nsi'), executable = path.join(root, name + '.exe')
     await fs.writeFile(script, `Unicode true
