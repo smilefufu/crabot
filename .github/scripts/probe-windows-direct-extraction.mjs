@@ -17,7 +17,7 @@ const quote = value => value.split('$').join('$$').replaceAll('"', '$\\"')
 const relative = 'resources/offline/core/.scrapling-runtime-desktop-ci-b21869a0a229da99-8413626c/packages/playwright/driver/package/lib/tools/skills/playwright-component-testing/references/gallery-spec.md'
 const value = 'exact archive bytes'
 try {
- const candidates = (await fs.readdir(plugins, { recursive: true })).filter(file => /nsis7z\.dll$/i.test(file) && !file.includes('ansi'))
+ const candidates = (await fs.readdir(plugins, { recursive: true })).filter(file => /nsis7z\.dll$/i.test(file) && file.split(/[\\/]/).includes('x86-unicode'))
  assert.equal(candidates.length, 1)
  const localPlugins = path.join(root, 'plugins'); await fs.mkdir(localPlugins)
  await fs.copyFile(path.join(plugins, candidates[0]), path.join(localPlugins, 'nsis7z.dll'))
