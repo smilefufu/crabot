@@ -34,8 +34,11 @@ if (config.cleanup) {
   // The host intentionally presents a bounded error code to end users.
   const childProcess = require('node:child_process'), spawn = childProcess.spawn
   childProcess.spawn = function (file, args, options) {
+    const takeover = args?.some(value => typeof value === 'string' && value.endsWith(path.join('scripts', 'lib', 'legacy-desktop-takeover.mjs')))
+    if (takeover && process.platform === 'win32' && process.env.PSModuleAnalysisCachePath
+      && options.env.PSModuleAnalysisCachePath !== process.env.PSModuleAnalysisCachePath) throw new Error('Target lost the host PowerShell module cache location')
     const child = spawn.call(this, file, args, options)
-    if (args?.some(value => typeof value === 'string' && value.endsWith(path.join('scripts', 'lib', 'legacy-desktop-takeover.mjs')))) {
+    if (takeover) {
       child.stderr?.on('data', bytes => process.stderr.write('CRABOT_CI_TARGET_STDERR ' + bytes.toString()))
     }
     return child

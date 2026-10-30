@@ -61,7 +61,7 @@ export async function runPreparedLegacyDesktopTakeover({ prepared, entryFenceId,
   signal?.throwIfAborted()
   const input = { installation: prepared.installation, selection: prepared.selection,
     coreRoot: prepared.coreRoot, guiRoot: prepared.guiRoot, proof: prepared.proof }
-  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => /^(PATH|HOME|USER|LOGNAME|USERPROFILE|APPDATA|LOCALAPPDATA|SYSTEMROOT|WINDIR|COMSPEC|PATHEXT|TEMP|TMP|TMPDIR|LANG|LC_.*|HTTPS?_PROXY|ALL_PROXY|NO_PROXY)$/i.test(name)))
+  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => /^(PATH|HOME|USER|LOGNAME|USERPROFILE|APPDATA|LOCALAPPDATA|SYSTEMROOT|WINDIR|PSMODULEANALYSISCACHEPATH|COMSPEC|PATHEXT|TEMP|TMP|TMPDIR|LANG|LC_.*|HTTPS?_PROXY|ALL_PROXY|NO_PROXY)$/i.test(name)))
   env.DATA_DIR = prepared.installation.dataRoot; env.CRABOT_HOME = prepared.coreRoot
   env.CRABOT_DEV = 'false'; env.CRABOT_PORT_OFFSET = '0'; env.CRABOT_PRODUCT_REQUIRED = '1'
   const child = spawn(runtime.executables.node, ['--input-type=module', '--eval', script,
