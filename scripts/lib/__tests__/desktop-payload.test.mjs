@@ -14,7 +14,7 @@ import installation from '../desktop-installation.cjs'
 import { writeCoreRelease, verifyCoreRelease } from '../core-release.mjs'
 import { sealDesktopPayload, verifyDesktopPayload, prepareDesktopInstallation, commitDesktopInstallation } from '../desktop-payload.mjs'
 const windows = process.platform === 'win32', launcher = windows ? 'crabot.exe' : 'crabot'
-async function fixture(t, { version = '1.2.3', schema, functional = false, executableNode = true, shared = false, launcherSuffix = '', conversionFailure = false, realPython = false } = {}) {
+async function fixture(t, { version = '1.2.3', schema, functional = false, executableNode = true, shared = false, launcherSuffix = '', conversionFailure = false, coreTamper = false, realPython = false } = {}) {
   const parent = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'Crabot 离线安装 ')))
   t.after(() => fs.rm(parent, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
   const payload = path.join(parent, '离线包'), core = path.join(payload, 'core'), gui = path.join(payload, 'gui'), target = path.join(parent, '选择的 目录')
@@ -82,7 +82,7 @@ async function fixture(t, { version = '1.2.3', schema, functional = false, execu
     await fs.writeFile(path.join(parser, 'package.json'), JSON.stringify({ name: '@electron/asar', version: '3.4.1', main: 'index.cjs' }))
     await fs.writeFile(path.join(core, 'crabot-fixture/upgrade/scope.mjs'), `export const migrationScope=()=>({reads:[],writes:['fixture/content','fixture/executions']})`)
     await fs.writeFile(path.join(core, 'crabot-fixture/upgrade/from_v1_to_v2.mjs'),
-      `import fs from 'node:fs';import path from 'node:path';const root=process.argv.find(arg=>arg.startsWith('--data-dir=')).slice(11);fs.writeFileSync(path.join(root,'content'),'converted by bundled Node');fs.appendFileSync(path.join(root,'executions'),'once\\n');${conversionFailure ? 'process.exit(13)' : ''}`)
+      `import fs from 'node:fs';import path from 'node:path';const root=process.argv.find(arg=>arg.startsWith('--data-dir=')).slice(11);fs.writeFileSync(path.join(root,'content'),'converted by bundled Node');fs.appendFileSync(path.join(root,'executions'),'once\\n');${coreTamper ? "fs.appendFileSync(path.resolve(process.argv[1],'../../../cli.mjs'),'corrupted')" : ''}${conversionFailure ? 'process.exit(13)' : ''}`)
   }
   if (shared) { await fs.mkdir(path.join(core, 'crabot-agent'), { recursive: true }); await fs.writeFile(path.join(core, 'crabot-agent/shared_request_version'), '1\n') }
   await writeCoreRelease(core, { schema_version: 1, version, platform: process.platform, arch: process.arch, commit: '1'.repeat(40), source_dirty: false })
@@ -1872,7 +1872,17 @@ test('legacy online program preparation preserves old entries and data while sta
   if (!windows) await fs.chmod(f.data, 0o755)
   const { prepareLegacyDesktopPrograms, verifyLegacyDesktopPrograms } = await import('../legacy-desktop-programs.mjs')
   const entry = await fs.readFile(path.join(f.target, 'cli.mjs')), data = await fs.readdir(f.data)
-  const prepared = await prepareLegacyDesktopPrograms({ payload: f.payload, installation: f.legacy, progress: phase => phases.push(phase) })
+  const readdir = fs.readdir
+  let scans = 0
+  const scan = t.mock.method(fs, 'readdir', (directory, ...args) => {
+    if (args[0]?.withFileTypes && String(directory).startsWith(f.target + path.sep)
+      && ['core', f.selection.core_id].includes(path.basename(String(directory)))) scans++
+    return readdir(directory, ...args)
+  })
+  let prepared
+  try { prepared = await prepareLegacyDesktopPrograms({ payload: f.payload, installation: f.legacy, progress: phase => phases.push(phase) }) }
+  finally { scan.mock.restore() }
+  assert.equal(scans, 1, 'A new target pair needs one complete post-copy scan, not a second scan after read-only preview')
   assert.deepEqual(phases, ['verifying', 'copying', 'previewing', 'prepared'])
   assert.deepEqual(prepared.installation, f.legacy)
   assert.equal(prepared.coreRoot, path.join(f.target, 'releases', f.selection.core_id))
@@ -1887,6 +1897,29 @@ test('legacy online program preparation preserves old entries and data while sta
   const again = await prepareLegacyDesktopPrograms({ payload: f.payload, installation: f.legacy })
   cp.mock.restore(); assert.deepEqual(again, prepared)
   if (!windows) assert.equal((await fs.stat(f.data)).mode & 0o777, 0o755)
+})
+
+for (const changed of ['copy', 'after-prepare']) test('legacy preparation and handoff reject corrupt programs before fencing old entries: ' + changed, async t => {
+  const f = await legacyProgramFixture(t)
+  const { prepareLegacyDesktopPrograms } = await import('../legacy-desktop-programs.mjs')
+  const original = await fs.readFile(path.join(f.target, 'cli.mjs'))
+  if (changed === 'copy') {
+    const cp = fs.cp
+    t.mock.method(fs, 'cp', async (from, to, ...args) => {
+      await cp(from, to, ...args)
+      if (from === path.join(f.payload, 'core')) await fs.appendFile(path.join(to, 'cli.mjs'), 'corrupt')
+    })
+    await assert.rejects(prepareLegacyDesktopPrograms({ payload: f.payload, installation: f.legacy }), { code: 'CRABOT_CORE_INTEGRITY' })
+  } else {
+    const prepared = await prepareLegacyDesktopPrograms({ payload: f.payload, installation: f.legacy })
+    await fs.appendFile(path.join(prepared.coreRoot, 'cli.mjs'), 'corrupt')
+    const { runPreparedLegacyDesktopTakeover } = await import('../legacy-desktop-handoff.mjs')
+    await assert.rejects(runPreparedLegacyDesktopTakeover({ prepared,
+      registerEntries: () => assert.fail('Corrupt programs must not reach registration') }), { code: 'CRABOT_CORE_INTEGRITY' })
+  }
+  assert.deepEqual(await fs.readFile(path.join(f.target, 'cli.mjs')), original)
+  assert.equal(await fs.readFile(path.join(f.data, 'fixture/content'), 'utf8'), 'old project data')
+  await assert.rejects(fs.lstat(path.join(f.target, '.desktop-takeover')), { code: 'ENOENT' })
 })
 
 for (const changed of ['source', 'external-data', 'missing-data', 'unknown-program', 'cancelled', 'redirected-app']) test('legacy online staging rejects changed or unsupported inputs without touching data: ' + changed, { skip: process.platform === 'win32' && changed === 'redirected-app' }, async t => {
@@ -2136,9 +2169,9 @@ test('actual installer takeover resumes a partial entry fence before stopping or
   assert.equal(await fs.readFile(path.join(f.data, 'fixture/executions'), 'utf8'), 'once\n')
 })
 
-for (const conversionFailure of [false, true]) test('Mac App legacy admission uses external original data and retains health protection; failure=' + conversionFailure, { skip: process.platform !== 'darwin' }, async t => {
-  const f = await legacyProgramFixture(t, { functional: true, conversionFailure })
-  await fs.unlink(path.join(f.data, 'mm.pid'))
+for (const conversionFailure of [false, true, 'pre-conversion-stop', 'core-changed-during-conversion']) test('Mac App legacy admission uses external original data and retains health protection; failure=' + conversionFailure, { skip: process.platform !== 'darwin' }, async t => {
+  const f = await legacyProgramFixture(t, { functional: true, conversionFailure: conversionFailure === true, coreTamper: conversionFailure === 'core-changed-during-conversion' })
+  if (conversionFailure !== 'pre-conversion-stop') await fs.unlink(path.join(f.data, 'mm.pid'))
   if (!conversionFailure) await fs.writeFile(path.join(f.target, '.env'), 'CRABOT_ADMIN_WEB_HOST=0.0.0.0\n')
   const coreRoot = path.join(f.parent, '真正 Crabot.app/Contents/Resources/core'), home = path.join(f.parent, 'home')
   await fs.mkdir(path.dirname(coreRoot), { recursive: true }); await fs.rename(f.core, coreRoot)
@@ -2147,8 +2180,29 @@ for (const conversionFailure of [false, true]) test('Mac App legacy admission us
   const { default: binding } = await import('../mac-app-binding.cjs')
   binding.writeMacAppBinding({ home, appPath: path.resolve(coreRoot, '../../..'), dataDir: f.data })
   const node = path.join(coreRoot, '.product-runtime/node/bin/node'), role = path.join(coreRoot, 'scripts/lib/mac-legacy-admission.mjs')
-  const script = `import{pathToFileURL}from'node:url';const[module,sourceRoot,home]=process.argv.slice(1);const role=await import(pathToFileURL(module).href);console.log(JSON.stringify(await role.admitLegacyMacData({sourceRoot,home,inspectEnvironment:async()=>({status:'absent'})})))`
+  const script = `import{pathToFileURL}from'node:url';import{promises as fs}from'node:fs';import path from'node:path';const[module,sourceRoot,home]=process.argv.slice(1);const core=path.resolve(path.dirname(module),'../..'),read=fs.readdir;let scans=0;fs.readdir=(dir,...args)=>{if(path.resolve(dir)===core&&args[0]?.withFileTypes)scans++;return read(dir,...args)};const role=await import(pathToFileURL(module).href);const result=await role.admitLegacyMacData({sourceRoot,home,inspectEnvironment:async()=>({status:'absent'})});console.log(JSON.stringify({...result,core_scans:scans}))`
   const run = () => promisify(execFile)(node, ['--input-type=module', '--eval', script, role, f.target, home], { timeout: 30000, maxBuffer: 65536, env: { ...process.env, HOME: home } })
+  if (conversionFailure === 'pre-conversion-stop') {
+    const original = await fs.readFile(path.join(f.target, 'cli.mjs'))
+    await assert.rejects(run())
+    const { inspectLegacyEntryFence, restoreLegacyEntries } = await import('../legacy-entry-fence.mjs')
+    assert.equal((await inspectLegacyEntryFence(f.target)).phase, 'fenced')
+    await assert.rejects(fs.lstat(path.join(f.data, 'desktop-maintenance.json')), { code: 'ENOENT' })
+    await assert.rejects(fs.lstat(path.join(f.data, 'fixture/executions')), { code: 'ENOENT' })
+    assert.equal(await fs.readFile(path.join(f.data, 'fixture/content'), 'utf8'), 'old project data')
+    assert.notDeepEqual(await fs.readFile(path.join(f.target, 'cli.mjs')), original)
+    assert.equal((await restoreLegacyEntries(f.target)).phase, 'restored')
+    assert.deepEqual(await fs.readFile(path.join(f.target, 'cli.mjs')), original)
+    return
+  }
+  if (conversionFailure === 'core-changed-during-conversion') {
+    await assert.rejects(run())
+    assert.equal(await fs.readFile(path.join(f.data, 'fixture/executions'), 'utf8'), 'once\n')
+    await assert.rejects(fs.lstat(path.join(f.data, 'desktop-managed.json')), { code: 'ENOENT' })
+    await assert.rejects(run())
+    assert.equal(await fs.readFile(path.join(f.data, 'fixture/executions'), 'utf8'), 'once\n')
+    return
+  }
   if (conversionFailure) {
     await assert.rejects(run())
     assert.equal(await fs.readFile(path.join(f.data, 'fixture/content'), 'utf8'), 'old project data')
@@ -2156,6 +2210,7 @@ for (const conversionFailure of [false, true]) test('Mac App legacy admission us
     await assert.rejects(run())
   } else {
     const result = JSON.parse((await run()).stdout.trim())
+    assert.ok(result.core_scans <= 9, 'Keep initial and final admission integrity checks without callback rescan: ' + result.core_scans)
     assert.equal(result.dataDir, f.data); assert.equal(result.verification_pending, true)
     assert.equal(await fs.readFile(path.join(f.data, 'fixture/executions'), 'utf8'), 'once\n')
     assert.equal(JSON.parse((await run()).stdout.trim()).maintenance_id, result.maintenance_id)

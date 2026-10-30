@@ -57,11 +57,11 @@ export async function admitLegacyMacData({ sourceRoot, home = homedir(), signal,
   if (!source || source.installation.dataRoot !== own.data_dir) fail()
   const release = await verifyCoreRelease(root), target = { root, version: release.version, core_id: release.inventory_sha256 }
   const listenHost = await legacyListenHost(source.installation.installRoot)
+  // Full Core checks bracket this admission; callbacks recheck source/binding.
   const verifyPrograms = async () => {
     const current = await discoverLegacyDesktopTakeover({ root: source.installation.installRoot, source: {} })
-    const verified = await verifyCoreRelease(root, { version: target.version })
     if (!current || await legacyListenHost(source.installation.installRoot) !== listenHost
-      || JSON.stringify(current.installation) !== JSON.stringify(source.installation) || verified.inventory_sha256 !== target.core_id
+      || JSON.stringify(current.installation) !== JSON.stringify(source.installation)
       || binding.applyMacAppEnvironment(root, { home, env: {} }).data_dir !== own.data_dir) fail()
   }
   const converted = await convertLegacyUserData({ installation: source.installation, target, verifyPrograms, signal, progress, inspectEnvironment })
@@ -70,6 +70,8 @@ export async function admitLegacyMacData({ sourceRoot, home = homedir(), signal,
   try {
     dataLock = await acquireExistingCliLock(own.data_dir, 'mac-legacy-commit')
     await verifyPrograms()
+    const verified = await verifyCoreRelease(root, { version: target.version })
+    if (verified.inventory_sha256 !== target.core_id) fail()
     const record = readVersionMaintenance(own.data_dir), entry = await inspectLegacyEntryFence(source.installation.installRoot)
     if (record?.id !== converted.maintenance_id || record.phase !== 'verifying' || record.schema_version !== 4
       || record.legacy_source.entry_fence_id !== entry.id || entry.phase !== 'data_changing'

@@ -106,7 +106,6 @@ export async function prepareLegacyDesktopPrograms({ payload, installation, entr
     const prepared = { installation, selection, coreRoot, guiRoot, proof: { file, sha256: digest(text) } }
     progress('previewing')
     const preview = await previewMigrations(coreRoot, installation.dataRoot)
-    await verifyLegacyDesktopPrograms(prepared, { entryFenceId, signal })
     progress('prepared'); signal?.throwIfAborted(); await sourceCurrent(installation, entryFenceId)
     return { ...prepared, preview }
   } catch (error) { preparationError = error; throw error }
