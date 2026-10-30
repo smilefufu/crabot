@@ -127,7 +127,7 @@ for (const mode of ['matching', 'partial', 'missing-core', 'changed-file', 'new-
 
 // Mutation cases use only the inert private program fixture. Native observer
 // outcomes below are controlled explicitly; real observation has a separate case.
-for (const mode of ['owned', 'partial', 'changed-file', 'unknown-directory', 'missing-lock', 'wrong-operation', 'wrong-installation', 'before-removing', 'running', 'referenced', 'unknown-reference', 'incomplete-observer', 'changed-after-observation', 'lost-unlink-reply', 'root-preparation', 'module-pending', 'lost-lock-after-observation', 'changed-proof-after-observation', 'directory-after-observation', 'reappeared-after-unlink', 'late-hardlink', 'late-file-link']) test('program removal holds the same job and preserves all user data: ' + mode, { timeout: 10000, skip: process.platform === 'win32' && mode === 'late-file-link' }, async t => {
+for (const mode of ['owned', 'partial', 'changed-file', 'unknown-directory', 'missing-lock', 'wrong-operation', 'wrong-installation', 'before-removing', 'running', 'referenced', 'unknown-reference', 'incomplete-observer', 'changed-after-observation', 'lost-unlink-reply', 'root-preparation', 'module-pending', 'lost-lock-after-observation', 'changed-proof-after-observation', 'directory-after-observation', 'parent-link-after-observation', 'reappeared-after-unlink', 'late-hardlink', 'late-file-link']) test('program removal holds the same job and preserves all user data: ' + mode, { timeout: 10000, skip: process.platform === 'win32' && mode === 'late-file-link' }, async t => {
   const f = await fixture(t), locks = await import('../cli-lock.mjs')
   const held = []
   try {
@@ -158,6 +158,11 @@ for (const mode of ['owned', 'partial', 'changed-file', 'unknown-directory', 'mi
       if (mode === 'lost-lock-after-observation') locks.releaseCliLock(held.pop())
       if (mode === 'changed-proof-after-observation') await fs.appendFile(path.join(f.root, 'app/removals', f.operationId, 'proof.json'), ' ')
       if (mode === 'directory-after-observation') { await fs.rename(path.dirname(target), path.dirname(target) + '-preserved'); await fs.mkdir(path.dirname(target)); await fs.writeFile(target, 'Core bytes') }
+      if (mode === 'parent-link-after-observation') {
+        const outside = path.join(f.temporary, 'outside'); await fs.mkdir(outside); await fs.writeFile(path.join(outside, 'program.txt'), 'Core bytes')
+        await fs.rename(path.dirname(target), path.dirname(target) + '-preserved')
+        await fs.symlink(outside, path.dirname(target), process.platform === 'win32' ? 'junction' : 'dir')
+      }
       return { complete: !['unknown-reference', 'incomplete-observer'].includes(mode), incomplete: mode === 'incomplete-observer',
         processes: mode === 'referenced' ? [{ pid: process.pid }] : [], unknown_pids: mode === 'unknown-reference' ? [process.pid] : [] }
     })
@@ -173,7 +178,7 @@ for (const mode of ['owned', 'partial', 'changed-file', 'unknown-directory', 'mi
       })
     }
     const beforeData = await fs.readFile(path.join(f.data, 'user.txt')), beforeRecord = await fs.readFile(path.join(f.root, '.desktop-removal.json'))
-    const refused = ['missing-lock', 'wrong-operation', 'wrong-installation', 'before-removing', 'running', 'referenced', 'unknown-reference', 'incomplete-observer', 'root-preparation', 'module-pending', 'lost-lock-after-observation', 'changed-proof-after-observation', 'directory-after-observation'].includes(mode)
+    const refused = ['missing-lock', 'wrong-operation', 'wrong-installation', 'before-removing', 'running', 'referenced', 'unknown-reference', 'incomplete-observer', 'root-preparation', 'module-pending', 'lost-lock-after-observation', 'changed-proof-after-observation', 'directory-after-observation', 'parent-link-after-observation'].includes(mode)
     if (mode === 'lost-unlink-reply') {
       const unlink = fsSync.unlinkSync; let removed = 0
       const fault = t.mock.method(fsSync, 'unlinkSync', file => {
@@ -186,6 +191,7 @@ for (const mode of ['owned', 'partial', 'changed-file', 'unknown-directory', 'mi
     if (refused) {
       await assert.rejects(removeDesktopRemovalPrograms(input))
       assert.equal(await fs.readFile(target, 'utf8'), 'Core bytes'); assert.equal(await fs.readFile(path.join(f.gui, 'program.txt'), 'utf8'), 'GUI bytes')
+      if (mode === 'parent-link-after-observation') assert.equal(await fs.readFile(path.join(f.temporary, 'outside/program.txt'), 'utf8'), 'Core bytes')
     } else {
       const result = await removeDesktopRemovalPrograms(input)
       if (['changed-file', 'changed-after-observation', 'reappeared-after-unlink', 'late-hardlink', 'late-file-link'].includes(mode)) {
@@ -414,8 +420,9 @@ test('finite many-file removal keeps repeated installation reads bounded and pre
   for (const programCount of [64, 128]) {
     const f = await fixture(t, programCount)
     const held = [await locks.acquireExistingCliLock(f.root, 'fixture-cost'), await locks.acquireExistingCliLock(f.data, 'fixture-cost')]
-    let discoveryReads = 0, asyncParentReads = 0
-    const lstat = fs.lstat, parent = path.join(f.core, 'nested')
+    let discoveryReads = 0, asyncParentReads = 0, canonicalParentReads = 0
+    const lstat = fs.lstat, parent = path.join(f.core, 'nested'), realpath = fsSync.realpathSync
+    const canonicalReader = t.mock.method(fsSync, 'realpathSync', (file, ...args) => { if (file === parent) canonicalParentReads++; return realpath(file, ...args) })
     const parentReader = t.mock.method(fs, 'lstat', (file, ...args) => { if (file === parent) asyncParentReads++; return lstat(file, ...args) })
     const reader = t.mock.method(fsSync, 'readFileSync', (file, ...args) => {
       if (file === path.join(f.root, 'desktop-installation.json')) discoveryReads++
@@ -424,13 +431,14 @@ test('finite many-file removal keeps repeated installation reads bounded and pre
     try {
       const started = performance.now(), result = await removeDesktopRemovalPrograms({ installRoot: f.root, operationId: f.operationId })
       console.log('CRABOT_REMOVAL_MANY_FILE_COST ' + JSON.stringify({ platform: process.platform, finite_added_files: programCount,
-        installation_reads: discoveryReads, async_parent_reads: asyncParentReads, elapsed_ms: Math.round(performance.now() - started), resource_observation_substituted: true }))
+        installation_reads: discoveryReads, async_parent_reads: asyncParentReads, canonical_parent_reads: canonicalParentReads, elapsed_ms: Math.round(performance.now() - started), resource_observation_substituted: true }))
       assert.equal(result.retained.length, 0); assert.ok(result.removed.length > programCount)
       observations.push(discoveryReads)
+      assert.ok(canonicalParentReads <= 3, 'An unchanged physical parent is established canonically once per observation, not re-resolved per child: ' + canonicalParentReads)
       assert.ok(asyncParentReads <= 4, 'One original parent is captured once; every destructive admission still performs its full synchronous check: ' + asyncParentReads)
       await assert.rejects(fs.lstat(f.core), { code: 'ENOENT' }); await assert.rejects(fs.lstat(f.gui), { code: 'ENOENT' })
       assert.equal(await fs.readFile(path.join(f.data, 'user.txt'), 'utf8'), 'preserved data and runtime bases')
-    } finally { parentReader.mock.restore(); reader.mock.restore(); for (const lock of held.reverse()) locks.releaseCliLock(lock) }
+    } finally { canonicalReader.mock.restore(); parentReader.mock.restore(); reader.mock.restore(); for (const lock of held.reverse()) locks.releaseCliLock(lock) }
   }
   assert.equal(observations[1], observations[0], 'Doubling program files must not double installation JSON parsing')
 })
