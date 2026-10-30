@@ -75,7 +75,7 @@ try {
   for (const key of ['lstatSync', 'readFileSync', 'readdirSync', 'realpathSync', 'unlinkSync', 'rmdirSync']) wrap(physical, key, 'fs.' + key)
   wrap(physical.realpathSync, 'native', 'fs.realpathSync.native')
   for (const key of ['lstat', 'readFile', 'readdir', 'realpath', 'open']) wrap(physical.promises, key, 'fs.promises.' + key, true)
-  for (const key of ['isOwnedDirectory', 'isOwnedFile', 'isExistingDataDirectory', 'isPrivateFile', 'inspectProcess', 'inspectProgramReferences'])
+  for (const key of ['isOwnedDirectory', 'isOwnedFile', 'isExistingDataDirectory', 'isPrivateFile', 'inspectProcess', 'tryFileLock', 'releaseFileLock', 'inspectProgramReferences'])
     wrap(identity, key, 'native.' + key, key === 'inspectProgramReferences')
   const start = performance.now(); console.log('CRABOT_REMOVAL_PROFILE_BEGIN')
   result = await removeDesktopRemovalPrograms({ installRoot: own.root, operationId: id })
