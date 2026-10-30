@@ -4,6 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { ProxyManager } from 'crabot-shared'
 import { SlackOnboarder } from '../src/onboard.js'
 import { SLACK_MANIFEST } from '../src/cli-project.js'
 import { cliEnvironment, ensureCli, type CliJob } from '../src/cli-tools.js'
@@ -168,6 +169,25 @@ describe('local Slack onboarding contract', () => {
     expect(SLACK_MANIFEST.settings).toMatchObject({ token_rotation_enabled: false, socket_mode_enabled: true })
     expect(SLACK_MANIFEST.settings.event_subscriptions.bot_events).toEqual(['message.channels', 'message.groups', 'message.im'])
   })
+  it('passes a detected native proxy to its CLI without overwriting an inherited shell proxy', () => {
+    const keys = ['HTTPS_PROXY', 'HTTP_PROXY', 'https_proxy', 'http_proxy']
+    const original = Object.fromEntries(keys.map(key => [key, process.env[key]]))
+    const detect = vi.spyOn(ProxyManager, 'resolveSystemProxyUrl').mockReturnValue('http://127.0.0.1:17890')
+    try {
+      for (const key of keys) delete process.env[key]
+      const detected = cliEnvironment({ mode: 'system' })
+      expect(detected.HTTP_PROXY).toBe('http://127.0.0.1:17890')
+      expect(detected.HTTPS_PROXY).toBe('http://127.0.0.1:17890')
+      process.env.http_proxy = 'http://shell.example:8080'
+      const inherited = cliEnvironment({ mode: 'system' })
+      expect(inherited.http_proxy).toBe('http://shell.example:8080')
+      expect(inherited.HTTPS_PROXY).toBeUndefined()
+    } finally {
+      detect.mockRestore()
+      for (const key of keys) { if (original[key] === undefined) delete process.env[key]; else process.env[key] = original[key] }
+    }
+  })
+
   it('does not pass unrelated runtime credentials to CLI children', () => {
     const original = process.env.SLACK_APP_TOKEN
     process.env.SLACK_APP_TOKEN = 'xapp-do-not-inherit'

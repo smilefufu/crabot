@@ -7,7 +7,7 @@ import { proxyService, type ProxyConfig } from '../../services/proxy'
 type ProxyMode = ProxyConfig['mode']
 
 const MODES: ReadonlyArray<{ value: ProxyMode; title: string; hint: string }> = [
-  { value: 'system', title: '系统代理', hint: '读取环境变量 HTTPS_PROXY / HTTP_PROXY' },
+  { value: 'system', title: '系统代理', hint: '优先使用代理环境变量；macOS 无变量时读取系统 HTTP/HTTPS 代理' },
   { value: 'custom', title: '自定义代理', hint: '指定代理服务器地址' },
   { value: 'none', title: '不使用代理', hint: '直接连接' },
 ]
@@ -50,8 +50,16 @@ export const ProxyConfigCard: React.FC = () => {
     }
 
     proxyService.updateConfig(config)
-      .then(() => {
-        toast.success('代理配置已更新并推送至所有模块')
+      .then(async () => {
+        toast.success('代理配置已保存并应用')
+        if (config.mode !== 'system') { setSystemProxyUrl(null); return }
+        try {
+          const current = await proxyService.getConfig()
+          setSystemProxyUrl(current.system_proxy_url)
+        } catch {
+          setSystemProxyUrl(null)
+          toast.error('配置已保存，但代理检测结果读取失败，请重新打开此页面查看')
+        }
       })
       .catch(() => {
         toast.error('更新代理配置失败')
@@ -91,7 +99,8 @@ export const ProxyConfigCard: React.FC = () => {
               <div className="proxy-config__detail">
                 {systemProxyUrl
                   ? <>当前系统代理：<code>{systemProxyUrl}</code></>
-                  : '未检测到系统代理环境变量'}
+                  : '未检测到可用的系统代理；可检查系统设置或使用自定义代理。'}
+                <p>系统代理更改后，点击“保存”重新检测并应用。暂不支持 PAC 自动配置和仅 SOCKS 的系统代理。</p>
               </div>
             )}
 

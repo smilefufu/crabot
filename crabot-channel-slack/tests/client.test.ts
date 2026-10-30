@@ -10,9 +10,23 @@ vi.mock('@slack/socket-mode', () => ({ SocketModeClient: class {
   start = state.start
   disconnect = state.stop
 } }))
+import { proxyManager } from 'crabot-shared'
 import { SlackClient, platformError } from '../src/slack-client.js'
 beforeEach(() => { state.handlers.clear(); vi.clearAllMocks() })
 describe('Slack official SDK boundary',()=>{
+  it('routes socket connections through the currently configured shared dispatcher rather than an SDK direct Agent', () => {
+    new SlackClient('xoxb-fixture', 'xapp-fixture')
+    expect(state.socketOptions.dispatcher).toBeDefined()
+    const first = { dispatch: vi.fn(() => true) }, second = { dispatch: vi.fn(() => true) }
+    const current = vi.spyOn(proxyManager, 'getDispatcher').mockReturnValueOnce(first as never).mockReturnValueOnce(second as never)
+    try {
+      const options = { origin: 'https://fixture.invalid', path: '/', method: 'GET' }, handler = {}
+      state.socketOptions.dispatcher.dispatch(options, handler)
+      state.socketOptions.dispatcher.dispatch(options, handler)
+      expect(first.dispatch).toHaveBeenCalledWith(options, handler)
+      expect(second.dispatch).toHaveBeenCalledWith(options, handler)
+    } finally { current.mockRestore() }
+  })
   it('uses SDK v3 slack_event, ACKs before dispatch and bounds retries',async()=>{
     const client = new SlackClient('xoxb-secret','xapp-secret'), deliver=vi.fn().mockRejectedValueOnce(new Error('MM down')).mockResolvedValue(undefined), ack=vi.fn()
     await client.start(deliver)

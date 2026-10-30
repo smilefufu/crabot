@@ -1,7 +1,8 @@
-import { afterEach, expect, it } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { ProxyManager } from 'crabot-shared'
 // Exercise the actual compiled supervisor, not a mock child_process.
 import { startCli } from '../dist/cli-tools.js'
 let root: string
@@ -48,3 +49,20 @@ it('stops its CLI tree when the owning Admin-like parent is forcibly lost', asyn
     expect(pids.some(live)).toBe(false)
   } finally { owner.kill('SIGKILL') }
 }, 30000)
+
+it('passes the detected system proxy into an actual isolated CLI child process', async () => {
+  root = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-slack-proxy-child-'))
+  const keys = ['HTTPS_PROXY', 'HTTP_PROXY', 'https_proxy', 'http_proxy']
+  const original = Object.fromEntries(keys.map(key => [key, process.env[key]]))
+  const detect = vi.spyOn(ProxyManager, 'resolveSystemProxyUrl').mockReturnValue('http://127.0.0.1:17890')
+  try {
+    for (const key of keys) delete process.env[key]
+    job = startCli(process.execPath, ['-e', 'console.log(JSON.stringify({http:process.env.HTTP_PROXY,https:process.env.HTTPS_PROXY}))'], root, { mode: 'system' })
+    const result = await job.result
+    expect(result.code).toBe(0)
+    expect(JSON.parse(result.output)).toEqual({ http: 'http://127.0.0.1:17890', https: 'http://127.0.0.1:17890' })
+  } finally {
+    detect.mockRestore()
+    for (const key of keys) { if (original[key] === undefined) delete process.env[key]; else process.env[key] = original[key] }
+  }
+})

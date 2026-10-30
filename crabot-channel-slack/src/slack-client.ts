@@ -1,6 +1,6 @@
 import { SocketModeClient } from '@slack/socket-mode'
 import { WebClient, LogLevel } from '@slack/web-api'
-import { RpcError } from 'crabot-shared'
+import { RpcError, proxyManager } from 'crabot-shared'
 import type { SlackApi, SlackEnvelope, SlackResult } from './types.js'
 
 // Do not let SDK logs expose tokens, websocket URLs, or raw message payloads.
@@ -21,7 +21,8 @@ export class SlackClient implements SlackApi {
   private readonly socket: SocketModeClient
   constructor(botToken: string, appToken: string) {
     this.web = new WebClient(botToken, { logger, timeout: 15000, maxRequestConcurrency: 1, retryConfig: { retries: 0 }, rejectRateLimitedCalls: true, allowAbsoluteUrls: false })
-    this.socket = new SocketModeClient({ appToken, logger, autoReconnectEnabled: true, clientOptions: { timeout: 15000, retryConfig: { retries: 2 }, rejectRateLimitedCalls: true } })
+    this.socket = new SocketModeClient({ appToken, logger, autoReconnectEnabled: true,
+      dispatcher: { dispatch: (options, handler) => proxyManager.getDispatcher().dispatch(options, handler) }, clientOptions: { timeout: 15000, retryConfig: { retries: 2 }, rejectRateLimitedCalls: true } })
     this.socket.on('connected', () => { this.connected = true })
     for (const name of ['disconnected', 'reconnecting', 'error']) this.socket.on(name, () => { this.connected = false })
   }

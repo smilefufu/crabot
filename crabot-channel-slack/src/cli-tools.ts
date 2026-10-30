@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { fork, execFile } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
-import { proxyManager, type ProxyConfig } from 'crabot-shared'
+import { ProxyManager, proxyManager, type ProxyConfig } from 'crabot-shared'
 const execute = promisify(execFile)
 export const CLI_VERSION = '4.11.0'
 const RELEASE = `https://github.com/slackapi/slack-cli/releases/download/v${CLI_VERSION}/`
@@ -37,7 +37,12 @@ export function cliEnvironment(config?: ProxyConfig): NodeJS.ProcessEnv {
     if (process.env[key] !== undefined) env[key] = process.env[key]
   }
   const proxy = config ?? proxyManager.getConfig()
-  if (proxy.mode !== 'system') {
+  if (proxy.mode === 'system') {
+    if (!env.HTTPS_PROXY && !env.HTTP_PROXY && !env.https_proxy && !env.http_proxy) {
+      const detected = ProxyManager.resolveSystemProxyUrl()
+      if (detected) env.HTTPS_PROXY = env.HTTP_PROXY = detected
+    }
+  } else {
     for (const key of ['http_proxy', 'https_proxy', 'all_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']) delete env[key]
     if (proxy.mode === 'custom' && proxy.custom_url) env.HTTPS_PROXY = env.HTTP_PROXY = proxy.custom_url
   }

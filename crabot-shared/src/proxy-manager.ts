@@ -9,8 +9,9 @@
  */
 
 import https from 'node:https'
+import childProcess from 'node:child_process'
 import net from 'node:net'
-import { setGlobalDispatcher, ProxyAgent, Agent, Dispatcher } from 'undici'
+import { getGlobalDispatcher, setGlobalDispatcher, ProxyAgent, Agent, Dispatcher } from 'undici'
 import { HttpsProxyAgent } from 'https-proxy-agent'
 import type { ProxyConfig } from './base-protocol.js'
 
@@ -112,7 +113,38 @@ class RoutingDispatcher extends Dispatcher {
   }
 }
 
+function readMacOSFixedProxy(): string | null {
+  try {
+    const output = childProcess.execFileSync('/usr/sbin/scutil', ['--proxy'], {
+      encoding: 'utf8', timeout: 2000, maxBuffer: 65536, stdio: ['ignore', 'pipe', 'ignore'],
+    })
+    const values: Record<string, string> = {}
+    let depth = 0
+    for (const line of output.split('\n')) {
+      const entry = line.trim()
+      if (entry.endsWith('{')) { depth++; continue }
+      if (entry === '}') { depth--; continue }
+      if (depth !== 1) continue
+      const match = entry.match(/^(HTTPSEnable|HTTPSProxy|HTTPSPort|HTTPEnable|HTTPProxy|HTTPPort)\s*:\s*(.*?)\s*$/)
+      if (match) values[match[1]] = match[2]
+    }
+    for (const scheme of ['HTTPS', 'HTTP']) {
+      const host = values[scheme + 'Proxy'], port = Number(values[scheme + 'Port'])
+      if (values[scheme + 'Enable'] !== '1' || !host || /[\s/@?#\\]/.test(host)
+        || !Number.isInteger(port) || port < 1 || port > 65535) continue
+      try {
+        const hostname = net.isIP(host) === 6 ? `[${host}]` : host
+        // The system HTTPS entry is an HTTP CONNECT proxy, not a TLS proxy URL.
+        const url = new URL(`http://${hostname}:${port}`)
+        return url.origin
+      } catch { /* Try the other enabled fixed proxy entry. */ }
+    }
+  } catch { /* A missing/unavailable system setting must not block local Admin. */ }
+  return null
+}
+
 export class ProxyManager {
+  private static nativeSystemProxyUrl: string | null | undefined
   private config: ProxyConfig = { mode: 'system' }
   private cachedHttpsAgent: https.Agent | InstanceType<typeof HttpsProxyAgent> | null = null
 
@@ -123,6 +155,7 @@ export class ProxyManager {
   updateConfig(config: ProxyConfig): void {
     this.config = config
     this.cachedHttpsAgent = null
+    if (config.mode === 'system') ProxyManager.nativeSystemProxyUrl = undefined
 
     const url = this.resolveProxyUrl(config)
     if (url) {
@@ -149,15 +182,18 @@ export class ProxyManager {
     return this.config
   }
 
-  /**
-   * 获取系统代理 URL（从环境变量读取）
-   */
+  /** 环境变量保持原优先级；macOS 固定系统代理在首次使用/保存 system 时检测。 */
   static resolveSystemProxyUrl(): string | null {
-    return process.env.HTTPS_PROXY
-      || process.env.HTTP_PROXY
-      || process.env.https_proxy
-      || process.env.http_proxy
-      || null
+    const inherited = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || process.env.https_proxy || process.env.http_proxy
+    if (inherited) return inherited
+    if (process.platform !== 'darwin') return null
+    if (this.nativeSystemProxyUrl === undefined) this.nativeSystemProxyUrl = readMacOSFixedProxy()
+    return this.nativeSystemProxyUrl
+  }
+
+  /** SDK 自有连接也使用当前网络出口；不捕获旧配置的 dispatcher。 */
+  getDispatcher(): Dispatcher {
+    return getGlobalDispatcher()
   }
 
   /**

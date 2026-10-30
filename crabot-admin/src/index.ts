@@ -7768,7 +7768,7 @@ export class AdminModule extends ModuleBase {
 
   private async handleGetProxyConfigApi(_req: IncomingMessage, res: ServerResponse): Promise<void> {
     const config = this.modelProviderManager.getProxyConfig()
-    const systemProxyUrl = ProxyManager.resolveSystemProxyUrl()
+    const systemProxyUrl = config.mode === 'system' ? ProxyManager.resolveSystemProxyUrl() : null
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ config, system_proxy_url: systemProxyUrl }))
   }
