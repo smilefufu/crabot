@@ -34,6 +34,8 @@ jobs:
           path: .desktop-build/prior-candidate
       - name: Extract the unchanged sealed candidate
         run: node .github/scripts/replay-windows-installer.mjs .desktop-build/prior-candidate
+      - name: Probe actual target stopped-record environment
+        run: node .github/scripts/probe-windows-takeover-environment.mjs 2>&1 | tee .desktop-build/windows-environment-probe.log
       - name: Replay actual v14 takeover with target stderr
         run: node .github/scripts/verify-legacy-user-takeover.mjs .desktop-build/manual/paired .desktop-build/manual/installer v2026.10.14.1 2>&1 | tee .desktop-build/windows-replay.log
       - uses: actions/upload-artifact@v4
