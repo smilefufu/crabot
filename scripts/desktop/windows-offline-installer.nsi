@@ -43,12 +43,14 @@ FunctionEnd
 Section "安装 Crabot"
   StrCpy $CrabotTarget "$INSTDIR"
   InitPluginsDir
-  StrCpy $INSTDIR "$PLUGINSDIR\crabot-installer"
+  ; Keep the private destination shorter than the extractor staging path.
+  ; Shell CopyFiles otherwise drops long payload paths before the GUI starts.
+  StrCpy $INSTDIR "$PLUGINSDIR\i"
   SetOutPath "$INSTDIR"
   !insertmacro extractEmbeddedAppPackage
   ExecWait '"$INSTDIR\${APP_EXECUTABLE_FILENAME}" "--install-root=$CrabotTarget\."' $0
   SetOutPath "$EXEDIR"
-  RMDir /r "$PLUGINSDIR\crabot-installer"
+  RMDir /r "$PLUGINSDIR\i"
   StrCpy $INSTDIR "$CrabotTarget"
   SetErrorLevel $0
   ${If} $0 != 0
