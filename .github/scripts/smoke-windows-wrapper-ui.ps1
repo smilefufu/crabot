@@ -69,7 +69,10 @@ try {
     Write-Output "CRABOT_WINDOWS_WRAPPER_UI installation_completed"
     break
    }
-   if ($all.Contains('安装尚未完成')) { throw "Real installation failed: $all" }
+   if ($all.Contains('安装尚未完成')) {
+    $details = & "$env:SystemRoot/System32/WindowsPowerShell/v1.0/powershell.exe" -NoProfile -NonInteractive -File (Join-Path $PSScriptRoot 'read-windows-dialog.ps1') -Handle $window.ToInt64()
+    throw "Real installation failed: $all`n$details"
+   }
    if ($clicked -lt 2) {
     $next = [WrapperUI]::GetDlgItem($window,1)
     if ($next -ne [IntPtr]::Zero -and [WrapperUI]::IsWindowEnabled($next)) {
