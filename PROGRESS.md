@@ -10,7 +10,9 @@
 - 自动化结果已收齐：40824815154的Linux/ARM/Intel完整产品及Ubuntu24原生安装成功；Windows原组的签名更新/完整卸载重装成功，因180分钟CI总预算取消的CLI/Host尾部已在62feb5f8/40845185103独立通过。原组仍记cancelled；只修未来Windows产品CI总预算，不改产品期限/断言。临时尾部workflow仅保留测试分支，不进入产品PR；不能用之前分支/局部通过代替最终组合。真实mirror-xinshu的Engine/Worker两链8次响应已通过，GUI/渠道模型与脚本业务仍须分开验收。ARM Mac/Win11由用户手测，缺资源的最低OS/Ubuntu桌面项按许可跳过披露；候选关闭正式自动更新，公开通道及正式信任根未就绪。
 - 安装路径表已区分历史源码/新dev、旧/新release、GUI/CLI及system；新版独立CLI加GUI、旧CLI首次跨代和历史源码/system升级的未覆盖项如实列明。完整测试及最终diff review后才按已有1–50依赖批次和新增源码/Mac批次开PR，每批独立构建验证，不直推产品main、不自行合并。详细证据见[本轮实施结果](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-29-development-macos-implementation.md)。
 
-### 桌面真机反馈：ARM Mac desktop.5与Windows desktop.6已交付
+### 桌面真机反馈：ARM Mac desktop.5可继续手测；Windows desktop.6现场未通过
+
+- Windows desktop.6现场仍出现外层Retry、内层接管弹窗被外层等待掩盖、复制阶段长时间无细进度及接管未核验失败；此前CI通过不等于现场验收。已用实际6版在全新4GiB虚拟TEMP原生复现同一Retry（41023965752），确认重复解包/复制及容量漏算，局部修复与原生验证在进行。当前接管失败原因未定，已请求只读阶段信息；不能宣称已恢复旧服务或已解决。按用户反馈审查安装与首启接管边界、重复全量核验，不直接重发仅修解包的包冒充解决。超深人工TEMP另有Win32路径限制，不记通过。
 
 - 首个模型服务保存后明确进入默认模型选择，显示服务/模型数量和当前步骤，不再突出重复添加；不改模型引用、默认值保存或费用触发。新增回归先复现失败，修复后模型与Slack页面11项回归、Web类型检查和生产构建通过。修复在桌面worktree完成，已随desktop.4交付；desktop.3保留，本机未部署。
 - Slack复制修复：主界面Session原先一律拒绝，误阻断clipboard-sanitized-write；现仅受信主窗口允许写，读取/外来页面/子frame仍拒绝。命令改只读纯文本框，复制拒绝或API不可用时选中并提示快捷键，手动复制只提供text/plain。新增3项Web回归先红，修复后相关14项、桌面权限/IPC7项、两端类型及Web生产构建通过；独立Electron44原生权限对照写denied→granted、读始终denied、正常退出0，未读写本机剪贴板或启动MM。已随desktop.4交付，desktop.3保留。
