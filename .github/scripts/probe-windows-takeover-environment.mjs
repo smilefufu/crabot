@@ -15,8 +15,8 @@ await stoppedLegacyModules(data)
 const parent = { ...process.env, HOME: home, USERPROFILE: home, APPDATA: path.join(home, 'Roaming'), LOCALAPPDATA: path.join(home, 'Local'), PATH: path.join(process.env.SystemRoot, 'System32') }
 const env = Object.fromEntries(Object.entries(parent).filter(([name]) => /^(PATH|HOME|USER|LOGNAME|USERPROFILE|APPDATA|LOCALAPPDATA|SYSTEMROOT|WINDIR|COMSPEC|PATHEXT|TEMP|TMP|TMPDIR|LANG|LC_.*|HTTPS?_PROXY|ALL_PROXY|NO_PROXY)$/i.test(name)))
 const script = `
-import path from 'node:path';import { promisify } from 'node:util';import { execFile } from 'node:child_process';
-const source=JSON.parse(process.argv[1]),base=JSON.parse(process.argv[2]),ps=path.join(base.SystemRoot||base.WINDIR,'System32/WindowsPowerShell/v1.0/powershell.exe');
+import { readFile } from 'node:fs/promises';import path from 'node:path';import { promisify } from 'node:util';import { execFile } from 'node:child_process';
+const {source,base}=JSON.parse(await readFile(process.argv[1],'utf8')),ps=path.join(base.SystemRoot||base.WINDIR,'System32/WindowsPowerShell/v1.0/powershell.exe');
 const names=['PSModulePath','SystemDrive','ProgramFiles','ProgramFiles(x86)','ProgramW6432','ProgramData'];
 const get=name=>Object.entries(source).find(([key])=>key.toLowerCase()===name.toLowerCase());
 const select=names=>Object.fromEntries(names.map(get).filter(Boolean));
@@ -25,8 +25,9 @@ const script="$ErrorActionPreference='Stop'; $p=Get-CimInstance Win32_Process -F
 const results=await Promise.all(Object.entries(modes).map(async([mode,env])=>{const started=Date.now();console.log('CRABOT_QUERY_BEGIN',mode);try{const result=await promisify(execFile)(ps,['-NoProfile','-NonInteractive','-Command',script],{env,windowsHide:true,timeout:20000,maxBuffer:128000});const record={mode,elapsed_ms:Date.now()-started,success:true,...result};console.log('CRABOT_QUERY_RESULT',JSON.stringify(record));return record}catch(e){const record={mode,elapsed_ms:Date.now()-started,success:false,code:e.code,killed:e.killed,signal:e.signal,stdout:e.stdout,stderr:e.stderr};console.log('CRABOT_QUERY_RESULT',JSON.stringify(record));return record}}));
 if(results.some(result=>!result.success))process.exitCode=1;
 `
+const input = path.join(home, 'environment.json'); await fs.writeFile(input, JSON.stringify({source:parent,base:env}), {mode:0o600})
 try {
-  const result = await execute(path.join(core, '.product-runtime/node/node.exe'), ['--input-type=module', '--eval', script, JSON.stringify(parent), JSON.stringify(env)], { cwd: core, env, timeout: 45000, maxBuffer: 128000 })
+  const result = await execute(path.join(core, '.product-runtime/node/node.exe'), ['--input-type=module', '--eval', script, input], { cwd: core, env, timeout: 45000, maxBuffer: 128000 })
   process.stdout.write(result.stdout); process.stderr.write(result.stderr)
-} catch (error) { process.stdout.write(error.stdout || ''); process.stderr.write(error.stderr || ''); throw error }
+} catch (error) { process.stdout.write(error.stdout || ''); process.stderr.write(error.stderr || ''); throw new Error('Bounded target environment query failed') }
 finally { await fs.rm(home, { recursive: true, force: true }) }
