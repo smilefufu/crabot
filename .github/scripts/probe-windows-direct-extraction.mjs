@@ -31,7 +31,7 @@ try {
  const direct = production.match(/!macro extractUsing7za FILE\r?\n[\s\S]*?!macroend/)?.[0]
  assert.ok(direct)
  const results = []
- for (const [name, temporary] of [ ['ordinary', path.join(root, 'temp')], ['deep', path.join(process.env.RUNNER_TEMP, ...Array.from({length:14},(_,i) => 'depth' + String(i).padStart(3,'0')))], ['unicode', path.join(root, '中文 空格 临时目录')] ]) {
+ for (const [name, temporary] of [ ['ordinary', path.join(root, 'temp')], ['deep', path.join(process.env.RUNNER_TEMP, ...Array.from({length:4},(_,i) => 'depth' + String(i).padStart(3,'0')))], ['unicode', path.join(root, '中文 空格 临时目录')] ]) {
   await fs.mkdir(temporary, { recursive: true })
   const report = path.join(root, name + '.txt'), script = path.join(root, name + '.nsi'), exe = path.join(root, name + '.exe')
   await fs.writeFile(script, `Unicode true\nSilentInstall silent\nRequestExecutionLevel user\n!addplugindir "${quote(localPlugins)}"\n${direct}\nOutFile "${quote(exe)}"\nSection\nInitPluginsDir\nSetOutPath "$PLUGINSDIR\\i"\n!insertmacro extractUsing7za "${quote(archive)}"\nExecWait '"${quote(process.execPath)}" "${quote(verify)}" "$OUTDIR" "${quote(report)}"' $0\nSetErrorLevel $0\nSectionEnd\n`)

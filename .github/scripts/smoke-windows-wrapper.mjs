@@ -45,6 +45,8 @@ try {
   const macro = path.join(root, 'extract.nsh')
   await fs.writeFile(macro, original.replace('    DetailPrint `Can', '    FileWrite $ProbeLog "copy-error$\\r$\\n"\n    DetailPrint `Can'))
   const source = await fs.readFile('scripts/desktop/windows-offline-installer.nsi', 'utf8')
+  const direct = source.match(/!macro extractUsing7za FILE\r?\n[\s\S]*?!macroend/)?.[0]
+  assert.ok(direct)
   const leaf = source.match(/StrCpy \$INSTDIR "\$PLUGINSDIR\\([^"\\]+)"/)?.[1]
   assert.ok(leaf && source.includes(`RMDir /r "$PLUGINSDIR\\${leaf}"`))
   const relative = 'resources/offline/core/.scrapling-runtime-desktop-ci-b21869a0a229da99-8413626c/packages/playwright/driver/package/lib/tools/skills/playwright-component-testing/references/gallery-spec.md'
@@ -92,6 +94,7 @@ RequestExecutionLevel user
 !define PRODUCT_NAME "Crabot Installer"
 LangString appCannotBeClosed 1033 "Cannot close installer"
 !include "${quote(macro)}"
+${name === 'legacy-path' ? '' : '!macroundef extractUsing7za\n' + direct}
 OutFile "${quote(executable)}"
 Var ProbeLog
 Section
