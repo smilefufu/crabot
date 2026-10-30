@@ -2147,7 +2147,9 @@ for (const registrationFails of [false, true]) test('legacy installer Node hando
     if (registrationFails && registered === 1) throw new Error('controlled registration failure')
   } })
   if (registrationFails) {
-    await assert.rejects(run())
+    await assert.rejects(run(), error => {
+      assert.equal(error.cause?.message, 'controlled registration failure'); return true
+    })
     await assert.rejects(fs.stat(path.join(f.target, 'current-release.json')), { code: 'ENOENT' })
     const { discoverLegacyDesktopTakeover } = await import('../legacy-desktop-discovery.mjs')
     const source = await discoverLegacyDesktopTakeover({ root: f.target })

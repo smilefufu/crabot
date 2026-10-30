@@ -83,13 +83,14 @@ export async function runPreparedLegacyDesktopTakeover({ prepared, entryFenceId,
     })
     child.on('message', message => {
       try {
-        if (failed || !message || typeof message !== 'object') return stop(fail())
+        if (!message || typeof message !== 'object') return stop(fail())
+        if (failed && message.type !== 'failure') return stop(fail())
         if (message.type === 'progress' && phases.includes(message.phase) && !registered && !registering) {
           if (message.phase === 'switching' || message.phase === 'converting') critical = true
           try { progress(message.phase) } catch (error) { stop(error) }
         } else if (message.type === 'failure' && !result && Object.keys(message).sort().join(',') === 'code,type'
           && typeof message.code === 'string' && /^[A-Z][A-Z0-9_]{0,127}$/.test(message.code)) {
-          failed = Object.assign(new Error(message.code), { code: message.code })
+          failed ??= Object.assign(new Error(message.code), { code: message.code })
         } else if (message.type === 'register-entries' && !registering && !registered) {
           const own = installation.readDesktopInstallation(prepared.installation.installRoot)
           const expected = { installRoot: own.root, installation_id: own.record.installation_id,
