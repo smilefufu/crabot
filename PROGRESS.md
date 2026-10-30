@@ -10,7 +10,7 @@
 - 自动化结果已收齐：40824815154的Linux/ARM/Intel完整产品及Ubuntu24原生安装成功；Windows原组的签名更新/完整卸载重装成功，因180分钟CI总预算取消的CLI/Host尾部已在62feb5f8/40845185103独立通过。原组仍记cancelled；只修未来Windows产品CI总预算，不改产品期限/断言。临时尾部workflow仅保留测试分支，不进入产品PR；不能用之前分支/局部通过代替最终组合。真实mirror-xinshu的Engine/Worker两链8次响应已通过，GUI/渠道模型与脚本业务仍须分开验收。ARM Mac/Win11由用户手测，缺资源的最低OS/Ubuntu桌面项按许可跳过披露；候选关闭正式自动更新，公开通道及正式信任根未就绪。
 - 安装路径表已区分历史源码/新dev、旧/新release、GUI/CLI及system；新版独立CLI加GUI、旧CLI首次跨代和历史源码/system升级的未覆盖项如实列明。完整测试及最终diff review后才按已有1–50依赖批次和新增源码/Mac批次开PR，每批独立构建验证，不直推产品main、不自行合并。详细证据见[本轮实施结果](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-29-development-macos-implementation.md)。
 
-### 桌面真机反馈：ARM Mac desktop.5已交付，Windows安装兼容修复验收中
+### 桌面真机反馈：ARM Mac desktop.5与Windows desktop.6已交付
 
 - 首个模型服务保存后明确进入默认模型选择，显示服务/模型数量和当前步骤，不再突出重复添加；不改模型引用、默认值保存或费用触发。新增回归先复现失败，修复后模型与Slack页面11项回归、Web类型检查和生产构建通过。修复在桌面worktree完成，已随desktop.4交付；desktop.3保留，本机未部署。
 - Slack复制修复：主界面Session原先一律拒绝，误阻断clipboard-sanitized-write；现仅受信主窗口允许写，读取/外来页面/子frame仍拒绝。命令改只读纯文本框，复制拒绝或API不可用时选中并提示快捷键，手动复制只提供text/plain。新增3项Web回归先红，修复后相关14项、桌面权限/IPC7项、两端类型及Web生产构建通过；独立Electron44原生权限对照写denied→granted、读始终denied、正常退出0，未读写本机剪贴板或启动MM。已随desktop.4交付，desktop.3保留。
@@ -23,7 +23,7 @@
 
 - 代理旧实现先复现Shared6项、CLI1项、设置页2项失败；修复后本地CONNECT实证fetch/HTTP Agent及Slack SDK真实WebSocket走代理、loopback直连，实际受管子进程得到代理。Shared全集350项通过/2平台跳过（含新增13项），Slack38、Web456、Admin定向77项通过，相关类型/构建通过；本机独立Node清空代理变量仍读取原生代理，正常TLS请求Slack公开api.test为200/ok=true；另一台Mac的FlClash现场另计，未改本机部署。
 - ARM Mac desktop.5（58f39f1f）已直接交付Downloads/Crabot桌面验收包-20261030/ARM Mac；原生构建、源码冷启动及GUI/release共存全过，DMG只读核验Core全量清单、代理/Slack接线、Cookie fuse及ad-hoc完整性并卸载。Windows已确认官方v14/v15安装脚本改写crabot.cmd造成发现器误拒绝，精确补认官方入口并保持实际字节指纹/取消恢复；移除目录框错误的promptToCreate。Windows原生46项入口/兼容回归通过、3平台项跳过，目录框8项通过。
-- 外层Windows安装已实证两项缺陷：长临时目的路径丢文件，缩短私有叶目录；完整包两项pip ARM入口使用ARM64过滤而NSIS解码器不支持，固定BCJ后同一约2.095GB Core/GUI全量校验通过（41006597997）。新desktop.6源4835eff3/41007892155完整重打和原生解包、v14实际接管、共存、真实EXE界面验收中，尚未交付或记最终通过。约231GiB空闲，本机源码未停机/升级/接管，主仓未推main。
+- 外层Windows安装已实证两项缺陷：长临时目的路径丢文件，缩短私有叶目录；pip ARM启动器使用默认ARM64过滤而NSIS解码器不支持，固定BCJ后保留完整载荷。新desktop.6源4835eff3已直接交付Downloads/Crabot桌面验收包-20261030/Windows 11，包/副本SHA一致；41007892155的source/installer作业通过完整解包、官方v14真实接管/凭据历史workspace保留、原CLI/GUI同实例、源码/release共存和保留数据重装。整体run仍记cancelled（仅取消旧UI驱动）；同一EXE独立41014365116实际点击安装、跨盘空格目录、完成、退出0且无Retry。模拟profile从共享D盘改到真实用户Temp后登记通过，产品归属检查未改。Win11普通账号/业务仍由用户手测；Mac5保持。本机约231GiB空闲，源码未停机/升级/接管，产品main未推送。分层证据及校验见[本轮Windows记录](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-30-windows-installation-feedback-fixes.md)。
 
 ### 渠道实例名大写误拒绝：bug 修复完成，未部署
 
