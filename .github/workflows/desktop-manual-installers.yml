@@ -4,15 +4,17 @@ on:
 permissions:
   contents: read
 jobs:
-  line:
+  powershell5:
     runs-on: windows-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        shell: [powershell, pwsh]
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - name: Parse and execute exact copied command
-        shell: ${{ matrix.shell }}
+      - shell: powershell
+        run: ./.github/scripts/check-windows-diagnostic-line.ps1
+  powershell7:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - shell: pwsh
         run: ./.github/scripts/check-windows-diagnostic-line.ps1

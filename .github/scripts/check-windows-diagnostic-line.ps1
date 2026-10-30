@@ -36,7 +36,7 @@ try {
    }
   }
   $after = @(Get-ChildItem $env:USERPROFILE -File -Recurse -ErrorAction SilentlyContinue | Get-FileHash | ForEach-Object { $_.Path + ':' + $_.Hash })
-  if (Compare-Object $before $after) { throw 'Diagnostic command changed fixture files' }
+  if (($before -join "`n") -ne ($after -join "`n")) { throw 'Diagnostic command changed fixture files' }
   Write-Output ('CRABOT_DIAGNOSTIC_LINE_PASS version=' + $PSVersionTable.PSVersion + ' case=' + $case)
  }
 } finally {
