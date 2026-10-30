@@ -1,7 +1,9 @@
 param([Parameter(Mandatory=$true)][string]$Installer)
 $ErrorActionPreference = 'Stop'
 $Installer = (Resolve-Path $Installer).Path
-$homeRoot = Join-Path $env:RUNNER_TEMP ('wrapper-home-' + [guid]::NewGuid().ToString('N'))
+# A simulated user profile must inherit the real user's private temp ACL,
+# rather than the runner's shared workspace volume. The selected app root stays on D:.
+$homeRoot = Join-Path ([IO.Path]::GetTempPath()) ('wrapper-home-' + [guid]::NewGuid().ToString('N'))
 $env:USERPROFILE = $homeRoot
 $env:HOME = $homeRoot
 $env:APPDATA = Join-Path $homeRoot 'AppData/Roaming'
