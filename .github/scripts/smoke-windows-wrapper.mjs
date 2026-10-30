@@ -56,8 +56,10 @@ try {
   const verify = path.join(root, 'verify.mjs'), verified = path.join(root, 'verified.json')
   await fs.writeFile(verify, `import { promises as fs } from 'node:fs'; import path from 'node:path';
 import { verifyDesktopPayload } from ${JSON.stringify(pathToFileURL(path.join(repo, 'scripts/lib/desktop-payload.mjs')).href)};
+try {
 const payload = await verifyDesktopPayload(path.join(process.argv[2], 'resources/offline'));
-await fs.writeFile(process.argv[3], JSON.stringify({ complete: true, bytes: String(payload.bytes) }));`)
+await fs.writeFile(process.argv[3], JSON.stringify({ complete: true, bytes: String(payload.bytes) }));
+} catch (error) { await fs.writeFile(process.argv[3], JSON.stringify({ complete: false, error: error.stack })); process.exitCode = 1; }`)
   async function probe(name, selectedLeaf, input, full) {
     const log = path.join(root, name + '.txt'), script = path.join(root, name + '.nsi'), executable = path.join(root, name + '.exe')
     await fs.writeFile(script, `Unicode true
@@ -91,7 +93,8 @@ SectionEnd
   assert.ok(!after.includes('copy-error'))
   const complete = await probe('full-package', leaf, archive, true)
   assert.ok(!complete.includes('copy-error'), 'The full package must not enter the Retry branch')
-  assert.ok(complete.includes('verify-exit=0'))
+  console.log('CRABOT_WINDOWS_WRAPPER_VERIFY ' + JSON.stringify({ result: complete, verification: await fs.readFile(verified, 'utf8').catch(error => error.message) }))
+  assert.ok(complete.includes('verify-exit=0'), complete)
   assert.equal(JSON.parse(await fs.readFile(verified, 'utf8')).complete, true)
   console.log('CRABOT_WINDOWS_WRAPPER ' + JSON.stringify({ old_path_reproduced: true, fixed_long_path: true, full_payload_inventory: true, retry_branch: false, business_mm_started: false }))
 } finally { await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
