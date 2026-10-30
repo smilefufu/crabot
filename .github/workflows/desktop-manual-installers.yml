@@ -183,3 +183,28 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
+  windows-ui:
+    name: Actual Windows EXE installation
+    if: inputs.target == 'win32-x64' && inputs.source_only != true
+    needs: installer
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: crabot-win32-x64-offline-test-${{ github.sha }}
+          path: .desktop-build/wrapper-ui
+      - name: Install the exact candidate through its real EXE interface
+        shell: pwsh
+        run: |
+          $files = @(Get-ChildItem .desktop-build/wrapper-ui -Recurse -Filter '*desktop.6*offline-candidate.exe')
+          if ($files.Count -ne 1) { throw 'Expected the exact Windows desktop.6 installer' }
+          & .github/scripts/smoke-windows-wrapper-ui.ps1 -Installer $files[0].FullName | Tee-Object .desktop-build/windows-wrapper-ui.log
+      - name: Retain actual installer evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-wrapper-ui-acceptance-${{ github.sha }}
+          path: .desktop-build/windows-wrapper-ui.log
+          if-no-files-found: warn

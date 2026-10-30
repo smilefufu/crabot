@@ -73,6 +73,9 @@ console.log('Offline installer host built; OS distribution wrappers and final in
 
 if (args.get('--distribute') === 'true') {
   const artifacts = [], packaged = process.platform === 'darwin' ? path.resolve(resources, '../../..') : path.dirname(executable)
+  // The pinned NSIS decoder cannot decode 7zip's automatic ARM64 filter.
+  // A supported filter preserves every byte, including pip's ARM launchers.
+  if (process.platform === 'win32') process.env.ELECTRON_BUILDER_7Z_FILTER = 'BCJ'
   await build({ projectDir: output, prepackaged: process.platform === 'darwin' ? path.join(packaged, 'Crabot Installer.app') : packaged,
     publish: 'never', targets: Platform.current().createTarget(process.platform === 'darwin' ? ['dmg'] : ['nsis'], Arch[process.arch]), config: {
       appId: 'com.crabot.installer', productName: 'Crabot Installer', electronVersion: '44.9.0',

@@ -113,25 +113,10 @@ SectionEnd
   const after = await probe('fixed-path', leaf, small, false)
   assert.ok(after.includes('content=' + contents), 'The shipped private path must retain the long entry')
   assert.ok(!after.includes('copy-error'))
-  const complete = process.argv.includes('--probe-bcj') ? '' : await probe('full-package', leaf, archive, true)
+  const complete = await probe('full-package', leaf, archive, true)
   assert.ok(!complete.includes('copy-error'), 'The full package must not enter the Retry branch')
   console.log('CRABOT_WINDOWS_WRAPPER_VERIFY ' + JSON.stringify({ result: complete, verification: await fs.readFile(verified, 'utf8').catch(error => error.message) }))
-  if (process.argv.includes('--probe-bcj')) {
-    const listing = await run(sevenZip, ['l', '-slt', archive, '*t64-arm.exe', '*w64-arm.exe', '-r']);
-    console.log('CRABOT_WINDOWS_ARCHIVE_METHODS ' + listing.stdout.split(/\r?\n\r?\n/).filter(block => /[tw]64-arm\.exe/.test(block)).join('\n'));
-    const unpacked = path.join(root, 'modern-extraction'), repacked = path.join(root, 'compatible.7z');
-    await run(sevenZip, ['x', archive, '-o' + unpacked, '-y']);
-    const { verifyDesktopPayload } = await import('../../scripts/lib/desktop-payload.mjs');
-    await verifyDesktopPayload(path.join(unpacked, 'resources/offline'));
-    await run(sevenZip, ['a', '-t7z', '-mx=1', '-mf=BCJ', repacked, '.'], { cwd: unpacked });
-    await fs.rm(verified, { force: true });
-    const compatible = await probe('compatible-filter', leaf, repacked, true);
-    console.log('CRABOT_WINDOWS_COMPATIBLE_FILTER ' + JSON.stringify({ result: compatible, verification: await fs.readFile(verified, 'utf8').catch(error => error.message) }));
-    assert.ok(compatible.includes('verify-exit=0'), compatible);
-    assert.equal(JSON.parse(await fs.readFile(verified, 'utf8')).complete, true);
-  } else {
   assert.ok(complete.includes('verify-exit=0'), complete)
   assert.equal(JSON.parse(await fs.readFile(verified, 'utf8')).complete, true)
-  }
   console.log('CRABOT_WINDOWS_WRAPPER ' + JSON.stringify({ old_path_reproduced: true, fixed_long_path: true, full_payload_inventory: true, retry_branch: false, business_mm_started: false }))
 } finally { await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
