@@ -38,6 +38,9 @@ try {
   const archive = await find(path.join(root, 'wrapper'), 'app-64.7z')
   const plugin = await find(path.join(root, 'wrapper'), 'nsis7z.dll')
   assert.ok(archive && plugin)
+  const pluginDirectory = path.join(root, 'plugins')
+  await fs.mkdir(pluginDirectory)
+  await fs.copyFile(plugin, path.join(pluginDirectory, 'nsis7z.dll'))
   const original = await fs.readFile(path.join(builderRoot, 'templates/nsis/include/extractAppPackage.nsh'), 'utf8')
   const macro = path.join(root, 'extract.nsh')
   await fs.writeFile(macro, original.replace('    DetailPrint `Can', '    FileWrite $ProbeLog "copy-error$\\r$\\n"\n    DetailPrint `Can'))
@@ -61,7 +64,7 @@ await fs.writeFile(process.argv[3], JSON.stringify({ complete: true, bytes: Stri
 SilentInstall silent
 RequestExecutionLevel user
 !include "LogicLib.nsh"
-!addplugindir "${quote(path.dirname(plugin))}"
+!addplugindir "${quote(pluginDirectory)}"
 !define PRODUCT_NAME "Crabot Installer"
 LangString appCannotBeClosed 1033 "Cannot close installer"
 !include "${quote(macro)}"
