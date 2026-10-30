@@ -71,8 +71,9 @@ export async function removeDesktopRemovalPrograms({ installRoot, operationId })
   }
   function assertDirectory(directory) {
     const stat = physical.lstatSync(directory, { bigint: true })
-    if (!stat.isDirectory() || stat.isSymbolicLink() || !owned(directory, stat) || directoryIdentity(stat) !== parents.get(directory)
-      || !equalPath(physical.realpathSync(directory), directory)) fail()
+    // Captured parents are canonical; fresh type, owner and file IDs retain
+    // that same physical ancestry without re-resolving it for every child.
+    if (!stat.isDirectory() || stat.isSymbolicLink() || !owned(directory, stat) || directoryIdentity(stat) !== parents.get(directory)) fail()
   }
   function assertParents(file) {
     for (let parent = path.dirname(file); parent !== own.root; parent = path.dirname(parent)) assertDirectory(parent)

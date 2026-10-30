@@ -74,10 +74,12 @@ export async function inspectDesktopRemovalPrograms({ installRoot, operationId, 
   }
   async function directory(file) {
     const stat = physical.lstatSync(file, { bigint: true })
-    if (!stat.isDirectory() || stat.isSymbolicLink() || stat.dev !== rootStat.dev || !owned(file, stat)
-      || !equalPath(physical.realpathSync(file), file)) fail()
-    if (parents.has(file) && parents.get(file) !== generation(stat)) fail()
-    parents.set(file, generation(stat))
+    if (!stat.isDirectory() || stat.isSymbolicLink() || stat.dev !== rootStat.dev || !owned(file, stat)) fail()
+    const known = parents.get(file), current = generation(stat)
+    if (known === undefined) {
+      if (!equalPath(physical.realpathSync(file), file)) fail()
+    } else if (known !== current) fail()
+    parents.set(file, current)
   }
   async function checkParents(file) {
     const list = []
