@@ -65,6 +65,9 @@ $probe = $probe.Replace('@PLUGIN@', $plugin.DirectoryName).Replace('@MACRO@',$ma
 [IO.File]::WriteAllText("$root/probe.nsi", $probe)
 & $nsis /V2 "$root/probe.nsi"
 if ($LASTEXITCODE -ne 0) { throw 'NSIS diagnostic compile failed' }
+$env:TEMP = Join-Path $env:RUNNER_TEMP 'a0000001/b0000002/c0000003/d0000004'
+$env:TMP = $env:TEMP
+New-Item $env:TEMP -ItemType Directory -Force | Out-Null
 foreach ($kind in @('crabot-installer','i')) {
  $env:CRABOT_PROBE_LEAF=$kind
  $env:CRABOT_PROBE_LOG=Join-Path $root "$kind.txt"
