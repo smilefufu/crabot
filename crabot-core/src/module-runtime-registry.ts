@@ -108,7 +108,7 @@ export async function inspectWindowsPortOwners(port: number): Promise<WindowsPor
     + `command_line = [string]$p.CommandLine; `
     + `process_start_identity = 'win32:' + $p.CreationDate.ToUniversalTime().ToString('o') } } }); `
     + `ConvertTo-Json -InputObject @($owners) -Compress -Depth 3`
-  const output = await execFileText('powershell.exe', [
+  const output = await execFileText(path.join((process.env.SystemRoot || process.env.WINDIR)!, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), [
     '-NoProfile',
     '-NonInteractive',
     '-Command',

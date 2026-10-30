@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process'
+import path from 'node:path'
 
 export interface TerminateProcessTreeOptions {
   gracefulTimeoutMs: number
@@ -110,7 +111,7 @@ async function queryWindowsOwnership(
     + listenerQuery
     + `[pscustomobject]@{ RootPid = $rootValue; ListenerPids = @($listenerPids) } `
     + `| ConvertTo-Json -Compress -Depth 3`
-  const output = await execFileText('powershell.exe', [
+  const output = await execFileText(path.join((process.env.SystemRoot || process.env.WINDIR)!, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), [
     '-NoProfile',
     '-NonInteractive',
     '-Command',

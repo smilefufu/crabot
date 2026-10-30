@@ -44,7 +44,7 @@ export async function readStoppedLegacyModuleRecords(dataDir) {
       // .NET observes IPv4 and IPv6 listeners without a per-record shell or
       // administrator privileges. Query failure is not an empty listener list.
       const script = "$ErrorActionPreference='Stop'; ConvertTo-Json -InputObject @([System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners() | ForEach-Object { $_.Port } | Sort-Object -Unique) -Compress"
-      const { stdout } = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, timeout: 10_000, maxBuffer: 1024 * 1024 })
+      const { stdout } = await run(path.join(process.env.SystemRoot || process.env.WINDIR, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, timeout: 10_000, maxBuffer: 1024 * 1024 })
       const ports = JSON.parse(stdout.trim())
       if (!Array.isArray(ports) || !ports.every(port => Number.isInteger(port) && port > 0 && port <= 65535)
         || result.some(({ record }) => ports.includes(record.module_port))) fail()

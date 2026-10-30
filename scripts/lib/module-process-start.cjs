@@ -2,6 +2,7 @@
 // recorded text and failure/null semantics stable; no caching or stop authority.
 const { execFile } = require('node:child_process')
 const fs = require('node:fs/promises')
+const path = require('node:path')
 
 function execFileText(file, args) {
   return new Promise((resolve, reject) => {
@@ -49,7 +50,7 @@ async function probeWindowsStartIdentity(pid) {
   const script = "$ErrorActionPreference='Stop'; "
     + `$process = Get-CimInstance Win32_Process -Filter \"ProcessId = ${pid}\"; `
     + `if ($null -ne $process) { $process.CreationDate.ToUniversalTime().ToString('o') }`
-  const output = await execFileText('powershell.exe', [
+  const output = await execFileText(path.join(process.env.SystemRoot || process.env.WINDIR, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), [
     '-NoProfile',
     '-NonInteractive',
     '-Command',

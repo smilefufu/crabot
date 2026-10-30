@@ -1,10 +1,13 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import path from 'node:path'
 
 const { execFileMock } = vi.hoisted(() => ({ execFileMock: vi.fn() }))
 vi.mock('node:child_process', () => ({ execFile: execFileMock }))
 
 import { terminateProcessTree, waitForProcessTreeExit } from './process-tree.js'
 
+const windowsRoot = path.resolve('test-windows-root')
+const powershellExecutable = path.join(windowsRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
 const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform')
 Object.defineProperty(process, 'platform', { value: 'win32' })
 
@@ -15,7 +18,7 @@ function ownership(rootPid: number | null, listenerPids: number[] = []): string 
 function mockCommands(powershellOutputs: Array<string | Error>): void {
   execFileMock.mockImplementation(
     (file: string, _args: string[], _options: unknown, callback: (error: Error | null, stdout: string) => void) => {
-      if (file === 'powershell.exe') {
+      if (file === powershellExecutable) {
         const result = powershellOutputs.shift() ?? ownership(null)
         if (result instanceof Error) callback(result, '')
         else callback(null, result)
@@ -27,10 +30,12 @@ function mockCommands(powershellOutputs: Array<string | Error>): void {
 }
 
 beforeEach(() => {
+  vi.stubEnv('SystemRoot', windowsRoot)
   execFileMock.mockReset()
 })
 
 afterAll(() => {
+  vi.unstubAllEnvs()
   if (originalPlatform) Object.defineProperty(process, 'platform', originalPlatform)
 })
 
@@ -105,7 +110,7 @@ describe('Windows process ownership fallback', () => {
       requireOwnedProcess: true,
     })
 
-    const powershell = execFileMock.mock.calls.find(([file]) => file === 'powershell.exe')
+    const powershell = execFileMock.mock.calls.find(([file]) => file === powershellExecutable)
     expect(powershell?.[1].join(' ')).toContain('LocalPort 19042')
     const taskkills = execFileMock.mock.calls.filter(([file]) => file === 'taskkill')
     expect(taskkills.map(call => call[1])).toEqual([
@@ -128,7 +133,7 @@ describe('Windows process ownership fallback', () => {
       isRootPidExited: () => true,
     })
 
-    const powershellCalls = execFileMock.mock.calls.filter(([file]) => file === 'powershell.exe')
+    const powershellCalls = execFileMock.mock.calls.filter(([file]) => file === powershellExecutable)
     expect(powershellCalls.every(call => !call[1].join(' ').includes('Win32_Process'))).toBe(true)
     const taskkills = execFileMock.mock.calls.filter(([file]) => file === 'taskkill')
     expect(taskkills.map(call => call[1])).toEqual([
@@ -141,7 +146,7 @@ describe('Windows process ownership fallback', () => {
     let ownershipQueries = 0
     execFileMock.mockImplementation(
       (file: string, _args: string[], _options: unknown, callback: (error: Error | null, stdout: string) => void) => {
-        if (file === 'powershell.exe') {
+        if (file === powershellExecutable) {
           ownershipQueries += 1
           const result = ownershipQueries === 1
             ? ownership(100)
@@ -162,7 +167,7 @@ describe('Windows process ownership fallback', () => {
       isRootPidExited: () => rootExited,
     })
 
-    const powershellCalls = execFileMock.mock.calls.filter(([file]) => file === 'powershell.exe')
+    const powershellCalls = execFileMock.mock.calls.filter(([file]) => file === powershellExecutable)
     expect(powershellCalls).toHaveLength(4)
     expect(powershellCalls[0][1].join(' ')).toContain('Win32_Process')
     expect(powershellCalls.slice(1).every(call => !call[1].join(' ').includes('Win32_Process'))).toBe(true)
