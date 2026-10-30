@@ -117,7 +117,7 @@ try {
         const directory = path.join(dataDir, name), marker = path.join(root, 'crabot-' + name, 'schema_version')
         await fs.mkdir(directory, { mode: 0o755 }); if (!await absent(marker)) await fs.copyFile(marker, path.join(directory, 'SCHEMA_VERSION'))
       }
-      const { newCredentialsFromPassword } = await import(pathToFileURL(path.join(repository, 'crabot-admin/dist/credentials.js')))
+      const { newCredentialsFromPassword } = await import(pathToFileURL(path.join(target.coreRoot, 'crabot-admin/dist/credentials.js')))
       const credentials = JSON.stringify(await newCredentialsFromPassword('fixture-legacy-password', { is_temp: false, changed_via: 'start' }))
       await fs.writeFile(path.join(dataDir, 'admin/credentials.json'), credentials, { mode: 0o600 })
       const sentinels = ['agent/preserved-history.txt', 'memory/preserved.txt', 'mcp-deps/preserved.txt', 'workspaces/old-project/content.txt']

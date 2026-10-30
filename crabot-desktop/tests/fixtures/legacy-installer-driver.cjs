@@ -14,7 +14,11 @@ if (process.platform === 'win32' && !config.cleanup) {
 }
 if (!config.cleanup) app.once('ready', () => record('driver-ready', { phase: 'app-ready' }))
 app.once('quit', (_event, code) => record(config.cleanup ? 'cleanup-driver-quit' : 'driver-quit', { code }))
-const fail = error => { record('driver-failed', { message: error.message }); console.error(error); app.exit(2) }
+let failed = false
+const fail = error => {
+  if (failed) return
+  failed = true; record('driver-failed', { message: error.message }); console.error(error); app.exit(2)
+}
 if (config.cleanup) {
   const profile = path.join(config.control, 'cleanup-profile'); fs.mkdirSync(profile, { mode: 0o700 })
   app.setPath('userData', profile)
@@ -26,6 +30,17 @@ if (config.cleanup) {
     record('entries-cleaned', true); app.exit(0)
   }).catch(fail)
 } else {
+  // Observe the real target's stderr only in this isolated, dummy-data CI run.
+  // The host intentionally presents a bounded error code to end users.
+  const childProcess = require('node:child_process'), spawn = childProcess.spawn
+  childProcess.spawn = function (file, args, options) {
+    const child = spawn.call(this, file, args, options)
+    if (args?.some(value => typeof value === 'string' && value.endsWith(path.join('scripts', 'lib', 'legacy-desktop-takeover.mjs')))) {
+      child.stderr?.on('data', bytes => process.stderr.write('CRABOT_CI_TARGET_STDERR ' + bytes.toString()))
+    }
+    return child
+  }
+  require('node:module').syncBuiltinESMExports()
   dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [config.installRoot] })
   dialog.showMessageBox = async (...args) => {
     const options = args.at(-1)
