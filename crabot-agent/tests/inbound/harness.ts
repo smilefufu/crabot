@@ -10,6 +10,7 @@
 import { promises as fs } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import { fileURLToPath } from 'url'
 
 import type {
   ChannelMessage,
@@ -131,6 +132,8 @@ export function makeAgentConfig(opts: {
     agent_config: {
       instance_id: opts.moduleId,
       roles: [],
+      skills: [{ id: 'builtin-tmp-page', name: 'tmp-page', description: 'Temporary pages',
+        skill_dir: fileURLToPath(new URL('../../../crabot-admin/builtins/skills/tmp-page/', import.meta.url)) }],
       system_prompt: '你是测试用 Crabot',
       model_config: opts.configured ? CONFIGURED_MODELS : {},
     },
