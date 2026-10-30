@@ -51,8 +51,9 @@ try {
    $description = ($text | Where-Object { $_ } | Select-Object -First 12) -join ' | '
    if ($description -and $observed.Add($description)) { Write-Output "CRABOT_WINDOWS_WRAPPER_UI window=$description" }
    if ($all -match '无法关闭|cannot be closed|Can.t modify') { throw "Outer EXE entered the reported Retry dialog: $all" }
-   if ($all.Contains('将 Crabot 安装到所选文件夹？')) {
-    if (!$all.Contains($target)) { throw "Installer lost the selected destination: $all" }
+   if ([WrapperUI]::Text($window) -eq '安装位置') {
+    $hostProcess = Get-CimInstance Win32_Process -Filter ("ProcessId=" + [WrapperUI]::Pid($window))
+    if (!$hostProcess.CommandLine.Contains("--install-root=$target\.")) { throw 'Installer lost the selected destination argument' }
     $install = @($children | Where-Object { [WrapperUI]::Text($_) -eq '安装' })
     if ($install.Count -ne 1) { throw "Expected the actual host's Install button" }
     [WrapperUI]::Click($install[0])
@@ -60,7 +61,7 @@ try {
     Write-Output "CRABOT_WINDOWS_WRAPPER_UI install_confirmed"
     continue
    }
-   if ($confirmed -and $all.Contains('Crabot 已安装')) {
+   if ($confirmed -and [WrapperUI]::Text($window) -eq '安装完成') {
     $finish = @($children | Where-Object { [WrapperUI]::Text($_) -eq '完成' })
     if ($finish.Count -ne 1) { throw "Expected the actual host's Finish button" }
     [WrapperUI]::Click($finish[0])
@@ -89,6 +90,8 @@ try {
  }
  if (!$verified) { throw 'Timed out waiting for the actual installer completion' }
  if (!(Test-Path $target)) { throw 'Installer reported completion without the selected root' }
+ $installed = Get-Content (Join-Path $target 'desktop-installation.json') -Raw | ConvertFrom-Json
+ if ($installed.install_root -ne $target) { throw 'The actual installation used a different destination' }
  $finishDeadline = (Get-Date).AddSeconds(90)
  while ((Get-Date) -lt $finishDeadline) {
   $process.Refresh()
