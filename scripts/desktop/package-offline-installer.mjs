@@ -50,7 +50,7 @@ await build({ projectDir: output, publish: 'never', targets: Platform.current().
   directories: { app: appDir, output: path.join(output, 'unpacked') },
   electronDist: path.join(path.dirname(require.resolve('electron/package.json')), 'dist'),
   files: ['dist/**/*', 'package.json', '!**/*.map'], asar: true, asarUnpack: ['dist/bootstrap/**/*.node'], npmRebuild: false, publish: null,
-  electronFuses: { runAsNode: false, enableCookieEncryption: true, enableNodeOptionsEnvironmentVariable: false, enableNodeCliInspectArguments: false,
+  electronFuses: { runAsNode: false, enableCookieEncryption: process.platform !== 'darwin', enableNodeOptionsEnvironmentVariable: false, enableNodeCliInspectArguments: false,
     enableEmbeddedAsarIntegrityValidation: process.platform !== 'linux', onlyLoadAppFromAsar: true, grantFileProtocolExtraPrivileges: false },
   mac: { icon: path.join(root, 'crabot-desktop/assets/app.png'), identity: '-', minimumSystemVersion: '14.0.0', hardenedRuntime: false, notarize: false, signIgnore: ['/Resources/offline/'] },
   win: { executableName: 'CrabotInstaller', icon: path.join(root, 'crabot-desktop/assets/app.png') },

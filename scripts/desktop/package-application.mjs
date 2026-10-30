@@ -95,7 +95,7 @@ const configuration = {
   electronDist: path.join(path.dirname(require.resolve('electron/package.json')), 'dist'),
   files: ['dist/**/*', 'package.json', '!**/*.map'],
   asar: true, asarUnpack: ['dist/bootstrap/**/*.node'], npmRebuild: false, publish: null,
-  electronFuses: { runAsNode: false, enableCookieEncryption: true, enableNodeOptionsEnvironmentVariable: false,
+  electronFuses: { runAsNode: false, enableCookieEncryption: process.platform !== 'darwin', enableNodeOptionsEnvironmentVariable: false,
     enableNodeCliInspectArguments: false, enableEmbeddedAsarIntegrityValidation: process.platform !== 'linux',
     onlyLoadAppFromAsar: true, grantFileProtocolExtraPrivileges: false },
   // Candidate signatures are local only. Keep core bytes and the vendor Cua
