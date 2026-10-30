@@ -76,7 +76,20 @@ try {
  }
  if (!$verified) { throw 'Timed out waiting for the actual installer completion' }
  if (!(Test-Path $target)) { throw 'Installer reported completion without the selected root' }
- @{ actual_exe_ui=$true; next_pages=$clicked; reported_retry_dialog=$false; host_confirmation=$true; selected_path_with_spaces=$true; actual_installation_completed=$true; business_mm_started=$false } | ConvertTo-Json -Compress | Write-Output
+ $finishDeadline = (Get-Date).AddSeconds(90)
+ while ((Get-Date) -lt $finishDeadline) {
+  $process.Refresh()
+  if ($process.HasExited) { break }
+  foreach ($window in [WrapperUI]::Windows()) {
+   if (!$owned.Contains([WrapperUI]::Pid($window))) { continue }
+   $button = [WrapperUI]::GetDlgItem($window,1)
+   if ($button -ne [IntPtr]::Zero -and [WrapperUI]::IsWindowEnabled($button) -and [WrapperUI]::Text($button) -match '完成|Finish') { [WrapperUI]::Click($button) }
+  }
+  Start-Sleep -Milliseconds 250
+ }
+ $process.Refresh()
+ if (!$process.HasExited -or $process.ExitCode -ne 0) { throw 'Outer installer did not finish with success' }
+ @{ actual_exe_ui=$true; next_pages=$clicked; reported_retry_dialog=$false; host_confirmation=$true; selected_path_with_spaces=$true; actual_installation_completed=$true; outer_exit_zero=$true; business_mm_started=$false } | ConvertTo-Json -Compress | Write-Output
 } finally {
  # Stop only tracked runner test processes. The installed business App is not launched.
  foreach ($id in $owned) { Stop-Process -Id $id -ErrorAction SilentlyContinue }
