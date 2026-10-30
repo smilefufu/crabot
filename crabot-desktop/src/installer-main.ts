@@ -77,7 +77,7 @@ async function boot() {
     detail: '已包含运行环境，无需额外安装。主要程序和数据将保存在你选择的安装文件夹；工作区可在安装后调整。', buttons: ['继续', '退出'], defaultId: 0, cancelId: 1 })
   if (welcome.response !== 0) return
   while (true) {
-    const chosen = preselected ? { canceled: false, filePaths: [selected] } : await dialog.showOpenDialog({ title: legacyRequired ? '选择原 Crabot 安装文件夹' : '选择 Crabot 安装文件夹', defaultPath: selected, buttonLabel: legacyRequired ? '选择此目录' : '安装到这里', properties: ['openDirectory', 'showHiddenFiles', 'createDirectory', 'promptToCreate'] })
+    const chosen = preselected ? { canceled: false, filePaths: [selected] } : await dialog.showOpenDialog({ title: legacyRequired ? '选择原 Crabot 安装文件夹' : '选择 Crabot 安装文件夹', defaultPath: selected, buttonLabel: legacyRequired ? '选择此目录' : '安装到这里', properties: ['openDirectory', 'showHiddenFiles', 'createDirectory'] })
     preselected = false
     if (chosen.canceled || chosen.filePaths.length !== 1) return
     selected = chosen.filePaths[0]
@@ -89,7 +89,7 @@ async function boot() {
       continue
     }
     if (legacyRequired && !legacy) {
-      const choice = await dialog.showMessageBox({ type: 'error', title: '请选择原安装位置', message: '此位置不是可确认的原 Crabot 安装。', detail: '已有数据不能用空目录代替。若是源码或不支持的来源，请退出并保留原部署。', buttons: ['重新选择', '退出安装'], defaultId: 0, cancelId: 1 })
+      const choice = await dialog.showMessageBox({ type: 'error', title: '请选择原安装位置', message: '未能识别此位置的旧版 Crabot 程序入口。', detail: '这不表示文件夹为空。请选择原安装根目录（通常包含 VERSION 和 cli.mjs），不要选择 data、workspace 或新的空文件夹。已有文件未作修改。', buttons: ['重新选择', '退出安装'], defaultId: 0, cancelId: 1 })
       if (choice.response !== 0) return
       continue
     }

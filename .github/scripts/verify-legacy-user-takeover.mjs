@@ -22,8 +22,8 @@ import product from '../../scripts/lib/product-runtime.cjs'
 assert.equal(process.env.GITHUB_ACTIONS, 'true'); assert.equal(process.env.RUNNER_ENVIRONMENT, 'github-hosted')
 assert.ok(['darwin', 'win32', 'linux'].includes(process.platform))
 const repository = path.resolve('.'), project = await fs.realpath(process.argv[2]), installer = await fs.realpath(process.argv[3])
-assert.equal(project, path.join(repository, '.desktop-build/安装 候选/paired'))
-assert.equal(installer, path.join(repository, '.desktop-build/安装 候选/installer'))
+assert.ok(['.desktop-build/安装 候选/paired', '.desktop-build/manual/paired'].some(value => project === path.join(repository, value)))
+assert.equal(installer, path.join(path.dirname(project), 'installer'))
 const target = await verifyDesktopPayload(path.join(project, 'offline'))
 const platform = (process.platform === 'win32' ? 'windows' : process.platform) + '-' + process.arch
 const archives = JSON.parse(await fs.readFile(new URL('fixtures/legacy-desktop-archives.json', import.meta.url), 'utf8'))
@@ -107,6 +107,8 @@ try {
       await execute(tar, ['-xf', path.basename(archive), '-C', 'extracted'], { cwd: home, timeout: 180000, maxBuffer: 65536 })
       const children = await fs.readdir(extracted); assert.equal(children.length, 1)
       await fs.rename(path.join(extracted, children[0]), root); await fs.writeFile(path.join(root, 'VERSION'), version + '\n')
+      if (process.platform === 'win32') await execute(path.join(process.env.SystemRoot, 'System32/WindowsPowerShell/v1.0/powershell.exe'),
+        ['-NoProfile', '-NonInteractive', '-File', path.join(repository, 'scripts/lib/__tests__/fixtures/legacy-windows-launcher.ps1'), '-Directory', root, '-PrivateNode'], { env, timeout: 30000 })
       await fs.mkdir(dataDir, { recursive: true, mode: 0o755 })
       for (const name of ['admin', 'agent', 'memory']) {
         const directory = path.join(dataDir, name), marker = path.join(root, 'crabot-' + name, 'schema_version')
@@ -181,7 +183,7 @@ try {
       await execute(runtime.executables.python, ['-c', 'import pathlib,sys;pathlib.Path(sys.argv[1]).write_text("old workspace usable")', scriptFile], { env, timeout: 10000 })
       assert.equal(await fs.readFile(scriptFile, 'utf8'), 'old workspace usable')
       assert.equal(inspectInstance(dataDir).record.generation, instance.record.generation)
-      reports.push({ version, platform, published_archive_verified: true, actual_installer_loaded: true, native_dialog_input_substituted: !linux, actual_ubuntu_backend: linux,
+      reports.push({ version, platform, published_archive_verified: true, official_windows_installer_launcher: process.platform === 'win32', actual_installer_loaded: true, native_dialog_input_substituted: !linux, actual_ubuntu_backend: linux,
         graphical_polkit_tested: false, actual_gtk_flow_driven: false,
         old_data_fixture_stopped: true, ordinary_main_core_healthy: true, actual_native_and_original_cli_same_instance: true, host_node_required: false,
         original_credentials_and_sentinels_preserved: true, actual_bundled_python_file_access: true, historical_user_data_fixture: true,

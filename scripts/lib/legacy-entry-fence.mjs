@@ -2,7 +2,7 @@
 // Never executes old code, stops processes, migrates data or grants authentication.
 import { promises as fs, realpathSync } from 'node:fs'
 import path from 'node:path'
-import { legacyReleaseFiles } from './legacy-release-files.mjs'
+import { legacyReleaseFiles, legacyReleaseEntryHashes } from './legacy-release-files.mjs'
 import { randomUUID } from 'node:crypto'
 import identity from './process-identity.cjs'
 import management from './desktop-management.cjs'
@@ -44,14 +44,15 @@ async function read(root, directory) {
     || !/^[a-f0-9]{64}$/.test(record.installation?.fingerprint) || typeof record.installation?.dataRoot !== 'string' || !path.isAbsolute(record.installation.dataRoot)
     || !['fencing', 'fenced', 'restoring', 'restored', 'data_changing'].includes(record.phase)
     || !record.originals || JSON.stringify(Object.keys(record.originals)) !== JSON.stringify(entries)) fail()
+  const files = legacyReleaseFiles(catalog, record.installation.version)
   for (const file of entries) {
     const original = record.originals[file]
     if (!original || typeof original.bytes !== 'string' || !Number.isInteger(original.mode) || original.mode < 0 || original.mode > 0o777) fail()
     const bytes = Buffer.from(original.bytes, 'base64')
-    if (bytes.toString('base64') !== original.bytes || hash(bytes) !== legacyReleaseFiles(catalog, record.installation.version)[file]) fail()
+    if (bytes.toString('base64') !== original.bytes || !legacyReleaseEntryHashes(catalog, record.installation.version, file).includes(hash(bytes))) fail()
+    files[file] = hash(bytes)
   }
   if (!identity.isOwnedDirectory(record.installation.dataRoot) || realpathSync(record.installation.dataRoot) !== record.installation.dataRoot) fail()
-  const files = legacyReleaseFiles(catalog, record.installation.version)
   if (record.installation.fingerprint !== hash(JSON.stringify({ version: record.installation.version, root: realpathSync(root), dataDir: record.installation.dataRoot, files }))) fail()
   return record
 }
@@ -83,16 +84,18 @@ export async function fenceLegacyEntries(installation) {
     } catch (error) { if (error.code !== 'ENOENT') throw error }
     const checked = await discoverLegacyUserInstall({ root: recognized.installRoot, dataDir: recognized.dataRoot })
     if (checked.fingerprint !== recognized.fingerprint) fail()
-    const originals = Object.create(null)
+    const originals = Object.create(null), files = legacyReleaseFiles(catalog, checked.version)
     for (const file of entries) {
       const { bytes, mode } = await regular(path.join(checked.installRoot, file))
-      if (hash(bytes) !== legacyReleaseFiles(catalog, checked.version)[file]) fail()
+      if (!legacyReleaseEntryHashes(catalog, checked.version, file).includes(hash(bytes))) fail()
+      files[file] = hash(bytes)
       originals[file] = { bytes: bytes.toString('base64'), mode }
     }
+    if (checked.fingerprint !== hash(JSON.stringify({ version: checked.version, root: checked.installRoot, dataDir: checked.dataRoot, files }))) fail()
     const record = { schema_version: 1, id: randomUUID(), installation: checked, phase: 'fencing', originals }
     await write(directory, record) // Durable originals before the first entry is changed.
     for (const file of entries) {
-      if (hash((await regular(path.join(checked.installRoot, file))).bytes) !== legacyReleaseFiles(catalog, checked.version)[file]) fail()
+      if (hash((await regular(path.join(checked.installRoot, file))).bytes) !== hash(Buffer.from(originals[file].bytes, 'base64'))) fail()
       await replace(path.join(checked.installRoot, file), fence(file), originals[file].mode)
     }
     record.phase = 'fenced'; await write(directory, record)

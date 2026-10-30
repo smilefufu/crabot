@@ -16,14 +16,14 @@ const compiled = ts.transpileModule(source.replaceAll('import.meta.url', JSON.st
 const home = path.resolve('/fixture/user'), existing = path.join(home, '.crabot')
 const required = () => Object.assign(new Error('Existing data'), { code: 'CRABOT_DESKTOP_TAKEOVER_REQUIRED' })
 
-async function runInstaller({ defaultError, recognized = false, sourceDeployment = false, selectionError } = {}) {
+async function runInstaller({ defaultError, recognized = false, sourceDeployment = false, selectionError, platform = 'darwin' } = {}) {
   const messages = [], directories = [], discovery = []
   let finish
   const done = new Promise(resolve => { finish = resolve })
   const forbid = () => { throw Error('Unexpected installation or service effect') }
   const modules = {
     electron: {
-      app: { setName() {}, setPath() {}, whenReady: async () => {}, isReady: () => true, on() {}, exit: code => finish(code) },
+      app: { setName() {}, setAppUserModelId() {}, setPath() {}, whenReady: async () => {}, isReady: () => true, on() {}, exit: code => finish(code) },
       shell: {},
       dialog: {
         showMessageBox: async options => {
@@ -66,7 +66,7 @@ async function runInstaller({ defaultError, recognized = false, sourceDeployment
     assert.ok(Object.hasOwn(modules, name), 'Unexpected module: ' + name)
     return modules[name]
   }
-  vm.runInNewContext(compiled, { require: load, exports: {}, process: { platform: 'darwin', argv: [], env: {}, resourcesPath: '/fixture/resources' }, console, AbortController, Error })
+  vm.runInNewContext(compiled, { require: load, exports: {}, process: { platform, argv: [], env: {}, resourcesPath: '/fixture/resources' }, console, AbortController, Error })
   const code = await done
   return { code, messages, directories, discovery }
 }
@@ -135,4 +135,14 @@ test('recognized source deployment can independently install release instead of 
   assert.equal(result.directories.length, 1)
   assert.equal(result.directories[0].defaultPath, path.join(home, 'Crabot'))
   assert.equal(result.messages.some(message => message.title === '核对已有 Crabot'), false)
+})
+
+for (const sourceDeployment of [false, true]) test('Windows folder selection does not request creating a file: ' + (sourceDeployment ? 'fresh release' : 'existing release'), { timeout: 5000 }, async () => {
+  const result = await runInstaller({ platform: 'win32', sourceDeployment })
+  assert.equal(result.directories.length, 1)
+  const picker = result.directories[0]
+  assert.ok(picker.properties.includes('openDirectory'))
+  assert.ok(picker.properties.includes('showHiddenFiles'))
+  assert.ok(!picker.properties.includes('promptToCreate'), 'Windows file creation prompt conflicts with the directory picker')
+  assert.equal(result.code, 2)
 })
