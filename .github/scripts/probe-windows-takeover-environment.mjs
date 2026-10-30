@@ -17,17 +17,21 @@ const env = Object.fromEntries(Object.entries(parent).filter(([name]) => /^(PATH
 const script = `
 import { readFile } from 'node:fs/promises';import path from 'node:path';import { promisify } from 'node:util';import { execFile } from 'node:child_process';
 const {source,base}=JSON.parse(await readFile(process.argv[1],'utf8')),ps=path.join(base.SystemRoot||base.WINDIR,'System32/WindowsPowerShell/v1.0/powershell.exe');
-const names=['PSModulePath','SystemDrive','ProgramFiles','ProgramFiles(x86)','ProgramW6432','ProgramData'];
-const get=name=>Object.entries(source).find(([key])=>key.toLowerCase()===name.toLowerCase());
-const select=names=>Object.fromEntries(names.map(get).filter(Boolean));
-const modes={filtered:base,modules:{...base,...select(['PSModulePath'])},system:{...base,...select(names.slice(1))},all:source};
-const script="$ErrorActionPreference='Stop'; $p=Get-CimInstance Win32_Process -Filter 'ProcessId = 2147483647'; ConvertTo-Json -InputObject @([System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners() | ForEach-Object { $_.Port } | Sort-Object -Unique) -Compress";
-const results=await Promise.all(Object.entries(modes).map(async([mode,env])=>{const started=Date.now();console.log('CRABOT_QUERY_BEGIN',mode);try{const result=await promisify(execFile)(ps,['-NoProfile','-NonInteractive','-Command',script],{env,windowsHide:true,timeout:20000,maxBuffer:128000});const record={mode,elapsed_ms:Date.now()-started,success:true,...result};console.log('CRABOT_QUERY_RESULT',JSON.stringify(record));return record}catch(e){const record={mode,elapsed_ms:Date.now()-started,success:false,code:e.code,killed:e.killed,signal:e.signal,stdout:e.stdout,stderr:e.stderr};console.log('CRABOT_QUERY_RESULT',JSON.stringify(record));return record}}));
-if(results.some(result=>!result.success))process.exitCode=1;
+const known=new Set(Object.keys(base).map(key=>key.toLowerCase()));
+const missing=Object.entries(source).filter(([key])=>!known.has(key.toLowerCase()));
+const command="$ErrorActionPreference='Stop'; $p=Get-CimInstance Win32_Process -Filter 'ProcessId = 2147483647'; ConvertTo-Json -InputObject @([System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners() | ForEach-Object { $_.Port } | Sort-Object -Unique) -Compress";
+let attempt=0;
+async function works(entries){const started=Date.now();try{await promisify(execFile)(ps,['-NoProfile','-NonInteractive','-Command',command],{env:{...base,...Object.fromEntries(entries)},windowsHide:true,timeout:5000,maxBuffer:128000});console.log('CRABOT_ENV_ATTEMPT',JSON.stringify({attempt:++attempt,keys:entries.map(([key])=>key),elapsed_ms:Date.now()-started,success:true}));return true}catch(e){console.log('CRABOT_ENV_ATTEMPT',JSON.stringify({attempt:++attempt,keys:entries.map(([key])=>key),elapsed_ms:Date.now()-started,success:false,killed:e.killed}));return false}}
+if(!await works(missing))throw new Error('Full environment control did not pass');
+let candidates=missing,n=2;
+while(candidates.length>=2){let reduced=false;const size=Math.ceil(candidates.length/n);for(let i=0;i<candidates.length;i+=size){const subset=candidates.filter((_,index)=>index<i||index>=i+size);if(await works(subset)){candidates=subset;n=Math.max(2,n-1);reduced=true;break}}if(!reduced){if(n>=candidates.length)break;n=Math.min(candidates.length,n*2)}}
+console.log('CRABOT_REQUIRED_ENVIRONMENT_KEYS',JSON.stringify(candidates.map(([key])=>key)));
+if(!await works(candidates))throw new Error('Minimal environment control did not pass');
+
 `
 const input = path.join(home, 'environment.json'); await fs.writeFile(input, JSON.stringify({source:parent,base:env}), {mode:0o600})
 try {
-  const result = await execute(path.join(core, '.product-runtime/node/node.exe'), ['--input-type=module', '--eval', script, input], { cwd: core, env, timeout: 45000, maxBuffer: 128000 })
+  const result = await execute(path.join(core, '.product-runtime/node/node.exe'), ['--input-type=module', '--eval', script, input], { cwd: core, env, timeout: 240000, maxBuffer: 128000 })
   process.stdout.write(result.stdout); process.stderr.write(result.stderr)
 } catch (error) { process.stdout.write(error.stdout || ''); process.stderr.write(error.stderr || ''); throw new Error('Bounded target environment query failed') }
 finally { await fs.rm(home, { recursive: true, force: true }) }
