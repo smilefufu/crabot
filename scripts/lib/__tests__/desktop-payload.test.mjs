@@ -1990,6 +1990,7 @@ for (const conversionFailure of [false, true, 'stale-modules']) test('actual tar
   const node = path.join(prepared.coreRoot, windows ? '.product-runtime/node/node.exe' : '.product-runtime/node/bin/node')
   const module = path.join(prepared.coreRoot, 'scripts/lib/legacy-desktop-takeover.mjs')
   const stale = conversionFailure === 'stale-modules' ? await stoppedLegacyModules(f.data) : undefined
+  if (stale) { const { fenceLegacyEntries } = await import('../legacy-entry-fence.mjs'); await fenceLegacyEntries(f.legacy) }
   // Interpreter inspection is substituted; the sealed target Node, locks,
   // old entry bytes and actual scoped migration/rollback run here. No MM starts.
   const script = `import{pathToFileURL}from'node:url';const [module,prepared]=process.argv.slice(1);const {convertLegacyDesktopData}=await import(pathToFileURL(module).href);const value=await convertLegacyDesktopData({prepared:JSON.parse(prepared),inspectEnvironment:async()=>({status:'absent'})});console.log(JSON.stringify(value))`
@@ -2192,6 +2193,7 @@ for (const conversionFailure of [false, true, 'pre-conversion-stop', 'core-chang
   if (conversionFailure !== 'pre-conversion-stop') await fs.unlink(path.join(f.data, 'mm.pid'))
   if (!conversionFailure || conversionFailure === 'stale-modules') await fs.writeFile(path.join(f.target, '.env'), 'CRABOT_ADMIN_WEB_HOST=0.0.0.0\n')
   const stale = conversionFailure === 'stale-modules' ? await stoppedLegacyModules(f.data) : undefined
+  if (stale) { const { fenceLegacyEntries } = await import('../legacy-entry-fence.mjs'); await fenceLegacyEntries(f.legacy) }
   const coreRoot = path.join(f.parent, '真正 Crabot.app/Contents/Resources/core'), home = path.join(f.parent, 'home')
   await fs.mkdir(path.dirname(coreRoot), { recursive: true }); await fs.rename(f.core, coreRoot)
   await fs.writeFile(path.join(coreRoot, 'desktop-host.json'), JSON.stringify({ schema_version: 1, platform: process.platform, arch: process.arch }))

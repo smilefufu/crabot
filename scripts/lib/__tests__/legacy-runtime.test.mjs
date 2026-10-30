@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { promises as fs } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { spawn } from 'node:child_process'
+import { spawn, execFileSync } from 'node:child_process'
 import { once } from 'node:events'
 import identity from '../process-identity.cjs'
 import { randomUUID } from 'node:crypto'
@@ -219,6 +219,14 @@ test('a surviving module child blocks admission after its actual root exits', { 
   await fs.writeFile(file, bytes)
   const exited = once(root, 'exit'); root.send('exit'); await exited
   assert.equal(await probeProcessStartIdentity(root.pid), null)
+  assert.equal(identity.sameProcess(child, identity.inspectProcess(child.pid)), true, 'The descendant must actually survive the root')
+  const listening = identity.listListeningTcpPorts(child.pid)
+  t.diagnostic(JSON.stringify({ root_pid: root.pid, child_pid: child.pid, recorded_port: ready.port, native_ports: listening }))
+  assert.ok(listening.includes(ready.port), 'The surviving descendant must still own its listener')
+  if (process.platform === 'win32') {
+    const observed = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "$ErrorActionPreference='Stop'; ConvertTo-Json -InputObject @([System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners() | ForEach-Object { $_.Port } | Sort-Object -Unique) -Compress"], { encoding: 'utf8', timeout: 10_000, windowsHide: true })
+    t.diagnostic('dotnet_ports=' + observed.trim())
+  }
   t.mock.method(identity, 'listProcessIds', () => [])
   await assert.rejects(discoverLegacyRuntime(f.installation), { code: 'CRABOT_LEGACY_RUNTIME_UNVERIFIED' })
   assert.equal(identity.sameProcess(child, identity.inspectProcess(child.pid)), true)
