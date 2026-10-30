@@ -3,17 +3,24 @@ import { createGuidanceTool, guidanceNames, guidanceCatalog, renderGuidance } fr
 import { MANAGER_IDENTITY, assembleManagerSystemPrompt } from '../../src/manager/prompt.js'
 import { BUILTIN_WORKER_PROMPT, assembleBuiltinWorkerPrompt } from '../../src/prompts/builtin-worker.js'
 import { narrowWorkerPermissions, BUILTIN_WORKER_PERMISSIONS } from '../../src/workers/builtin/runtime.js'
-import { automaticGuidanceForWake, needsWorkerEventGuidance } from '../../src/manager/loop.js'
+import { automaticGuidanceForWake } from '../../src/manager/loop.js'
 
 const context = {} as never
 const base = { managerKey: 'fixture::user', isSystemThread: false } as const
 
 describe('product guidance boundaries', () => {
-  it('keeps short cores and role-specific catalogs; ordinary tasks receive no workflows', () => {
-    expect(MANAGER_IDENTITY.replace(/\s/g, '').length).toBeLessThanOrEqual(500)
+  it('反馈职责常驻且退役名称沿原错误契约返回，不保留加载别名', async () => {
+    const prompt = assembleManagerSystemPrompt(base)
+    for (const rule of ['活动变化、空闲或自报完成不能代替证据', '缺口交给具备相应工具能力的执行器补齐', '投递失败就处理投递问题', '最多一条记忆候选', '先用既有来源标记查询所有状态去重', '重复通知不再触发同一交付或补派']) expect(prompt).toContain(rule)
+    expect(guidanceNames('manager')).not.toContain('manager.worker-events')
+    const result = await createGuidanceTool('manager').call({ name: 'manager.worker-events' }, context)
+    expect(result.isError).toBe(true)
+    expect(result.output).toContain('已常驻')
+  })
+  it('keeps role-specific catalogs; ordinary tasks receive no specialized workflows', () => {
     expect(BUILTIN_WORKER_PROMPT.replace(/\s/g, '').length).toBeLessThanOrEqual(420)
     expect(BUILTIN_WORKER_PROMPT).not.toMatch(/主控|执行器|调用方/)
-    expect(guidanceNames('manager')).toHaveLength(4)
+    expect(guidanceNames('manager')).toHaveLength(3)
     expect(guidanceNames('worker')).toHaveLength(3)
     const manager = assembleManagerSystemPrompt(base)
     expect(manager).toContain(guidanceCatalog('manager'))
@@ -33,12 +40,12 @@ describe('product guidance boundaries', () => {
     expect(automaticGuidanceForWake({ kind: 'workboard_idle_review' })).toBe('manager.workboard')
     expect(renderGuidance('manager', 'manager.workboard')).toContain('只有确需人类决策、授权或提供系统无法取得的信息时')
     expect(renderGuidance('manager', 'manager.workboard')).toContain('对没有当前事项的目标，也要结合最新的人类要求和已有结果判断是否应收口')
-    expect(renderGuidance('manager', 'manager.worker-events')).toContain('执行器完成不自动产生对外汇报义务')
+    expect(prompt).toContain('执行器完成不自动产生对外汇报义务')
   })
   it('正常子任务执行不催办，缺少工作时继续安排而非只补证据', () => {
-    const events = renderGuidance('manager', 'manager.worker-events')
+    const events = assembleManagerSystemPrompt(base)
     expect(events).toContain('不因父执行器结束本轮或处于 idle 而催办')
-    expect(events).toContain('仍有未完成要求：继续安排剩余工作')
+    expect(events).toContain('仍有已授权且可推进的剩余工作时，沿用成果继续安排')
     for (const name of guidanceNames('manager')) {
       expect(renderGuidance('manager', name)).not.toMatch(/等通知|等待通知/)
     }
@@ -60,12 +67,8 @@ describe('product guidance boundaries', () => {
     expect(daily).not.toContain('guidance')
     expect(daily).not.toContain(MANAGER_IDENTITY)
   })
-  it.each([
-    ['lifecycle_changed', {}, false], ['state_changed', { to: 'running' }, false],
-    ['state_changed', { to: 'idle', turn_pending: true }, true],
-    ['activity_available', { has_error: true }, true], ['interaction_required', {}, true], ['turn_completed', {}, true],
-  ])('routes actual event %s %j', (kind, detail, expected) => {
-    expect(needsWorkerEventGuidance({ kind, detail, worker_id: 'w', seq: 0, ts: '' } as never)).toBe(expected)
+  it.each(['lifecycle_changed', 'state_changed', 'activity_available', 'interaction_required', 'turn_completed', 'query_failed'])('event %s uses permanent rules without automatic guidance', kind => {
+    expect(automaticGuidanceForWake({ kind: 'worker_event', event: { kind, worker_id: 'w', seq: 0, ts: '', detail: { turn_pending: true, has_error: true } } } as never)).toBeUndefined()
   })
   it('opens desktop only with an affirmative frozen principal; does not mutate the role ceiling', () => {
     expect(narrowWorkerPermissions(BUILTIN_WORKER_PERMISSIONS, null).tool_access.desktop).toBe(false)

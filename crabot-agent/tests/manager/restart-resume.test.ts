@@ -15,7 +15,7 @@ import { renderGuidance } from '../../src/guidance/catalog.js'
 import { buildPromptCacheKey } from '../../src/engine/prompt-cache-key.js'
 import { DailyReflectionEvidence } from '../../src/manager/daily-reflection-evidence.js'
 import type { DailyReflectionState } from '../../src/manager/daily-reflection-types.js'
-import { createAssistantMessage } from '../../src/engine/types.js'
+import { createAssistantMessage, createToolResultMessage } from '../../src/engine/types.js'
 import { assertToolMessageIntegrity } from '../../src/engine/tool-message-integrity.js'
 import { encodeSegment } from '../../src/workers/harness/ledger-store.js'
 import { WorkerTurnStore } from '../../src/workers/harness/worker-turn-store.js'
@@ -909,7 +909,7 @@ describe('Manager restart continuation', () => {
     expect(accepted).not.toHaveBeenCalled()
   })
 
-  it('恢复运行中注入的 guidance，不丢失、不重复，且不修改普通 system 或持久历史', async () => {
+  it('恢复完整指南不重复且继续保存，短提示仍按临时项清理', async () => {
     const requests: LLMStreamParams[] = []
     const inject = defineTool({ name: 'inject', description: 'fixture', inputSchema: {}, call: async () => {
       const loop = old.getOrCreate(KEY)
@@ -928,19 +928,50 @@ describe('Manager restart continuation', () => {
     }, updateConfig() {} }, { toolFace: () => [inject] })
     void old.routeHumanMessages('feishu', 'restart-test', [message('original', 'Continue')])
     const checkpoint = await checkpointWhere(value => value.turns.length === 1 && requests.length === 2)
-    expect(checkpoint.transientMessageIds).toHaveLength(4)
+    expect(checkpoint.transientMessageIds).toHaveLength(2)
     const restored = registry({ async *stream(params) {
       expect(params.systemPrompt).toBe(requests[0].systemPrompt)
       expect(buildPromptCacheKey(params.model, params.systemPrompt)).toBe(buildPromptCacheKey(requests[0].model, requests[0].systemPrompt))
-      for (const name of ['manager.workboard', 'manager.worker-events'] as const) {
-        expect(params.messages.filter(m => 'content' in m && m.content === renderGuidance('manager', name))).toHaveLength(1)
-      }
+      expect(params.messages.filter(m => 'content' in m && m.content === renderGuidance('manager', 'manager.workboard'))).toHaveLength(1)
+      expect(JSON.stringify(params.messages)).not.toContain('## Guidance: manager.worker-events')
       yield* chunksFromContent([], 'end_turn')
     }, updateConfig() {} })
     restored.registerResumeCheckpoints([checkpoint])
     trace.reconcileInterruptedManagerEpisodes(new Set([checkpoint.episodeId]))
     await restored.resumeInterruptedEpisodes()
-    expect(JSON.stringify(await store.load(KEY))).not.toContain('## Guidance:')
+    expect(JSON.stringify(await store.load(KEY))).toContain('## Guidance: manager.workboard')
+    expect(await store.loadCheckpoint(KEY)).toBeUndefined()
+  })
+
+  it('旧检查点只按临时 ID 清理旧注入，保留旧手动回包并为仍需的自省补供', async () => {
+    const old = registry({ async *stream() { await new Promise(() => {}) }, updateConfig() {} })
+    void old.getOrCreate(KEY).wakeUp({ wake: { kind: 'workboard_idle_review' }, received_at: '2026-09-06T22:05:00+08:00', timezone: 'Asia/Shanghai' })
+    const checkpoint = await checkpointWhere(value => value.hasEngineMessages)
+    const legacyText = '## Guidance: manager.worker-events（处理执行器反馈）\n\n旧版本完整正文保留样本'
+    const legacyAutomatic = createUserMessage(legacyText)
+    const guide = renderGuidance('manager', 'manager.workboard')
+    const legacy: ManagerResumeCheckpoint = { ...checkpoint,
+      state: { ...checkpoint.state, recent: [
+        createAssistantMessage([{ type: 'tool_use', id: 'legacy-manual', name: 'load_guidance', input: { name: 'manager.worker-events' } }], 'tool_use'),
+        createToolResultMessage('legacy-manual', legacyText, false),
+        ...checkpoint.state.recent, legacyAutomatic,
+      ] },
+      transientMessageIds: [...checkpoint.transientMessageIds, legacyAutomatic.id,
+        ...checkpoint.state.recent.filter(m => 'content' in m && m.content === guide).map(m => m.id)],
+    }
+    const restored = registry({ async *stream(params) {
+      expect(params.messages.some(m => m.id === legacyAutomatic.id)).toBe(false)
+      expect(params.messages.filter(m => 'toolResults' in m && m.toolResults.some(r => r.content === legacyText))).toHaveLength(1)
+      expect(params.messages.filter(m => 'content' in m && m.content === guide)).toHaveLength(1)
+      yield* chunksFromContent([], 'end_turn')
+    }, updateConfig() {} })
+    restored.registerResumeCheckpoints([legacy])
+    trace.reconcileInterruptedManagerEpisodes(new Set([legacy.episodeId]))
+    await restored.resumeInterruptedEpisodes()
+    const saved = await store.load(KEY)
+    expect(saved.recent.some(m => m.id === legacyAutomatic.id)).toBe(false)
+    expect(JSON.stringify(saved.recent)).toContain('legacy-manual')
+    expect(saved.recent.filter(m => 'content' in m && m.content === guide)).toHaveLength(1)
     expect(await store.loadCheckpoint(KEY)).toBeUndefined()
   })
 
@@ -972,7 +1003,7 @@ describe('Manager restart continuation', () => {
       timezone: 'Asia/Shanghai',
     })
     const checkpoint = await checkpointWhere((value) => value.hasEngineMessages)
-    expect(checkpoint.transientMessageIds).toHaveLength(2)
+    expect(checkpoint.transientMessageIds).toHaveLength(1)
 
     const restored = registry({
       async *stream(params) {
