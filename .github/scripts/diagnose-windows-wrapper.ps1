@@ -42,7 +42,7 @@ if (!(Test-Path $nsis)) { choco install nsis --yes --no-progress | Out-Null; if 
 $plugin = Get-ChildItem "$root/wrapper" -Recurse -Filter 'nsis7z.dll' | Select-Object -First 1
 if (!$plugin) { throw 'Embedded NSIS extraction plugin absent' }
 $macroFile = Join-Path $root 'extractAppPackage.nsh'
-Invoke-WebRequest 'https://raw.githubusercontent.com/electron-userland/electron-builder/v26.15.3/packages/app-builder-lib/templates/nsis/include/extractAppPackage.nsh' -OutFile $macroFile
+Copy-Item (Join-Path $PSScriptRoot 'fixtures/windows-wrapper-extract-original.nsh') $macroFile
 $macro = [IO.File]::ReadAllText($macroFile)
 $macro = $macro.Replace('    CopyFiles /SILENT', '    IfErrors 0 +2' + "`n" + '      FileWrite $ProbeLog "before-copy:error$\r$\n"' + "`n" + '    CopyFiles /SILENT')
 $macro = $macro.Replace('    DetailPrint `Can', '    FileWrite $ProbeLog "after-copy:error$\r$\n"' + "`n" + '    DetailPrint `Can')
