@@ -11,6 +11,7 @@ import { once } from 'node:events'
 import { pipeline } from 'node:stream/promises'
 import { Readable } from 'node:stream'
 import { pathToFileURL } from 'node:url'
+import { stoppedLegacyModules } from '../../scripts/lib/__tests__/fixtures/stopped-legacy-modules.mjs'
 assert.equal(process.env.GITHUB_ACTIONS, 'true')
 assert.equal(process.platform, 'darwin')
 const repository = await fs.realpath(process.env.GITHUB_WORKSPACE), project = await fs.realpath(process.argv[2])
@@ -59,6 +60,13 @@ try {
     const command = path.join(home, '.local/bin/crabot')
     await fs.mkdir(path.dirname(command), { recursive: true }); await fs.symlink(path.join(old, 'cli.mjs'), command)
     binding.writeMacAppBinding({ home, appPath: app, dataDir: data })
+    let stale
+    if (version === 'v2026.10.14.1') {
+      stale = await stoppedLegacyModules(data)
+      const { discoverLegacyUserInstall } = await moduleAt('legacy-desktop.mjs'), { fenceLegacyEntries } = await moduleAt('legacy-entry-fence.mjs')
+      await fenceLegacyEntries(await discoverLegacyUserInstall({ root: old, dataDir: data, source: env }))
+      await assert.rejects(fs.lstat(path.join(data, 'desktop-maintenance.json')), { code: 'ENOENT' })
+    }
     let gui, exited, output = '', passed = false
     try {
       console.log('CRABOT_MAC_APP_LEGACY_STAGE ' + JSON.stringify({ version, stage: 'actual-bundled-admission' }))
@@ -75,6 +83,7 @@ try {
       finally { clearTimeout(admissionTimer) }
       assert.equal(JSON.parse(await fs.readFile(path.join(data, 'desktop-maintenance.json'), 'utf8')).phase, 'verifying')
       assert.equal(await fs.readlink(command), path.join(core, 'bin/crabot'))
+      if (stale) for (const file of stale.files) await assert.rejects(fs.lstat(file), { code: 'ENOENT' })
       gui = spawn(path.join(app, 'Contents/MacOS/Crabot'), ['--background'], { env, stdio: ['ignore', 'pipe', 'pipe'] })
       exited = once(gui, 'close'); let ready = false, failure, buffered = ''
       gui.once('error', error => { failure = error })
@@ -100,7 +109,7 @@ try {
       assert.equal(await fs.readFile(path.join(data, 'admin/credentials.json'), 'utf8'), credentials)
       for (const file of sentinels) assert.equal(await fs.readFile(path.join(data, file), 'utf8'), 'retained ' + version)
       for (const file of ['app', 'releases', 'current-release.json', 'desktop-installation.json']) await assert.rejects(fs.lstat(path.join(old, file)), { code: 'ENOENT' })
-      reports.push({ version, published_program_verified: true, stopped_fixture_data: true, actual_bundled_admission: true,
+      reports.push({ version, published_program_verified: true, stopped_fixture_data: true, old_fenced_stale_records_settled: Boolean(stale), actual_bundled_admission: true,
         ordinary_sealed_gui_ready: true, cli_same_instance_without_host_node: true, original_data_and_password_preserved: true,
         legacy_root_not_reinstalled: true, native_consent_dialog_tested: false, business_model_calls: 0 })
       passed = true

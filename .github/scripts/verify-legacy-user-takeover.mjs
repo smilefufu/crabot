@@ -12,6 +12,9 @@ import { once } from 'node:events'
 import { pipeline } from 'node:stream/promises'
 import { Readable } from 'node:stream'
 import { pathToFileURL } from 'node:url'
+import { stoppedLegacyModules } from '../../scripts/lib/__tests__/fixtures/stopped-legacy-modules.mjs'
+import { discoverLegacyUserInstall } from '../../scripts/lib/legacy-desktop.mjs'
+import { fenceLegacyEntries } from '../../scripts/lib/legacy-entry-fence.mjs'
 import { buildLegacyInstallerDriver } from './build-legacy-installer-driver.mjs'
 import { verifyDesktopPayload } from '../../scripts/lib/desktop-payload.mjs'
 import { inspectInstance, identity } from '../../scripts/lib/instance-runtime.mjs'
@@ -91,7 +94,7 @@ try {
     const home = path.join(temporary, version), root = path.join(home, '.crabot'), dataDir = path.join(root, 'data'), control = path.join(home, 'control')
     await fs.mkdir(control, { recursive: true, mode: 0o700 })
     const archive = path.join(home, process.platform === 'win32' ? 'old.zip' : 'old.tar.gz'), extracted = path.join(home, 'extracted')
-    let gui, exited, peer, prepared, passed = false
+    let gui, exited, peer, prepared, stale, passed = false
     const env = { ...process.env, HOME: home, USERPROFILE: home, APPDATA: path.join(home, 'Roaming'), LOCALAPPDATA: path.join(home, 'Local') }
     if (process.platform === 'win32') {
       // Real Windows profiles already contain these OS-owned parent locations.
@@ -125,6 +128,15 @@ try {
       const config = path.join(control, 'config.json')
       await fs.writeFile(config, JSON.stringify({ control, installRoot: root }) + '\n', { mode: 0o600 })
       env.CRABOT_LEGACY_INSTALLER_DRIVER = config
+      if (process.platform === 'win32' && version === 'v2026.10.14.1') {
+        // Field feedback: the old instance is stopped, but a previous attempt
+        // has fenced entries and left three old module records behind.
+        stale = await stoppedLegacyModules(dataDir)
+        const source = await discoverLegacyUserInstall({ root, dataDir, source: env })
+        await fenceLegacyEntries(source)
+        assert.equal(await absent(path.join(dataDir, 'desktop-maintenance.json')), true)
+        stage('stopped-v14-fenced-with-three-module-records')
+      }
       stage('actual-installer')
       if (linux) {
         Object.assign(env, { XDG_CONFIG_HOME: path.join(home, 'config'), XDG_DATA_HOME: path.join(home, 'share'),
@@ -146,6 +158,7 @@ try {
       prepared = { installRoot: root, installation_id: own.record.installation_id, selection: own.selection, coreRoot: own.coreRoot, guiRoot: own.guiRoot }
       assert.equal(own.dataDir, dataDir); assert.deepEqual(own.selection, target.record.selection)
       assert.equal(JSON.parse(await fs.readFile(path.join(dataDir, 'desktop-maintenance.json'), 'utf8')).phase, 'verifying')
+      if (stale) for (const file of stale.files) assert.equal(await absent(file), true, 'Exited legacy record must settle before ordinary Main')
       stage('ordinary-target-main')
       gui = spawn(own.executable, ['--background'], { env, stdio: ['ignore', 'pipe', 'pipe'] }); peer = identity.inspectProcess(gui.pid); assert.ok(peer); exited = once(gui, 'exit'); void exited.catch(() => {})
       let ready = false, buffered = '', failed
@@ -185,7 +198,7 @@ try {
       assert.equal(inspectInstance(dataDir).record.generation, instance.record.generation)
       reports.push({ version, platform, published_archive_verified: true, official_windows_installer_launcher: process.platform === 'win32', actual_installer_loaded: true, native_dialog_input_substituted: !linux, actual_ubuntu_backend: linux,
         graphical_polkit_tested: false, actual_gtk_flow_driven: false,
-        old_data_fixture_stopped: true, ordinary_main_core_healthy: true, actual_native_and_original_cli_same_instance: true, host_node_required: false,
+        old_data_fixture_stopped: true, old_fenced_stale_records_settled: Boolean(stale), ordinary_main_core_healthy: true, actual_native_and_original_cli_same_instance: true, host_node_required: false,
         original_credentials_and_sentinels_preserved: true, actual_bundled_python_file_access: true, historical_user_data_fixture: true,
         historical_user_model_session_tested: false, business_model_calls: 0 })
       await fs.writeFile(evidence, JSON.stringify({ complete: false, cases: reports }) + '\n')
