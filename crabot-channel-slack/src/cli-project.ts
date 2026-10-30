@@ -6,7 +6,7 @@ export const SLACK_MANIFEST = {
   oauth_config: { scopes: { bot: ['chat:write', 'channels:history', 'groups:history', 'channels:read', 'groups:read', 'im:history', 'im:read', 'im:write', 'users:read'] } },
   settings: { event_subscriptions: { bot_events: ['message.channels', 'message.groups', 'message.im'] }, socket_mode_enabled: true, org_deploy_enabled: false, token_rotation_enabled: false },
 }
-export async function prepareProject(root: string): Promise<string> {
+export async function prepareProject(root: string, name = 'Crabot'): Promise<string> {
   const project = path.join(root, 'project')
   await fs.mkdir(path.join(project, '.slack'), { recursive: true, mode: 0o700 })
   // Official CLI uses PowerShell on Windows and sh here on POSIX (no SHELL override).
@@ -18,7 +18,9 @@ export async function prepareProject(root: string): Promise<string> {
   const command = `${process.platform === 'win32' ? '& ' : ''}${quote(process.execPath)} ${quote(path.join(project, 'hook.mjs'))}`
   const hooks = { runtime: 'node', hooks: { 'get-hooks': `${command} config` }, config: { 'sdk-managed-connection-enabled': true } }
   await fs.writeFile(path.join(project, '.slack', 'hooks.json'), JSON.stringify(hooks), { mode: 0o600, flag: 'wx' })
-  await fs.writeFile(path.join(project, 'manifest.json'), JSON.stringify(SLACK_MANIFEST), { mode: 0o600, flag: 'wx' })
+  const manifest = { ...SLACK_MANIFEST, display_information: { ...SLACK_MANIFEST.display_information, name },
+    features: { ...SLACK_MANIFEST.features, bot_user: { ...SLACK_MANIFEST.features.bot_user, display_name: name } } }
+  await fs.writeFile(path.join(project, 'manifest.json'), JSON.stringify(manifest), { mode: 0o600, flag: 'wx' })
   await fs.writeFile(path.join(project, 'hook.mjs'), `import fs from 'node:fs';
 const mode = process.argv[2];
 if (mode === 'config') console.log(JSON.stringify({runtime:'node',hooks:{'get-manifest':${JSON.stringify(`${command} manifest`)},start:${JSON.stringify(`${command} handoff`)}},config:{'sdk-managed-connection-enabled':true}}));

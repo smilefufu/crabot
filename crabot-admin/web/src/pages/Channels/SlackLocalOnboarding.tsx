@@ -165,11 +165,13 @@ export function SlackLocalOnboarding() {
       <p>Crabot 会在你的 workspace 创建和配置一个自己的 Slack App，保持本地直连。授权包含 App 管理能力，CLI 只在接入时运行。</p>
       <label htmlFor="slack-instance-name">渠道名称</label>
       <input id="slack-instance-name" className="input" value={name} onChange={e => setName(e.target.value)} placeholder="如：slack-bot" />
+      <p>App 和 Bot 使用此渠道名称，Slack CLI 会添加 (local) 后缀；渠道名称最多 27 个字符。</p>
       <p>你只需在 Slack 确认一次授权，并填回验证码；完成后将自动认主，无需手工配置 Bot 或填写 Token。</p>
       <Button onClick={start} disabled={!name.trim()}>开始授权</Button>
     </>}
     {phase === 'waiting' && <>
-      <ol><li>复制以下一次性命令，在目标 workspace 的任意聊天中发送。</li><li>在 Slack 弹窗中确认权限。</li><li>将 Slack 给出的验证码填回下方。</li></ol>
+      <ol><li>复制以下一次性命令，建议在目标 Slack 工作区与自己的私聊中发送；任意私聊或群聊也可以。</li><li>在 Slack 弹窗中确认权限。</li><li>将 Slack 给出的验证码填回下方。</li></ol>
+      <p>这一步只授权 Slack CLI 管理应用，不会将新 Bot 加入发送命令的群。配置完成后，请在要使用的群中添加此 Bot。</p>
       <label htmlFor="slack-authorization-command">一次性授权命令</label>
       <textarea id="slack-authorization-command" ref={commandField} className="input" rows={3} readOnly spellCheck={false}
         value={begin?.authorization_command ?? ''} onFocus={event => event.currentTarget.select()}

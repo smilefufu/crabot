@@ -52,6 +52,16 @@ describe('Slack local setup experience', () => {
     expect(setData).toHaveBeenCalledWith('text/plain', '/slackauthticket fixture-ticket')
   })
 
+  it('explains channel-based naming and that CLI authorization does not add the Bot to the originating group', async () => {
+    render(<MemoryRouter><SlackLocalOnboarding /></MemoryRouter>)
+    expect(screen.getByText(/App 和 Bot 使用此渠道名称/)).toHaveTextContent('(local)')
+    fireEvent.change(screen.getByLabelText('渠道名称'), { target: { value: 'slack-team' } })
+    fireEvent.click(screen.getByRole('button', { name: '开始授权' }))
+    await screen.findByLabelText('一次性验证码')
+    expect(screen.getByText(/建议在目标 Slack 工作区与自己的私聊/)).toHaveTextContent('任意私聊或群聊也可以')
+    expect(screen.getByText(/这一步只授权 Slack CLI/)).toHaveTextContent('不会将新 Bot 加入发送命令的群')
+  })
+
   it('preserves uppercase instance names when starting authorization, matching the updated contract', async () => {
     render(<MemoryRouter><SlackLocalOnboarding /></MemoryRouter>)
     fireEvent.change(screen.getByLabelText('渠道名称'), { target: { value: 'Slack-one' } })

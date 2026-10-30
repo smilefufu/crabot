@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { SlackOnboarder } from '../src/onboard.js'
 import { SLACK_MANIFEST } from '../src/cli-project.js'
 import { cliEnvironment, ensureCli, type CliJob } from '../src/cli-tools.js'
@@ -42,6 +44,33 @@ async function terminal(onboarder: SlackOnboarder, id: string) {
   throw new Error('missing terminal')
 }
 describe('local Slack onboarding contract', () => {
+  it('uses each channel name in the manifest consumed by CLI without changing another session', async () => {
+    const { onboarder, dataDir, commands } = await setup()
+    const first = await onboarder.begin({ instance_name: 'Slack-Team-A' })
+    const second = await onboarder.begin({ instance_name: 'Slack-Team-B' })
+    for (const [session, name] of [[first, 'Slack-Team-A'], [second, 'Slack-Team-B']] as const) {
+      const manifest = JSON.parse(await fs.readFile(path.join(dataDir, 'slack-onboarding', session.session_id, 'project/manifest.json'), 'utf8'))
+      const { stdout } = await promisify(execFile)(process.execPath, [path.join(dataDir, 'slack-onboarding', session.session_id, 'project/hook.mjs'), 'manifest'])
+      expect(JSON.parse(stdout)).toEqual(manifest)
+      expect(manifest.display_information.name).toBe(name)
+      expect(manifest.features.bot_user.display_name).toBe(name)
+      expect(manifest.oauth_config).toEqual(SLACK_MANIFEST.oauth_config)
+      expect(manifest.settings).toEqual(SLACK_MANIFEST.settings)
+    }
+    expect(SLACK_MANIFEST.display_information.name).toBe('Crabot')
+    expect(commands.some(args => args[0] === 'run')).toBe(false)
+    await onboarder.dispose()
+  })
+
+  it('explains the Slack name limit before starting authorization rather than silently shortening the channel name', async () => {
+    const { onboarder, commands } = await setup()
+    await expect(onboarder.begin({ instance_name: 'a'.repeat(28) })).rejects.toMatchObject({ status: 400, code: 'invalid_input', message: expect.stringContaining('27') })
+    expect(commands).toHaveLength(0)
+    const accepted = await onboarder.begin({ instance_name: 'a'.repeat(27) })
+    expect(accepted.ui_mode).toBe('challenge_code')
+    await onboarder.dispose()
+  })
+
   it('waits for an in-flight begin to release its resources during dispose', async () => {
     const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-slack-begin-test-')); roots.push(dataDir)
     let started!: () => void

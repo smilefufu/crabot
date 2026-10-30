@@ -80,6 +80,8 @@ export class SlackOnboarder implements Onboarder {
     if (proxy && !['system', 'custom', 'none'].includes(proxy.mode)) throw new OnboardingError('invalid_input', 400, '网络配置无效')
     const name = params?.instance_name
     if (name !== undefined && (typeof name !== 'string' || !validateInstanceId(name).ok)) throw new OnboardingError('invalid_input', 400, '渠道名称无效')
+    // Slack limits the App name to 35 characters; CLI adds the 8-character local suffix.
+    if (typeof name === 'string' && Array.from(name.normalize('NFC')).length > 27) throw new OnboardingError('invalid_input', 400, 'Slack 本地 App 的渠道名称最多 27 个字符（平台名称上限含 CLI 的 local 后缀）；请缩短名称后再授权')
     if (this.disposed) throw new Error('Slack 授权服务已停止')
     const base = path.join(this.dataDir, 'slack-onboarding')
     await privateDirectory(base)
@@ -104,14 +106,14 @@ export class SlackOnboarder implements Onboarder {
       this.preparation ??= (this.options.ensureCli ?? ensureCli)(this.dataDir, session.abort.signal).catch(error => { this.preparation = undefined; throw error }).finally(() => { this.preparation = undefined })
       session.executable = await this.preparation
       session.abort.signal.throwIfAborted()
-      session.project = await prepareProject(root)
+      session.project = await prepareProject(root, typeof name === 'string' ? name.normalize('NFC') : undefined)
       const output = await this.command(session, ['auth', 'login', '--no-prompt'])
       const ticket = output.match(/\/slackauthticket\s+([A-Za-z0-9_+/=-]+)/)?.[1]
       if (!ticket) throw new Error('CLI did not return ticket')
       session.ticket = ticket
       session.phase = 'waiting'
       session.expires = Date.now() + (this.options.waitMs ?? 600000)
-      return { session_id: id, ui_mode: 'challenge_code', authorization_command: `/slackauthticket ${ticket}`, expires_at: session.expires, display: { title: '在 Slack 确认授权', description: '在目标 workspace 发送命令，确认授权后将验证码填回。Crabot 自动创建和安装本地 App。' } }
+      return { session_id: id, ui_mode: 'challenge_code', authorization_command: `/slackauthticket ${ticket}`, expires_at: session.expires, display: { title: '在 Slack 确认授权', description: '在目标 Slack 工作区与自己的私聊中发送命令，也可用任意私聊或群聊。确认授权后填回验证码；授权不会将新 Bot 自动加入群聊。' } }
     } catch {
       await this.fail(session)
       throw new Error(`Slack 本地授权准备失败（网络模式：${proxy?.mode ?? 'system'}）；请检查当前网络/代理、工具路径和系统权限后重新开始`)
