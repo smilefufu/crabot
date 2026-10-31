@@ -241,6 +241,27 @@ try {
             modules: modules?.filter(module => ['admin-web', 'crabot-agent', 'crabot-memory'].includes(module.module_id))
               .map(module => ({ module_id: module.module_id, status: statuses.has(module.status) ? module.status : 'unknown' })) ?? null })
         } catch { diagnostics.push({ name: 'startup-health', unavailable: true }) }
+        // Observe only the disposable fixture's admission records and windows.
+        // A selector timeout alone cannot distinguish a renderer wait from conversion.
+        for (const [name, file] of [
+          ['program-binding', path.join(programRoot, 'desktop-installation.json')],
+          ['program-selector', path.join(programRoot, 'current-release.json')],
+          ['data-maintenance', path.join(dataDir, 'desktop-maintenance.json')],
+          ['legacy-entry-fence', path.join(root, '.desktop-takeover/transaction.json')]
+        ]) {
+          try {
+            const value = JSON.parse(await fs.readFile(file, 'utf8'))
+            diagnostics.push({ name, present: true, schema: value.schema_version, phase: value.phase })
+          } catch (error) { diagnostics.push({ name, present: error.code !== 'ENOENT', unavailable: error.code !== 'ENOENT' }) }
+        }
+        if (singleLayer && gui && gui.exitCode === null) {
+          try {
+            const observed = await execute(path.join(process.env.SystemRoot, 'System32/WindowsPowerShell/v1.0/powershell.exe'),
+              ['-NoProfile', '-NonInteractive', '-File', path.join(repository, '.github/scripts/accept-windows-legacy-data-dialog.ps1'), '-GuiPid', String(gui.pid), '-DataDirectory', dataDir, '-Version', version, '-ObserveOnly'],
+              { env, timeout: 30000, maxBuffer: 65536 })
+            diagnostics.push({ name: 'actual-gui-windows', value: JSON.parse(observed.stdout) })
+          } catch { diagnostics.push({ name: 'actual-gui-windows', unavailable: true }) }
+        }
         for (const name of ['driver-started.json', 'driver-ready.json', 'driver-imported.json', 'driver-quit.json', 'driver-failed.json', 'takeover-confirmed.json', 'installer-handoff.json']) {
           try { diagnostics.push({ name, value: JSON.parse(await fs.readFile(path.join(control, name), 'utf8')) }) }
           catch (error) { if (error.code !== 'ENOENT') diagnostics.push({ name, unavailable: true }) }

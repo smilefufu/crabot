@@ -1,4 +1,4 @@
-﻿param([Parameter(Mandatory=$true)][int]$GuiPid,[Parameter(Mandatory=$true)][string]$DataDirectory,[Parameter(Mandatory=$true)][string]$Version)
+﻿param([Parameter(Mandatory=$true)][int]$GuiPid,[Parameter(Mandatory=$true)][string]$DataDirectory,[Parameter(Mandatory=$true)][string]$Version,[switch]$ObserveOnly)
 $ErrorActionPreference='Stop'
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') { throw 'Disposable hosted runner required' }
 Add-Type @'
@@ -18,6 +18,15 @@ public class CrabotFirstUseUI {
  public static void Confirm(IntPtr window){SendMessage(window,0x466,(IntPtr)100,IntPtr.Zero);}
 }
 '@
+if ($ObserveOnly) {
+ $result=@(foreach($window in [CrabotFirstUseUI]::Windows()){
+  if([CrabotFirstUseUI]::Pid($window) -ne $GuiPid){continue}
+  $text = (& (Join-Path $PSScriptRoot 'read-windows-dialog.ps1') -Handle ($window.ToInt64())) | ConvertFrom-Json
+  [pscustomobject]@{title=[CrabotFirstUseUI]::Text($window);text=@($text)}
+ })
+ ConvertTo-Json -InputObject $result -Depth 4 -Compress
+ exit 0
+}
 $observed=[Collections.Generic.HashSet[string]]::new()
 $deadline=(Get-Date).AddMinutes(4)
 while((Get-Date) -lt $deadline){
