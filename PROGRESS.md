@@ -1,37 +1,15 @@
 # Crabot 项目进度
 
-### 桌面化冻结范围：已交付新包，完整验收收口中
+### 桌面化冻结范围：Windows安装纠错及完整验收中
 
-- 2026-10-31安装纠错继续：e2a39594的Windows原生首启边界与源码冷启动两作业通过（41166710311）；旧crabot.cmd实际转接原数据、登记失败重试通过。当前单层NSIS直接解包、GUI首启和已有GUI原位更新仍在验收，尚未交付新EXE；desktop.7仍是旧安装流程。已补实际产品NSIS小载荷长路径探针；保留数据重装接入同一目标Node交接，旧Core删除后同版/较新版恢复及原入口失败回归共10项、本轮UI/签名/布局17项通过，均为隔离夹具。完整载荷与成功后可选清理未验收前不宣称交付完成。单层产品NSIS原生小载荷已在41169484764通过318/315/445字符的普通/中文/深目录完整字节核对，安装阶段无数据初始化；不代表完整大包已验收。本机源码部署未动。
-
-- 2026-10-29两份Spec已确认并先更新协议。源码使用项目内pnpm dev、repo/data与固定29000/13000，包含增量准备、状态、精确启停、Vite及开发GUI；release独立。历史源码data、全局命令和升级路径保留，不自动转换或搬数据。
-- Mac已改真正App拖拽，首启选择外部data，隐藏目录可选；两版列明旧release沿原数据接入，真实GUI/CLI健康后解除保护。Windows保留一次用户级NSIS安装。workspace、权限及system边界继续沿冻结协议。
-- ARM Mac/Win11 desktop.3完整离线候选已直接交付Downloads/Crabot桌面验收包-20261029，原件/副本SHA一致；Mac普通App入口、Applications链接、Core清单与ad-hoc完整性已只读核验并卸载镜像。旧desktop.1/2保留，真实内置Python/Node验证和精确来源/摘要见文档。本机原部署未停机、升级或接管，未启动第二个业务MM；约298GiB空闲，40/30GiB及本任务20GiB保护保持，不动Docker/Spotlight。
-- 三平台纯源码实际准备、冷启动、公共前台/Vite及正常停止通过。Windows9eb/40828644566和ARM Mac e057/40829438173通过实际开发GUI+release双Core、数据/端口/代际与双向启停隔离；Mac两种公开旧程序配合合成停机数据完成普通App接入并保留原密码/文件，Windows完整程序删除后保留data重装及健康收口通过。
-- 最终回归实证旧根.env会在准备及MM二次读取中重新引入生产目录/JWT，两层均仅对新dev关闭。有限真实MM的dev/旧CLI对照先红后绿，Core编译、本机9项入口/1项CI专用跳过和23项边界通过；7d7ec89b/40837581904的Windows实际源码生命周期及10项入口回归全过。历史CLI读取策略及release行为保持；未因dev专用修复重打离线包。
-- 自动化结果已收齐：40824815154的Linux/ARM/Intel完整产品及Ubuntu24原生安装成功；Windows原组的签名更新/完整卸载重装成功，因180分钟CI总预算取消的CLI/Host尾部已在62feb5f8/40845185103独立通过。原组仍记cancelled；只修未来Windows产品CI总预算，不改产品期限/断言。临时尾部workflow仅保留测试分支，不进入产品PR；不能用之前分支/局部通过代替最终组合。真实mirror-xinshu的Engine/Worker两链8次响应已通过，GUI/渠道模型与脚本业务仍须分开验收。ARM Mac/Win11由用户手测，缺资源的最低OS/Ubuntu桌面项按许可跳过披露；候选关闭正式自动更新，公开通道及正式信任根未就绪。
-- 安装路径表已区分历史源码/新dev、旧/新release、GUI/CLI及system；新版独立CLI加GUI、旧CLI首次跨代和历史源码/system升级的未覆盖项如实列明。完整测试及最终diff review后才按已有1–50依赖批次和新增源码/Mac批次开PR，每批独立构建验证，不直推产品main、不自行合并。详细证据见[本轮实施结果](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-29-development-macos-implementation.md)。
-
-### 桌面真机反馈：desktop.7已交付，体验仍在收口
-
-- Mac7源d0209eb7/41071881275、Windows7源d1f4f499/41092605799已直接交付原20261030验收目录，包与交付SHA一致；Windows三作业及独立同EXE41098745676通过，v14预fenced/三份已退出记录、原数据保留、GUI/CLI同实例、源码共存、保留data重装和真实EXE无Retry均核对。Windows6现场失败保留，真人Win11/业务仍待复验；本机未启动新App/Core或改变源码部署，产品main未推送。
-- 用户确认现场无MM，不再要求诊断脚本。仅持锁清理已退出记录，活动/未知进程不终止；Windows系统PowerShell定位与缓存环境误过滤、合法失败帧二次断连均已修复。接管33项、停止观察22项通过（5平台跳过），同源整链通过；历史失败和来源详情收敛到[反馈记录](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-30-windows-installation-feedback-fixes.md)。
-- 未完成：Windows安装/GUI首启职责分离、转换前失败入口自动恢复及删除性能收敛。41106997421实测约4.4万个文件触发120万次程序父目录解析；9c2da44e只减少同一物理目录的重复解析，身份/归属/占用/锁仍核对。41113651891的同包Windows原生回归59过3平台跳过，程序解析降至5032次、约8分55秒降至4分46秒；数据保留，不称性能已达标，旧Win7包未变。安装/数据绑定的设计纠错见2026-10-31-windows-install-first-launch-boundary-design.md；用户要求升级成功后自选清理旧程序，成功识别不依赖删除，保留/清理失败也不得重复接管。正式协议已按用户原要求同步；共同定位支持程序外旧data，真实CLI与GUI定位51项通过；实际目标Node的接入/恢复及Mac兼容21项通过，Windows首启对话5项通过、类型检查通过。转换前失败自动恢复已知旧命令，重试只转换一次；新首启直接使用已解包程序，不复制整份程序回旧根。Windows单层NSIS接线、升级/保留数据修复、成功后可选旧程序清理和原生EXE验收仍在进行，不把原需求反述为新增需求。缺资源真实桌面项按已许可跳过披露；旧超深TEMP限制保留，不称整项feature完成。
-- 已合入主线72257636（#228），冲突仅PROGRESS并保留两边记录；Agent构建与主线相关220项通过。剩余304个Agent测试文件已执行：2863项通过、11项失败；先前失败另逐项追踪。主线源码快照复现了部分相同失败；修正构造/受管目录及读模型夹具后相关104项通过，未放宽生产权限。旧重试计时夹具已对齐，19项18过1失败且不再挂起；相同预算失败在未修改的主线Engine上复现，单列后续处理，不混入桌面生产代码。入站夹具补齐必需Skill后106项94过12失败，身份/Memory旧断言仍需逐项核对，不改断言假称通过；既有Win7包源d1f4f499不改写。
-- 用户要求安装修复后审计体积：同SHA Mac7/Win7只读实测普通文件约1737.6/2005.6MiB（不含用户data）。Windows浏览器435.5、Git/Bash387.9、GUI379.2MiB；浏览器两驱动的同SHA Node重复116.5/89.2MiB，Core全部重复字节上限238.2/251.8MiB，不能当作已验证可删空间。已补反馈记录；未精简/重建或启动App，先按原顺序完成安装修复。
-
-- 首个模型服务保存后明确进入默认模型选择，显示服务/模型数量和当前步骤，不再突出重复添加；不改模型引用、默认值保存或费用触发。新增回归先复现失败，修复后模型与Slack页面11项回归、Web类型检查和生产构建通过。修复在桌面worktree完成，已随desktop.4交付；desktop.3保留，本机未部署。
-- Slack复制修复：主界面Session原先一律拒绝，误阻断clipboard-sanitized-write；现仅受信主窗口允许写，读取/外来页面/子frame仍拒绝。命令改只读纯文本框，复制拒绝或API不可用时选中并提示快捷键，手动复制只提供text/plain。新增3项Web回归先红，修复后相关14项、桌面权限/IPC7项、两端类型及Web生产构建通过；独立Electron44原生权限对照写denied→granted、读始终denied、正常退出0，未读写本机剪贴板或启动MM。已随desktop.4交付，desktop.3保留。
-- 用户指出“对齐飞书”包含自动认主，已纠正原Slack Spec/正式协议/计划/使用指南的手工绑定要求。服务端用核验身份创建/复用唯一主人，新建用已知昵称；完成页直接显示认主，无需选Friend/点击关联/先发DM。共享Master写盘失败可重试，已有绑定冲突保留；成功结果随原回执保存，重复完成不重新认主覆盖后续手工调整。Admin49、全量Web453、Slack32及飞书285项共819项通过，Admin构建/Web类型和生产构建通过；覆盖真实HTTP、真实Friend落盘/重载/身份解析及私聊Master与群默认权限。渠道传输为隔离夹具，未冒充真实Slack/Agent收发，已进入新desktop.4，旧包保留。
-- 定向review还清除了完成页写死“Crabot(local)”的使用指引，私聊改为可选消息测试；Feishu专用OWNER字段/权限链接推送不复用。App/Bot命名、系统代理、权限配图仍按各自状态跟踪，不混入本次授权修复。未操作本机部署或真实Slack账号。
-- 2026-10-30新desktop.4 ARM Mac/Win11完整离线包已代下载至原Downloads验收目录，ZIP/安装包/交付副本SHA均核对；新入口说明及逐平台来源/摘要已写入同目录。Mac1244009a/40903240313全部原生CI通过，DMG只读核验普通App入口、完整Core清单、三项实际修复及ad-hoc完整性，镜像已卸载；Windows2ec65be4/40902195436全部原生CI通过，包含源码冷启动、实际GUI/release共存与完整删除程序后的保留数据重装恢复。两来源差异仅CI固定Python3.12：原Mac源环境误选3.15被锁定watchfiles/PyO3拒绝，失败/取消记录保留，不改变产品或源码依赖。临时下载副本已在复核交付摘要后清理，本机约297GiB空闲；未启动App/Core或接管本机源码部署。
-- 桌面权限引导已生成逐步配图产品预览，等待用户确认，尚未改权限页面、申请或检查语义。
-- 现场在另一台Mac；系统代理最小修正已于2026-10-30获确认并完成实现：无环境变量时读取macOS固定HTTP/HTTPS设置，Node、Slack CLI和SDK Socket共用出口，保存system重新检测；终端变量与GUI继承环境仍分开核验。2026-10-30按用户要求修正新App/Bot使用渠道名（CLI保留local后缀；平台35字符上限扣除后缀后最多27），已有在线App不远程改名；授权说明明确可用任意私聊/群聊，推荐与自己的私聊，授权不自动入群。用户已取消远端历史App列表需求。
-- macOS钥匙串误触发来自未使用的Cookie加密；桌面认证沿用主进程短期令牌/请求头，关闭Mac GUI及安装宿主的该开关，其余平台保持。未清理钥匙串/profile或操作本机部署。独立ad-hoc原生测试未使用模拟钥匙串：两次启动认证200、Cookie为0、偏好跨重启保留；ARM Mac desktop.5实际二进制fuse已核对关闭，用户机器仍待验。desktop.4不包含本轮修改。
-
-- 代理旧实现先复现Shared6项、CLI1项、设置页2项失败；修复后本地CONNECT实证fetch/HTTP Agent及Slack SDK真实WebSocket走代理、loopback直连，实际受管子进程得到代理。Shared全集350项通过/2平台跳过（含新增13项），Slack38、Web456、Admin定向77项通过，相关类型/构建通过；本机独立Node清空代理变量仍读取原生代理，正常TLS请求Slack公开api.test为200/ok=true；另一台Mac的FlClash现场另计，未改本机部署。
-- ARM Mac desktop.5（58f39f1f）已直接交付Downloads/Crabot桌面验收包-20261030/ARM Mac；原生构建、源码冷启动及GUI/release共存全过，DMG只读核验Core全量清单、代理/Slack接线、Cookie fuse及ad-hoc完整性并卸载。Windows已确认官方v14/v15安装脚本改写crabot.cmd造成发现器误拒绝，精确补认官方入口并保持实际字节指纹/取消恢复；移除目录框错误的promptToCreate。Windows原生46项入口/兼容回归通过、3平台项跳过，目录框8项通过。
-- 外层Windows安装已实证两项缺陷：长临时目的路径丢文件，缩短私有叶目录；pip ARM启动器使用默认ARM64过滤而NSIS解码器不支持，固定BCJ后保留完整载荷。新desktop.6源4835eff3已直接交付Downloads/Crabot桌面验收包-20261030/Windows 11，包/副本SHA一致；41007892155的source/installer作业通过完整解包、官方v14真实接管/凭据历史workspace保留、原CLI/GUI同实例、源码/release共存和保留数据重装。整体run仍记cancelled（仅取消旧UI驱动）；同一EXE独立41014365116实际点击安装、跨盘空格目录、完成、退出0且无Retry。模拟profile从共享D盘改到真实用户Temp后登记通过，产品归属检查未改。Win11普通账号/业务仍由用户手测；Mac5保持。本机约231GiB空闲，源码未停机/升级/接管，产品main未推送。分层证据及校验见[本轮Windows记录](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-30-windows-installation-feedback-fixes.md)。
+- 继续原冻结范围：Electron＋React、共享HTTP/SDK与独立宿主IPC、统一内置环境与依赖隔离、GUI/CLI共享实例、项目workspace、在线Admin迁移、旧目录权限兼容及system批量管理；本轮不扩需求。源码dev/release隔离、固定29000/13000和原源码部署保留规则继续有效。
+- 最新已交付仍是20261030 Downloads目录的desktop.7：ARM Mac来源d0209eb7、Windows来源d1f4f499；精确包名/SHA和旧版现场失败均见[安装反馈与验收记录](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-30-windows-installation-feedback-fixes.md)。旧Win7仍是双层安装，不包含本轮单层修正；Mac保持正常拖拽App与外部data首启。
+- 本轮Windows改为NSIS一次直接解包最终GUI/Core到所选盘，真正GUI首启才确认旧release数据；原data不搬，新旧命令转同一实例。转换前失败恢复已知旧入口，fenced＋三个已退出模块记录可继续；原位GUI升级、保留数据重装沿原范围保护/健康恢复。普通0755旧目录可兼容，不收紧既有自定义ACL。
+- e8ea8041的41170061901原生首启边界通过：实际旧crabot.cmd、外部data、登记失败重试、同版/较新版保留数据交接及原位版本对转换。a34d9e25的41170494206三个原生作业均通过，新增准备/登记失败继续、迁移中断不重放及异目标拒绝；共同接入75项、Controller/更新59项与实际Electron门禁也通过。实测是隔离数据，不能代替Win11真人业务验收。Node子进程隔离修复了Windows测试清理已映射DLL的等待，没有放宽产品断言。
+- 单层产品NSIS实际普通/中文/深目录318/315/445字符的完整字节核对通过；安装阶段无业务data。来源a34d9e25的Windows desktop.8完整包正在41170496475构建/验收，尚未交付，不能提前宣称完整EXE通过。成功接入已有独立持久结果，旧程序保留或移除都不重复接管；可选清理提示/删除仍待完成，正式旧发行物字节索引已独立生成，用户端不下载旧安装包。
+- 约2GB体积已只读拆分：旧Mac程序1737.6MiB、Win程序2005.6MiB；Win浏览器435.5、Git387.9、GUI379.2、浏览器Python266.2MiB为主要组成。旧额外Installer宿主380.1MiB在单层包装移除；程序运行时尚未精简，不把理论可去重字节当作已减少。保持全离线内置要求。
+- 尚待：完整Win EXE与约1.5GiB TEMP、真实首启/旧数据/GUI与原CLI健康、新首启路径的保留数据重装、可选残留清理和重复安装、发行回归与本地新包交付；最终按可独立构建/验收的依赖边界拆PR。Agent扩大回归的既有失败单列在记录中，未弱化断言或记全绿。用户允许缺失旧macOS/Ubuntu真实桌面资源先跳过，Win11/macOS真人验收由用户继续。
+- 本机约220GiB空闲；原源码服务/data、Docker和Spotlight未动，未在本机启动验收包替代源码部署。主线仍72257636且已包含在分支，产品main未推送，未开未完成的大PR。
 
 ### 主控常驻职责与指南生命周期：实现完成，PR 验证中
 
