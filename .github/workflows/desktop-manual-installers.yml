@@ -11,15 +11,37 @@ on:
         description: 'Run only the real source development acceptance, without rebuilding installers'
         type: boolean
         default: false
+      cleanup_facts_only:
+        description: 'Build the pinned old-program byte index without installers or product services'
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
   group: desktop-manual-installer-${{ inputs.target || 'darwin-arm64' }}${{ inputs.source_only && format('-source-{0}', github.run_id) || '' }}
   cancel-in-progress: false
 jobs:
+  cleanup-facts:
+    name: Pinned legacy compiled-program facts
+    if: inputs.cleanup_facts_only == true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python .github/scripts/build-legacy-cleanup-inventory.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: legacy-cleanup-program-facts-${{ github.sha }}
+          path: .desktop-build/legacy-cleanup-files.json.gz
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
   boundary:
     name: Windows first-use data boundaries
-    if: inputs.target == 'win32-x64' && inputs.source_only == true
+    if: inputs.cleanup_facts_only != true && inputs.target == 'win32-x64' && inputs.source_only == true
     runs-on: windows-latest
     timeout-minutes: 30
     defaults:
@@ -65,7 +87,7 @@ jobs:
           retention-days: 7
   decoder:
     name: Actual single-layer Windows decoder
-    if: inputs.target == 'win32-x64' && inputs.source_only == true
+    if: inputs.cleanup_facts_only != true && inputs.target == 'win32-x64' && inputs.source_only == true
     runs-on: windows-latest
     timeout-minutes: 10
     defaults:
@@ -92,6 +114,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
   source:
+    if: inputs.cleanup_facts_only != true
     name: Source cold boot ${{ inputs.target || 'darwin-arm64' }}
     runs-on: ${{ inputs.target == 'win32-x64' && 'windows-latest' || inputs.target == 'linux-x64' && 'ubuntu-24.04' || 'macos-15' }}
     timeout-minutes: 30
@@ -132,7 +155,7 @@ jobs:
           if-no-files-found: error
           retention-days: 7
   installer:
-    if: inputs.source_only != true && inputs.target != 'linux-x64'
+    if: inputs.cleanup_facts_only != true && inputs.source_only != true && inputs.target != 'linux-x64'
     name: Offline test installer ${{ inputs.target || 'darwin-arm64' }}
     runs-on: ${{ inputs.target == 'win32-x64' && 'windows-latest' || 'macos-15' }}
     timeout-minutes: 120
@@ -262,7 +285,7 @@ jobs:
           retention-days: 7
   windows-ui:
     name: Actual Windows EXE installation
-    if: inputs.target == 'win32-x64' && inputs.source_only != true
+    if: inputs.cleanup_facts_only != true && inputs.target == 'win32-x64' && inputs.source_only != true
     needs: installer
     runs-on: windows-latest
     timeout-minutes: 30
