@@ -1,0 +1,66 @@
+name: Desktop installer initialization probe
+on:
+  workflow_dispatch:
+    inputs:
+      source_run:
+        type: string
+        default: '41170496475'
+      artifact_name:
+        type: string
+        default: 'crabot-win32-x64-offline-test-a34d9e253fa9ea565e29c0a34f8c2b8ed960b7a7'
+permissions:
+  contents: read
+  actions: read
+jobs:
+  recheck:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Prepare the finite test dependencies
+        run: |
+          node scripts/build-native.mjs
+          pnpm --dir crabot-client install --frozen-lockfile
+          pnpm --dir crabot-client run build
+          pnpm install --frozen-lockfile
+          pnpm --dir scripts/lib install --frozen-lockfile
+          pnpm --dir crabot-desktop install --frozen-lockfile
+          pnpm --dir crabot-desktop run build
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ inputs.source_run }}
+          name: ${{ inputs.artifact_name }}
+          path: .desktop-build/completed-exe
+      - name: Place the original completed EXE without rebuilding it
+        run: |
+          mkdir -p .desktop-build/manual/installer/distribution
+          find .desktop-build/completed-exe -type f \( -name '*offline-candidate.exe' -o -name SHA256SUMS \) -exec cp {} .desktop-build/manual/installer/distribution/ \;
+      - name: Exact EXE extraction with the original and sufficient output budgets
+        run: node .github/scripts/recheck-windows-single-layer.mjs 2>&1 | tee .desktop-build/exact-exe-recheck.log
+      - name: Real v14 data confirmation in the unchanged packaged GUI
+        run: node .github/scripts/verify-legacy-user-takeover.mjs .desktop-build/manual/paired .desktop-build/manual/installer v2026.10.14.1 2>&1 | tee .desktop-build/exact-exe-legacy-gui.log
+      - name: Real EXE Finish opens the GUI with 1.5 GiB free TEMP
+        shell: pwsh
+        run: |
+          $files = @(Get-ChildItem .desktop-build/manual/installer/distribution -Filter '*offline-candidate.exe')
+          if ($files.Count -ne 1) { throw 'Expected exactly one unchanged completed EXE' }
+          & .github/scripts/smoke-windows-wrapper-capacity.ps1 -Installer $files[0].FullName -Expected complete | Tee-Object .desktop-build/exact-exe-ui.log
+      - name: Retain exact package recheck evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: exact-windows-exe-recheck-${{ github.sha }}
+          path: |
+            .desktop-build/*.log
+            .desktop-build/*.json
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 7
