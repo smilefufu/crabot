@@ -2371,33 +2371,24 @@ test('an extracted desktop update keeps its original location and scoped stopped
   const programs = await first.readFirstLaunchPrograms(extracted)
   assert.equal(programs.initialized, false); assert.equal(programs.source.dataDir, source.dataDir)
   const bound = await first.bindFirstLaunchData(programs, source.dataDir)
-  const { DesktopController } = await import('../../../crabot-desktop/dist/controller.js')
-  const controller = new DesktopController({ coreRoot: source.coreRoot, dataRoot: source.dataDir, appVersion: source.selection.version,
-    platform: process.platform, packaged: true, verifyBinding: () => assert.deepEqual(installation.readDesktopSelection(source.root).selection, source.selection) })
-  if (windows) {
-    const load = controller.load.bind(controller)
-    t.mock.method(controller, 'load', async (file, root) => {
-      console.log('CRABOT_PAIR_FIXTURE load ' + file)
-      return load(file, root)
-    })
-    controller.host.subscribe(state => console.log('CRABOT_PAIR_FIXTURE phase ' + state.phase))
-    const native = (await import(pathToFileURL(path.join(source.coreRoot, 'scripts/lib/process-identity.cjs')).href)).default
-    for (const name of ['createPrivateDirectory', 'writePrivateFile', 'tryFileLock']) {
-      const original = native[name]
-      t.mock.method(native, name, (...args) => {
-        console.log('CRABOT_PAIR_FIXTURE native-before ' + name)
-        const value = original(...args)
-        console.log('CRABOT_PAIR_FIXTURE native-after ' + name)
-        return value
-      })
-    }
-  }
-  try {
-    controller.host.status('stopped', 'fixture was already stopped')
-    const prepared = { installRoot: source.root, installation_id: source.record.installation_id, source: source.selection,
-      selection: incoming.selection, coreRoot: extracted.coreRoot, guiRoot: extracted.guiRoot, proof: bound.proof }
-    await controller.applyPreparedPair(prepared, async () => {})
-  } finally { controller.close() }
+  const prepared = { installRoot: source.root, installation_id: source.record.installation_id, source: source.selection,
+    selection: incoming.selection, coreRoot: extracted.coreRoot, guiRoot: extracted.guiRoot, proof: bound.proof }
+  // The controller loads the source Core's native addon. Keep that finite role
+  // in a child so Windows can release the mapped DLL before fixture cleanup.
+  const code = `
+    import assert from 'node:assert/strict';import{pathToFileURL}from'node:url';import path from'node:path';
+    const [module,input]=process.argv.slice(1),{source,prepared}=JSON.parse(input);
+    const {DesktopController}=await import(pathToFileURL(module).href);
+    const installation=(await import(pathToFileURL(path.join(source.coreRoot,'scripts/lib/desktop-installation.cjs')).href)).default;
+    const controller=new DesktopController({coreRoot:source.coreRoot,dataRoot:source.dataDir,appVersion:source.selection.version,
+      platform:process.platform,packaged:true,verifyBinding:()=>assert.deepEqual(installation.readDesktopSelection(source.root).selection,source.selection)});
+    try{controller.host.status('stopped','fixture was already stopped');await controller.applyPreparedPair(prepared,async(from,to)=>{
+      assert.deepEqual(from.selection,source.selection);assert.deepEqual(to.selection,prepared.selection)
+    });console.log('CRABOT_PAIR_COMMITTED')}finally{controller.close()}
+  `
+  const result = await promisify(execFile)(process.execPath, ['--input-type=module', '--eval', code,
+    fileURLToPath(new URL('../../../crabot-desktop/dist/controller.js', import.meta.url)), JSON.stringify({ source, prepared })], { timeout: 45000, maxBuffer: 65536 })
+  assert.match(result.stdout, /CRABOT_PAIR_COMMITTED/)
   const selected = installation.readDesktopSelection(source.root)
   assert.equal(selected.dataDir, source.dataDir); assert.deepEqual(selected.selection, incoming.selection)
   assert.equal(await fs.readFile(path.join(source.dataDir, 'fixture/executions'), 'utf8'), 'once\n')
