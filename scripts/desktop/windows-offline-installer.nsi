@@ -85,7 +85,7 @@ Section "安装 Crabot"
   File /oname=$PLUGINSDIR\7za.exe "${CRABOT_DECODER}"
   SetOutPath "$INSTDIR"
   !insertmacro extractEmbeddedAppPackage
-  IfFileExists "$INSTDIR\${CRABOT_GUI}" Ready
+  IfFileExists "\\?\$INSTDIR\${CRABOT_GUI}" Ready
     SetErrorLevel 1
     Abort "程序解包尚未完成，原数据未改动。请重新运行安装包。"
   Ready:

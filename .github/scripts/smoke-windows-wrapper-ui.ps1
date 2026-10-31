@@ -44,15 +44,15 @@ $null = $process.Handle
 $owned = [Collections.Generic.HashSet[uint32]]::new()
 [void]$owned.Add([uint32]$process.Id)
 $clicked = 0
+$finished = $false
 $verified = $false
-$confirmed = $false
 $observed = [Collections.Generic.HashSet[string]]::new()
-$deadline = (Get-Date).AddMinutes(15)
+$deadline = (Get-Date).AddMinutes(10)
 try {
  while ((Get-Date) -lt $deadline) {
-  # Track only this newly launched installer's descendants on the isolated runner.
-  $rows = @(Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId)
-  foreach ($row in $rows) { if ($owned.Contains([uint32]$row.ParentProcessId)) { [void]$owned.Add([uint32]$row.ProcessId) } }
+  foreach ($row in @(Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId)) {
+   if ($owned.Contains([uint32]$row.ParentProcessId)) { [void]$owned.Add([uint32]$row.ProcessId) }
+  }
   foreach ($window in [WrapperUI]::Windows()) {
    if (!$owned.Contains([WrapperUI]::Pid($window))) { continue }
    $children = [WrapperUI]::Children($window)
@@ -60,91 +60,52 @@ try {
    $all = $text -join "`n"
    $description = ($text | Where-Object { $_ } | Select-Object -First 12) -join ' | '
    if ($description -and $observed.Add($description)) { Write-Output "CRABOT_WINDOWS_WRAPPER_UI window=$description" }
-   if ($all -match '无法关闭|cannot be closed|Can.t modify') {
-    if ($Expected -ne 'retry') { throw "Outer EXE entered the reported Retry dialog: $all" }
-    $verified = $true
-    Write-Output 'CRABOT_WINDOWS_WRAPPER_UI expected_old_retry_reproduced'
-    break
-   }
+   if ($all -match '无法关闭|cannot be closed|Can.t modify') { throw "Unexpected Retry: $all" }
    if ($all -match '系统临时目录' -and $all -match '空间不足') {
-    if ($Expected -ne 'space') { throw "Unexpected TEMP capacity rejection: $all" }
+    if ($Expected -ne 'space') { throw "Unexpected TEMP rejection: $all" }
+    if (Test-Path -LiteralPath $target) { throw 'Capacity rejection wrote the target' }
     $verified = $true
-    Write-Output 'CRABOT_WINDOWS_WRAPPER_UI expected_capacity_rejection'
+    Write-Output 'CRABOT_WINDOWS_WRAPPER_UI capacity_rejection_before_target_write=true'
     break
    }
-   if ([WrapperUI]::Text($window) -eq '安装位置') {
-    $hostProcess = Get-CimInstance Win32_Process -Filter ("ProcessId=" + [WrapperUI]::Pid($window))
-    if (!$hostProcess.CommandLine.Contains("--install-root=$target\.")) { throw 'Installer lost the selected destination argument' }
-    $install = @($children | Where-Object { [WrapperUI]::Text($_) -eq '安装' })
-    if ($install.Count -ne 1) { throw "Expected the actual host's Install button" }
-    [WrapperUI]::Click($install[0])
-    $confirmed = $true
-    Write-Output "CRABOT_WINDOWS_WRAPPER_UI install_confirmed"
-    continue
-   }
-   if ($confirmed -and [WrapperUI]::Text($window) -eq '安装完成') {
-    $finish = @($children | Where-Object { [WrapperUI]::Text($_) -eq '完成' })
-    if ($finish.Count -ne 1) { throw "Expected the actual host's Finish button" }
-    [WrapperUI]::Click($finish[0])
-    $verified = $true
-    Write-Output "CRABOT_WINDOWS_WRAPPER_UI installation_completed"
-    break
-   }
-   if ($all.Contains('安装尚未完成')) {
-    $details = & "$env:SystemRoot/System32/WindowsPowerShell/v1.0/powershell.exe" -NoProfile -NonInteractive -File (Join-Path $PSScriptRoot 'read-windows-dialog.ps1') -Handle $window.ToInt64()
-    $entries = @((Get-ChildItem $target -Force -ErrorAction SilentlyContinue).Name)
-    $registration = Join-Path $env:LOCALAPPDATA 'Crabot/desktop-integration'
-    $menu = Join-Path $env:APPDATA 'Microsoft/Windows/Start Menu/Programs'
-    $facts = @($target,$registration,$menu,(Join-Path $menu 'Crabot.lnk')) | ForEach-Object {
-     if (Test-Path -LiteralPath $_) { @{ path=$_; owner=(Get-Acl -LiteralPath $_).Owner; children=@((Get-ChildItem -LiteralPath $_ -Force -ErrorAction SilentlyContinue).Name) } }
-    }
-    $metadata = Get-Content (Join-Path $target 'desktop-installation.json') -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json
-    $registry = if ($metadata) { Get-ItemProperty -LiteralPath ("HKCU:/Software/Microsoft/Windows/CurrentVersion/Uninstall/Crabot-" + $metadata.installation_id) -ErrorAction SilentlyContinue }
-    Write-Output ('CRABOT_WINDOWS_INSTALL_FAILURE_STATE ' + (@{ entries=$entries; filesystem=$facts; installation=$metadata; uninstall=$registry } | ConvertTo-Json -Depth 6 -Compress))
-    throw "Real installation failed: $all`n$details"
-   }
-   if ($clicked -lt 2) {
-    $next = [WrapperUI]::GetDlgItem($window,1)
-    if ($next -ne [IntPtr]::Zero -and [WrapperUI]::IsWindowEnabled($next)) {
-     $label = [WrapperUI]::Text($next)
-     if ($label -match '下一步|安装|Next|Install') {
-      [WrapperUI]::Click($next)
-      $clicked++
-      Write-Output "CRABOT_WINDOWS_WRAPPER_UI outer_page=$clicked"
-      Start-Sleep -Milliseconds 400
-     }
-    }
+   if ([WrapperUI]::Text($window) -eq '安装位置' -or $all -match 'CrabotInstaller.exe|旧安装接管') { throw 'A second installer or data admission appeared during installation' }
+   $next = [WrapperUI]::GetDlgItem($window,1)
+   if ($next -eq [IntPtr]::Zero -or ![WrapperUI]::IsWindowEnabled($next)) { continue }
+   $label = [WrapperUI]::Text($next)
+   if ($label -match '下一步|安装|Next|Install') {
+    [WrapperUI]::Click($next); $clicked++
+    Start-Sleep -Milliseconds 300
+   } elseif (!$finished -and $label -match '完成|Finish') {
+    if (!(Test-Path -LiteralPath (Join-Path $target 'app/installers'))) { throw 'Finish appeared before the final programs were extracted' }
+    if (Test-Path -LiteralPath (Join-Path $target 'data')) { throw 'Installer initialized business data before first GUI launch' }
+    $finished=$true
+    [WrapperUI]::Click($next)
+    Write-Output 'CRABOT_WINDOWS_WRAPPER_UI finish_clicked=true installer_data_writes=false'
    }
   }
   if ($verified) { break }
   $process.Refresh()
-  if ($process.HasExited) { throw "Outer installer exited before the real GUI host was usable (code $($process.ExitCode))" }
-  Start-Sleep -Milliseconds 250
- }
- if (!$verified) { throw 'Timed out waiting for the actual installer completion' }
- if ($Expected -ne 'complete') {
-  if ($confirmed -or (Test-Path $target)) { throw 'Expected rejection occurred after actual target installation started' }
-  @{ expected=$Expected; reproduced=$true; actual_installation_started=$false } | ConvertTo-Json -Compress | Write-Output
-  return
- }
- if (!(Test-Path $target)) { throw 'Installer reported completion without the selected root' }
- $installed = Get-Content (Join-Path $target 'desktop-installation.json') -Raw | ConvertFrom-Json
- if ($installed.install_root -ne $target) { throw 'The actual installation used a different destination' }
- $finishDeadline = (Get-Date).AddSeconds(90)
- while ((Get-Date) -lt $finishDeadline) {
-  $process.Refresh()
-  if ($process.HasExited) { break }
-  foreach ($window in [WrapperUI]::Windows()) {
-   if (!$owned.Contains([WrapperUI]::Pid($window))) { continue }
-   $button = [WrapperUI]::GetDlgItem($window,1)
-   if ($button -ne [IntPtr]::Zero -and [WrapperUI]::IsWindowEnabled($button) -and [WrapperUI]::Text($button) -match '完成|Finish') { [WrapperUI]::Click($button) }
+  if ($process.HasExited) {
+   if (!$finished -or $process.ExitCode -ne 0) { throw "Installer exited before Finish or returned $($process.ExitCode)" }
+   $selection = Join-Path $target 'current-release.json'
+   $command = Join-Path $target 'bin/crabot.exe'
+   if ((Test-Path -LiteralPath $selection) -and (Test-Path -LiteralPath $command)) {
+    $raw = & $command status --json 2>&1
+    if ($LASTEXITCODE -eq 0) {
+     try { $status = ($raw -join "`n") | ConvertFrom-Json } catch { $status=$null }
+     if ($status.running -eq $true -and $status.data_dir -eq (Join-Path $target 'data')) { $verified=$true; break }
+    }
+   }
   }
   Start-Sleep -Milliseconds 250
  }
- $process.Refresh()
- if (!$process.HasExited -or $process.ExitCode -ne 0) { throw 'Outer installer did not finish with success' }
- @{ actual_exe_ui=$true; next_pages=$clicked; reported_retry_dialog=$false; host_confirmation=$true; selected_path_with_spaces=$true; actual_installation_completed=$true; outer_exit_zero=$true; business_mm_started=$false } | ConvertTo-Json -Compress | Write-Output
+ if (!$verified) { throw 'Timed out waiting for the actual single-layer installation and first GUI startup' }
+ if ($Expected -eq 'space') { return }
+ $installed=Get-Content (Join-Path $target 'desktop-installation.json') -Raw | ConvertFrom-Json
+ if ($installed.install_root -ne $target) { throw 'GUI bound another installation root' }
+ @{actual_exe_ui=$true; next_pages=$clicked; retry_dialog=$false; second_installer=$false; selected_path_with_spaces=$true; installer_exit_zero=$true; finish_launched_gui=$true; gui_started_actual_core=$true; native_cli_same_data=$true} | ConvertTo-Json -Compress | Write-Output
 } finally {
- # Stop only tracked runner test processes. The installed business App is not launched.
+ $command = Join-Path $target 'bin/crabot.exe'
+ if (Test-Path -LiteralPath $command) { & $command stop 2>&1 | Write-Output }
  foreach ($id in $owned) { Stop-Process -Id $id -ErrorAction SilentlyContinue }
 }

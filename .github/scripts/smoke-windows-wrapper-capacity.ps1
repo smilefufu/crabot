@@ -22,9 +22,10 @@ try {
  if ($volume.FileSystemLabel -ne 'CrabotTempTest' -or $volume.Size -gt 4GB) { throw 'Unexpected test volume' }
  $temporary = $letter + ':\temp'
  New-Item $temporary -ItemType Directory | Out-Null
- if ($Expected -eq 'space') {
+ $desiredFree = if ($Expected -eq 'space') { 256MB } else { 1536MB }
+ if ($volume.SizeRemaining -gt $desiredFree) {
   $reserve = [IO.File]::Create(($letter + ':\reserved.bin'))
-  try { $reserve.SetLength(1GB) } finally { $reserve.Dispose() }
+  try { $reserve.SetLength([long]($volume.SizeRemaining - $desiredFree)) } finally { $reserve.Dispose() }
  }
  Write-Output ("CRABOT_TEMP_VOLUME expected=$Expected free=" + (Get-Volume -DriveLetter $letter).SizeRemaining)
  & (Join-Path $PSScriptRoot 'smoke-windows-wrapper-ui.ps1') -Installer $Installer -TemporaryDirectory $temporary -Expected $Expected

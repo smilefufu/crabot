@@ -31,7 +31,12 @@ try {
   for (const name of ['ordinary', '中文 空格', 'deep']) {
     const target = name === 'deep' ? path.join(root, 'target', ...Array.from({ length: 8 }, (_, index) => 'long-directory-' + index)) : path.join(root, 'target', name)
     await fs.mkdir(path.dirname(target), { recursive: true })
-    await execute(path.join(output, 'distribution', installers[0]), ['/S', '/D=' + target], { windowsVerbatimArguments: true, timeout: 120000, maxBuffer: 65536 })
+    try {
+      await execute(path.join(output, 'distribution', installers[0]), ['/S', '/D=' + target], { windowsVerbatimArguments: true, timeout: 120000, maxBuffer: 65536 })
+    } catch (error) {
+      console.log('CRABOT_DECODER_FAILURE ' + JSON.stringify({ name, code: error.code, gui_present: !!await fs.lstat(path.join(target, 'app/releases', selection.gui_id, 'Crabot.exe')).catch(() => null), nested_present: !!await fs.lstat(path.join(target, 'releases', selection.core_id, relative)).catch(() => null) }))
+      throw error
+    }
     const installed = path.join(target, 'releases', selection.core_id, relative)
     console.log('CRABOT_DECODER_DESTINATION ' + JSON.stringify({ name, target, entries: await fs.readdir(target).catch(error => error.code), default_entries: await fs.readdir(path.join(process.env.USERPROFILE, 'Crabot')).catch(error => error.code) }))
     assert.equal(await fs.readFile(installed, 'utf8'), 'complete long-path payload bytes')
