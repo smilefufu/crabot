@@ -121,6 +121,9 @@ if importlib.metadata.version("cryptography") != crypto_version:
 for package in ("scrapling", "mcp", "playwright", "patchright"):
     if importlib.metadata.version(package) != versions[package]:
         raise RuntimeError(f"Unexpected {package} version")
+# server.py already directs both SDKs to the inventoried Playwright Node.
+# Keep each driver's own JS implementation and licenses, remove only its unused interpreter.
+(runtime / "packages/patchright/driver" / ("node.exe" if sys.platform == "win32" else "node")).unlink()
 shutil.rmtree(runtime / "browsers/.links", ignore_errors=True)
 for cache in runtime.rglob("__pycache__"):
     shutil.rmtree(cache)

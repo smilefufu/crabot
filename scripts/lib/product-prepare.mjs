@@ -132,6 +132,8 @@ export async function prepareProductRuntime(root, { cache, version = 'desktop-de
     const nodeUrl = 'https://nodejs.org/dist/v' + config.versions.node + '/' + nodeAsset.name
     const nodeArchive = await downloadProductAsset({ ...nodeAsset, url: nodeUrl }, cache, { signal })
     await unpack(nodeArchive, join(directory, 'node'), 1, signal)
+    // Headers are build inputs; installed runtimes keep Node, npm/npx and their licenses.
+    await fs.rm(join(directory, 'node/include'), { recursive: true, force: true })
     await license(directory, 'Node.js (including npm)', config.versions.node, nodeUrl)
 
     const uvAsset = config.uv[target]

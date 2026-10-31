@@ -205,6 +205,16 @@ jobs:
           node scripts/prepare-scrapling.mjs --release=desktop-ci
           node scripts/prepare-computer-use.mjs
           node scripts/prepare-product-runtime.mjs
+      - name: Verify both browser drivers with one bundled Node
+        run: |
+          node --input-type=module <<'NODE'
+          import { createRequire } from 'node:module';
+          import { execFileSync } from 'node:child_process';
+          import { join } from 'node:path';
+          const require = createRequire(import.meta.url);
+          const { directory, manifest } = require('./scripts/lib/scrapling-runtime.cjs').loadRuntime(process.cwd(), { full: true });
+          execFileSync(join(directory, manifest.command), ['-I', '-B', '.github/scripts/smoke-browser-node-sharing.py', directory], { stdio: 'inherit' });
+          NODE
       - name: Prepare isolated source memory for real coexistence
         run: |
           node --input-type=module -e 'import{resolve}from"node:path";import{prepareMemoryDependencies}from"./scripts/lib/memory-deps.mjs";await prepareMemoryDependencies(resolve("crabot-memory"),{dev:true,relocatable:false,uv:"uv",logger:console})'
@@ -215,8 +225,10 @@ jobs:
           node .github/scripts/smoke-development-coexistence.mjs --background-only 2>&1 | tee .desktop-build/development-source-boot.log
       - name: Build same-source offline GUI and Core installer
         run: |
-          node scripts/desktop/stage-core.mjs --out=.desktop-build/manual/core --version=0.1.0-desktop.9
+          node scripts/desktop/stage-core.mjs --out=.desktop-build/manual/core --version=0.1.0-desktop.10
           node .github/scripts/verify-release-payload.mjs "$GITHUB_WORKSPACE/.desktop-build/manual/core"
+          node .github/scripts/smoke-product-runtime.mjs .desktop-build/manual/core 2>&1 | tee .desktop-build/product-runtime-slim.log
+          node .github/scripts/smoke-scrapling.mjs .desktop-build/manual/core --offline 2>&1 | tee .desktop-build/browser-runtime-slim.log
           if [ "${{ runner.os }}" = "macOS" ]; then
             node scripts/desktop/package-application.mjs --candidate=true --core=.desktop-build/manual/core --out=.desktop-build/manual/gui
             node scripts/desktop/package-installers.mjs --candidate=true --project=.desktop-build/manual/gui --out=.desktop-build/manual/distribution
@@ -225,6 +237,27 @@ jobs:
             node scripts/desktop/package-offline-installer.mjs --candidate=true --distribute=true --paired=.desktop-build/manual/paired --out=.desktop-build/manual/installer
             node .github/scripts/verify-offline-installer-host.mjs .desktop-build/manual/installer
           fi
+      - name: Record actual program footprint without user data
+        run: |
+          node --input-type=module <<'NODE'
+          import { promises as fs } from 'node:fs';
+          import path from 'node:path';
+          const project = path.resolve('.desktop-build/manual', process.platform === 'darwin' ? 'gui' : 'paired');
+          const location = JSON.parse(await fs.readFile(path.join(project, 'packaged-location.json'), 'utf8'));
+          const root = process.platform === 'darwin' ? path.resolve(project, path.dirname(location.executable), '../..') : path.join(project, 'offline');
+          async function bytes(directory) {
+            let total = 0;
+            for (const item of await fs.readdir(directory, { withFileTypes: true })) {
+              const file = path.join(directory, item.name);
+              if (item.isDirectory()) total += await bytes(file);
+              else if (item.isFile()) total += (await fs.stat(file)).size;
+            }
+            return total;
+          }
+          const report = { commit: process.env.GITHUB_SHA, platform: process.platform, arch: process.arch, program_regular_file_bytes: await bytes(root), measurement: 'logical regular file bytes, symlinks not followed, user data excluded' };
+          await fs.writeFile('.desktop-build/runtime-footprint.json', JSON.stringify(report) + '\n');
+          console.log(JSON.stringify(report));
+          NODE
       - name: Hash completed installers
         run: |
           node --input-type=module <<'NODE'
@@ -246,6 +279,7 @@ jobs:
         with:
           name: crabot-${{ inputs.target || 'darwin-arm64' }}-offline-test-${{ github.sha }}
           path: |
+            .desktop-build/runtime-footprint.json
             .desktop-build/manual/distribution/*candidate.dmg
             .desktop-build/manual/distribution/installers.json
             .desktop-build/manual/distribution/SHA256SUMS
@@ -300,14 +334,14 @@ jobs:
       - name: Install the exact candidate through its real EXE interface
         shell: pwsh
         run: |
-          $files = @(Get-ChildItem .desktop-build/wrapper-ui -Recurse -Filter '*desktop.9*offline-candidate.exe')
-          if ($files.Count -ne 1) { throw 'Expected the exact Windows desktop.9 installer' }
+          $files = @(Get-ChildItem .desktop-build/wrapper-ui -Recurse -Filter '*desktop.10*offline-candidate.exe')
+          if ($files.Count -ne 1) { throw 'Expected the exact Windows desktop.10 installer' }
           & .github/scripts/smoke-windows-wrapper-capacity.ps1 -Installer $files[0].FullName -Expected complete | Tee-Object .desktop-build/windows-wrapper-ui.log
       - name: Reject insufficient TEMP before extraction
         shell: pwsh
         run: |
-          $files = @(Get-ChildItem .desktop-build/wrapper-ui -Recurse -Filter '*desktop.9*offline-candidate.exe')
-          if ($files.Count -ne 1) { throw 'Expected exact desktop.9 installer' }
+          $files = @(Get-ChildItem .desktop-build/wrapper-ui -Recurse -Filter '*desktop.10*offline-candidate.exe')
+          if ($files.Count -ne 1) { throw 'Expected exact desktop.10 installer' }
           & .github/scripts/smoke-windows-wrapper-capacity.ps1 -Installer $files[0].FullName -Expected space
       - name: Retain actual installer evidence
         if: always()

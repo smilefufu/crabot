@@ -16,6 +16,7 @@ const require = createRequire(import.meta.url)
 const product = require(join(root, 'scripts/lib/product-runtime.cjs'))
 const pythonEnv = require(join(root, 'scripts/lib/product-python-env.cjs'))
 const runtime = product.loadProductRuntime(root, { required: true, full: true })
+await assert.rejects(fs.lstat(join(root, '.product-runtime/node/include')), { code: 'ENOENT' })
 const data = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'Crabot 产品 中文 ')))
 const env = product.productEnvironment(runtime, data, process.env)
 const pathKey = process.platform === 'win32' ? Object.keys(env).find(key => key.toLowerCase() === 'path') ?? 'PATH' : 'PATH'
@@ -46,6 +47,17 @@ try {
   const shell = command => run(runtime.executables.bash, ['-c', command])
   report.npm = await shell('npm --version')
   report.npx = await shell('npx --version')
+  // The standalone Node distribution needs npm/npx, not its C/C++ headers,
+  // to install and run a local JavaScript tool without any network access.
+  const npmPackage = join(data, 'npm-package')
+  await fs.mkdir(npmPackage)
+  await fs.writeFile(join(data, 'package.json'), JSON.stringify({ name: 'crabot-runtime-probe', private: true }))
+  await fs.writeFile(join(npmPackage, 'package.json'), JSON.stringify({ name: 'crabot-runtime-local-tool', version: '1.0.0', bin: { 'crabot-runtime-local-tool': 'run.cjs' } }))
+  await fs.writeFile(join(npmPackage, 'run.cjs'), '#!/usr/bin/env node\nconsole.log("bundled npx offline ok")\n', { mode: 0o755 })
+  await shell('npm install --offline --ignore-scripts --no-audit --no-fund ./npm-package')
+  assert.equal(await shell('npx --offline --no-install crabot-runtime-local-tool'), 'bundled npx offline ok')
+  report.npx_local_offline = true
+
   report.git = await shell('git --version')
   report.rg = await shell('rg --version')
   assert.match(report.git, /^git version /)
