@@ -1,0 +1,23 @@
+name: Desktop legacy cleanup program facts
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  facts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Read compiled-program bytes from SHA-pinned official archives without extraction
+        run: python .github/scripts/build-legacy-cleanup-inventory.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: legacy-cleanup-program-facts-${{ github.sha }}
+          path: .desktop-build/legacy-cleanup-files.json.gz
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
