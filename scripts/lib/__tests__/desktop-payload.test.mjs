@@ -2314,8 +2314,11 @@ test('first GUI legacy admission uses already extracted programs and external or
     coreRoot: extracted.coreRoot, guiRoot: extracted.guiRoot, proof: bound.proof }
   const node = path.join(extracted.coreRoot, windows ? '.product-runtime/node/node.exe' : '.product-runtime/node/bin/node')
   const module = path.join(extracted.coreRoot, 'scripts/lib/legacy-desktop-takeover.mjs')
-  const code = `import{pathToFileURL}from'node:url';const[module,input]=process.argv.slice(1);const role=await import(pathToFileURL(module).href);const prepared=JSON.parse(input);const converted=await role.convertLegacyDesktopData({prepared,inspectEnvironment:async()=>({status:'absent'})});await role.commitLegacyDesktopInstallation({prepared,maintenanceId:converted.maintenance_id,registerEntries:async value=>{if(value.installRoot!==prepared.installRoot)throw new Error('wrong program registration')}})`
-  const run = () => promisify(execFile)(node, ['--input-type=module', '--eval', code, module, JSON.stringify(prepared)], { timeout: 30000, maxBuffer: 65536 })
+  const code = `import{pathToFileURL}from'node:url';const[module,input,fault]=process.argv.slice(1);const role=await import(pathToFileURL(module).href);const prepared=JSON.parse(input);const converted=await role.convertLegacyDesktopData({prepared,inspectEnvironment:async()=>({status:'absent'})});await role.commitLegacyDesktopInstallation({prepared,maintenanceId:converted.maintenance_id,registerEntries:async value=>{if(fault==='yes')throw new Error('controlled registration failure');if(value.installRoot!==prepared.installRoot)throw new Error('wrong program registration')}})`
+  const run = (fault = 'no') => promisify(execFile)(node, ['--input-type=module', '--eval', code, module, JSON.stringify(prepared), fault], { timeout: 30000, maxBuffer: 65536 })
+  await assert.rejects(run('yes'))
+  await assert.rejects(fs.lstat(path.join(extracted.root, '.desktop-installing.json')), { code: 'ENOENT' })
+  assert.equal((await first.readFirstLaunchPrograms(extracted)).initialized, false)
   await run(); await run()
   assert.equal(installation.readDesktopSelection(extracted.root).dataDir, f.data)
   assert.equal((await first.readFirstLaunchPrograms(extracted)).initialized, true)
