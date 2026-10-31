@@ -345,14 +345,14 @@ jobs:
       - name: Install the exact candidate through its real EXE interface
         shell: pwsh
         run: |
-          $files = @(Get-ChildItem .desktop-build/wrapper-ui -Recurse -Filter '*desktop.10*offline-candidate.exe')
-          if ($files.Count -ne 1) { throw 'Expected the exact Windows desktop.10 installer' }
+          $files = @(Get-ChildItem .desktop-build/wrapper-ui -Recurse -Filter '*offline-candidate.exe')
+          if ($files.Count -ne 1) { throw 'Expected exactly one Windows candidate installer' }
           & .github/scripts/smoke-windows-wrapper-capacity.ps1 -Installer $files[0].FullName -Expected complete | Tee-Object .desktop-build/windows-wrapper-ui.log
       - name: Reject insufficient TEMP before extraction
         shell: pwsh
         run: |
-          $files = @(Get-ChildItem .desktop-build/wrapper-ui -Recurse -Filter '*desktop.10*offline-candidate.exe')
-          if ($files.Count -ne 1) { throw 'Expected exact desktop.10 installer' }
+          $files = @(Get-ChildItem .desktop-build/wrapper-ui -Recurse -Filter '*offline-candidate.exe')
+          if ($files.Count -ne 1) { throw 'Expected exactly one Windows candidate installer' }
           & .github/scripts/smoke-windows-wrapper-capacity.ps1 -Installer $files[0].FullName -Expected space
       - name: Retain actual installer evidence
         if: always()
