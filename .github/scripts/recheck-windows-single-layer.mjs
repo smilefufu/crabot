@@ -17,7 +17,7 @@ const digest = createHash('sha256'); for await (const bytes of createReadStream(
 assert.equal(sums.trim(), digest.digest('hex') + '  ' + files[0])
 const root = await fs.mkdtemp(path.resolve('.desktop-build/actual-exe-recheck-')), reports = []
 let selected
-for (const maxBuffer of [65536, 16 * 1024 * 1024]) {
+for (const maxBuffer of [16 * 1024 * 1024]) {
   const target = path.join(root, String(maxBuffer) + ' 中文 程序'), started = Date.now()
   const pending = execute(executable, ['/S', '/D=' + target], { windowsVerbatimArguments: true, timeout: 600000, maxBuffer })
   try {

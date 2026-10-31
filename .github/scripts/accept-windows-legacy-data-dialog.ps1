@@ -9,12 +9,10 @@ public class CrabotFirstUseUI {
  [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr window,Visitor callback,IntPtr data);
  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window,out uint pid);
  [DllImport("user32.dll",CharSet=CharSet.Unicode,EntryPoint="SendMessageTimeoutW")] static extern IntPtr ReadText(IntPtr window,uint message,IntPtr length,StringBuilder text,uint flags,uint timeout,out IntPtr result);
- [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr window,uint message,IntPtr a,IntPtr b);
  public static string Text(IntPtr window){var text=new StringBuilder(8192);IntPtr result;ReadText(window,13,(IntPtr)text.Capacity,text,2,500,out result);return text.ToString();}
  public static IntPtr[] Windows(){var list=new List<IntPtr>();EnumWindows((w,d)=>{list.Add(w);return true;},IntPtr.Zero);return list.ToArray();}
  public static IntPtr[] Children(IntPtr window){var list=new List<IntPtr>();EnumChildWindows(window,(w,d)=>{list.Add(w);return true;},IntPtr.Zero);return list.ToArray();}
  public static uint Pid(IntPtr window){uint pid;GetWindowThreadProcessId(window,out pid);return pid;}
- public static void Click(IntPtr window){SendMessage(window,245,IntPtr.Zero,IntPtr.Zero);}
 }
 '@
 $observed=[Collections.Generic.HashSet[string]]::new()
@@ -37,8 +35,15 @@ while((Get-Date) -lt $deadline){
     Write-Output ('CRABOT_FIRST_USE_TEXT ' + (ConvertTo-Json -InputObject $text -Compress))
     throw 'Actual data confirmation did not display the original data/version'
    }
-   [CrabotFirstUseUI]::Click($button[0])
-   Write-Output 'CRABOT_FIRST_USE_UI original_data_and_version_visible=true native_confirmation_clicked=true'
+   $control=[Windows.Automation.AutomationElement]::FromHandle($button[0])
+   $invoke=$control.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern)
+   $invoke.Invoke()
+   $closedBy=(Get-Date).AddSeconds(10)
+   while(([CrabotFirstUseUI]::Windows() -contains $window) -and [CrabotFirstUseUI]::Text($window) -eq $title){
+    if((Get-Date) -ge $closedBy){throw 'Native confirmation was not dismissed after its accessible Invoke action'}
+    Start-Sleep -Milliseconds 100
+   }
+   Write-Output 'CRABOT_FIRST_USE_UI original_data_and_version_visible=true native_confirmation_invoked_and_dismissed=true'
    exit 0
   }
   if($text -match 'Error|无法核验|未能启动|启动失败'){throw ('First-use failure before confirmation: '+$text)}
