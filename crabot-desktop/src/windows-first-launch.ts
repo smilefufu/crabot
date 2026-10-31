@@ -12,6 +12,7 @@ export async function prepareWindowsFirstLaunch(options: {
   dialog: Pick<typeof ElectronDialog, 'showMessageBox' | 'showOpenDialog'>;
   load: (name: string, verifiedCore?: string) => Promise<any>;
   registerEntries: (prepared: PreparedInstallation) => Promise<void>
+  repairExisting?: (programs: any) => Promise<boolean>
   upgradeExisting?: (prepared: PreparedInstallation & { source: PreparedInstallation['selection']; proof: { file: string; sha256: string } }, source: any) => Promise<boolean>
 }): Promise<any | null> {
   const { dialog } = options
@@ -24,6 +25,10 @@ export async function prepareWindowsFirstLaunch(options: {
   const management = (await load('desktop-management.cjs')).default
   const { discoverLegacyDesktopTakeover } = await load('legacy-desktop-discovery.mjs')
   const { discoverUserSourceDeployment } = await load('source-installation.mjs')
+  if (programs.removal) {
+    if (!options.repairExisting || !await options.repairExisting(programs)) return null
+    return desktop.locatePinnedDesktopGui(options.resources, options.pinText)
+  }
   if (programs.source) {
     if (compareVersions(programs.selection.version, programs.source.selection.version) < 0) throw Object.assign(new Error('安装包比当前桌面版本旧，请使用同版或更新版；原程序和数据保留。'), { code: 'CRABOT_DESKTOP_RELEASE_VERSION' })
     const selected = await first.bindFirstLaunchData(programs, programs.source.dataDir)

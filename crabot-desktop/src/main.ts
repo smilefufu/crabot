@@ -165,7 +165,7 @@ async function boot() {
   let windowsInstallation
   const windowsRoot = path.resolve(process.resourcesPath, '../../../..')
   const windowsFirstUse = app.isPackaged && process.platform === 'win32' && pin !== undefined
-    && (!existsSync(path.join(windowsRoot, 'current-release.json')) || readFileSync(path.join(windowsRoot, 'current-release.json'), 'utf8') !== pin)
+    && (existsSync(path.join(windowsRoot, '.desktop-removal.json')) || !existsSync(path.join(windowsRoot, 'current-release.json')) || readFileSync(path.join(windowsRoot, 'current-release.json'), 'utf8') !== pin)
   if (windowsFirstUse) {
     configureProfile(path.join(app.getPath('appData'), 'Crabot/bootstrap'))
     if (!claimInstance()) return
@@ -175,6 +175,10 @@ async function boot() {
     windowsInstallation = await prepareWindowsFirstLaunch({ resources: process.resourcesPath, pinText: pin!, home: homedir(), dialog,
       load: (name, verifiedCore) => import(verifiedCore ? pathToFileURL(path.join(verifiedCore, 'scripts/lib', name)).href : new URL('./bootstrap/scripts/lib/' + name, import.meta.url).href),
       registerEntries: prepared => registerInstallationEntries(prepared, { home: homedir(), platform: process.platform, env: process.env, shell }),
+      repairExisting: async programs => {
+        const { repairWindowsRetainedData } = await import('./windows-offline-update.js')
+        return repairWindowsRetainedData({ programs, app, dialog, shell, home: homedir() })
+      },
       upgradeExisting: async (prepared, source) => {
         const { applyWindowsOfflineUpdate } = await import('./windows-offline-update.js')
         return applyWindowsOfflineUpdate({ prepared, source, app, dialog, shell, home: homedir() })

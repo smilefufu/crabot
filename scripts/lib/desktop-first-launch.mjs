@@ -9,6 +9,8 @@ import management from './desktop-management.cjs'
 import { verifyDesktopPrograms } from './desktop-payload.mjs'
 import { privateJson } from './desktop-preparation-files.mjs'
 import { acquireExistingCliLock, releaseCliLock } from './cli-lock.mjs'
+import { readDesktopRemoval } from './desktop-removal-record.cjs'
+import { readDesktopRemovalProof } from './desktop-removal-proof.mjs'
 const fail = () => { throw Object.assign(new Error('程序位置或已有数据绑定无法核对，原文件已保留；请重新打开原应用。'), { code: 'CRABOT_DESKTOP_INSTALLATION' }) }
 const hash = text => createHash('sha256').update(text).digest('hex')
 async function present(file) { try { return await fs.lstat(file) } catch (error) { if (error.code !== 'ENOENT') throw error; return null } }
@@ -25,12 +27,13 @@ export async function readFirstLaunchPrograms({ resources, pinText }) {
   // An existing selected installation stays on its normal startup/update path.
   // Missing or damaged selected programs cannot turn into fresh initialization.
   let source
-  if (await present(path.join(installRoot, 'current-release.json'))) {
+  const removal = await present(path.join(installRoot, '.desktop-removal.json')) ? readDesktopRemoval(installRoot) : null
+  if (!removal && await present(path.join(installRoot, 'current-release.json'))) {
     const selected = installation.readDesktopSelection(installRoot)
     if (JSON.stringify(selected.selection) + '\n' === pinText) return { initialized: true, ...installation.locatePinnedDesktopGui(resources, pinText) }
     source = selected
   }
-  if (await present(path.join(installRoot, '.desktop-removal.json')) || await present(path.join(installRoot, '.desktop-installing.json'))) fail()
+  if (!removal && await present(path.join(installRoot, '.desktop-installing.json'))) fail()
   const incoming = path.join(installRoot, 'app/installers', selection.gui_id + '.json')
   const payload = await present(incoming) ? incoming : path.join(installRoot, '.desktop-install-payload.json'), stat = await fs.lstat(payload)
   if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size > 64 * 1024 * 1024) fail()
@@ -38,7 +41,7 @@ export async function readFirstLaunchPrograms({ resources, pinText }) {
   if (JSON.stringify(record.selection) + '\n' !== pinText) fail()
   const coreRoot = path.join(installRoot, 'releases', selection.core_id)
   await verifyDesktopPrograms(coreRoot, guiRoot, record)
-  return { initialized: false, installRoot, selection, coreRoot, guiRoot, payload: record, payloadText: text, payloadFile: payload, source }
+  return { initialized: false, installRoot, selection, coreRoot, guiRoot, payload: record, payloadText: text, payloadFile: payload, source, removal }
 }
 export async function bindFirstLaunchData(programs, dataDir) {
   const root = programs.installRoot
@@ -52,7 +55,20 @@ export async function bindFirstLaunchData(programs, dataDir) {
     const expected = path.join(programs.source?.coreRoot ?? programs.coreRoot, 'bin', name)
     if (await present(command)) {
       const stat = await fs.lstat(command)
-      if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || !(await fs.readFile(command)).equals(await fs.readFile(expected))) fail()
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) fail()
+      const bytes = await fs.readFile(command)
+      if (!bytes.equals(await fs.readFile(expected))) {
+        if (!programs.removal) fail()
+        const { proof } = await readDesktopRemovalProof(root), original = JSON.parse(proof.core.inventory).files['bin/' + name]
+        if (original?.type !== 'file' || original.size !== bytes.length || original.sha256 !== hash(bytes)) fail()
+        const temporary = command + '.tmp-' + randomUUID()
+        try {
+          await fs.copyFile(expected, temporary, constants.COPYFILE_EXCL)
+          if (process.platform !== 'win32') await fs.chmod(temporary, 0o755)
+          if (!(await fs.readFile(command)).equals(bytes)) fail()
+          await fs.rename(temporary, command)
+        } finally { await fs.rm(temporary, { force: true }) }
+      }
     } else {
       await fs.copyFile(expected, command, constants.COPYFILE_EXCL)
       if (process.platform !== 'win32') await fs.chmod(command, 0o755)

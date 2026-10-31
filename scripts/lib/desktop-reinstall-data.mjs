@@ -123,11 +123,25 @@ export function previewPreparedDesktopReinstallData(options) {
   })
 }
 
+// Read an already extracted, privately bound target without staging or copying
+// another payload. Original installer callers retain their payload verifier.
+async function reinstallSource({ payload, prepared, installRoot }) {
+  if (!prepared) return verifyDesktopPayload(payload)
+  const own = installation.readDesktopInstallation(installRoot)
+  if (prepared.installRoot !== own.root || prepared.installation_id !== own.record.installation_id
+    || prepared.coreRoot !== path.join(own.root, 'releases', prepared.selection.core_id)
+    || prepared.guiRoot !== path.join(own.root, 'app/releases', prepared.selection.gui_id)) fail()
+  const proof = await readOriginalDesktopPayload(own.root, prepared.selection)
+  if (prepared.proof?.file !== proof.file || prepared.proof.sha256 !== proof.sha256) fail()
+  await verifyDesktopPrograms(prepared.coreRoot, prepared.guiRoot, proof.record)
+  return { record: proof.record }
+}
+
 // Fixed trusted-target Node role. The original GUI's existing version recovery
 // owns data conversion, service startup and health; this handoff proves none of them.
-export async function handoffPreparedDesktopReinstall({ payload, installRoot, operationId, registerEntries }) {
+export async function handoffPreparedDesktopReinstall({ payload, prepared: installed, installRoot, operationId, registerEntries }) {
   if (process.versions.electron || typeof registerEntries !== 'function') fail()
-  const source = await verifyDesktopPayload(payload), own = installation.readDesktopInstallation(installRoot)
+  const source = await reinstallSource({ payload, prepared: installed, installRoot }), own = installation.readDesktopInstallation(installRoot)
   const core = path.join(own.root, 'releases', source.record.selection.core_id), gui = path.join(own.root, 'app/releases', source.record.selection.gui_id)
   // Run the target's own lock/maintenance modules in its bundled Node, rather
   // than borrowing a second module-local lock map from installer bootstrap.
@@ -218,12 +232,12 @@ export async function handoffPreparedDesktopReinstall({ payload, installRoot, op
 // the target owns its own lock map, data protection and final root-fence handoff.
 const handoffScript = `
 import { pathToFileURL } from 'node:url'
-const [module, payload, root, id] = process.argv.slice(1)
+const [module, input] = process.argv.slice(1)
 const timer = setTimeout(() => process.exit(1), ${previewTimeout})
 process.once('disconnect', () => process.exit(1))
 try {
   const { handoffPreparedDesktopReinstall } = await import(pathToFileURL(module).href)
-  const result = await handoffPreparedDesktopReinstall({ payload, installRoot: root, operationId: id,
+  const result = await handoffPreparedDesktopReinstall({ ...JSON.parse(input),
     registerEntries: prepared => new Promise((resolve, reject) => {
       process.once('message', message => message?.type === 'entries-registered' && message.ok === true ? resolve() : reject(new Error('Entries unavailable')))
       process.send({ type: 'register-entries', prepared })
@@ -231,16 +245,16 @@ try {
   process.send({ type: 'handoff', result }, () => { clearTimeout(timer); process.removeAllListeners('disconnect'); process.disconnect() })
 } catch { clearTimeout(timer); process.exitCode = 1; process.removeAllListeners('disconnect'); process.disconnect() }
 `
-export async function runPreparedDesktopReinstallHandoff({ payload, installRoot, operationId, registerEntries }) {
+export async function runPreparedDesktopReinstallHandoff({ payload, prepared: installed, installRoot, operationId, registerEntries }) {
   if (typeof registerEntries !== 'function') fail()
-  const source = await verifyDesktopPayload(payload), own = installation.readDesktopInstallation(installRoot)
+  const source = await reinstallSource({ payload, prepared: installed, installRoot }), own = installation.readDesktopInstallation(installRoot)
   const core = path.join(own.root, 'releases', source.record.selection.core_id), gui = path.join(own.root, 'app/releases', source.record.selection.gui_id)
   await verifyDesktopPrograms(core, gui, source.record)
   const runtime = product.loadProductRuntime(core, { required: true, full: true })
   const prepared = { installRoot: own.root, installation_id: own.record.installation_id, selection: source.record.selection, coreRoot: core, guiRoot: gui }
   const env = Object.fromEntries(['SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'LANG', 'LC_ALL'].flatMap(name => process.env[name] ? [[name, process.env[name]]] : []))
   const child = spawn(runtime.executables.node, ['--input-type=module', '--eval', handoffScript,
-    path.join(core, 'scripts/lib/desktop-reinstall-data.mjs'), source.directory, own.root, operationId],
+    path.join(core, 'scripts/lib/desktop-reinstall-data.mjs'), JSON.stringify({ ...(installed ? { prepared: installed } : { payload: source.directory }), installRoot: own.root, operationId })],
     { cwd: core, env, windowsHide: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'] })
   return new Promise((resolve, reject) => {
     let registered = false, registering = false, result, failed = false

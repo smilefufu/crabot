@@ -2386,3 +2386,32 @@ test('a cancelled same-directory first use can rediscover its verified legacy da
   await assert.rejects(fs.lstat(path.join(f.target, '.desktop-takeover')), { code: 'ENOENT' })
   await assert.rejects(fs.lstat(path.join(f.target, 'current-release.json')), { code: 'ENOENT' })
 })
+
+for (const version of ['1.2.3', '1.2.4']) test('an extracted retained reinstall uses installed programs and the original data guard without a payload copy: ' + version, async t => {
+  const f = await removalProofFixture(t, { schema: 'v1', functional: true })
+  f.record.phase = 'completed'; await f.publish()
+  const originalProof = await fs.readFile(f.file), data = path.join(f.target, 'data')
+  await fs.rm(f.prepared.coreRoot, { recursive: true }); await fs.rm(f.prepared.guiRoot, { recursive: true })
+  const incoming = await fixture(t, { version, schema: 'v2', functional: true })
+  const extracted = await extractedFirstLaunch(incoming, f.target)
+  const first = await import('../../../crabot-desktop/dist/bootstrap/scripts/lib/desktop-first-launch.mjs')
+  const programs = await first.readFirstLaunchPrograms(extracted)
+  assert.equal(programs.removal.operation_id, f.record.operation_id); assert.equal(programs.source, undefined)
+  const bound = await first.bindFirstLaunchData(programs, data)
+  const { runPreparedDesktopReinstallHandoff } = await import('../desktop-reinstall-data.mjs')
+  let registered = 0
+  const prepared = { installRoot: f.target, installation_id: bound.record.installation_id, selection: incoming.selection,
+    coreRoot: extracted.coreRoot, guiRoot: extracted.guiRoot, proof: bound.proof }
+  const result = await runPreparedDesktopReinstallHandoff({ installRoot: f.target, operationId: f.record.operation_id, prepared,
+    registerEntries: async selected => { registered++; assert.deepEqual(selected.selection, incoming.selection) } })
+  assert.equal(registered, 1); assert.equal(result.health_verified, false); assert.equal(result.verification_pending, true)
+  assert.deepEqual(installation.readDesktopSelection(f.target).selection, incoming.selection)
+  const { readVersionMaintenance } = await import('../version-maintenance.mjs')
+  const record = readVersionMaintenance(data)
+  assert.equal(record.phase, 'installing'); assert.equal(record.source_inventory_sha256, f.selection.core_id)
+  assert.equal(record.target_core.inventory_sha256, incoming.selection.core_id)
+  assert.deepEqual(await fs.readFile(f.file), originalProof)
+  assert.equal(await fs.readFile(path.join(data, 'retained-user-file'), 'utf8'), 'user content')
+  await assert.rejects(fs.lstat(path.join(data, 'mm.pid')), { code: 'ENOENT' })
+  await assert.rejects(fs.lstat(path.join(f.target, '.desktop-removal.json')), { code: 'ENOENT' })
+})

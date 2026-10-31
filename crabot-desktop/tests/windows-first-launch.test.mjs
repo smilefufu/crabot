@@ -10,10 +10,10 @@ const source = readFileSync(new URL('../src/windows-first-launch.ts', import.met
 const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText
 const root = path.resolve('/fixture/selected-programs'), old = path.resolve('/fixture/home/.crabot'), dataDir = path.join(old, 'data')
 const selection = { schema_version: 1, version: '1.2.3', gui_id: 'fixture-gui', core_id: 'fixture-core' }
-async function run({ initialized = false, legacy = false, source = false, cancel = false, bound = false, previousDesktop = false, previousVersion = '1.2.2' } = {}) {
+async function run({ initialized = false, legacy = false, source = false, cancel = false, bound = false, previousDesktop = false, previousVersion = '1.2.2', retained = false } = {}) {
   const effects = [], messages = [], queries = []
   const own = { root, dataDir, record: { installation_id: 'fixture' } }
-  const programs = { initialized, installRoot: root, selection, coreRoot: path.join(root, 'releases/core'), guiRoot: path.join(root, 'app/releases/gui'), ...(previousDesktop ? { source: { ...own, selection: { ...selection, version: previousVersion } } } : {}) }
+  const programs = { initialized, installRoot: root, selection, coreRoot: path.join(root, 'releases/core'), guiRoot: path.join(root, 'app/releases/gui'), ...(retained ? { removal: { phase: 'completed' } } : {}), ...(previousDesktop ? { source: { ...own, selection: { ...selection, version: previousVersion } } } : {}) }
   const original = { installation: { installRoot: old, dataRoot: dataDir, version: 'v2026.10.14.1' }, entryFenceId: 'previous-fence' }
   const modules = {
     'desktop-first-launch.mjs': {
@@ -41,6 +41,7 @@ async function run({ initialized = false, legacy = false, source = false, cancel
   const result = await exports.prepareWindowsFirstLaunch({ resources: '/fixture/resources', pinText: 'pin', home: path.dirname(old),
     load: async name => { assert.ok(modules[name], name); return modules[name] },
     registerEntries: async value => { effects.push(['register', value.installRoot]) },
+    repairExisting: async value => { assert.equal(value, programs); effects.push(['repair', root]); return !cancel },
     upgradeExisting: async (prepared, source) => { effects.push(['update', prepared.installRoot, source.dataDir]); return !cancel },
     dialog: { showMessageBox: async options => { messages.push(options); return { response: cancel ? 1 : 0 } }, showOpenDialog: () => assert.fail('No directory picker is needed for a verified release') } })
   return { result, effects, messages, queries }
@@ -84,4 +85,10 @@ test('cancelling an existing GUI update does not initialize a new instance or en
 
 test('an older desktop package is rejected before binding or data conversion', async () => {
   await assert.rejects(run({ previousDesktop: true, previousVersion: '1.2.4' }), { code: 'CRABOT_DESKTOP_RELEASE_VERSION' })
+})
+
+for (const cancel of [false, true]) test('retained first use routes only to original data repair and never fresh or legacy admission; cancel=' + cancel, async () => {
+  const value = await run({ retained: true, cancel })
+  assert.deepEqual(value.effects, [['repair', root]]); assert.deepEqual(value.queries, [])
+  if (cancel) assert.equal(value.result, null)
 })

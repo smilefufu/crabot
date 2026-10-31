@@ -1,9 +1,11 @@
 import path from 'node:path'
 import { createRequire } from 'node:module'
+import { pathToFileURL } from 'node:url'
 import type { App, Shell, dialog as ElectronDialog } from 'electron'
 import { DesktopController, type PreparedDesktopPair } from './controller.js'
 import { LoginStartup } from './login-startup.js'
-import { replaceInstallationEntries } from './installation-entries.js'
+import { createOperationProgressWindow } from './operation-progress-window.js'
+import { replaceInstallationEntries, registerRetainedInstallationEntries } from './installation-entries.js'
 
 // Offline source-to-target update of one existing desktop installation. Reuses
 // the original stopped-pair coordinator, never authenticates the new GUI to the
@@ -38,9 +40,53 @@ export async function applyWindowsOfflineUpdate(options: {
     configHome: path.join(home, '.config'), app })
   const controller = new DesktopController({ coreRoot: source.coreRoot, dataRoot: source.dataDir, appVersion: source.selection.version,
     platform: 'win32', packaged: true, verifyBinding, loginStartup: startup })
+  const progress = createOperationProgressWindow('admission', new AbortController())
   try {
+    await progress.ready; progress.update('正在更新需要转换的数据，原数据保留在原位置…', false)
     controller.host.status('stopped', '旧版已退出，正在更新需要转换的数据。')
     await controller.applyPreparedPair(prepared, (from, to) => replaceInstallationEntries(from, to, { home, platform: 'win32', env: process.env, shell }))
     return true
-  } finally { controller.close() }
+  } finally { progress.close(); controller.close() }
+}
+
+// A retained-data repair has a different source: the original removal proof,
+// even if its Core has been deleted. The existing target-Node handoff alone
+// transfers that root guard to the normal data/health recovery coordinator.
+export async function repairWindowsRetainedData(options: {
+  programs: any; home: string; app: App; dialog: Pick<typeof ElectronDialog, 'showMessageBox'>; shell: Shell
+}): Promise<boolean> {
+  const { programs, dialog, home, shell } = options
+  const load = (name: string): Promise<any> => import(new URL('./bootstrap/scripts/lib/' + name, import.meta.url).href)
+  const { assertReinstallVersion } = await load('desktop-reinstall.mjs')
+  assertReinstallVersion(programs.removal.source_selection.version, programs.selection.version)
+  const desktop = createRequire(import.meta.url)('./bootstrap/scripts/lib/desktop-installation.cjs')
+  const own = desktop.readDesktopInstallation(programs.installRoot)
+  const answer = await dialog.showMessageBox({ type: 'question', title: '继续使用保留的数据', message: '修复程序并沿用已有聊天、项目和设置？',
+    detail: `原数据：${own.dataDir}\n程序：${own.root}\n只转换确实需要升级的数据；不会复制整份旧目录。`,
+    buttons: ['修复并继续', '取消'], defaultId: 0, cancelId: 1 })
+  if (answer.response !== 0) return false
+  if (!['removing', 'completed'].includes(programs.removal.phase)) throw new Error('原卸载尚未停止，请先完成原应用退出；原数据已保留。')
+  const { inspectInstance } = await load('instance-runtime.mjs')
+  const identity = createRequire(import.meta.url)('./bootstrap/scripts/lib/process-identity.cjs')
+  const original = programs.removal.source_selection
+  const observation = await identity.inspectProgramReferences({ roots: [path.join(own.root, 'app/releases', original.gui_id), path.join(own.root, 'releases', original.core_id)], files: [own.command] })
+  // Only this verified GUI and its OS-pinned child tree are the repair host.
+  // Other original processes remain blockers; no stop signal is sent.
+  const self = identity.inspectProcess(process.pid)
+  const host = identity.captureProcessTreeGeneration(self.pid, self.started, self.owner)
+  if (inspectInstance(own.dataDir).state !== 'stopped' || !observation.complete || observation.incomplete
+    || observation.unknown_pids?.length || observation.processes.some((value: any) => !host.some((member: any) => identity.sameProcess(member, value)))) {
+    throw new Error('原应用或服务仍在使用程序，请正常退出后重新打开；尚未转换数据。')
+  }
+  const progress = createOperationProgressWindow('admission', new AbortController())
+  try {
+    await progress.ready; progress.update('正在恢复程序入口，随后核验原数据并启动服务…', false)
+    const first = await load('desktop-first-launch.mjs'), bound = await first.bindFirstLaunchData(programs, own.dataDir)
+    const prepared = { installRoot: own.root, installation_id: own.record.installation_id, selection: programs.selection,
+      coreRoot: programs.coreRoot, guiRoot: programs.guiRoot, proof: bound.proof }
+    const { runPreparedDesktopReinstallHandoff } = await import(pathToFileURL(path.join(programs.coreRoot, 'scripts/lib/desktop-reinstall-data.mjs')).href)
+    await runPreparedDesktopReinstallHandoff({ installRoot: own.root, prepared, operationId: programs.removal.operation_id,
+      registerEntries: (value: PreparedDesktopPair) => registerRetainedInstallationEntries(value, { home, platform: 'win32', env: process.env, shell, operationId: programs.removal.operation_id }) })
+    return true
+  } finally { progress.close() }
 }

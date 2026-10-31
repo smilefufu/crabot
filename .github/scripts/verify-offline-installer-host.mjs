@@ -18,7 +18,23 @@ function within(relative) {
 const executable = within(info.executable), payload = within(info.payload), resources = path.dirname(payload)
 const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'Crabot installer host ')))
 try {
-  if (info.bootstrap === 'gtk4') {
+  if (info.bootstrap === 'windows-first-launch') {
+    assert.equal(process.platform, 'win32')
+    const { verifyDesktopPrograms } = await import('../../scripts/lib/desktop-payload.mjs')
+    const gui = path.dirname(executable), pin = JSON.parse(await fs.readFile(path.join(gui, 'resources/desktop-release.json'), 'utf8'))
+    const record = JSON.parse(await fs.readFile(path.join(payload, 'app/installers', pin.gui_id + '.json'), 'utf8'))
+    assert.deepEqual(record.selection, pin)
+    await verifyDesktopPrograms(path.join(payload, 'releases', pin.core_id), gui, record)
+    const require = createRequire(new URL('../../crabot-desktop/package.json', import.meta.url))
+    const builder = createRequire(createRequire(require.resolve('electron-builder')).resolve('app-builder-lib/package.json'))
+    const { getCurrentFuseWire, FuseV1Options } = builder('@electron/fuses'), fuses = await getCurrentFuseWire(executable)
+    for (const key of [FuseV1Options.RunAsNode, FuseV1Options.EnableNodeOptionsEnvironmentVariable, FuseV1Options.EnableNodeCliInspectArguments]) assert.equal(fuses[key], 48)
+    assert.equal(fuses[FuseV1Options.OnlyLoadAppFromAsar], 49)
+    for (const absent of ['data', 'current-release.json', 'desktop-installation.json', 'CrabotInstaller.exe', 'resources/offline']) {
+      await assert.rejects(fs.lstat(path.join(payload, absent)), { code: 'ENOENT' })
+    }
+    console.log('CRABOT_INSTALLER_HOST ' + JSON.stringify({ actual_gui_and_core_inventory: true, protected_gui_fuses: true, single_program_tree: true, data_initialized: false, business_mm_started: false }))
+  } else if (info.bootstrap === 'gtk4') {
     assert.equal(process.platform, 'linux')
     const release = JSON.parse(await fs.readFile(path.join(payload, 'core/core-release.json'), 'utf8'))
     await readUbuntuBootstrap(resources, release.commit)
