@@ -185,3 +185,56 @@ export async function enableLegacyCliForwarding(root, id, programRoot = root) {
     }
   } finally { releaseCliLock(lock) }
 }
+
+// A successful health handoff is independent of retaining old programs. This
+// private receipt is discovery evidence only, never startup or deletion authority.
+async function completedTarget(coreRoot, dataDir) {
+  const { default: mac } = await import('./mac-app-binding.cjs')
+  const application = process.platform === 'darwin' && mac.macAppForCore(coreRoot)
+  if (application) {
+    if (mac.applyMacAppEnvironment(coreRoot, { env: {} })?.data_dir !== dataDir) fail()
+    return { kind: 'mac-app', root: application }
+  }
+  const { default: desktop } = await import('./desktop-installation.cjs')
+  const own = desktop.locateDesktopCore(coreRoot)
+  if (!own || own.dataDir !== dataDir) fail()
+  return { kind: 'desktop', root: own.root, installation_id: own.record.installation_id }
+}
+export async function completeLegacyEntryAdmission(root, id, coreRoot) {
+  root = realpathSync(root)
+  const directory = await control(root), record = await read(root, directory)
+  if (record.id !== id || record.phase !== 'data_changing') fail()
+  const data = await fs.lstat(record.installation.dataRoot, { bigint: true })
+  const receipt = { schema_version: 1, entry_fence_id: id, source_fingerprint: record.installation.fingerprint,
+    data_dir: record.installation.dataRoot, data_identity: { dev: String(data.dev), ino: String(data.ino) },
+    target: await completedTarget(coreRoot, record.installation.dataRoot) }
+  const file = path.join(directory, 'completed.json'), bytes = Buffer.from(JSON.stringify(receipt) + '\n')
+  try { if (!(await regular(file, 4096)).bytes.equals(bytes)) fail() }
+  catch (error) { if (error.code !== 'ENOENT') throw error; await replace(file, bytes, 0o600) }
+  return receipt
+}
+export async function readLegacyEntryCompletion(root) {
+  root = realpathSync(root)
+  const directory = await control(root), record = await read(root, directory), file = path.join(directory, 'completed.json')
+  let stat
+  try { stat = await fs.lstat(file) } catch (error) { if (error.code === 'ENOENT') return null; throw error }
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1
+    || (process.platform === 'win32' ? !identity.isPrivateFile(file) : stat.uid !== process.getuid() || (stat.mode & 0o777) !== 0o600)) fail()
+  const { bytes } = await regular(file, 4096)
+  let receipt
+  try { receipt = JSON.parse(bytes) } catch { fail() }
+  const data = await fs.lstat(record.installation.dataRoot, { bigint: true }), target = receipt?.target
+  const canonical = { schema_version: 1, entry_fence_id: record.id, source_fingerprint: record.installation.fingerprint,
+    data_dir: record.installation.dataRoot, data_identity: { dev: String(data.dev), ino: String(data.ino) }, target }
+  if (record.phase !== 'data_changing' || !bytes.equals(Buffer.from(JSON.stringify(canonical) + '\n'))
+    || !target || typeof target.root !== 'string' || !path.isAbsolute(target.root)) fail()
+  if (target.kind === 'desktop' && Object.keys(target).join(',') === 'kind,root,installation_id') {
+    const { default: desktop } = await import('./desktop-installation.cjs')
+    const own = desktop.readDesktopInstallation(target.root)
+    if (own.record.installation_id !== target.installation_id || own.dataDir !== receipt.data_dir) fail()
+  } else if (target.kind === 'mac-app' && process.platform === 'darwin' && Object.keys(target).join(',') === 'kind,root') {
+    const { default: mac } = await import('./mac-app-binding.cjs')
+    if (mac.readMacAppBinding()?.data_dir !== receipt.data_dir) fail()
+  } else fail()
+  return { installation: record.installation, receipt }
+}

@@ -44,11 +44,16 @@ jobs:
           pnpm --dir crabot-core install --frozen-lockfile
           pnpm --dir crabot-core run build
           pnpm --dir crabot-desktop run build
+      - name: Existing GUI stopped update with a bounded native diagnostic
+        run: |
+          mkdir -p .desktop-build
+          node --input-type=module -e 'import{runBounded}from"./scripts/lib/run-bounded.mjs";await runBounded(process.execPath,["--test","--test-name-pattern=an extracted desktop update","scripts/lib/__tests__/desktop-payload.test.mjs"],{timeout:90000})' 2>&1 | tee .desktop-build/windows-first-use-pair.log
       - name: GUI and original CLI preserve the actual legacy data binding
+        if: ${{ !cancelled() }}
         run: |
           mkdir -p .desktop-build
           node --test --test-concurrency=1 scripts/lib/__tests__/desktop-installation.test.mjs scripts/lib/__tests__/legacy-entry-fence.test.mjs crabot-desktop/tests/windows-first-launch.test.mjs crabot-desktop/tests/installer-discovery-dialogs.test.mjs 2>&1 | tee .desktop-build/windows-first-use-boundary.log
-          node --test --test-concurrency=1 --test-name-pattern='legacy handoff retains|pre-data preparation|first GUI|an extracted desktop update|an extracted retained reinstall|cancelled same-directory first|actual target Node takes over|target takeover never|legacy target commits|dedicated legacy health' scripts/lib/__tests__/desktop-payload.test.mjs 2>&1 | tee .desktop-build/windows-first-use-admission.log
+          node --test --test-concurrency=1 --test-name-pattern='legacy handoff retains|pre-data preparation|first GUI|an extracted retained reinstall|cancelled same-directory first|actual target Node takes over|target takeover never|legacy target commits|dedicated legacy health' scripts/lib/__tests__/desktop-payload.test.mjs 2>&1 | tee .desktop-build/windows-first-use-admission.log
       - name: Retain first-use boundary evidence
         if: always()
         uses: actions/upload-artifact@v4

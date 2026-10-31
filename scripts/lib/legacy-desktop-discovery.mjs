@@ -4,7 +4,7 @@ import { promises as fs, realpathSync } from 'node:fs'
 import path from 'node:path'
 import { detectMode } from './mode.mjs'
 import { discoverLegacyUserInstall } from './legacy-desktop.mjs'
-import { inspectLegacyEntryFence } from './legacy-entry-fence.mjs'
+import { inspectLegacyEntryFence, readLegacyEntryCompletion } from './legacy-entry-fence.mjs'
 const pending = () => { throw Object.assign(new Error('原接管维护尚未完成，请使用原安装包和原安装位置继续；数据和记录已保留。'), { code: 'CRABOT_MAINTENANCE_PENDING' }) }
 async function present(file) { try { return await fs.lstat(file) } catch (error) { if (error.code === 'ENOENT') return null; throw error } }
 export async function discoverLegacyDesktopTakeover({ root, source = process.env, etcDir }) {
@@ -25,10 +25,11 @@ export async function discoverLegacyDesktopTakeover({ root, source = process.env
     if (record && record.schema_version !== 4) pending()
   }
   if (await present(path.join(root, '.desktop-takeover'))) {
-    const entry = await inspectLegacyEntryFence(root)
-    if (entry.installation.dataRoot !== dataDir) pending()
     const { readVersionMaintenance } = await import('./version-maintenance.mjs')
     record ??= readVersionMaintenance(dataDir)
+    if (!record && await readLegacyEntryCompletion(root)) return null
+    const entry = await inspectLegacyEntryFence(root)
+    if (entry.installation.dataRoot !== dataDir) pending()
     if (!record && entry.phase === 'restored') return { installation: await discoverLegacyUserInstall({ root, dataDir, source, etcDir }) }
     if (!record && entry.phase === 'fencing') return { installation: entry.installation, entryFenceId: entry.id }
     if (!entry.entries_fenced || !['fenced', 'data_changing'].includes(entry.phase)) pending()

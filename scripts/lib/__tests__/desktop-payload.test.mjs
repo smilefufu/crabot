@@ -2329,6 +2329,7 @@ test('first GUI legacy admission uses already extracted programs and external or
   assert.equal(JSON.parse(await fs.readFile(path.join(f.data, 'desktop-maintenance.json'), 'utf8')).phase, 'verifying')
   const { inspectLegacyEntryFence } = await import('../legacy-entry-fence.mjs')
   assert.equal((await inspectLegacyEntryFence(f.target)).entries_fenced, true)
+  await assert.rejects(fs.lstat(path.join(f.target, '.desktop-takeover/completed.json')), { code: 'ENOENT' })
   const health = `import{pathToFileURL}from'node:url';const[module,dataDir,root]=process.argv.slice(1);const versions=await import(pathToFileURL(module).href);await versions.recoverLegacyUserVersionMaintenance({dataDir,root,appVersion:'1.2.3',verifyTakeover:async()=>{},verifyCompatible:async()=>{},run:async()=>true})`
   // Only health is substituted; real maintenance admission/finalization and the
   // original command's target routing are exercised. No live MM is claimed.
@@ -2339,7 +2340,21 @@ test('first GUI legacy admission uses already extracted programs and external or
     ? await promisify(execFile)(path.join(process.env.SystemRoot, 'System32/cmd.exe'), ['/d', '/c', probe], { timeout: 15000, env: { ...process.env, CRABOT_OLD_COMMAND: path.join(f.target, 'crabot.cmd') } })
     : await promisify(execFile)(node, [path.join(f.target, 'cli.mjs'), '--version'], { timeout: 15000 })
   assert.equal(JSON.parse(forwarded.stdout.trim()).version, f.selection.version)
-
+  const { discoverLegacyDesktopTakeover } = await import('../legacy-desktop-discovery.mjs')
+  assert.equal(await discoverLegacyDesktopTakeover({ root: f.target, source: {} }), null, 'A completed data admission must not be offered again when old programs are retained')
+  const receiptFile = path.join(f.target, '.desktop-takeover/completed.json'), receipt = await fs.readFile(receiptFile)
+  for (const changed of ['fingerprint', 'data-identity', 'target', 'extra']) {
+    const value = JSON.parse(receipt)
+    if (changed === 'fingerprint') value.source_fingerprint = 'f'.repeat(64)
+    if (changed === 'data-identity') value.data_identity.ino = '0'
+    if (changed === 'target') value.target.installation_id = randomUUID()
+    if (changed === 'extra') value.ignore = true
+    await fs.writeFile(receiptFile, JSON.stringify(value) + '\n')
+    await assert.rejects(discoverLegacyDesktopTakeover({ root: f.target, source: {} }))
+    await fs.writeFile(receiptFile, receipt)
+  }
+  await fs.unlink(path.join(f.target, 'VERSION'))
+  assert.equal(await discoverLegacyDesktopTakeover({ root: f.target, source: {} }), null, 'Completion does not depend on keeping old program files for discovery')
 })
 
 test('an extracted desktop update keeps its original location and scoped stopped-pair conversion instead of re-entering legacy admission', { timeout: 120000 }, async t => {
@@ -2366,6 +2381,16 @@ test('an extracted desktop update keeps its original location and scoped stopped
       return load(file, root)
     })
     controller.host.subscribe(state => console.log('CRABOT_PAIR_FIXTURE phase ' + state.phase))
+    const native = (await import(pathToFileURL(path.join(source.coreRoot, 'scripts/lib/process-identity.cjs')).href)).default
+    for (const name of ['createPrivateDirectory', 'writePrivateFile', 'tryFileLock']) {
+      const original = native[name]
+      t.mock.method(native, name, (...args) => {
+        console.log('CRABOT_PAIR_FIXTURE native-before ' + name)
+        const value = original(...args)
+        console.log('CRABOT_PAIR_FIXTURE native-after ' + name)
+        return value
+      })
+    }
   }
   try {
     controller.host.status('stopped', 'fixture was already stopped')

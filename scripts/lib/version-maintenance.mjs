@@ -436,6 +436,8 @@ export async function recoverLegacyUserVersionMaintenance({ dataDir, root, appVe
     recovering.add(record.id)
     if (!await run()) fail()
     await verify()
+    const { completeLegacyEntryAdmission } = await import('./legacy-entry-fence.mjs')
+    await completeLegacyEntryAdmission(record.install_root, record.legacy_source.entry_fence_id, root)
     rmSync(path.join(dataDir, name)); syncDirectory(dataDir)
     return true
   } finally { if (record) recovering.delete(record.id); releaseCliLock(lock) }
