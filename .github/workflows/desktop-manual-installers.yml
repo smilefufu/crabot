@@ -227,10 +227,10 @@ jobs:
           retention-days: 7
       - name: Tiny native decoder path regression
         if: runner.os == 'Windows'
-        run: node .github/scripts/probe-windows-direct-extraction.mjs
+        run: node .github/scripts/probe-windows-single-layer-installer.mjs
       - name: Native Windows wrapper extraction regression
         if: runner.os == 'Windows'
-        run: node .github/scripts/smoke-windows-wrapper.mjs .desktop-build/manual/installer 2>&1 | tee .desktop-build/windows-wrapper.log
+        run: node .github/scripts/smoke-windows-single-layer.mjs .desktop-build/manual/installer 2>&1 | tee .desktop-build/windows-wrapper.log
       - name: Published Windows CLI v2026.10.14.1 into GUI preserving existing data
         if: runner.os == 'Windows'
         run: node .github/scripts/verify-legacy-user-takeover.mjs .desktop-build/manual/paired .desktop-build/manual/installer v2026.10.14.1 2>&1 | tee .desktop-build/windows-v14-takeover.log

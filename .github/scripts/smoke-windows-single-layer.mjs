@@ -15,7 +15,7 @@ const distribution = path.join(project, 'distribution'), installers = (await fs.
 assert.equal(installers.length, 1)
 const root = await fs.mkdtemp(path.join(tmpdir(), 'Crabot exact EXE ')), target = path.join(root, '选择的程序 目录'), started = Date.now()
 try {
-  await execute(path.join(distribution, installers[0]), ['/S', '/D=' + target], { timeout: 600000, maxBuffer: 65536 })
+  await execute(path.join(distribution, installers[0]), ['/S', '/D=' + target], { windowsVerbatimArguments: true, timeout: 600000, maxBuffer: 65536 })
   const originalGui = path.dirname(path.resolve(project, info.executable)), gui = path.join(target, path.relative(path.resolve(project, info.programs), originalGui))
   const pin = JSON.parse(await fs.readFile(path.join(gui, 'resources/desktop-release.json'), 'utf8'))
   const record = JSON.parse(await fs.readFile(path.join(target, 'app/installers', pin.gui_id + '.json'), 'utf8'))

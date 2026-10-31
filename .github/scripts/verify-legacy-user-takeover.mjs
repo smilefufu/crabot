@@ -88,10 +88,11 @@ async function runUbuntuInstaller({ bundle, root, env, control, version }) {
 try {
   await space()
   const linux = process.platform === 'linux', bundle = path.join(installer, 'ubuntu-native')
-  const driver = linux ? null : await buildLegacyInstallerDriver({ repository, installer, destination: driverRoot, payload: target.directory })
+  const singleLayer = process.platform === 'win32'
+  const driver = linux || singleLayer ? null : await buildLegacyInstallerDriver({ repository, installer, destination: driverRoot, payload: target.directory })
   for (const version of versions) {
     await space()
-    const home = path.join(temporary, version), root = path.join(home, '.crabot'), dataDir = path.join(root, 'data'), control = path.join(home, 'control')
+    const home = path.join(temporary, version), programRoot = singleLayer ? path.join(repository, '.desktop-build/first-use-' + randomUUID()) : path.join(home, '.crabot'), root = path.join(home, '.crabot'), dataDir = path.join(root, 'data'), control = path.join(home, 'control')
     await fs.mkdir(control, { recursive: true, mode: 0o700 })
     const archive = path.join(home, process.platform === 'win32' ? 'old.zip' : 'old.tar.gz'), extracted = path.join(home, 'extracted')
     let gui, exited, peer, prepared, stale, passed = false
@@ -143,6 +144,27 @@ try {
           XDG_CACHE_HOME: path.join(home, 'cache'), XDG_RUNTIME_DIR: path.join(home, 'run'), GDK_BACKEND: 'x11' })
         for (const name of ['config', 'share', 'cache', 'run']) await fs.mkdir(path.join(home, name), { mode: 0o700 })
         await runUbuntuInstaller({ bundle, root, env, control, version })
+      } else if (singleLayer) {
+        const directory = path.join(installer, 'distribution'), files = (await fs.readdir(directory)).filter(name => name.endsWith('offline-candidate.exe'))
+        assert.equal(files.length, 1)
+        await execute(path.join(directory, files[0]), ['/S', '/D=' + programRoot], { env, windowsVerbatimArguments: true, timeout: 600000, maxBuffer: 65536 })
+        assert.equal(await absent(path.join(root, 'releases', target.record.selection.core_id)), true, 'Installer must not copy new programs to the old root')
+        assert.equal(await absent(path.join(programRoot, 'data')), true)
+        const executable = path.join(programRoot, 'app/releases', target.record.selection.gui_id, 'Crabot.exe')
+        gui = spawn(executable, ['--background'], { env, stdio: ['ignore', 'pipe', 'pipe'] })
+        peer = identity.inspectProcess(gui.pid); assert.ok(peer); exited = once(gui, 'exit'); void exited.catch(() => {})
+        gui.stdout.on('data', bytes => { output = (output + bytes.toString()).slice(-128000) })
+        gui.stderr.on('data', bytes => { output = (output + bytes.toString()).slice(-128000) })
+        const confirmation = await execute(path.join(process.env.SystemRoot, 'System32/WindowsPowerShell/v1.0/powershell.exe'),
+          ['-NoProfile', '-NonInteractive', '-File', path.join(repository, '.github/scripts/accept-windows-legacy-data-dialog.ps1'), '-GuiPid', String(gui.pid), '-DataDirectory', dataDir, '-Version', version], { env, timeout: 250000, maxBuffer: 65536 })
+        output += confirmation.stdout + confirmation.stderr
+        const selectedBy = Date.now() + 180000
+        while (true) {
+          try { installation.readDesktopSelection(programRoot); break } catch (error) {
+            if (gui.exitCode !== null || Date.now() >= selectedBy) throw new Error('Actual GUI data handoff failed: ' + error.message + '\n' + output)
+            await new Promise(resolve => setTimeout(resolve, 100))
+          }
+        }
       } else {
         try {
           const installed = await execute(driver, ['--enable-logging=file', '--log-file=' + path.join(control, 'installer-native.log')], { env, timeout: 600000, maxBuffer: 256000 }); output += installed.stdout + installed.stderr
@@ -152,16 +174,18 @@ try {
           throw error
         }
       }
-      assert.equal(JSON.parse(await fs.readFile(path.join(control, 'installer-handoff.json'), 'utf8')), true)
-      assert.ok(JSON.parse(await fs.readFile(path.join(control, 'takeover-confirmed.json'), 'utf8')).detail.includes(version))
-      const own = installation.readDesktopSelection(root)
-      prepared = { installRoot: root, installation_id: own.record.installation_id, selection: own.selection, coreRoot: own.coreRoot, guiRoot: own.guiRoot }
+      if (!singleLayer) {
+        assert.equal(JSON.parse(await fs.readFile(path.join(control, 'installer-handoff.json'), 'utf8')), true)
+        assert.ok(JSON.parse(await fs.readFile(path.join(control, 'takeover-confirmed.json'), 'utf8')).detail.includes(version))
+      }
+      const own = installation.readDesktopSelection(programRoot)
+      prepared = { installRoot: programRoot, installation_id: own.record.installation_id, selection: own.selection, coreRoot: own.coreRoot, guiRoot: own.guiRoot }
       assert.equal(own.dataDir, dataDir); assert.deepEqual(own.selection, target.record.selection)
-      assert.equal(JSON.parse(await fs.readFile(path.join(dataDir, 'desktop-maintenance.json'), 'utf8')).phase, 'verifying')
+      if (!singleLayer) assert.equal(JSON.parse(await fs.readFile(path.join(dataDir, 'desktop-maintenance.json'), 'utf8')).phase, 'verifying')
       if (stale) for (const file of stale.files) assert.equal(await absent(file), true, 'Exited legacy record must settle before ordinary Main')
       stage('ordinary-target-main')
-      gui = spawn(own.executable, ['--background'], { env, stdio: ['ignore', 'pipe', 'pipe'] }); peer = identity.inspectProcess(gui.pid); assert.ok(peer); exited = once(gui, 'exit'); void exited.catch(() => {})
-      let ready = false, buffered = '', failed
+      if (!gui) { gui = spawn(own.executable, ['--background'], { env, stdio: ['ignore', 'pipe', 'pipe'] }); peer = identity.inspectProcess(gui.pid); assert.ok(peer); exited = once(gui, 'exit'); void exited.catch(() => {}) }
+      let ready = singleLayer && output.split('\n').some(line => { try { const value = JSON.parse(line); return value.component === 'desktop' && value.phase === 'ready' } catch { return false } }), buffered = '', failed
       gui.on('error', error => { failed = error })
       gui.stderr.on('data', bytes => { output = (output + bytes.toString()).slice(-128000) })
       gui.stdout.on('data', bytes => {
@@ -178,7 +202,7 @@ try {
         await new Promise(resolve => setTimeout(resolve, 100))
       }
       const instance = inspectInstance(dataDir); assert.equal(instance.state, 'running'); assert.equal(instance.record.install_root, own.coreRoot)
-      const nativeCli = path.join(root, 'bin', process.platform === 'win32' ? 'crabot.exe' : 'crabot')
+      const nativeCli = path.join(programRoot, 'bin', process.platform === 'win32' ? 'crabot.exe' : 'crabot')
       const nativeStatus = JSON.parse((await execute(nativeCli, ['status', '--json'], { env, timeout: 30000, maxBuffer: 128000 })).stdout)
       assert.equal(nativeStatus.running, true); assert.equal(nativeStatus.data_dir, dataDir)
       if (process.platform === 'win32') {
@@ -196,7 +220,7 @@ try {
       await execute(runtime.executables.python, ['-c', 'import pathlib,sys;pathlib.Path(sys.argv[1]).write_text("old workspace usable")', scriptFile], { env, timeout: 10000 })
       assert.equal(await fs.readFile(scriptFile, 'utf8'), 'old workspace usable')
       assert.equal(inspectInstance(dataDir).record.generation, instance.record.generation)
-      reports.push({ version, platform, published_archive_verified: true, official_windows_installer_launcher: process.platform === 'win32', actual_installer_loaded: true, native_dialog_input_substituted: !linux, actual_ubuntu_backend: linux,
+      reports.push({ version, platform, published_archive_verified: true, official_windows_installer_launcher: process.platform === 'win32', actual_installer_loaded: true, single_layer_exe: singleLayer, actual_gui_first_use: singleLayer, native_dialog_input_substituted: !linux && !singleLayer, actual_ubuntu_backend: linux,
         graphical_polkit_tested: false, actual_gtk_flow_driven: false,
         old_data_fixture_stopped: true, old_fenced_stale_records_settled: Boolean(stale), ordinary_main_core_healthy: true, actual_native_and_original_cli_same_instance: true, host_node_required: false,
         original_credentials_and_sentinels_preserved: true, actual_bundled_python_file_access: true, historical_user_data_fixture: true,
@@ -237,6 +261,12 @@ try {
             shell: { readShortcutLink: () => { throw new Error('Windows only') } },
             verifyStopped: async () => assert.equal(inspectInstance(dataDir).state, 'stopped') })
           await fs.writeFile(path.join(control, 'entries-cleaned.json'), 'true\n')
+        } else if (singleLayer) {
+          const script = path.join(control, 'cleanup-entries.cjs')
+          await fs.writeFile(script, `const{app,shell}=require('electron');app.whenReady().then(async()=>{try{const{removeInstallationEntries}=await import(${JSON.stringify(pathToFileURL(path.join(repository, 'crabot-desktop/dist/installation-removal.js')).href)});const{inspectInstance}=await import(${JSON.stringify(pathToFileURL(path.join(repository, 'scripts/lib/instance-runtime.mjs')).href)});await removeInstallationEntries(${JSON.stringify(prepared)},{home:${JSON.stringify(home)},platform:'win32',env:process.env,shell,verifyStopped:async()=>{if(inspectInstance(${JSON.stringify(dataDir)}).state!=='stopped')throw Error('not stopped')}});require('fs').writeFileSync(${JSON.stringify(path.join(control, 'entries-cleaned.json'))},'true\n');app.exit(0)}catch(error){console.error(error);app.exit(1)}})`)
+          const { createRequire } = await import('node:module'), require = createRequire(new URL('../../crabot-desktop/package.json', import.meta.url))
+          await execute(require('electron'), [script], { env, timeout: 90000, maxBuffer: 65536 })
+          await fs.rm(programRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
         } else await execute(driver, [], { env: { ...env, CRABOT_LEGACY_INSTALLER_DRIVER: cleanup }, timeout: 90000, maxBuffer: 128000 })
         assert.equal(JSON.parse(await fs.readFile(path.join(control, 'entries-cleaned.json'), 'utf8')), true)
         await fs.rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })

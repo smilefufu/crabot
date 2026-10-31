@@ -31,8 +31,9 @@ try {
   for (const name of ['ordinary', '中文 空格', 'deep']) {
     const target = name === 'deep' ? path.join(root, 'target', ...Array.from({ length: 8 }, (_, index) => 'long-directory-' + index)) : path.join(root, 'target', name)
     await fs.mkdir(path.dirname(target), { recursive: true })
-    await execute(path.join(output, 'distribution', installers[0]), ['/S', '/D=' + target], { timeout: 120000, maxBuffer: 65536 })
+    await execute(path.join(output, 'distribution', installers[0]), ['/S', '/D=' + target], { windowsVerbatimArguments: true, timeout: 120000, maxBuffer: 65536 })
     const installed = path.join(target, 'releases', selection.core_id, relative)
+    console.log('CRABOT_DECODER_DESTINATION ' + JSON.stringify({ name, target, entries: await fs.readdir(target).catch(error => error.code), default_entries: await fs.readdir(path.join(process.env.USERPROFILE, 'Crabot')).catch(error => error.code) }))
     assert.equal(await fs.readFile(installed, 'utf8'), 'complete long-path payload bytes')
     for (const absent of ['desktop-installation.json', 'current-release.json', 'data', 'CrabotInstaller.exe', 'resources/offline']) {
       await assert.rejects(fs.lstat(path.join(target, absent)), { code: 'ENOENT' })

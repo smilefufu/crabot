@@ -2342,7 +2342,7 @@ test('first GUI legacy admission uses already extracted programs and external or
 
 })
 
-test('an extracted desktop update keeps its original location and scoped stopped-pair conversion instead of re-entering legacy admission', async t => {
+test('an extracted desktop update keeps its original location and scoped stopped-pair conversion instead of re-entering legacy admission', { timeout: 120000 }, async t => {
   const previous = await fixture(t, { functional: true, schema: 'v1' })
   const initial = await prepareDesktopInstallation({ payload: previous.payload, installRoot: previous.target })
   const source = await commitDesktopInstallation(initial)
@@ -2359,6 +2359,14 @@ test('an extracted desktop update keeps its original location and scoped stopped
   const { DesktopController } = await import('../../../crabot-desktop/dist/controller.js')
   const controller = new DesktopController({ coreRoot: source.coreRoot, dataRoot: source.dataDir, appVersion: source.selection.version,
     platform: process.platform, packaged: true, verifyBinding: () => assert.deepEqual(installation.readDesktopSelection(source.root).selection, source.selection) })
+  if (windows) {
+    const load = controller.load.bind(controller)
+    t.mock.method(controller, 'load', async (file, root) => {
+      console.log('CRABOT_PAIR_FIXTURE load ' + file)
+      return load(file, root)
+    })
+    controller.host.subscribe(state => console.log('CRABOT_PAIR_FIXTURE phase ' + state.phase))
+  }
   try {
     controller.host.status('stopped', 'fixture was already stopped')
     const prepared = { installRoot: source.root, installation_id: source.record.installation_id, source: source.selection,
