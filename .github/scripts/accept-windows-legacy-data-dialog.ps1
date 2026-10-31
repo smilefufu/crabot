@@ -29,7 +29,14 @@ while((Get-Date) -lt $deadline){
   $text=(@([CrabotFirstUseUI]::Text($window))+@($children|ForEach-Object{[CrabotFirstUseUI]::Text($_)})) -join "`n"
   $button=@($children|Where-Object{[CrabotFirstUseUI]::Text($_) -eq '接入已有数据'})
   if($button.Count -eq 1){
-   if(!$text.Contains($DataDirectory) -or !$text.Contains($Version)){throw 'Actual data confirmation did not display the original data/version'}
+   # TaskDialog's detail can be DirectUI text without its own HWND. Read the
+   # actual accessibility names too; the data/version assertion stays required.
+   $accessible = (& (Join-Path $PSScriptRoot 'read-windows-dialog.ps1') -Handle ($window.ToInt64())) | ConvertFrom-Json
+   $text += "`n" + ($accessible -join "`n")
+   if(!$text.Contains($DataDirectory) -or !$text.Contains($Version)){
+    Write-Output ('CRABOT_FIRST_USE_TEXT ' + (ConvertTo-Json -InputObject $text -Compress))
+    throw 'Actual data confirmation did not display the original data/version'
+   }
    [CrabotFirstUseUI]::Click($button[0])
    Write-Output 'CRABOT_FIRST_USE_UI original_data_and_version_visible=true native_confirmation_clicked=true'
    exit 0
