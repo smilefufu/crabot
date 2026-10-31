@@ -5,6 +5,7 @@
 !include "extractAppPackage.nsh"
 !define CRABOT_GUI "$%CRABOT_WINDOWS_GUI%"
 !define CRABOT_DECODER "$%CRABOT_WINDOWS_DECODER%"
+!define CRABOT_DIRECTORY_HELPER "$%CRABOT_WINDOWS_DIRECTORY_HELPER%"
 !macroundef extractUsing7za
 !macro extractUsing7za FILE
   DetailPrint "正在解包程序到 $INSTDIR"
@@ -83,6 +84,13 @@ Section "安装 Crabot"
   AddSize ${APP_64_UNPACKED_SIZE}
   InitPluginsDir
   File /oname=$PLUGINSDIR\7za.exe "${CRABOT_DECODER}"
+  File /oname=$PLUGINSDIR\directory.exe "${CRABOT_DIRECTORY_HELPER}"
+  nsExec::ExecToLog '"$PLUGINSDIR\directory.exe" "$INSTDIR"'
+  Pop $0
+  ${If} $0 != 0
+    SetErrorLevel 1
+    Abort "无法准备所选程序目录，原文件未改动。请检查目录是否可写后重试。"
+  ${EndIf}
   SetOutPath "$INSTDIR"
   !insertmacro extractEmbeddedAppPackage
   IfFileExists "\\?\$INSTDIR\${CRABOT_GUI}" Ready

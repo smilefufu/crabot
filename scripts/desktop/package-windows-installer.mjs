@@ -24,6 +24,7 @@ export async function packageWindowsInstaller({ root, output, source, payload, d
   const builder = createRequire(createRequire(require.resolve('electron-builder')).resolve('app-builder-lib/package.json'))
   process.env.CRABOT_WINDOWS_DECODER = await builder('app-builder-lib/out/toolsets/7zip.js').getPath7za()
   process.env.CRABOT_WINDOWS_GUI = path.relative(programs, executable).split(path.sep).join('\\')
+  process.env.CRABOT_WINDOWS_DIRECTORY_HELPER = path.join(root, 'crabot-native/build/Release/crabot-install-directory.exe')
   await build({ projectDir: source, prepackaged: programs, publish: 'never', targets: Platform.WINDOWS.createTarget(['nsis'], Arch[process.arch]), config: {
     appId: 'com.crabot.desktop', productName: 'Crabot', electronVersion: '44.9.0',
     directories: { app: path.join(source, 'app'), output: path.join(output, 'distribution') }, publish: null,

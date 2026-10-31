@@ -48,6 +48,7 @@ jobs:
       - name: Real v14 data confirmation in the unchanged packaged GUI
         run: node .github/scripts/verify-legacy-user-takeover.mjs .desktop-build/manual/paired .desktop-build/manual/installer v2026.10.14.1 2>&1 | tee .desktop-build/exact-exe-legacy-gui.log
       - name: Real EXE Finish opens the GUI with 1.5 GiB free TEMP
+        if: ${{ !cancelled() }}
         shell: pwsh
         run: |
           $files = @(Get-ChildItem .desktop-build/manual/installer/distribution -Filter '*offline-candidate.exe')
