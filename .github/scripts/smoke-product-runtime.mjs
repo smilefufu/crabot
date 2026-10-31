@@ -33,6 +33,12 @@ const report = { platform: process.platform, arch: process.arch, version: runtim
 let connector
 
 try {
+  if (process.platform === 'darwin') {
+    const cua = require(join(root, 'scripts/lib/computer-use-runtime.cjs')).loadRuntime(root, { full: true })
+    report.desktop_control_arch = await run('/usr/bin/lipo', ['-archs', cua.command])
+    assert.equal(report.desktop_control_arch, process.arch === 'arm64' ? 'arm64' : 'x86_64')
+    await run('/usr/bin/codesign', ['--verify', '--deep', '--strict', cua.app])
+  }
   report.node = await run(runtime.executables.node, ['--version'])
   assert.equal(await run(runtime.executables.node, ['-p', 'process.execPath']), await fs.realpath(runtime.executables.node))
   const agentPython = join(pythonPath.split(delimiter)[0], process.platform === 'win32' ? 'python.exe' : 'python')

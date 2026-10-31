@@ -7,6 +7,7 @@ import { runBounded } from '../lib/run-bounded.mjs'
 import product from '../lib/product-runtime.cjs'
 import scrapling from '../lib/scrapling-runtime.cjs'
 import computerUse from '../lib/computer-use-runtime.cjs'
+import { slimCore } from './slim-core.mjs'
 import { writeCoreRelease, verifyCoreRelease } from '../lib/core-release.mjs'
 
 const excluded = new Set(['node_modules', 'node_modules_link_check', '.git', '.env', '.venv', '__pycache__', '__tests__', 'tests', 'test'])
@@ -128,6 +129,7 @@ try {
       }
     }
   }
+  console.log('Core slimming: ' + JSON.stringify(await slimCore(output)))
   await preparePayload(output)
   product.loadProductRuntime(output, { required: true, full: true })
   scrapling.loadRuntime(output, { full: true })

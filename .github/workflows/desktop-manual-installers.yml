@@ -200,6 +200,8 @@ jobs:
         run: |
           node --test scripts/lib/__tests__/legacy-windows-launcher.test.mjs scripts/lib/__tests__/legacy-desktop.test.mjs scripts/lib/__tests__/legacy-entry-fence.test.mjs
           node --test crabot-desktop/tests/installer-discovery-dialogs.test.mjs
+      - name: Verify package slimming boundaries
+        run: node --test scripts/desktop/__tests__/slim-core.test.mjs scripts/lib/__tests__/scrapling-runtime.test.mjs
       - name: Prepare locked offline runtime
         run: |
           node scripts/prepare-scrapling.mjs --release=desktop-ci
@@ -225,8 +227,17 @@ jobs:
           node .github/scripts/smoke-development-coexistence.mjs --background-only 2>&1 | tee .desktop-build/development-source-boot.log
       - name: Build same-source offline GUI and Core installer
         run: |
-          node scripts/desktop/stage-core.mjs --out=.desktop-build/manual/core --version=0.1.0-desktop.10
+          node scripts/desktop/stage-core.mjs --out=.desktop-build/manual/core --version=0.1.0-desktop.11
           node .github/scripts/verify-release-payload.mjs "$GITHUB_WORKSPACE/.desktop-build/manual/core"
+          node --input-type=module <<'NODE'
+          import { createRequire } from 'node:module';
+          import { execFileSync } from 'node:child_process';
+          import { join, resolve } from 'node:path';
+          const require = createRequire(import.meta.url), root = resolve('.desktop-build/manual/core');
+          const { directory, manifest } = require(join(root, 'scripts/lib/scrapling-runtime.cjs')).loadRuntime(root, { full: true });
+          if (!manifest.node.startsWith('../.product-runtime/node/')) throw new Error('Packaged browser did not share product Node');
+          execFileSync(join(directory, manifest.command), ['-I', '-B', '.github/scripts/smoke-browser-node-sharing.py', directory], { stdio: 'inherit' });
+          NODE
           node .github/scripts/smoke-product-runtime.mjs .desktop-build/manual/core 2>&1 | tee .desktop-build/product-runtime-slim.log
           node .github/scripts/smoke-scrapling.mjs .desktop-build/manual/core --offline 2>&1 | tee .desktop-build/browser-runtime-slim.log
           if [ "${{ runner.os }}" = "macOS" ]; then

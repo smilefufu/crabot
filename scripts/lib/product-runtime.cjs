@@ -119,6 +119,7 @@ function productEnvironment(runtime, dataDir, source = process.env) {
   env.PATH = [...runtime.pathEntries, currentPath].filter(Boolean).join(path.delimiter)
   env.CRABOT_PRODUCT_ROOT = runtime.root
   env.CRABOT_BASH_PATH = runtime.executables.bash
+  env.PLAYWRIGHT_NODEJS_PATH = runtime.executables.node
   env.npm_config_cache = path.join(dataDir, 'runtime-cache', 'npm')
   env.UV_CACHE_DIR = path.join(dataDir, 'runtime-cache', 'uv')
   env.PYTHONUTF8 ||= '1'

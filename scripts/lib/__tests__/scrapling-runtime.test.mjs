@@ -125,3 +125,31 @@ test('preparation parent SIGTERM terminates its owned child', { skip: process.pl
     await fs.rm(root, { recursive: true, force: true })
   }
 })
+
+test('sealed Core shares only its verified product Node, relocates and never falls back when damaged', async () => {
+  const root = await fixture(), moved = root + '-shared-moved'
+  try {
+    await fs.copyFile(new URL('scripts/lib/product-runtime.cjs', repo), join(root, 'scripts/lib/product-runtime.cjs'))
+    const browser = await prepareRuntime(root, { builder })
+    const relative = '.product-runtime/node/' + (process.platform === 'win32' ? 'node.exe' : 'bin/node')
+    const node = join(root, relative), bytes = Buffer.from('fixed product Node')
+    await fs.mkdir(join(node, '..'), { recursive: true }); await fs.writeFile(node, bytes, { mode: 0o755 })
+    const manifest = { schema_version: 1, version: 'test', platform: process.platform, arch: process.arch,
+      versions: { node: '22.22.3', python: '3.12.12' },
+      files: { [relative]: { size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') } },
+      executables: Object.fromEntries(['node', 'python', 'uv', 'bash', 'git', 'rg'].map(name => [name, relative])),
+      path_entries: ['.product-runtime/node'], python_home: '.product-runtime/node', memory_packages: '.product-runtime/node', seed_wheels: [] }
+    await fs.writeFile(join(root, 'product-runtime.json'), JSON.stringify(manifest))
+    const readyFile = join(browser.directory, 'ready.json'), ready = JSON.parse(await fs.readFile(readyFile, 'utf8'))
+    await fs.unlink(join(browser.directory, ready.node)); delete ready.files[ready.node]
+    ready.node = '../' + relative; await fs.writeFile(readyFile, JSON.stringify(ready))
+    runtime.loadRuntime(root, { full: true })
+    await fs.rename(root, moved); runtime.loadRuntime(moved, { full: true })
+    const relocatedReady = join(moved, browser.directory.slice(root.length), 'ready.json')
+    ready.node = '../outside-node'; await fs.writeFile(relocatedReady, JSON.stringify(ready))
+    assert.throws(() => runtime.loadRuntime(moved), /inventory|path/)
+    ready.node = '../' + relative; await fs.writeFile(relocatedReady, JSON.stringify(ready))
+    await fs.writeFile(join(moved, relative), Buffer.alloc(bytes.length, 0))
+    assert.throws(() => runtime.loadRuntime(moved), /integrity/)
+  } finally { await fs.rm(root, { recursive: true, force: true }); await fs.rm(moved, { recursive: true, force: true }) }
+})

@@ -37,7 +37,15 @@ function validateDirectory(root, directory, { full = false } = {}) {
   if (manifest.fingerprint !== fingerprint(root)) throw new Error('dependency fingerprint mismatch')
   if (manifest.platform !== process.platform || manifest.arch !== process.arch) throw new Error('platform mismatch')
   if (!manifest.files || !manifest.command || !manifest.browser || !manifest.node) throw new Error('incomplete ready manifest')
-  const required = ['server.py', manifest.command, manifest.browser, manifest.node]
+  // Full Core candidates share their fixed product Node. Standalone source
+  // browser environments retain their own inventoried interpreter.
+  const productNode = '../.product-runtime/node/' + (process.platform === 'win32' ? 'node.exe' : 'bin/node')
+  const sharedNode = manifest.node === productNode
+  if (sharedNode) {
+    const product = require('./product-runtime.cjs').loadProductRuntime(root, { required: true })
+    if (fs.realpathSync(path.resolve(directory, manifest.node)) !== fs.realpathSync(product.executables.node)) throw new Error('product Node mismatch')
+  }
+  const required = ['server.py', manifest.command, manifest.browser, ...sharedNode ? [] : [manifest.node]]
   if (required.some(file => !manifest.files[file])) throw new Error('incomplete resource inventory')
   const files = full ? Object.entries(manifest.files) : required.map(p => [p, manifest.files[p]])
   for (const [relative, record] of files) {
