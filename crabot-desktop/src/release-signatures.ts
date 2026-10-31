@@ -19,7 +19,7 @@ function copyBytes(value: Uint8Array, limit: number): Buffer {
 function decode(bytes: Buffer): unknown {
   return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
 }
-function compareVersions(left: string, right: string): number {
+export function compareVersions(left: string, right: string): number {
   const parts = (value: string): [string, string | undefined] => { const split = value.indexOf('-'); return split < 0 ? [value, undefined] : [value.slice(0, split), value.slice(split + 1)] }
   const [a, ap] = parts(left), [b, bp] = parts(right), av = a.split('.'), bv = b.split('.')
   for (let i = 0; i < 3; i++) { const first = BigInt(av[i]), second = BigInt(bv[i]); if (first !== second) return first > second ? 1 : -1 }

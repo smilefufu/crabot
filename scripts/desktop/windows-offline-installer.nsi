@@ -1,18 +1,28 @@
-; Only the self-extracting host is temporary. Never recursively remove the
-; selected Crabot root: data, workspaces and retained interpreters live there.
+; Extract immutable programs directly to their final location. GUI first use
+; owns existing-data admission; no second installer or business process waits here.
 !include "common.nsh"
 !include "MUI2.nsh"
 !include "extractAppPackage.nsh"
-; This is a fresh private bootstrap directory, not an installed app update.
-; Extract once instead of invoking the updater's Shell CopyFiles/retry path.
+!define CRABOT_GUI "$%CRABOT_WINDOWS_GUI%"
+!define CRABOT_DECODER "$%CRABOT_WINDOWS_DECODER%"
 !macroundef extractUsing7za
 !macro extractUsing7za FILE
-  Nsis7z::Extract "${FILE}"
+  DetailPrint "正在解包程序到 $INSTDIR"
+  nsExec::ExecToLog '"$PLUGINSDIR\7za.exe" x -y -bb1 -bsp0 "-o$INSTDIR" "${FILE}"'
+  Pop $0
+  ${If} $0 != 0
+    SetErrorLevel 1
+    Abort "程序解包尚未完成，原数据未改动。请重新运行安装包。"
+  ${EndIf}
 !macroend
 RequestExecutionLevel user
 InstallDir "$PROFILE\Crabot"
-Var CrabotTarget
+Var ExistingDesktopRoot
+!define MUI_FINISHPAGE_RUN
+!define MUI_FINISHPAGE_RUN_FUNCTION OpenCrabot
+!define MUI_FINISHPAGE_RUN_TEXT "打开 Crabot"
 !insertmacro MUI_PAGE_WELCOME
+!define MUI_PAGE_CUSTOMFUNCTION_PRE DirectoryPage
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH
@@ -26,50 +36,64 @@ Function .onInit
     SetErrorLevel 1
     Quit
   Supported:
-  ; Capacity is checked before extracting the large offline payload to TEMP.
+  ; The archive is the only large TEMP file. Decoded programs go to the chosen disk.
   System::Call 'Kernel32::GetDiskFreeSpaceExW(t "$TEMP", *l .r1, p 0, p 0)i.r0'
   StrCmp $0 0 TempUnknown
-  System::Int64Op ${APP_64_UNPACKED_SIZE} * 1024
-  Pop $2
-  ; The embedded archive also occupies TEMP while its files are unpacked.
   FileOpen $3 "$EXEPATH" r
   IfErrors TempUnknown
   FileSeek $3 0 END $4
   FileClose $3
-  IfErrors TempUnknown
-  System::Int64Op $2 + $4
-  Pop $2
-  System::Int64Op $2 + 536870912
+  System::Int64Op $4 + 67108864
   Pop $2
   System::Int64Op $1 < $2
   Pop $0
-  StrCmp $0 1 TempFull TempReady
+  StrCmp $0 1 TempFull FindDesktop
   TempUnknown:
-    MessageBox MB_OK|MB_ICONSTOP "无法核验系统临时目录空间，请确认临时目录可用后重试。安装文件尚未写入所选目录。"
+    MessageBox MB_OK|MB_ICONSTOP "无法读取系统临时目录空间，请确认临时目录可用后重试。尚未写入安装目录。"
     SetErrorLevel 1
     Quit
   TempFull:
-    MessageBox MB_OK|MB_ICONSTOP "系统临时目录（$TEMP）空间不足，请清理临时文件后重试。安装文件尚未写入所选目录。"
+    MessageBox MB_OK|MB_ICONSTOP "系统临时目录空间不足以暂存压缩包，尚未写入安装目录。请释放空间或更改系统临时目录后重试。"
     SetErrorLevel 1
     Quit
-  TempReady:
+  FindDesktop:
+  ; Existing desktop upgrades retain their original program location. This OS
+  ; registration is a location hint; the GUI verifies actual binding and data.
+  StrCpy $0 0
+  RegistryLoop:
+    EnumRegKey $1 HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall" $0
+    StrCmp $1 "" RegistryDone
+    IntOp $0 $0 + 1
+    StrCpy $2 $1 7
+    StrCmp $2 "Crabot-" 0 RegistryLoop
+    ReadRegStr $2 HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\$1" "InstallLocation"
+    IfFileExists "$2\desktop-installation.json" 0 RegistryLoop
+    StrCmp $ExistingDesktopRoot "" 0 RegistryDone
+    StrCpy $ExistingDesktopRoot $2
+    StrCpy $INSTDIR $2
+    Goto RegistryLoop
+  RegistryDone:
+FunctionEnd
+Function DirectoryPage
+  StrCmp $ExistingDesktopRoot "" Done
+  Abort
+  Done:
 FunctionEnd
 Section "安装 Crabot"
-  StrCpy $CrabotTarget "$INSTDIR"
+  AddSize ${APP_64_UNPACKED_SIZE}
   InitPluginsDir
-  ; Only this unique temporary host is removed; the selected root is separate.
-  StrCpy $INSTDIR "$PLUGINSDIR\i"
+  File /oname=$PLUGINSDIR\7za.exe "${CRABOT_DECODER}"
   SetOutPath "$INSTDIR"
   !insertmacro extractEmbeddedAppPackage
-  ClearErrors
-  ExecWait '"$INSTDIR\${APP_EXECUTABLE_FILENAME}" "--install-root=$CrabotTarget\."' $0
-  IfErrors 0 +2
-  StrCpy $0 1
-  SetOutPath "$EXEDIR"
-  RMDir /r "$PLUGINSDIR\i"
-  StrCpy $INSTDIR "$CrabotTarget"
-  SetErrorLevel $0
-  ${If} $0 != 0
-    Abort "安装未完成，原文件和准备记录已保留。"
-  ${EndIf}
+  IfFileExists "$INSTDIR\${CRABOT_GUI}" Ready
+    SetErrorLevel 1
+    Abort "程序解包尚未完成，原数据未改动。请重新运行安装包。"
+  Ready:
+  IfFileExists "$SMPROGRAMS\Crabot.lnk" ShortcutReady
+  CreateShortcut "$SMPROGRAMS\Crabot.lnk" "$INSTDIR\${CRABOT_GUI}"
+  ShortcutReady:
 SectionEnd
+Function OpenCrabot
+  ; Finish exits this installer instead of waiting for first-use dialogs.
+  Exec '"$INSTDIR\${CRABOT_GUI}"'
+FunctionEnd

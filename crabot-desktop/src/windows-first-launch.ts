@@ -1,4 +1,5 @@
 import path from 'node:path'
+import { compareVersions } from './release-signatures.js'
 import { existsSync } from 'node:fs'
 import type { dialog as ElectronDialog } from 'electron'
 import type { PreparedInstallation } from './installation-entries.js'
@@ -9,17 +10,28 @@ import { createOperationProgressWindow } from './operation-progress-window.js'
 export async function prepareWindowsFirstLaunch(options: {
   resources: string; pinText: string; home: string;
   dialog: Pick<typeof ElectronDialog, 'showMessageBox' | 'showOpenDialog'>;
-  load: (name: string) => Promise<any>;
+  load: (name: string, verifiedCore?: string) => Promise<any>;
   registerEntries: (prepared: PreparedInstallation) => Promise<void>
+  upgradeExisting?: (prepared: PreparedInstallation & { source: PreparedInstallation['selection']; proof: { file: string; sha256: string } }, source: any) => Promise<boolean>
 }): Promise<any | null> {
-  const { dialog, load } = options
-  const first = await load('desktop-first-launch.mjs')
+  const { dialog } = options
+  const first = await options.load('desktop-first-launch.mjs')
   const programs = await first.readFirstLaunchPrograms(options)
   if (programs.initialized) return programs
+  // Only the protected first-use verifier can supply this completely checked Core.
+  const load = (name: string) => options.load(name, programs.coreRoot)
   const desktop = (await load('desktop-installation.cjs')).default
   const management = (await load('desktop-management.cjs')).default
   const { discoverLegacyDesktopTakeover } = await load('legacy-desktop-discovery.mjs')
   const { discoverUserSourceDeployment } = await load('source-installation.mjs')
+  if (programs.source) {
+    if (compareVersions(programs.selection.version, programs.source.selection.version) < 0) throw Object.assign(new Error('安装包比当前桌面版本旧，请使用同版或更新版；原程序和数据保留。'), { code: 'CRABOT_DESKTOP_RELEASE_VERSION' })
+    const selected = await first.bindFirstLaunchData(programs, programs.source.dataDir)
+    if (!options.upgradeExisting) throw new Error('已有桌面版本更新入口尚未就绪，原程序和数据保留。')
+    if (!await options.upgradeExisting({ installRoot: programs.installRoot, installation_id: selected.record.installation_id,
+      selection: programs.selection, source: programs.source.selection, coreRoot: programs.coreRoot, guiRoot: programs.guiRoot, proof: selected.proof }, programs.source)) return null
+    return desktop.locatePinnedDesktopGui(options.resources, options.pinText)
+  }
   const metadata = path.join(programs.installRoot, 'desktop-installation.json')
   const bound = existsSync(metadata) ? desktop.readDesktopInstallation(programs.installRoot) : null
   let root = bound ? path.dirname(bound.dataDir) : path.join(options.home, '.crabot'), legacy

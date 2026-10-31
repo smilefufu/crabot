@@ -44,6 +44,7 @@ let cancelRemovalHost: (() => void) | undefined
 let uninstallRequested = process.platform === 'win32' && process.argv.includes('--uninstall')
 let requestUninstall: (() => Promise<void>) | undefined
 let pendingUninstall: Promise<void> | undefined
+let instanceHandlerRegistered = false
 
 function uninstallInstallation(installRoot: string): Promise<void> {
   return pendingUninstall ||= (async () => {
@@ -121,6 +122,8 @@ function configureProfile(root: string) {
 function claimInstance() {
   if (!app.requestSingleInstanceLock()) { bootstrapStage('instance-lock-denied'); quitting = true; app.quit(); return false }
   bootstrapStage('instance-lock-acquired')
+  if (instanceHandlerRegistered) return true
+  instanceHandlerRegistered = true
   app.on('second-instance', (_event, args) => {
     if (process.platform === 'win32' && args.includes('--uninstall')) {
       uninstallRequested = true; if (requestUninstall) void requestUninstall(); return
@@ -160,16 +163,24 @@ async function boot() {
   }
   bootstrapStage('installation-pin-read')
   let windowsInstallation
-  if (app.isPackaged && process.platform === 'win32' && pin !== undefined) {
+  const windowsRoot = path.resolve(process.resourcesPath, '../../../..')
+  const windowsFirstUse = app.isPackaged && process.platform === 'win32' && pin !== undefined
+    && (!existsSync(path.join(windowsRoot, 'current-release.json')) || readFileSync(path.join(windowsRoot, 'current-release.json'), 'utf8') !== pin)
+  if (windowsFirstUse) {
     configureProfile(path.join(app.getPath('appData'), 'Crabot/bootstrap'))
     if (!claimInstance()) return
     await app.whenReady()
     const { prepareWindowsFirstLaunch } = await import('./windows-first-launch.js')
     const { registerInstallationEntries } = await import('./installation-entries.js')
-    windowsInstallation = await prepareWindowsFirstLaunch({ resources: process.resourcesPath, pinText: pin, home: homedir(), dialog,
-      load: name => import(new URL('./bootstrap/scripts/lib/' + name, import.meta.url).href),
-      registerEntries: prepared => registerInstallationEntries(prepared, { home: homedir(), platform: process.platform, env: process.env, shell }) })
+    windowsInstallation = await prepareWindowsFirstLaunch({ resources: process.resourcesPath, pinText: pin!, home: homedir(), dialog,
+      load: (name, verifiedCore) => import(verifiedCore ? pathToFileURL(path.join(verifiedCore, 'scripts/lib', name)).href : new URL('./bootstrap/scripts/lib/' + name, import.meta.url).href),
+      registerEntries: prepared => registerInstallationEntries(prepared, { home: homedir(), platform: process.platform, env: process.env, shell }),
+      upgradeExisting: async (prepared, source) => {
+        const { applyWindowsOfflineUpdate } = await import('./windows-offline-update.js')
+        return applyWindowsOfflineUpdate({ prepared, source, app, dialog, shell, home: homedir() })
+      } })
     if (!windowsInstallation) { quitting = true; app.quit(); return }
+    app.releaseSingleInstanceLock()
   }
   const discovered = verifier?.locateDesktopGui(process.resourcesPath)
   bootstrapStage('installation-discovered')
@@ -184,7 +195,7 @@ async function boot() {
     dataRoot = management.requireExistingDataRoot(installation.dataDir)
     configureProfile(dataRoot)
     bootstrapStage('profile-configured')
-    if (!windowsInstallation && !claimInstance()) return
+    if (!claimInstance()) return
     const { verifyCoreRelease } = await import(pathToFileURL(path.join(directory, 'bootstrap/scripts/lib/core-release.mjs')).href)
     const release = await verifyCoreRelease(installation.coreRoot, { version: installation.selection.version })
     if (release.inventory_sha256 !== installation.selection.core_id) throw Object.assign(new Error('Protected Core identity changed'), { code: 'CRABOT_CORE_INTEGRITY' })

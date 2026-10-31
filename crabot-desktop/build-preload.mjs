@@ -8,7 +8,7 @@ await copyFile('assets/tray.png', 'dist/assets/tray.png')
 
 // Keep fixed maintenance code independent of Core and previous build leftovers.
 await rm('dist/bootstrap', { recursive: true, force: true })
-for (const file of [...desktopMaintenanceBootstrap, 'scripts/desktop/extract-paired-release.py', 'crabot-native/build/Release/crabot-native.node']) {
+for (const file of [...desktopMaintenanceBootstrap, 'scripts/lib/desktop-first-launch.mjs', 'scripts/desktop/extract-paired-release.py', 'crabot-native/build/Release/crabot-native.node']) {
   const destination = 'dist/bootstrap/' + file
   await mkdir(destination.slice(0, destination.lastIndexOf('/')), { recursive: true })
   await copyFile('../' + file, destination)

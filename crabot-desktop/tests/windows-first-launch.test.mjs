@@ -4,20 +4,21 @@ import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import vm from 'node:vm'
 import { createRequire } from 'node:module'
+import { compareVersions } from '../dist/release-signatures.js'
 const require = createRequire(import.meta.url), ts = require('typescript')
 const source = readFileSync(new URL('../src/windows-first-launch.ts', import.meta.url), 'utf8')
 const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText
 const root = path.resolve('/fixture/selected-programs'), old = path.resolve('/fixture/home/.crabot'), dataDir = path.join(old, 'data')
 const selection = { schema_version: 1, version: '1.2.3', gui_id: 'fixture-gui', core_id: 'fixture-core' }
-async function run({ initialized = false, legacy = false, source = false, cancel = false, bound = false } = {}) {
+async function run({ initialized = false, legacy = false, source = false, cancel = false, bound = false, previousDesktop = false, previousVersion = '1.2.2' } = {}) {
   const effects = [], messages = [], queries = []
   const own = { root, dataDir, record: { installation_id: 'fixture' } }
-  const programs = { initialized, installRoot: root, selection, coreRoot: path.join(root, 'releases/core'), guiRoot: path.join(root, 'app/releases/gui') }
+  const programs = { initialized, installRoot: root, selection, coreRoot: path.join(root, 'releases/core'), guiRoot: path.join(root, 'app/releases/gui'), ...(previousDesktop ? { source: { ...own, selection: { ...selection, version: previousVersion } } } : {}) }
   const original = { installation: { installRoot: old, dataRoot: dataDir, version: 'v2026.10.14.1' }, entryFenceId: 'previous-fence' }
   const modules = {
     'desktop-first-launch.mjs': {
       readFirstLaunchPrograms: async () => programs,
-      bindFirstLaunchData: async (value, data) => { assert.equal(value, programs); effects.push(['bind', data]); return { ...own, dataDir: data, proof: { file: 'proof', sha256: 'digest' } } },
+      bindFirstLaunchData: async (value, data) => { assert.ok(!previousDesktop || previousVersion !== '1.2.4', 'No binding writes on downgrade'); assert.equal(value, programs); effects.push(['bind', data]); return { ...own, dataDir: data, proof: { file: 'proof', sha256: 'digest' } } },
       completeFreshFirstLaunch: async (value, register) => { await register({ installRoot: root }); effects.push(['fresh', value.dataDir]); return value },
     },
     'desktop-installation.cjs': { default: { readDesktopInstallation: value => { assert.equal(value, root); return own }, locatePinnedDesktopGui: () => own } },
@@ -32,6 +33,7 @@ async function run({ initialized = false, legacy = false, source = false, cancel
   const exports = {}
   vm.runInNewContext(compiled, { exports, AbortController, require: name => {
     if (name === 'node:path') return path
+    if (name === './release-signatures.js') return { compareVersions }
     if (name === 'node:fs') return { existsSync: () => bound }
     if (name === './operation-progress-window.js') return { createOperationProgressWindow: () => ({ ready: Promise.resolve(), close() {}, update() {} }) }
     throw Error('Unexpected import: ' + name)
@@ -39,6 +41,7 @@ async function run({ initialized = false, legacy = false, source = false, cancel
   const result = await exports.prepareWindowsFirstLaunch({ resources: '/fixture/resources', pinText: 'pin', home: path.dirname(old),
     load: async name => { assert.ok(modules[name], name); return modules[name] },
     registerEntries: async value => { effects.push(['register', value.installRoot]) },
+    upgradeExisting: async (prepared, source) => { effects.push(['update', prepared.installRoot, source.dataDir]); return !cancel },
     dialog: { showMessageBox: async options => { messages.push(options); return { response: cancel ? 1 : 0 } }, showOpenDialog: () => assert.fail('No directory picker is needed for a verified release') } })
   return { result, effects, messages, queries }
 }
@@ -65,4 +68,20 @@ test('a pending first launch resumes from the actual bound data without promptin
   const value = await run({ legacy: true, bound: true })
   assert.equal(value.messages.length, 0); assert.equal(value.queries[0].root, old)
   assert.deepEqual(value.effects, [['bind', dataDir], ['legacy', root, dataDir], ['register', root]])
+})
+
+
+test('an existing GUI update uses its stopped-pair path and never asks to adopt legacy CLI data again', async () => {
+  const value = await run({ previousDesktop: true })
+  assert.deepEqual(value.queries, []); assert.deepEqual(value.messages, [])
+  assert.deepEqual(value.effects, [['bind', dataDir], ['update', root, dataDir]])
+})
+test('cancelling an existing GUI update does not initialize a new instance or enter legacy conversion', async () => {
+  const value = await run({ previousDesktop: true, cancel: true })
+  assert.equal(value.result, null); assert.deepEqual(value.queries, [])
+  assert.deepEqual(value.effects, [['bind', dataDir], ['update', root, dataDir]])
+})
+
+test('an older desktop package is rejected before binding or data conversion', async () => {
+  await assert.rejects(run({ previousDesktop: true, previousVersion: '1.2.4' }), { code: 'CRABOT_DESKTOP_RELEASE_VERSION' })
 })

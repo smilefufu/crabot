@@ -24,6 +24,13 @@ function sameSource() {
 }
 sameSource()
 await fs.mkdir(output)
+if (process.platform === 'win32') {
+  const { packageWindowsInstaller } = await import('./package-windows-installer.mjs')
+  await packageWindowsInstaller({ root, output, source, payload, distribute: args.get('--distribute') === 'true' })
+  sameSource()
+  console.log('Single-layer Windows candidate assembled; first-use GUI and actual EXE acceptance remain required.')
+  process.exit(0)
+}
 const appDir = path.join(output, 'app')
 await fs.cp(path.join(source, 'app'), appDir, { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE })
 await fs.cp(path.join(source, 'crabot-client'), path.join(output, 'crabot-client'), { recursive: true })

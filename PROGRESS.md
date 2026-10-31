@@ -2,6 +2,8 @@
 
 ### 桌面化冻结范围：已交付新包，完整验收收口中
 
+- 2026-10-31安装纠错继续：e2a39594的Windows原生首启边界与源码冷启动两作业通过（41166710311）；旧crabot.cmd实际转接原数据、登记失败重试通过。当前单层NSIS直接解包、GUI首启和已有GUI原位更新仍在验收，尚未交付新EXE；desktop.7仍是旧安装流程。已补实际产品NSIS小载荷长路径探针，完整载荷/保留数据重装/成功后可选清理未完成前不宣称交付完成。本机源码部署未动。
+
 - 2026-10-29两份Spec已确认并先更新协议。源码使用项目内pnpm dev、repo/data与固定29000/13000，包含增量准备、状态、精确启停、Vite及开发GUI；release独立。历史源码data、全局命令和升级路径保留，不自动转换或搬数据。
 - Mac已改真正App拖拽，首启选择外部data，隐藏目录可选；两版列明旧release沿原数据接入，真实GUI/CLI健康后解除保护。Windows保留一次用户级NSIS安装。workspace、权限及system边界继续沿冻结协议。
 - ARM Mac/Win11 desktop.3完整离线候选已直接交付Downloads/Crabot桌面验收包-20261029，原件/副本SHA一致；Mac普通App入口、Applications链接、Core清单与ad-hoc完整性已只读核验并卸载镜像。旧desktop.1/2保留，真实内置Python/Node验证和精确来源/摘要见文档。本机原部署未停机、升级或接管，未启动第二个业务MM；约298GiB空闲，40/30GiB及本任务20GiB保护保持，不动Docker/Spotlight。

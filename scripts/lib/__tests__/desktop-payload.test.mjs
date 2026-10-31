@@ -2277,22 +2277,23 @@ for (const previouslyFenced of [false, true]) test('pre-data preparation failure
   assert.equal(await fs.readFile(path.join(f.data, 'fixture/executions'), 'utf8'), 'once\n')
 })
 
-async function extractedFirstLaunch(f) {
+async function extractedFirstLaunch(f, selectedRoot) {
   const { default: management } = await import('../desktop-management.cjs')
-  const root = management.ensurePrivateDataRoot(path.join(f.parent, '选择的程序目录'))
+  const root = selectedRoot ?? management.ensurePrivateDataRoot(path.join(f.parent, '选择的程序目录'))
   const coreRoot = path.join(root, 'releases', f.selection.core_id), guiRoot = path.join(root, 'app/releases', f.selection.gui_id)
-  await fs.mkdir(path.dirname(coreRoot), { recursive: true }); await fs.mkdir(path.dirname(guiRoot), { recursive: true }); await fs.mkdir(path.join(root, 'bin'))
+  await fs.mkdir(path.dirname(coreRoot), { recursive: true }); await fs.mkdir(path.dirname(guiRoot), { recursive: true }); await fs.mkdir(path.join(root, 'bin'), { recursive: true })
   await fs.rename(f.core, coreRoot); await fs.rename(f.gui, guiRoot)
-  await fs.copyFile(path.join(coreRoot, 'bin', launcher), path.join(root, 'bin', launcher))
+  if (!(await fs.lstat(path.join(root, 'bin', launcher)).catch(error => { if (error.code !== 'ENOENT') throw error; return null }))) await fs.copyFile(path.join(coreRoot, 'bin', launcher), path.join(root, 'bin', launcher))
   if (!windows) await fs.chmod(path.join(root, 'bin', launcher), 0o755)
-  await fs.copyFile(path.join(f.payload, 'desktop-payload.json'), path.join(root, '.desktop-install-payload.json'))
+  await fs.mkdir(path.join(root, 'app/installers'), { recursive: true })
+  await fs.copyFile(path.join(f.payload, 'desktop-payload.json'), path.join(root, 'app/installers', f.selection.gui_id + '.json'))
   const resources = path.join(guiRoot, path.relative(f.gui, f.resources))
   return { root, coreRoot, guiRoot, resources, pinText: JSON.stringify(f.selection) + '\n' }
 }
 
 test('first GUI use initializes an already extracted pair without a second program copy or starting services', async t => {
-  const f = await fixture(t, { functional: true, schema: '2' }), extracted = await extractedFirstLaunch(f)
-  const first = await import('../desktop-first-launch.mjs'), { default: management } = await import('../desktop-management.cjs')
+  const f = await fixture(t, { functional: true, schema: 'v2' }), extracted = await extractedFirstLaunch(f)
+  const first = await import('../../../crabot-desktop/dist/bootstrap/scripts/lib/desktop-first-launch.mjs'), { default: management } = await import('../desktop-management.cjs')
   const programs = await first.readFirstLaunchPrograms(extracted)
   const forbidden = t.mock.method(fs, 'cp', () => assert.fail('Programs have already been extracted'))
   const data = management.ensurePrivateDataRoot(path.join(extracted.root, 'data'))
@@ -2308,7 +2309,7 @@ test('first GUI use initializes an already extracted pair without a second progr
 
 test('first GUI legacy admission uses already extracted programs and external original data, preserving retry and health gates', async t => {
   const f = await legacyProgramFixture(t, { functional: true }); await fs.unlink(path.join(f.data, 'mm.pid'))
-  const extracted = await extractedFirstLaunch(f), first = await import('../desktop-first-launch.mjs')
+  const extracted = await extractedFirstLaunch(f), first = await import('../../../crabot-desktop/dist/bootstrap/scripts/lib/desktop-first-launch.mjs')
   const programs = await first.readFirstLaunchPrograms(extracted), bound = await first.bindFirstLaunchData(programs, f.data)
   const prepared = { installRoot: extracted.root, installation: f.legacy, selection: f.selection,
     coreRoot: extracted.coreRoot, guiRoot: extracted.guiRoot, proof: bound.proof }
@@ -2339,4 +2340,49 @@ test('first GUI legacy admission uses already extracted programs and external or
     : await promisify(execFile)(node, [path.join(f.target, 'cli.mjs'), '--version'], { timeout: 15000 })
   assert.equal(JSON.parse(forwarded.stdout.trim()).version, f.selection.version)
 
+})
+
+test('an extracted desktop update keeps its original location and scoped stopped-pair conversion instead of re-entering legacy admission', async t => {
+  const previous = await fixture(t, { functional: true, schema: 'v1' })
+  const initial = await prepareDesktopInstallation({ payload: previous.payload, installRoot: previous.target })
+  const source = await commitDesktopInstallation(initial)
+  const { default: management } = await import('../desktop-management.cjs')
+  management.initializeDesktopManagement(source.dataDir)
+  await fs.mkdir(path.join(source.dataDir, 'fixture'))
+  await fs.writeFile(path.join(source.dataDir, 'fixture/SCHEMA_VERSION'), 'v1')
+  await fs.writeFile(path.join(source.dataDir, 'fixture/content'), 'existing desktop content')
+  const incoming = await fixture(t, { version: '1.2.4', functional: true, schema: 'v2' })
+  const extracted = await extractedFirstLaunch(incoming, source.root), first = await import('../../../crabot-desktop/dist/bootstrap/scripts/lib/desktop-first-launch.mjs')
+  const programs = await first.readFirstLaunchPrograms(extracted)
+  assert.equal(programs.initialized, false); assert.equal(programs.source.dataDir, source.dataDir)
+  const bound = await first.bindFirstLaunchData(programs, source.dataDir)
+  const { DesktopController } = await import('../../../crabot-desktop/dist/controller.js')
+  const controller = new DesktopController({ coreRoot: source.coreRoot, dataRoot: source.dataDir, appVersion: source.selection.version,
+    platform: process.platform, packaged: true, verifyBinding: () => assert.deepEqual(installation.readDesktopSelection(source.root).selection, source.selection) })
+  try {
+    controller.host.status('stopped', 'fixture was already stopped')
+    const prepared = { installRoot: source.root, installation_id: source.record.installation_id, source: source.selection,
+      selection: incoming.selection, coreRoot: extracted.coreRoot, guiRoot: extracted.guiRoot, proof: bound.proof }
+    await controller.applyPreparedPair(prepared, async () => {})
+  } finally { controller.close() }
+  const selected = installation.readDesktopSelection(source.root)
+  assert.equal(selected.dataDir, source.dataDir); assert.deepEqual(selected.selection, incoming.selection)
+  assert.equal(await fs.readFile(path.join(source.dataDir, 'fixture/executions'), 'utf8'), 'once\n')
+  assert.equal(JSON.parse(await fs.readFile(path.join(source.dataDir, 'desktop-maintenance.json'), 'utf8')).schema_version, 3)
+  await assert.rejects(fs.lstat(path.join(source.root, '.desktop-takeover')), { code: 'ENOENT' })
+  assert.equal((await first.readFirstLaunchPrograms(extracted)).initialized, true)
+})
+
+test('a cancelled same-directory first use can rediscover its verified legacy data before any entry was fenced', async t => {
+  const f = await legacyProgramFixture(t, { functional: true }); await fs.unlink(path.join(f.data, 'mm.pid'))
+  const original = await fs.readFile(path.join(f.target, 'cli.mjs'))
+  const extracted = await extractedFirstLaunch(f, f.target)
+  const first = await import('../../../crabot-desktop/dist/bootstrap/scripts/lib/desktop-first-launch.mjs')
+  const programs = await first.readFirstLaunchPrograms(extracted)
+  await first.bindFirstLaunchData(programs, f.data)
+  const { discoverLegacyDesktopTakeover } = await import('../legacy-desktop-discovery.mjs')
+  assert.deepEqual((await discoverLegacyDesktopTakeover({ root: f.target, source: {} })).installation, f.legacy)
+  assert.deepEqual(await fs.readFile(path.join(f.target, 'cli.mjs')), original)
+  await assert.rejects(fs.lstat(path.join(f.target, '.desktop-takeover')), { code: 'ENOENT' })
+  await assert.rejects(fs.lstat(path.join(f.target, 'current-release.json')), { code: 'ENOENT' })
 })

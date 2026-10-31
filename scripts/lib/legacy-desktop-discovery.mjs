@@ -38,6 +38,10 @@ export async function discoverLegacyDesktopTakeover({ root, source = process.env
     return { installation: entry.installation, entryFenceId: entry.id }
   }
   if (record?.schema_version === 4) pending()
-  if (desktop || !await present(path.join(root, 'VERSION')) && !await present(path.join(root, 'cli.mjs'))) return null
+  if (desktop) {
+    const { default: binding } = await import('./desktop-installation.cjs')
+    if (binding.readDesktopInstallation(root).dataDir !== dataDir) pending()
+  }
+  if (!await present(path.join(root, 'VERSION')) && !await present(path.join(root, 'cli.mjs'))) return null
   return { installation: await discoverLegacyUserInstall({ root, dataDir, source, etcDir }) }
 }
