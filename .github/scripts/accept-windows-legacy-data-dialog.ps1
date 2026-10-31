@@ -1,4 +1,4 @@
-param([Parameter(Mandatory=$true)][int]$GuiPid,[Parameter(Mandatory=$true)][string]$DataDirectory,[Parameter(Mandatory=$true)][string]$Version)
+﻿param([Parameter(Mandatory=$true)][int]$GuiPid,[Parameter(Mandatory=$true)][string]$DataDirectory,[Parameter(Mandatory=$true)][string]$Version)
 $ErrorActionPreference='Stop'
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') { throw 'Disposable hosted runner required' }
 Add-Type @'
@@ -17,11 +17,14 @@ public class CrabotFirstUseUI {
  public static void Click(IntPtr window){SendMessage(window,245,IntPtr.Zero,IntPtr.Zero);}
 }
 '@
+$observed=[Collections.Generic.HashSet[string]]::new()
 $deadline=(Get-Date).AddMinutes(4)
 while((Get-Date) -lt $deadline){
  if(!(Get-Process -Id $GuiPid -ErrorAction SilentlyContinue)){throw 'Actual first-use GUI exited before confirmation'}
  foreach($window in [CrabotFirstUseUI]::Windows()){
   if([CrabotFirstUseUI]::Pid($window) -ne $GuiPid){continue}
+  $title=[CrabotFirstUseUI]::Text($window)
+  if($observed.Add($title)){Write-Output ('CRABOT_FIRST_USE_WINDOW title='+$title)}
   $children=[CrabotFirstUseUI]::Children($window)
   $text=(@([CrabotFirstUseUI]::Text($window))+@($children|ForEach-Object{[CrabotFirstUseUI]::Text($_)})) -join "`n"
   $button=@($children|Where-Object{[CrabotFirstUseUI]::Text($_) -eq '接入已有数据'})
