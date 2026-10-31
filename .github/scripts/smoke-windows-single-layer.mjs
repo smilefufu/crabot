@@ -14,17 +14,20 @@ assert.equal(info.bootstrap, 'windows-first-launch')
 const distribution = path.join(project, 'distribution'), installers = (await fs.readdir(distribution)).filter(file => file.endsWith('offline-candidate.exe'))
 assert.equal(installers.length, 1)
 const root = await fs.mkdtemp(path.join(tmpdir(), 'Crabot exact EXE ')), target = path.join(root, '选择的程序 目录'), started = Date.now()
+let failure
 try {
-  await execute(path.join(distribution, installers[0]), ['/S', '/D=' + target], { windowsVerbatimArguments: true, timeout: 600000, maxBuffer: 65536 })
+  await execute(path.join(distribution, installers[0]), ['/S', '/D=' + target], { windowsVerbatimArguments: true, timeout: 600000, maxBuffer: 16 * 1024 * 1024 })
   const originalGui = path.dirname(path.resolve(project, info.executable)), gui = path.join(target, path.relative(path.resolve(project, info.programs), originalGui))
   const pin = JSON.parse(await fs.readFile(path.join(gui, 'resources/desktop-release.json'), 'utf8'))
   const record = JSON.parse(await fs.readFile(path.join(target, 'app/installers', pin.gui_id + '.json'), 'utf8'))
   await verifyDesktopPrograms(path.join(target, 'releases', pin.core_id), gui, record)
   for (const absent of ['data', 'desktop-installation.json', 'current-release.json', 'CrabotInstaller.exe', 'resources/offline']) await assert.rejects(fs.lstat(path.join(target, absent)), { code: 'ENOENT' })
   console.log('CRABOT_WINDOWS_SINGLE_LAYER ' + JSON.stringify({ exact_exe: true, full_gui_and_core_inventory: true, elapsed_ms: Date.now() - started, data_initialized: false, second_installer: false, gui_or_core_started: false }))
-} finally {
-  const cleanup = path.join(root, 'shortcut.ps1')
-  await fs.writeFile(cleanup, `$p=Join-Path ([Environment]::GetFolderPath('Programs')) 'Crabot.lnk';if(Test-Path -LiteralPath $p){$s=New-Object -ComObject WScript.Shell;$t=$s.CreateShortcut($p).TargetPath;if($t.StartsWith($env:CRABOT_PROBE_ROOT+'\\',[StringComparison]::OrdinalIgnoreCase)){Remove-Item -LiteralPath $p;}}`)
-  await execute(path.join(process.env.SystemRoot, 'System32/WindowsPowerShell/v1.0/powershell.exe'), ['-NoProfile', '-NonInteractive', '-File', cleanup], { env: { ...process.env, CRABOT_PROBE_ROOT: root }, timeout: 30000 })
-  await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+} catch (error) { failure = error; throw error } finally {
+  try {
+    const cleanup = path.join(root, 'shortcut.ps1')
+    await fs.writeFile(cleanup, `$p=Join-Path ([Environment]::GetFolderPath('Programs')) 'Crabot.lnk';if(Test-Path -LiteralPath $p){$s=New-Object -ComObject WScript.Shell;$t=$s.CreateShortcut($p).TargetPath;if($t.StartsWith($env:CRABOT_PROBE_ROOT+'\\',[StringComparison]::OrdinalIgnoreCase)){Remove-Item -LiteralPath $p;}}`)
+    await execute(path.join(process.env.SystemRoot, 'System32/WindowsPowerShell/v1.0/powershell.exe'), ['-NoProfile', '-NonInteractive', '-File', cleanup], { env: { ...process.env, CRABOT_PROBE_ROOT: root }, timeout: 30000 })
+    await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  } catch (error) { if (!failure) throw error; console.error('CRABOT_FIXTURE_CLEANUP_FAILED', error.message) }
 }

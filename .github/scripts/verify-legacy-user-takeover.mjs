@@ -147,7 +147,7 @@ try {
       } else if (singleLayer) {
         const directory = path.join(installer, 'distribution'), files = (await fs.readdir(directory)).filter(name => name.endsWith('offline-candidate.exe'))
         assert.equal(files.length, 1)
-        await execute(path.join(directory, files[0]), ['/S', '/D=' + programRoot], { env, windowsVerbatimArguments: true, timeout: 600000, maxBuffer: 65536 })
+        await execute(path.join(directory, files[0]), ['/S', '/D=' + programRoot], { env, windowsVerbatimArguments: true, timeout: 600000, maxBuffer: 16 * 1024 * 1024 })
         assert.equal(await absent(path.join(root, 'releases', target.record.selection.core_id)), true, 'Installer must not copy new programs to the old root')
         assert.equal(await absent(path.join(programRoot, 'data')), true)
         const executable = path.join(programRoot, 'app/releases', target.record.selection.gui_id, 'Crabot.exe')
