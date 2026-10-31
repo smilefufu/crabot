@@ -3,8 +3,8 @@
 ### 桌面化冻结范围：Windows安装纠错及完整验收中
 
 - 继续原冻结范围：Electron＋React、共享HTTP/SDK与独立宿主IPC、统一内置环境与依赖隔离、GUI/CLI共享实例、项目workspace、在线Admin迁移、旧目录权限兼容及system批量管理；本轮不扩需求。源码dev/release隔离、固定29000/13000和原源码部署保留规则继续有效。
-- 第二轮瘦身按用户确认范围实施：候选包内共享产品Node、ARM裁去Intel切片、Zod/Undici同字节去重、Windows只裁文档与本模块编译中间产物。Mac隔离副本完整资源/签名、两驱动真实输入截图、13工具MCP和离线产品环境通过；24项定向回归通过、1项平台跳过。第11版原生打包待验收，不能以估算替代交付数字；源码部署和旧程序清理WIP不动。
-- 最新已交付ARM Mac/Windows desktop.10（同源a150015c），位于20261031 Downloads；包分别625558061/598808085字节，官方产物/包内摘要/本地副本一致，Mac签名与完整Core已只读核验。原源码服务不动；包名/SHA及分层证据见[验收记录](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-30-windows-installation-feedback-fixes.md)。
+- 最新瘦身包已交付ARM Mac desktop.11（f87e4d46）/Windows desktop.12（c2eaa3bc）：包537516782/559310933字节，程序1372029537/1855100146字节，较第10版再少266875713/154797274字节。Mac41199706942整组成功；Windows41201950600主installer/source成功，同EXE41203266373实际UI成功，旧数据/源码共存/完整程序删除后保留数据恢复及实际GUI-Core-CLI通过。Windows11恢复失败包已归档；12原run附属UI旧desktop.10过滤器误报保持failure，3562d082仅修CI发现器。程序删除/恢复仍慢、真人业务及原冻结项继续；本机源码部署不动，产品main未推。
+- 上轮已交付ARM Mac/Windows desktop.10（同源a150015c），位于20261031 Downloads；包分别625558061/598808085字节，官方产物/包内摘要/本地副本一致，Mac签名与完整Core已只读核验。原源码服务不动；包名/SHA及分层证据见[验收记录](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-30-windows-installation-feedback-fixes.md)。
 - 本轮Windows改为NSIS一次直接解包最终GUI/Core到所选盘，真正GUI首启才确认旧release数据；原data不搬，新旧命令转同一实例。转换前失败恢复已知旧入口，fenced＋三个已退出模块记录可继续；原位GUI升级、保留数据重装沿原范围保护/健康恢复。普通0755旧目录可兼容，不收紧既有自定义ACL。
 - e8ea8041的41170061901原生首启边界通过：实际旧crabot.cmd、外部data、登记失败重试、同版/较新版保留数据交接及原位版本对转换。a34d9e25的41170494206三个原生作业均通过，新增准备/登记失败继续、迁移中断不重放及异目标拒绝；共同接入75项、Controller/更新59项与实际Electron门禁也通过。实测是隔离数据，不能代替Win11真人业务验收。Node子进程隔离修复了Windows测试清理已映射DLL的等待，没有放宽产品断言。
 - Windows普通/中文/445字符完整解包及新根私有ACL已通过。第10版41190181072通过实际NSIS目录页、D盘空格路径、TEMP仅1.5GiB、Finish/GUI-Core-CLI；41190566613同EXE通过v14旧数据接入和原命令健康。原完整run的180秒期限失败保留；第9版同包复验约201秒定位/5分钟健康，第10版本次约82秒定位/126秒健康，不把不同机器差值当提速证明，首次接入耗时仍待优化。可选残留清理WIP未打入。
