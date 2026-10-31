@@ -131,7 +131,7 @@ export class DesktopController {
         }
       }
       const verifyData = async () => {
-        if (core.verifyDataCompatibility(root, this.options.dataRoot).length) throw Object.assign(new Error('Target data migration is incomplete'), { code: 'CRABOT_MIGRATION_FAILED' })
+        if (core.verifyDataCompatibility(root, this.options.dataRoot).length) return false
         const preview = await previewMigrations(root, this.options.dataRoot)
         return preview.modules.length === 0 && ['ready', 'not_applicable'].includes(preview.shared.status)
       }
@@ -139,25 +139,44 @@ export class DesktopController {
       let record
       try {
         checkSource(); await this.current()
-        await inspectLocalMigrationData(this.options.dataRoot, core.verifyDataCompatibility(root, this.options.dataRoot), root)
+        record = maintenance.readVersionMaintenance(this.options.dataRoot)
+        if (record && (record.schema_version !== 3 || record.data_protection !== 'scoped' || record.system_operation_id !== undefined
+          || record.data_dir !== this.options.dataRoot || record.install_root !== this.options.coreRoot
+          || record.source_version !== prepared.source.version || record.source_inventory_sha256 !== prepared.source.core_id
+          || record.target_version !== prepared.selection.version || !['preparing', 'prepared', 'installing', 'verifying'].includes(record.phase)
+          || (record.target_core ? record.target_core.root !== root || record.target_core.inventory_sha256 !== prepared.selection.core_id : record.phase !== 'preparing'))) {
+          throw Object.assign(new Error('The pending update belongs to another source or target'), { code: 'CRABOT_MAINTENANCE_PENDING' })
+        }
+        if (!record || record.phase === 'preparing') await inspectLocalMigrationData(this.options.dataRoot, core.verifyDataCompatibility(root, this.options.dataRoot), root)
         if (await this.updateActivity() !== 'idle') throw Object.assign(new Error('Current activity cannot be confirmed idle'), { code: 'CRABOT_UPDATE_BUSY' })
         checkSource(); await this.current()
-        record = await maintenance.beginVersionMaintenance(this.options.dataRoot, this.options.coreRoot, prepared.selection.version, this.options.appVersion, { dataProtection: 'scoped' })
-        await maintenance.bindVersionMaintenanceTarget(this.options.dataRoot, record.id, root)
-        if (this.options.loginStartup) {
-          await this.captureLoginStartup(prepared, record.id)
-          checkSource(); await this.current(); checkSource()
+        if (!record) record = await maintenance.beginVersionMaintenance(this.options.dataRoot, this.options.coreRoot, prepared.selection.version, this.options.appVersion, { dataProtection: 'scoped' })
+        if (record.phase === 'preparing') {
+          record = await maintenance.bindVersionMaintenanceTarget(this.options.dataRoot, record.id, root)
+          if (this.options.loginStartup) {
+            await this.captureLoginStartup(prepared, record.id)
+            checkSource(); await this.current(); checkSource()
+          }
         }
         this.host.status('stopping', '正在停止共享实例并准备更新所需的数据转换。')
         await stopInstance(this.options.dataRoot)
         checkSource()
         this.host.status('stopped', '共享实例已停止，正在更新数据。')
-        await maintenance.prepareScopedVersionMaintenance(this.options.dataRoot, record.id)
-        await maintenance.markVersionMaintenanceInstalling(this.options.dataRoot, record.id)
-        await maintenance.migrateStoppedVersionMaintenance({ dataDir: this.options.dataRoot, root, id: record.id,
-          migrate: () => core.applyStartupMigrations(root, this.options.dataRoot, { ...process.env,
-            DATA_DIR: this.options.dataRoot, CRABOT_HOME: root, CRABOT_PRODUCT_REQUIRED: '1' }),
-          verifyComplete: async () => { if (!await verifyData()) throw Object.assign(new Error('Target data completion is unconfirmed'), { code: 'CRABOT_MIGRATION_INTERRUPTED' }) } })
+        if (record.phase === 'preparing') record = await maintenance.prepareScopedVersionMaintenance(this.options.dataRoot, record.id)
+        if (record.phase === 'prepared') {
+          await maintenance.markVersionMaintenanceInstalling(this.options.dataRoot, record.id)
+          record = maintenance.readVersionMaintenance(this.options.dataRoot)
+        }
+        if (record.phase === 'installing') {
+          await maintenance.migrateStoppedVersionMaintenance({ dataDir: this.options.dataRoot, root, id: record.id,
+            migrate: () => core.applyStartupMigrations(root, this.options.dataRoot, { ...process.env,
+              DATA_DIR: this.options.dataRoot, CRABOT_HOME: root, CRABOT_PRODUCT_REQUIRED: '1' }),
+            verifyComplete: async () => { if (!await verifyData()) throw Object.assign(new Error('Target data completion is unconfirmed'), { code: 'CRABOT_MIGRATION_INTERRUPTED' }) } })
+        } else {
+          // A lost selection/entry reply can be retried, but an unknown or
+          // interrupted conversion must never execute its scripts again.
+          if (!await verifyData()) throw Object.assign(new Error('Target data completion is unconfirmed'), { code: 'CRABOT_MIGRATION_INTERRUPTED' })
+        }
       } finally { releaseCliLock(lock) }
       this.host.status('stopped', '数据转换已核验，正在提交应用版本；启动保护保持。')
       const { commitPreparedDesktopPair } = await this.load('scripts/lib/desktop-pair-commit.mjs')

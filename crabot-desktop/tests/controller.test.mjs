@@ -258,13 +258,14 @@ async function pairedController(t, failure, commitBarrier) {
     }
     if (file.endsWith('upgrade-lib/migrate.mjs')) return { previewMigrations: async () => ({ modules: [], shared: { status: 'ready' } }) }
     if (file.endsWith('version-maintenance.mjs')) return {
+      readVersionMaintenance: () => record ?? null,
       beginVersionMaintenance: async (actualData, from, toVersion, fromVersion, options) => {
         calls.push('begin'); assert.equal(locked, true); assert.equal(actualData, dataDir); assert.equal(from, sourceRoot)
         assert.equal(toVersion, target.version); assert.equal(fromVersion, source.version); assert.deepEqual(options, { dataProtection: 'scoped' })
         if (record) throw Object.assign(new Error('pending maintenance'), { code: 'CRABOT_MAINTENANCE_PENDING' })
         return record = { id: uuid, phase: 'preparing' }
-      }, bindVersionMaintenanceTarget: async (actual, id, core) => { calls.push('bind'); assert.equal(core, targetRoot) },
-      prepareScopedVersionMaintenance: async () => { calls.push('prepare'); record.phase = 'prepared' },
+      }, bindVersionMaintenanceTarget: async (actual, id, core) => { calls.push('bind'); assert.equal(core, targetRoot); return record },
+      prepareScopedVersionMaintenance: async () => { calls.push('prepare'); record.phase = 'prepared'; return record },
       markVersionMaintenanceInstalling: async () => { calls.push('installing'); record.phase = 'installing' },
       migrateStoppedVersionMaintenance: async options => {
         calls.push('migrate'); record.phase = 'verifying'; await options.migrate(); await options.verifyComplete(); calls.push('migrated')

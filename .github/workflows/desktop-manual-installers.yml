@@ -47,7 +47,7 @@ jobs:
       - name: Existing GUI stopped update with a bounded native diagnostic
         run: |
           mkdir -p .desktop-build
-          node --input-type=module -e 'import{runBounded}from"./scripts/lib/run-bounded.mjs";await runBounded(process.execPath,["--test","--test-name-pattern=an extracted desktop update","scripts/lib/__tests__/desktop-payload.test.mjs"],{timeout:90000})' 2>&1 | tee .desktop-build/windows-first-use-pair.log
+          node --input-type=module -e 'import{runBounded}from"./scripts/lib/run-bounded.mjs";await runBounded(process.execPath,["--test","--test-name-pattern=an extracted desktop update","scripts/lib/__tests__/desktop-payload.test.mjs"],{timeout:180000})' 2>&1 | tee .desktop-build/windows-first-use-pair.log
       - name: GUI and original CLI preserve the actual legacy data binding
         if: ${{ !cancelled() }}
         run: |

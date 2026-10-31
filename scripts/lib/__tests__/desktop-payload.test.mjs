@@ -83,7 +83,7 @@ async function fixture(t, { version = '1.2.3', schema, functional = false, execu
     await fs.writeFile(path.join(parser, 'package.json'), JSON.stringify({ name: '@electron/asar', version: '3.4.1', main: 'index.cjs' }))
     await fs.writeFile(path.join(core, 'crabot-fixture/upgrade/scope.mjs'), `export const migrationScope=()=>({reads:[],writes:['fixture/content','fixture/executions']})`)
     await fs.writeFile(path.join(core, 'crabot-fixture/upgrade/from_v1_to_v2.mjs'),
-      `import fs from 'node:fs';import path from 'node:path';const root=process.argv.find(arg=>arg.startsWith('--data-dir=')).slice(11);fs.writeFileSync(path.join(root,'content'),'converted by bundled Node');fs.appendFileSync(path.join(root,'executions'),'once\\n');${coreTamper ? "fs.appendFileSync(path.resolve(process.argv[1],'../../../cli.mjs'),'corrupted')" : ''}${conversionFailure ? 'process.exit(13)' : ''}`)
+      `import fs from 'node:fs';import path from 'node:path';const root=process.argv.find(arg=>arg.startsWith('--data-dir=')).slice(11);fs.writeFileSync(path.join(root,'content'),'converted by bundled Node');fs.appendFileSync(path.join(root,'executions'),'once\\n');${coreTamper ? "fs.appendFileSync(path.resolve(process.argv[1],'../../../cli.mjs'),'corrupted')" : ''}${conversionFailure ? "process.stderr.write('CRABOT_FIXTURE_CONVERSION_ATTEMPT\\n');process.exit(13)" : ''}`)
   }
   if (shared) { await fs.mkdir(path.join(core, 'crabot-agent'), { recursive: true }); await fs.writeFile(path.join(core, 'crabot-agent/shared_request_version'), '1\n') }
   await writeCoreRelease(core, { schema_version: 1, version, platform: process.platform, arch: process.arch, commit: '1'.repeat(40), source_dirty: false })
@@ -2357,7 +2357,7 @@ test('first GUI legacy admission uses already extracted programs and external or
   assert.equal(await discoverLegacyDesktopTakeover({ root: f.target, source: {} }), null, 'Completion does not depend on keeping old program files for discovery')
 })
 
-test('an extracted desktop update keeps its original location and scoped stopped-pair conversion instead of re-entering legacy admission', { timeout: 120000 }, async t => {
+for (const failure of ['none', 'entries-failed', 'preparation-failed', 'interrupted', 'foreign']) test('an extracted desktop update keeps its original location and scoped stopped-pair conversion instead of re-entering legacy admission: ' + failure, { timeout: 120000 }, async t => {
   const previous = await fixture(t, { functional: true, schema: 'v1' })
   const initial = await prepareDesktopInstallation({ payload: previous.payload, installRoot: previous.target })
   const source = await commitDesktopInstallation(initial)
@@ -2366,7 +2366,7 @@ test('an extracted desktop update keeps its original location and scoped stopped
   await fs.mkdir(path.join(source.dataDir, 'fixture'))
   await fs.writeFile(path.join(source.dataDir, 'fixture/SCHEMA_VERSION'), 'v1')
   await fs.writeFile(path.join(source.dataDir, 'fixture/content'), 'existing desktop content')
-  const incoming = await fixture(t, { version: '1.2.4', functional: true, schema: 'v2' })
+  const incoming = await fixture(t, { version: '1.2.4', functional: true, schema: 'v2', conversionFailure: failure === 'interrupted' })
   const extracted = await extractedFirstLaunch(incoming, source.root), first = await import('../../../crabot-desktop/dist/bootstrap/scripts/lib/desktop-first-launch.mjs')
   const programs = await first.readFirstLaunchPrograms(extracted)
   assert.equal(programs.initialized, false); assert.equal(programs.source.dataDir, source.dataDir)
@@ -2377,24 +2377,35 @@ test('an extracted desktop update keeps its original location and scoped stopped
   // in a child so Windows can release the mapped DLL before fixture cleanup.
   const code = `
     import assert from 'node:assert/strict';import{pathToFileURL}from'node:url';import path from'node:path';
-    const [module,input]=process.argv.slice(1),{source,prepared}=JSON.parse(input);
+    const [module,input]=process.argv.slice(1),{source,prepared,failure}=JSON.parse(input);
     const {DesktopController}=await import(pathToFileURL(module).href);
     const installation=(await import(pathToFileURL(path.join(source.coreRoot,'scripts/lib/desktop-installation.cjs')).href)).default;
+    let attempts=0;const loginStartup=failure==='preparation-failed'?{captureForUpdate:async()=>{if(attempts===1)throw Error('controlled startup capture failure');return'off'},restoreForUpdate:async()=>{}}:undefined;
     const controller=new DesktopController({coreRoot:source.coreRoot,dataRoot:source.dataDir,appVersion:source.selection.version,
-      platform:process.platform,packaged:true,verifyBinding:()=>assert.deepEqual(installation.readDesktopSelection(source.root).selection,source.selection)});
-    try{controller.host.status('stopped','fixture was already stopped');await controller.applyPreparedPair(prepared,async(from,to)=>{
-      assert.deepEqual(from.selection,source.selection);assert.deepEqual(to.selection,prepared.selection)
-    });console.log('CRABOT_PAIR_COMMITTED')}finally{controller.close()}
+      platform:process.platform,packaged:true,loginStartup,verifyBinding:()=>assert.deepEqual(installation.readDesktopSelection(source.root).selection,source.selection)});
+    const attempt=()=>{attempts++;controller.host.status('stopped','fixture was already stopped');return controller.applyPreparedPair(prepared,async(from,to)=>{
+      assert.deepEqual(from.selection,source.selection);assert.deepEqual(to.selection,prepared.selection);
+      if(['entries-failed','foreign'].includes(failure)&&attempts===1)throw Error('controlled entry publication failure')
+    })};
+    try{if(failure!=='none')await assert.rejects(attempt(),failure==='preparation-failed'?{code:'CRABOT_LOGIN_STARTUP_UPDATE'}:failure==='interrupted'?{code:'CRABOT_MIGRATION_FAILED'}:/controlled entry publication failure/);
+      if(failure==='foreign'){const fs=await import('node:fs/promises');const file=path.join(source.dataDir,'desktop-maintenance.json');const record=JSON.parse(await fs.readFile(file,'utf8'));record.target_version='9.9.9';await fs.writeFile(file,JSON.stringify(record)+'\\n')}
+      if(failure==='interrupted')await assert.rejects(attempt(),{code:'CRABOT_MIGRATION_INTERRUPTED'});else if(failure==='foreign')await assert.rejects(attempt(),{code:'CRABOT_MAINTENANCE_PENDING'});else await attempt();
+      console.log('CRABOT_PAIR_CHECKED')
+    }finally{controller.close()}
   `
   const result = await promisify(execFile)(process.execPath, ['--input-type=module', '--eval', code,
-    fileURLToPath(new URL('../../../crabot-desktop/dist/controller.js', import.meta.url)), JSON.stringify({ source, prepared })], { timeout: 45000, maxBuffer: 65536 })
-  assert.match(result.stdout, /CRABOT_PAIR_COMMITTED/)
+    fileURLToPath(new URL('../../../crabot-desktop/dist/controller.js', import.meta.url)), JSON.stringify({ source, prepared, failure })], { timeout: 45000, maxBuffer: 65536 })
+  assert.match(result.stdout, /CRABOT_PAIR_CHECKED/)
   const selected = installation.readDesktopSelection(source.root)
-  assert.equal(selected.dataDir, source.dataDir); assert.deepEqual(selected.selection, incoming.selection)
-  assert.equal(await fs.readFile(path.join(source.dataDir, 'fixture/executions'), 'utf8'), 'once\n')
+  assert.equal(selected.dataDir, source.dataDir); assert.deepEqual(selected.selection, ['interrupted', 'foreign'].includes(failure) ? source.selection : incoming.selection)
+  if (failure === 'interrupted') {
+    await assert.rejects(fs.lstat(path.join(source.dataDir, 'fixture/executions')), { code: 'ENOENT' })
+    assert.equal(await fs.readFile(path.join(source.dataDir, 'fixture/content'), 'utf8'), 'existing desktop content')
+    assert.equal(result.stderr.split('CRABOT_FIXTURE_CONVERSION_ATTEMPT').length - 1, 1, 'Retry must not replay the failed migration even when its data writes were rolled back')
+  } else assert.equal(await fs.readFile(path.join(source.dataDir, 'fixture/executions'), 'utf8'), 'once\n')
   assert.equal(JSON.parse(await fs.readFile(path.join(source.dataDir, 'desktop-maintenance.json'), 'utf8')).schema_version, 3)
   await assert.rejects(fs.lstat(path.join(source.root, '.desktop-takeover')), { code: 'ENOENT' })
-  assert.equal((await first.readFirstLaunchPrograms(extracted)).initialized, true)
+  assert.equal((await first.readFirstLaunchPrograms(extracted)).initialized, !['interrupted', 'foreign'].includes(failure))
 })
 
 test('a cancelled same-directory first use can rediscover its verified legacy data before any entry was fenced', async t => {
