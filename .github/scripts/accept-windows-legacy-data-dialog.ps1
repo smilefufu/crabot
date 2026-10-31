@@ -9,10 +9,13 @@ public class CrabotFirstUseUI {
  [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr window,Visitor callback,IntPtr data);
  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window,out uint pid);
  [DllImport("user32.dll",CharSet=CharSet.Unicode,EntryPoint="SendMessageTimeoutW")] static extern IntPtr ReadText(IntPtr window,uint message,IntPtr length,StringBuilder text,uint flags,uint timeout,out IntPtr result);
+ [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr window,uint message,IntPtr a,IntPtr b);
  public static string Text(IntPtr window){var text=new StringBuilder(8192);IntPtr result;ReadText(window,13,(IntPtr)text.Capacity,text,2,500,out result);return text.ToString();}
  public static IntPtr[] Windows(){var list=new List<IntPtr>();EnumWindows((w,d)=>{list.Add(w);return true;},IntPtr.Zero);return list.ToArray();}
  public static IntPtr[] Children(IntPtr window){var list=new List<IntPtr>();EnumChildWindows(window,(w,d)=>{list.Add(w);return true;},IntPtr.Zero);return list.ToArray();}
  public static uint Pid(IntPtr window){uint pid;GetWindowThreadProcessId(window,out pid);return pid;}
+ // Electron's own dialog-helper uses TDM_CLICK_BUTTON with IDs 100+index.
+ public static void Confirm(IntPtr window){SendMessage(window,0x466,(IntPtr)100,IntPtr.Zero);}
 }
 '@
 $observed=[Collections.Generic.HashSet[string]]::new()
@@ -35,16 +38,12 @@ while((Get-Date) -lt $deadline){
     Write-Output ('CRABOT_FIRST_USE_TEXT ' + (ConvertTo-Json -InputObject $text -Compress))
     throw 'Actual data confirmation did not display the original data/version'
    }
-   $automation=[Windows.Automation.AutomationElement]::FromHandle($window)
-   $condition=[Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty,'接入已有数据')
-   $controls=$automation.FindAll([Windows.Automation.TreeScope]::Subtree,$condition)
-   $actions=@($controls | Where-Object { $_.GetCurrentPropertyValue([Windows.Automation.AutomationElement]::IsInvokePatternAvailableProperty) -eq $true })
-   if($actions.Count -ne 1){throw 'Expected one actionable data confirmation button in the actual dialog accessibility tree'}
-   $invoke=$actions[0].GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern)
-   $invoke.Invoke()
+   # Match Electron's official native-addon/dialog-helper implementation,
+   # rather than BM_CLICK on a label or an unsupported UIA Invoke provider.
+   [CrabotFirstUseUI]::Confirm($window)
    $closedBy=(Get-Date).AddSeconds(10)
    while(([CrabotFirstUseUI]::Windows() -contains $window) -and [CrabotFirstUseUI]::Text($window) -eq $title){
-    if((Get-Date) -ge $closedBy){throw 'Native confirmation was not dismissed after its accessible Invoke action'}
+    if((Get-Date) -ge $closedBy){throw 'Native confirmation was not dismissed after the native TaskDialog button action'}
     Start-Sleep -Milliseconds 100
    }
    Write-Output 'CRABOT_FIRST_USE_UI original_data_and_version_visible=true native_confirmation_invoked_and_dismissed=true'
