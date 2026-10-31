@@ -14,7 +14,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: desktop-manual-installer-${{ inputs.target || 'darwin-arm64' }}${{ inputs.source_only && '-source' || '' }}
+  group: desktop-manual-installer-${{ inputs.target || 'darwin-arm64' }}${{ inputs.source_only && format('-source-{0}', github.run_id) || '' }}
   cancel-in-progress: false
 jobs:
   boundary:
