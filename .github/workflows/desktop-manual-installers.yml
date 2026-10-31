@@ -227,7 +227,7 @@ jobs:
           node .github/scripts/smoke-development-coexistence.mjs --background-only 2>&1 | tee .desktop-build/development-source-boot.log
       - name: Build same-source offline GUI and Core installer
         run: |
-          node scripts/desktop/stage-core.mjs --out=.desktop-build/manual/core --version=0.1.0-desktop.11
+          node scripts/desktop/stage-core.mjs --out=.desktop-build/manual/core --version=0.1.0-desktop.12
           node .github/scripts/verify-release-payload.mjs "$GITHUB_WORKSPACE/.desktop-build/manual/core"
           node --input-type=module <<'NODE'
           import { createRequire } from 'node:module';

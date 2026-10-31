@@ -60,6 +60,9 @@ export async function pruneBuildFiles(root, platform = process.platform) {
       if (entry.isDirectory()) await remove(file, predicate)
       else if (entry.isFile() && predicate(entry.name)) { await fs.unlink(file); removed.add(path.relative(root, file).split(path.sep).join('/')) }
     }
+    if (platform === 'win32') {
+      try { await fs.rmdir(directory) } catch (error) { if (!['ENOTEMPTY', 'EEXIST', 'ENOENT'].includes(error.code)) throw error }
+    }
   }
   await remove(path.join(root, 'crabot-native/build/Release'), name => /\.(obj|lib|exp)$/.test(name))
   if (platform === 'win32') {

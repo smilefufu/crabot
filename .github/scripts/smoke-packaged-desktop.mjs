@@ -135,6 +135,7 @@ function launch() {
   guiDiagnostics.push(() => ({ pid: child.pid, phases, output }))
   return { child, exited: () => waitForExit(child), phase }
 }
+let primaryFailure
 try {
   let gui = launch(); await gui.phase('ready')
   let first = await inspectInstance()
@@ -211,6 +212,8 @@ try {
     packaged_asar_native_auth: true, installed_core_shared_with_cli: true, gui_crash_preserves_core: true, reattach_same_generation: true,
     cli_stop_stays_stopped: true, unicode_spaced_data: true, outside_checkout: true, registered_bundled_cli: true, release_signed: false }))
 } catch (error) {
+  primaryFailure = error
+  console.error('CRABOT_PACKAGED_PRIMARY_FAILURE', error)
   // The artifact uploader collects .desktop-build/*.log; the pair can be nested below it.
   // Preserve bounded fixture diagnostics without replacing the original assertion on a logging failure.
   const diagnostics = path.resolve('.desktop-build')
@@ -227,17 +230,22 @@ try {
   } catch { console.error('Packaged fixture diagnostics could not be preserved') }
   throw error
 } finally {
-  stage('cleanup-start')
-  for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
-  const exits = await Promise.allSettled(children.map(waitForExit))
-  await cli('stop')
-  assert.equal((await inspectInstance()).state, 'stopped', 'Unverified processes keep their disposable data for investigation')
-  for (const exit of exits) if (exit.status === 'rejected') throw exit.reason
-  if (macBindingFile) {
-    const current = JSON.parse(await fs.readFile(macBindingFile, 'utf8'))
-    if (current.data_dir !== data || current.app_path !== path.resolve(core, '../../..')) throw new Error('CI Mac binding changed')
-    await fs.unlink(macBindingFile)
+  try {
+    stage('cleanup-start')
+    for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+    const exits = await Promise.allSettled(children.map(waitForExit))
+    await cli('stop')
+    assert.equal((await inspectInstance()).state, 'stopped', 'Unverified processes keep their disposable data for investigation')
+    for (const exit of exits) if (exit.status === 'rejected') throw exit.reason
+    if (macBindingFile) {
+      const current = JSON.parse(await fs.readFile(macBindingFile, 'utf8'))
+      if (current.data_dir !== data || current.app_path !== path.resolve(core, '../../..')) throw new Error('CI Mac binding changed')
+      await fs.unlink(macBindingFile)
+    }
+    await fs.rm(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+    stage('cleanup-completed')
+  } catch (error) {
+    if (!primaryFailure) throw error
+    console.error('CRABOT_PACKAGED_CLEANUP_FAILURE', error)
   }
-  await fs.rm(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
-  stage('cleanup-completed')
 }

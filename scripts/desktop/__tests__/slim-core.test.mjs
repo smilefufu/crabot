@@ -37,5 +37,7 @@ test('pruning removes compiler outputs and Windows documentation while retaining
     for (const file of [...removed, ...retained]) { await fs.mkdir(join(root, file, '..'), { recursive: true }); await fs.writeFile(join(root, file), 'fixture') }
     assert.deepEqual([...(await pruneBuildFiles(root, 'win32'))].sort(), removed.sort())
     for (const file of retained) await fs.access(join(root, file))
+    await assert.rejects(fs.lstat(join(root, '.product-runtime/git/ucrt64/share/doc/git-doc')), { code: 'ENOENT' })
+    await assert.rejects(fs.lstat(join(root, '.product-runtime/git/usr/share/vim/vim92/doc')), { code: 'ENOENT' })
   } finally { await fs.rm(root, { recursive: true, force: true }) }
 })
