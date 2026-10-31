@@ -3,13 +3,13 @@
 ### 桌面化冻结范围：Windows安装纠错及完整验收中
 
 - 继续原冻结范围：Electron＋React、共享HTTP/SDK与独立宿主IPC、统一内置环境与依赖隔离、GUI/CLI共享实例、项目workspace、在线Admin迁移、旧目录权限兼容及system批量管理；本轮不扩需求。源码dev/release隔离、固定29000/13000和原源码部署保留规则继续有效。
-- 最新本地候选：20261031 Downloads目录Windows desktop.9，来源baf48283，623145874字节；完整artifact和交付副本SHA一致。旧release数据接入仍未通过；41182669144已见定位文件和schema4 verifying，但Core未健康，不再把读取超时解释为定位文件未生成。ARM Mac仍为20261030的desktop.7（d0209eb7）；精确包名/SHA及失败边界见[安装反馈与验收记录](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-30-windows-installation-feedback-fixes.md)。本机未运行新App/Core。
+- 最新已交付ARM Mac/Windows desktop.10（同源a150015c），位于20261031 Downloads；包分别625558061/598808085字节，官方产物/包内摘要/本地副本一致，Mac签名与完整Core已只读核验。原源码服务不动；包名/SHA及分层证据见[验收记录](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-30-windows-installation-feedback-fixes.md)。
 - 本轮Windows改为NSIS一次直接解包最终GUI/Core到所选盘，真正GUI首启才确认旧release数据；原data不搬，新旧命令转同一实例。转换前失败恢复已知旧入口，fenced＋三个已退出模块记录可继续；原位GUI升级、保留数据重装沿原范围保护/健康恢复。普通0755旧目录可兼容，不收紧既有自定义ACL。
 - e8ea8041的41170061901原生首启边界通过：实际旧crabot.cmd、外部data、登记失败重试、同版/较新版保留数据交接及原位版本对转换。a34d9e25的41170494206三个原生作业均通过，新增准备/登记失败继续、迁移中断不重放及异目标拒绝；共同接入75项、Controller/更新59项与实际Electron门禁也通过。实测是隔离数据，不能代替Win11真人业务验收。Node子进程隔离修复了Windows测试清理已映射DLL的等待，没有放宽产品断言。
-- Windows单层NSIS普通/中文/445字符深目录完整字节核对通过；fd1ee81a修正仅新建根目录的私有ACL，既有非空目录不改。desktop.9在41174762975用实际最终EXE、所选D盘空格路径及TEMP仅1.5GiB空闲完成真实安装/Finish启动GUI/Core、原生CLI同data，无Retry或第二安装器。旧release GUI确认自动化此前因测试按钮操作失败；41177197015实际确认后仍超时；41182669144复用同一EXE定位，尚不计通过。成功接入已有独立持久结果；可选残留清理代码保留WIP，未含进desktop.9。
-- 用户要求先瘦身、稍后统一真人测试。a150015c只移除浏览器驱动未用的第二Node及独立Node编译头文件；Mac隔离组件实测省181015041字节，两SDK真实输入/点击/截图、完整13工具MCP/生产connector、离线npm/npx及22项运行回归通过。Win41188615002、ARM Mac41188617368正构建desktop.10并统计实际程序占用；未把组件/理论节省记为最终包交付。其余内置能力及许可证保留。
-- 尚待：旧数据真实GUI确认/原CLI健康、新首启路径的保留数据重装、可选残留清理和重复安装、发行回归；最终按可独立构建/验收的依赖边界拆PR。Agent扩大回归的既有失败单列在记录中，未弱化断言或记全绿。用户允许缺失旧macOS/Ubuntu真实桌面资源先跳过，Win11/macOS真人验收由用户继续。
-- 本机约220GiB空闲；原源码服务/data、Docker和Spotlight未动，未在本机启动验收包替代源码部署。主线仍72257636且已包含在分支，产品main未推送，未开未完成的大PR。
+- Windows普通/中文/445字符完整解包及新根私有ACL已通过。第10版41190181072通过实际NSIS目录页、D盘空格路径、TEMP仅1.5GiB、Finish/GUI-Core-CLI；41190566613同EXE通过v14旧数据接入和原命令健康。原完整run的180秒期限失败保留；第9版同包复验约201秒定位/5分钟健康，第10版本次约82秒定位/126秒健康，不把不同机器差值当提速证明，首次接入耗时仍待优化。可选残留清理WIP未打入。
+- 瘦身只去重复浏览器Node和独立Node编译头文件：实际程序普通文件ARM Mac 1638905250字节、Windows 2009897420字节，较此前审计各少183119716/93133532字节，不含用户data/workspace。Mac全包/接入/共存通过；两平台真实离线解释器/npm/npx/Git/Memory、两浏览器驱动、13工具MCP/生产connector通过，相关资源回归22项通过。其余能力与许可证保持；用户稍后统一真人验收。
+- 尚待：首次旧数据接入性能稳定、新首启路径的保留数据重装、可选残留清理和重复安装、发行回归；最终按可独立构建/验收的依赖边界拆PR。Agent扩大回归的既有失败单列在记录中，未弱化断言或记全绿。用户允许缺失旧macOS/Ubuntu真实桌面资源先跳过，Win11/macOS真人验收由用户继续。
+- 本机保留200GiB以上空闲；原源码服务/data、Docker和Spotlight未动，未在本机启动验收包替代源码部署。分支已包含截至72257636的主线，产品main未推送，未开未完成的大PR。
 
 ### 主控常驻职责与指南生命周期：实现完成，PR 验证中
 
