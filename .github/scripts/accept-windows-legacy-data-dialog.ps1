@@ -35,8 +35,12 @@ while((Get-Date) -lt $deadline){
     Write-Output ('CRABOT_FIRST_USE_TEXT ' + (ConvertTo-Json -InputObject $text -Compress))
     throw 'Actual data confirmation did not display the original data/version'
    }
-   $control=[Windows.Automation.AutomationElement]::FromHandle($button[0])
-   $invoke=$control.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern)
+   $automation=[Windows.Automation.AutomationElement]::FromHandle($window)
+   $condition=[Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty,'接入已有数据')
+   $controls=$automation.FindAll([Windows.Automation.TreeScope]::Subtree,$condition)
+   $actions=@($controls | Where-Object { $_.GetCurrentPropertyValue([Windows.Automation.AutomationElement]::IsInvokePatternAvailableProperty) -eq $true })
+   if($actions.Count -ne 1){throw 'Expected one actionable data confirmation button in the actual dialog accessibility tree'}
+   $invoke=$actions[0].GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern)
    $invoke.Invoke()
    $closedBy=(Get-Date).AddSeconds(10)
    while(([CrabotFirstUseUI]::Windows() -contains $window) -and [CrabotFirstUseUI]::Text($window) -eq $title){
