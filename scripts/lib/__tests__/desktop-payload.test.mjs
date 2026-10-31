@@ -2325,4 +2325,15 @@ test('first GUI legacy admission uses already extracted programs and external or
   assert.equal(JSON.parse(await fs.readFile(path.join(f.data, 'desktop-maintenance.json'), 'utf8')).phase, 'verifying')
   const { inspectLegacyEntryFence } = await import('../legacy-entry-fence.mjs')
   assert.equal((await inspectLegacyEntryFence(f.target)).entries_fenced, true)
+  const health = `import{pathToFileURL}from'node:url';const[module,dataDir,root]=process.argv.slice(1);const versions=await import(pathToFileURL(module).href);await versions.recoverLegacyUserVersionMaintenance({dataDir,root,appVersion:'1.2.3',verifyTakeover:async()=>{},verifyCompatible:async()=>{},run:async()=>true})`
+  // Only health is substituted; real maintenance admission/finalization and the
+  // original command's target routing are exercised. No live MM is claimed.
+  await promisify(execFile)(node, ['--input-type=module', '--eval', health, path.join(extracted.coreRoot, 'scripts/lib/version-maintenance.mjs'), f.data, extracted.coreRoot], { timeout: 30000 })
+  const probe = path.join(f.parent, 'old-cli-probe.cmd')
+  if (windows) await fs.writeFile(probe, '@echo off\r\ncall "%CRABOT_OLD_COMMAND%" --version\r\nexit /b %errorlevel%\r\n')
+  const forwarded = windows
+    ? await promisify(execFile)(path.join(process.env.SystemRoot, 'System32/cmd.exe'), ['/d', '/c', probe], { timeout: 15000, env: { ...process.env, CRABOT_OLD_COMMAND: path.join(f.target, 'crabot.cmd') } })
+    : await promisify(execFile)(node, [path.join(f.target, 'cli.mjs'), '--version'], { timeout: 15000 })
+  assert.equal(JSON.parse(forwarded.stdout.trim()).version, f.selection.version)
+
 })
