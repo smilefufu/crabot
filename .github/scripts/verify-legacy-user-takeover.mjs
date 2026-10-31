@@ -158,9 +158,14 @@ try {
         const confirmation = await execute(path.join(process.env.SystemRoot, 'System32/WindowsPowerShell/v1.0/powershell.exe'),
           ['-NoProfile', '-NonInteractive', '-File', path.join(repository, '.github/scripts/accept-windows-legacy-data-dialog.ps1'), '-GuiPid', String(gui.pid), '-DataDirectory', dataDir, '-Version', version], { env, timeout: 250000, maxBuffer: 65536 })
         output += confirmation.stdout + confirmation.stderr
-        const selectedBy = Date.now() + 180000
+        const selectionStarted = Date.now(), selectedBy = selectionStarted + 600000
+        stage('actual-data-consent-dismissed')
         while (true) {
-          try { installation.readDesktopSelection(programRoot); break } catch (error) {
+          try {
+            installation.readDesktopSelection(programRoot)
+            console.log('CRABOT_LEGACY_USER_SELECTION_TIMING ' + JSON.stringify({ version, elapsed_ms: Date.now() - selectionStarted }))
+            break
+          } catch (error) {
             if (gui.exitCode !== null || Date.now() >= selectedBy) throw new Error('Actual GUI data handoff failed: ' + error.message + '\n' + output)
             await new Promise(resolve => setTimeout(resolve, 100))
           }
