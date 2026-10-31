@@ -53,13 +53,17 @@ export async function runPreparedLegacyDesktopTakeover({ prepared, entryFenceId,
   if (typeof registerEntries !== 'function') throw fail()
   signal?.throwIfAborted()
   if (entryFenceId === undefined) {
-    try { await fs.lstat(path.join(prepared.installation.installRoot, '.desktop-takeover')); entryFenceId = (await inspectLegacyEntryFence(prepared.installation.installRoot)).id }
+    try {
+      await fs.lstat(path.join(prepared.installation.installRoot, '.desktop-takeover'))
+      const entry = await inspectLegacyEntryFence(prepared.installation.installRoot)
+      if (entry.phase !== 'restored') entryFenceId = entry.id
+    }
     catch (error) { if (error.code !== 'ENOENT') throw error }
   }
   await verifyLegacyDesktopPrograms(prepared, { entryFenceId, signal })
   const runtime = product.loadProductRuntime(prepared.coreRoot, { required: true, full: true })
   signal?.throwIfAborted()
-  const input = { installation: prepared.installation, selection: prepared.selection,
+  const input = { ...(prepared.installRoot ? { installRoot: prepared.installRoot } : {}), installation: prepared.installation, selection: prepared.selection,
     coreRoot: prepared.coreRoot, guiRoot: prepared.guiRoot, proof: prepared.proof }
   const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => /^(PATH|HOME|USER|LOGNAME|USERPROFILE|APPDATA|LOCALAPPDATA|SYSTEMROOT|WINDIR|PSMODULEANALYSISCACHEPATH|COMSPEC|PATHEXT|TEMP|TMP|TMPDIR|LANG|LC_.*|HTTPS?_PROXY|ALL_PROXY|NO_PROXY)$/i.test(name)))
   env.DATA_DIR = prepared.installation.dataRoot; env.CRABOT_HOME = prepared.coreRoot
@@ -92,7 +96,7 @@ export async function runPreparedLegacyDesktopTakeover({ prepared, entryFenceId,
           && typeof message.code === 'string' && /^[A-Z][A-Z0-9_]{0,127}$/.test(message.code)) {
           failed ??= Object.assign(new Error(message.code), { code: message.code })
         } else if (message.type === 'register-entries' && !registering && !registered) {
-          const own = installation.readDesktopInstallation(prepared.installation.installRoot)
+          const own = installation.readDesktopInstallation(prepared.installRoot ?? prepared.installation.installRoot)
           const expected = { installRoot: own.root, installation_id: own.record.installation_id,
             selection: prepared.selection, coreRoot: prepared.coreRoot, guiRoot: prepared.guiRoot }
           if (!same(message.prepared, expected)) return stop(fail())

@@ -28,7 +28,7 @@ export async function captureDesktopRemovalFacts(options) {
   // Capture immutable document bytes once, then revalidate their complete file
   // generations and access on every admission. Changed generations take the
   // original full readers again; no live process/lock/permission result is cached.
-  const directories = [own.root, ...['app', 'app/releases', 'releases', 'data', 'bin'].map(name => path.join(own.root, name))]
+  const directories = [own.root, own.dataDir, ...['app', 'app/releases', 'releases', 'bin'].map(name => path.join(own.root, name))]
   const documents = ['desktop-installation.json', '.desktop-removal.json'].map(name => path.join(own.root, name))
   let documentVersions
   const observeDocument = file => {

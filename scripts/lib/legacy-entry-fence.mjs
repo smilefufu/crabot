@@ -12,7 +12,7 @@ import { legacyEntryFiles as entries, hashEntry as hash, failEntryFence as fail,
 
 function knownFence(file, bytes) {
   const forward = pairedCliFenceBytes(file), digest = hash(bytes)
-  return digest === hash(fence(file)) || forward !== null && digest === hash(forward)
+  return digest === hash(fence(file)) || forward !== null && [forward, pairedCliFenceBytes(file, true)].some(value => digest === hash(value))
 }
 
 const catalog = JSON.parse(await fs.readFile(new URL('../desktop/legacy-releases.json', import.meta.url), 'utf8'))
@@ -163,14 +163,22 @@ export async function sealLegacyEntryFence(root, id) {
 // The takeover coordinator separately verifies schema4, target programs and
 // stopped conversion. Only these original command files gain the fixed handoff;
 // the same durable originals and all old Core guards are kept.
-export async function enableLegacyCliForwarding(root, id) {
+export async function enableLegacyCliForwarding(root, id, programRoot = root) {
   root = realpathSync(root)
   const directory = await control(root), lock = await acquireCliLock(directory, 'legacy-cli-forwarding')
   try {
     const record = await read(root, directory), states = await current(root, record)
     if (record.id !== id || !['fenced', 'data_changing'].includes(record.phase) || [...states.values()].some(state => state !== 'fenced')) fail()
+    programRoot = realpathSync(programRoot)
+    if (programRoot !== root) {
+      const { default: desktop } = await import('./desktop-installation.cjs')
+      if (desktop.readDesktopInstallation(programRoot).dataDir !== record.installation.dataRoot) fail()
+      const target = path.join(directory, 'desktop-target')
+      try { if (realpathSync(target) !== programRoot) fail() }
+      catch (error) { if (error.code !== 'ENOENT') throw error; await fs.symlink(programRoot, target, process.platform === 'win32' ? 'junction' : 'dir') }
+    }
     for (const file of ['cli.mjs', 'crabot.cmd']) {
-      const bytes = (await regular(path.join(root, file))).bytes, target = pairedCliFenceBytes(file)
+      const bytes = (await regular(path.join(root, file))).bytes, target = pairedCliFenceBytes(file, programRoot !== root)
       if (hash(bytes) === hash(target)) continue
       if (!knownFence(file, bytes)) fail()
       await replace(path.join(root, file), target, record.originals[file].mode)

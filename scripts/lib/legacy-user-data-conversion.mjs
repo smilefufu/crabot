@@ -5,14 +5,14 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import product from './product-runtime.cjs'
 import { acquireExistingCliLock, releaseCliLock } from './cli-lock.mjs'
-import { fenceLegacyEntries, inspectLegacyEntryFence, resumeLegacyEntryFence } from './legacy-entry-fence.mjs'
+import { fenceLegacyEntries, inspectLegacyEntryFence, resumeLegacyEntryFence, restoreLegacyEntries } from './legacy-entry-fence.mjs'
 import { inspectInstance } from './instance-runtime.mjs'
 import { discoverSealedLegacyRuntime } from './legacy-runtime.mjs'
 import { stopFencedLegacyInstance } from './legacy-stop.mjs'
 import { inspectLegacyPythonEnvironment } from './legacy-python.mjs'
 import { prepareLegacyPythonRebuild } from './legacy-python-rebuild.mjs'
 import { beginLegacyUserVersionMaintenance, readVersionMaintenance, prepareScopedVersionMaintenance,
-  bindLegacyPythonMaintenance, markVersionMaintenanceInstalling, selectLegacyPythonMaintenance, migrateStoppedVersionMaintenance } from './version-maintenance.mjs'
+  cancelPreparedLegacyUserVersionMaintenance, bindLegacyPythonMaintenance, markVersionMaintenanceInstalling, selectLegacyPythonMaintenance, migrateStoppedVersionMaintenance } from './version-maintenance.mjs'
 import { applyStartupMigrations, verifyDataCompatibility } from './core-preparation.mjs'
 import { assertNoInterruptedMigrations } from '../upgrade-lib/migration-transaction.mjs'
 const fail = () => { throw Object.assign(new Error('旧数据接入尚未核验完成，原数据和保护记录已保留。'), { code: 'CRABOT_MAINTENANCE_PENDING' }) }
@@ -30,16 +30,17 @@ export async function convertLegacyUserData({ installation, target, verifyProgra
   if (realpathSync(process.execPath) !== realpathSync(runtime.executables.node)) fail()
   const dataDir = installation.dataRoot
   const rootLock = await acquireExistingCliLock(installation.installRoot, 'legacy-desktop-takeover')
-  let dataLock
+  let dataLock, entry, restoreAllowed = false
   try {
-    let entry
     try { await fs.lstat(path.join(installation.installRoot, '.desktop-takeover')); entry = await inspectLegacyEntryFence(installation.installRoot) }
     catch (error) { if (error.code !== 'ENOENT') throw error }
+    if (entry?.phase === 'restored') entry = undefined
     await verifyPrograms({ entryFenceId: entry?.id, signal })
     dataLock = await acquireExistingCliLock(dataDir, 'legacy-desktop-takeover')
     let record = readVersionMaintenance(dataDir)
     const matching = value => matches(value, installation, target, entry?.id)
     if (record && !matching(record)) fail()
+    restoreAllowed = !record || record.schema_version === 4 && ['preparing', 'prepared'].includes(record.phase)
     signal?.throwIfAborted()
     if (!entry) entry = await fenceLegacyEntries(installation)
     else if (!record && entry.phase === 'fencing') entry = await resumeLegacyEntryFence(installation.installRoot, entry.id)
@@ -81,5 +82,23 @@ export async function convertLegacyUserData({ installation, target, verifyProgra
     const current = readVersionMaintenance(dataDir)
     if (!matching(current) || current.id !== record.id || current.phase !== 'verifying') fail()
     return { maintenance_id: current.id, dataDir, verification_pending: true, health_verified: false }
+  } catch (error) {
+    if (restoreAllowed) {
+      try {
+        const current = readVersionMaintenance(dataDir)
+        if (!current || current.schema_version === 4 && current.legacy_source.fingerprint === installation.fingerprint
+          && current.target_core.root === target.root && ['preparing', 'prepared'].includes(current.phase)) {
+          if (current) await cancelPreparedLegacyUserVersionMaintenance({ dataDir, id: current.id })
+          let fenced
+          try { fenced = await inspectLegacyEntryFence(installation.installRoot) }
+          catch (inspectionError) { if (inspectionError.code !== 'ENOENT') throw inspectionError }
+          if (fenced && fenced.installation.fingerprint === installation.fingerprint
+            && ['fencing', 'fenced', 'restoring'].includes(fenced.phase)) await restoreLegacyEntries(installation.installRoot)
+        }
+      } catch (restoreError) {
+        throw Object.assign(new AggregateError([error, restoreError], '接入失败，且旧入口恢复尚未完成；原数据和诊断已保留。'), { code: 'CRABOT_MAINTENANCE_PENDING' })
+      }
+    }
+    throw error
   } finally { if (dataLock) releaseCliLock(dataLock); releaseCliLock(rootLock) }
 }

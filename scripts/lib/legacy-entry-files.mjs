@@ -20,14 +20,16 @@ export function entryFenceBytes(file, scope = 'desktop') {
 }
 // The original command can hand off only after a paired installation has
 // cleared its maintenance guard. Old Core/supervisor guards never forward.
-export function pairedCliFenceBytes(file) {
+export function pairedCliFenceBytes(file, external = false) {
+  const prefix = external ? '%~dp0.desktop-takeover\\desktop-target\\' : '%~dp0'
+  const relative = external ? './.desktop-takeover/desktop-target/' : './'
   if (file === 'crabot.cmd') return Buffer.from([
     '@echo off', 'setlocal DisableDelayedExpansion',
-    'if not exist "%~dp0desktop-installation.json" goto pending',
-    'if not exist "%~dp0current-release.json" goto pending',
+    `if not exist "${prefix}desktop-installation.json" goto pending`,
+    `if not exist "${prefix}current-release.json" goto pending`,
     'if exist "%~dp0data\\desktop-maintenance.json" goto pending',
-    'if not exist "%~dp0bin\\crabot.exe" goto pending',
-    '"%~dp0bin\\crabot.exe" %*', 'exit /b %errorlevel%', ':pending',
+    `if not exist "${prefix}bin\\crabot.exe" goto pending`,
+    `"${prefix}bin\\crabot.exe" %*`, 'exit /b %errorlevel%', ':pending',
     'echo Crabot takeover is pending. Open the desktop app to recover. 1>&2', 'exit /b 1', '',
   ].join('\r\n'))
   if (file !== 'cli.mjs') return null
@@ -36,8 +38,8 @@ import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 const relative = name => fileURLToPath(new URL(name, import.meta.url))
-const command = relative('./bin/' + (process.platform === 'win32' ? 'crabot.exe' : 'crabot'))
-if (!existsSync(relative('./desktop-installation.json')) || !existsSync(relative('./current-release.json'))
+const command = relative('${relative}bin/' + (process.platform === 'win32' ? 'crabot.exe' : 'crabot'))
+if (!existsSync(relative('${relative}desktop-installation.json')) || !existsSync(relative('${relative}current-release.json'))
   || existsSync(relative('./data/desktop-maintenance.json')) || !existsSync(command)) {
   throw Object.assign(new Error('Crabot takeover is pending. Open the desktop app to recover.'), { code: 'CRABOT_LEGACY_ENTRY_FENCE' })
 }

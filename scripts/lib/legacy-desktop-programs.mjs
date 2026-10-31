@@ -38,7 +38,7 @@ async function proofText(file) {
 // Byte/source verification only; neither this proof nor a prepared program is
 // admission to start Core or to remove version-maintenance protection.
 export async function verifyLegacyDesktopPrograms(prepared, { entryFenceId, signal } = {}) {
-  const root = prepared?.installation?.installRoot, selection = prepared?.selection
+  const root = prepared?.installRoot ?? prepared?.installation?.installRoot, selection = prepared?.selection
   await sourceCurrent(prepared?.installation, entryFenceId)
   if (!selection || selection.schema_version !== 1 || !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(selection.gui_id)
     || !/^[a-f0-9]{64}$/.test(selection.core_id) || prepared.coreRoot !== path.join(root, 'releases', selection.core_id)
@@ -119,11 +119,11 @@ export async function prepareLegacyDesktopPrograms({ payload, installation, entr
 
 // Read-only reconstruction of the already selected takeover pair. Source facts
 // come from the original entry fence; this grants no startup or completion.
-export async function readLegacyDesktopPrograms(root) {
-  const own = installationState.readDesktopSelection(root), entry = await inspectLegacyEntryFence(own.root)
+export async function readLegacyDesktopPrograms(root, programRoot = root) {
+  const own = installationState.readDesktopSelection(programRoot), entry = await inspectLegacyEntryFence(root)
   management.requirePrivateDataRoot(path.join(own.root, 'app/payloads'))
   const file = path.join(own.root, 'app/payloads', own.selection.gui_id + '.json'), text = await proofText(file)
-  const prepared = { installation: entry.installation, selection: own.selection, coreRoot: own.coreRoot, guiRoot: own.guiRoot,
+  const prepared = { ...(own.root !== root ? { installRoot: own.root } : {}), installation: entry.installation, selection: own.selection, coreRoot: own.coreRoot, guiRoot: own.guiRoot,
     proof: { file, sha256: digest(text) } }
   await verifyLegacyDesktopPrograms(prepared, { entryFenceId: entry.id })
   return prepared

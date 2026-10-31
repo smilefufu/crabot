@@ -408,7 +408,7 @@ export async function recoverLegacyUserVersionMaintenance({ dataDir, root, appVe
         const release = await verifyCoreRelease(root, { version: appVersion })
         if (bound.data_dir !== dataDir || release.inventory_sha256 !== record.target_core.inventory_sha256) fail()
       } else {
-        const prepared = await readLegacyDesktopPrograms(record.install_root)
+        const prepared = await readLegacyDesktopPrograms(record.install_root, path.resolve(root, '../..'))
         if (prepared.installation.dataRoot !== dataDir || prepared.installation.fingerprint !== record.legacy_source.fingerprint
           || prepared.coreRoot !== root || prepared.selection.core_id !== record.target_core.inventory_sha256
           || prepared.selection.version !== appVersion) fail()

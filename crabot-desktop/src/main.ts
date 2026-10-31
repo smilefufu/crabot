@@ -159,6 +159,18 @@ async function boot() {
     catch (error: any) { if (error.code !== 'ENOENT') throw error }
   }
   bootstrapStage('installation-pin-read')
+  let windowsInstallation
+  if (app.isPackaged && process.platform === 'win32' && pin !== undefined) {
+    configureProfile(path.join(app.getPath('appData'), 'Crabot/bootstrap'))
+    if (!claimInstance()) return
+    await app.whenReady()
+    const { prepareWindowsFirstLaunch } = await import('./windows-first-launch.js')
+    const { registerInstallationEntries } = await import('./installation-entries.js')
+    windowsInstallation = await prepareWindowsFirstLaunch({ resources: process.resourcesPath, pinText: pin, home: homedir(), dialog,
+      load: name => import(new URL('./bootstrap/scripts/lib/' + name, import.meta.url).href),
+      registerEntries: prepared => registerInstallationEntries(prepared, { home: homedir(), platform: process.platform, env: process.env, shell }) })
+    if (!windowsInstallation) { quitting = true; app.quit(); return }
+  }
   const discovered = verifier?.locateDesktopGui(process.resourcesPath)
   bootstrapStage('installation-discovered')
   const installation = pin !== undefined || discovered ? verifier.locatePinnedDesktopGui(process.resourcesPath, pin) : undefined
@@ -172,7 +184,7 @@ async function boot() {
     dataRoot = management.requireExistingDataRoot(installation.dataDir)
     configureProfile(dataRoot)
     bootstrapStage('profile-configured')
-    if (!claimInstance()) return
+    if (!windowsInstallation && !claimInstance()) return
     const { verifyCoreRelease } = await import(pathToFileURL(path.join(directory, 'bootstrap/scripts/lib/core-release.mjs')).href)
     const release = await verifyCoreRelease(installation.coreRoot, { version: installation.selection.version })
     if (release.inventory_sha256 !== installation.selection.core_id) throw Object.assign(new Error('Protected Core identity changed'), { code: 'CRABOT_CORE_INTEGRITY' })

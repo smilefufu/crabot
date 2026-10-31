@@ -78,17 +78,19 @@ export async function commitLegacyDesktopInstallation({ prepared, maintenanceId,
       current()
     }
     await verify()
-    const bin = path.join(source.installRoot, 'bin')
+    const programRoot = prepared.installRoot ?? source.installRoot
+    const bin = path.join(programRoot, 'bin')
     if (await present(bin)) management.requireExistingDataRoot(bin)
     else management.ensurePrivateDataRoot(bin)
-    const metadata = path.join(source.installRoot, 'desktop-installation.json')
+    const metadata = path.join(programRoot, 'desktop-installation.json')
     if (!await present(metadata)) {
       const stat = await fs.lstat(source.installRoot, { bigint: true })
       await privateJson(metadata, { schema_version: 1, installation_id: randomUUID(), owner: identity.inspectProcess(process.pid).owner,
         install_root: source.installRoot, root_identity: { dev: String(stat.dev), ino: String(stat.ino) },
         paths: { app: 'app/releases', core: 'releases', data: 'data', bin: 'bin' } })
     }
-    const own = installationState.readDesktopInstallation(source.installRoot)
+    const own = installationState.readDesktopInstallation(programRoot)
+    if (own.dataDir !== dataDir) fail()
     const name = process.platform === 'win32' ? 'crabot.exe' : 'crabot', launcher = path.join(bin, name), original = path.join(root, 'bin', name)
     const stat = await present(launcher)
     if (stat) {
@@ -118,7 +120,7 @@ export async function commitLegacyDesktopInstallation({ prepared, maintenanceId,
     if (!originalPending) await privateJson(path.join(own.root, '.desktop-installing.json'), pending)
     const selector = path.join(own.root, 'current-release.json')
     if (await present(selector) && JSON.stringify(installationState.readDesktopPairReference(own.root).selection) !== JSON.stringify(prepared.selection)) fail()
-    await enableLegacyCliForwarding(source.installRoot, entry.id)
+    await enableLegacyCliForwarding(source.installRoot, entry.id, own.root)
     await adoptLegacyDesktopCli({ installRoot: own.root })
     await registerEntries(registration)
     await verify()

@@ -34,15 +34,24 @@ function readDesktopInstallation(root) {
     directory(root, true)
     const stat = fs.lstatSync(root, { bigint: true }), canonical = fs.realpathSync.native(root)
     const record = json(path.join(root, 'desktop-installation.json'), true)
-    if (!keys(record, ['schema_version', 'installation_id', 'owner', 'install_root', 'root_identity', 'paths'])
-      || record.schema_version !== 1 || !uuid(record.installation_id) || record.owner !== identity.inspectProcess(process.pid).owner
+    const external = record.schema_version === 2
+    if (!keys(record, ['schema_version', 'installation_id', 'owner', 'install_root', 'root_identity', 'paths', ...(external ? ['data_dir', 'data_identity'] : [])])
+      || ![1, 2].includes(record.schema_version) || !uuid(record.installation_id) || record.owner !== identity.inspectProcess(process.pid).owner
       || record.install_root !== canonical || !keys(record.root_identity, ['dev', 'ino'])
       || record.root_identity.dev !== String(stat.dev) || record.root_identity.ino !== String(stat.ino)
-      || !keys(record.paths, ['app', 'core', 'data', 'bin']) || record.paths.app !== 'app/releases' || record.paths.core !== 'releases'
-      || record.paths.data !== 'data' || record.paths.bin !== 'bin'
+      || !keys(record.paths, external ? ['app', 'core', 'bin'] : ['app', 'core', 'data', 'bin']) || record.paths.app !== 'app/releases' || record.paths.core !== 'releases'
+      || !external && record.paths.data !== 'data' || record.paths.bin !== 'bin'
       || present(path.join(root, 'current-core')) || present(path.join(root, 'cli-installation.json'))) fail()
-    for (const name of ['app', 'app/releases', 'releases', 'data', 'bin']) directory(path.join(root, name), name === 'data')
-    return { root: canonical, record, dataDir: path.join(canonical, 'data'), command: path.join(canonical, 'bin', process.platform === 'win32' ? 'crabot.exe' : 'crabot') }
+    for (const name of ['app', 'app/releases', 'releases', 'bin']) directory(path.join(root, name))
+    const dataDir = external ? record.data_dir : path.join(canonical, 'data')
+    if (typeof dataDir !== 'string' || !path.isAbsolute(dataDir)) fail()
+    directory(dataDir, true)
+    if (external) {
+      const dataStat = fs.lstatSync(dataDir, { bigint: true })
+      if (fs.realpathSync.native(dataDir) !== dataDir || !keys(record.data_identity, ['dev', 'ino'])
+        || record.data_identity.dev !== String(dataStat.dev) || record.data_identity.ino !== String(dataStat.ino)) fail()
+    }
+    return { root: canonical, record, dataDir, command: path.join(canonical, 'bin', process.platform === 'win32' ? 'crabot.exe' : 'crabot') }
   } catch { fail() }
 }
 function readPairSelection(installation) {
@@ -143,7 +152,7 @@ function locatePinnedDesktopGui(resources, pinText) {
 function applyDesktopEnvironment(installation, env = process.env) {
   try {
     if (!installation || typeof installation.root !== 'string' || !path.isAbsolute(installation.root)
-      || installation.dataDir !== path.join(installation.root, 'data') || !digest(installation.selection?.core_id)
+      || installation.dataDir !== readDesktopInstallation(installation.root).dataDir || !digest(installation.selection?.core_id)
       || installation.coreRoot !== path.join(installation.root, 'releases', installation.selection.core_id)
       || typeof installation.executable !== 'string' || !path.isAbsolute(installation.executable)) fail()
     if (env.CRABOT_DEV === 'true' || Number(env.CRABOT_PORT_OFFSET || 0) !== 0

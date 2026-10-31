@@ -405,3 +405,43 @@ test('removal source location reads the protected GUI without creating a Core or
   assert.throws(() => desktop.locateDesktopRemovalGui(f.resources, pin), { code: 'CRABOT_DESKTOP_INSTALLATION' })
   await assert.rejects(fs.stat(path.join(f.root, 'data')), { code: 'ENOENT' })
 })
+
+async function useExternalData(f) {
+  const dataDir = management.ensurePrivateDataRoot(path.join(f.parent, '旧 release 数据'))
+  const stat = await fs.stat(dataDir, { bigint: true })
+  const { data: _data, ...paths } = f.record.paths
+  const record = { ...f.record, schema_version: 2, paths, data_dir: dataDir,
+    data_identity: { dev: String(stat.dev), ino: String(stat.ino) } }
+  await fs.writeFile(path.join(f.root, 'desktop-installation.json'), JSON.stringify(record) + '\n')
+  return { dataDir, record }
+}
+
+test('external legacy data is shared by GUI, Core and the actual native CLI without a root-local data directory', async t => {
+  const f = await fixture(t), { dataDir } = await useExternalData(f)
+  await fs.rmdir(path.join(f.root, 'data'))
+  await fs.writeFile(path.join(dataDir, 'history.json'), 'existing history')
+  const selected = desktop.readDesktopSelection(f.root)
+  assert.equal(selected.dataDir, dataDir)
+  assert.equal(desktop.locatePinnedDesktopGui(f.resources, JSON.stringify(f.selection) + '\n').dataDir, dataDir)
+  assert.equal(desktop.locateDesktopCore(f.coreRoot).dataDir, dataDir)
+  assert.equal(desktop.readDesktopPairReference(f.root).data_dir, dataDir)
+  const env = { PATH: '' }; desktop.applyDesktopEnvironment(selected, env)
+  const { stdout } = await promisify(execFile)(path.join(f.root, 'bin', nativeName), ['help'], { env })
+  assert.deepEqual(JSON.parse(stdout), { data: dataDir, core: f.coreRoot })
+  assert.equal(await fs.readFile(path.join(dataDir, 'history.json'), 'utf8'), 'existing history')
+  await assert.rejects(fs.lstat(path.join(f.root, 'data')), { code: 'ENOENT' })
+})
+
+test('external data identity, missing directory and explicit conflicts cannot redirect or create an empty instance', async t => {
+  const f = await fixture(t), { dataDir, record } = await useExternalData(f)
+  const selected = desktop.readDesktopSelection(f.root)
+  assert.throws(() => desktop.applyDesktopEnvironment(selected, { DATA_DIR: path.join(f.root, 'data') }), { code: 'CRABOT_DESKTOP_INSTALLATION' })
+  await fs.writeFile(path.join(f.root, 'desktop-installation.json'), JSON.stringify({ ...record, data_identity: { ...record.data_identity, ino: '0' } }))
+  assert.throws(() => desktop.readDesktopSelection(f.root), { code: 'CRABOT_DESKTOP_INSTALLATION' })
+  await fs.writeFile(path.join(f.root, 'desktop-installation.json'), JSON.stringify(record))
+  await fs.rmdir(dataDir)
+  assert.throws(() => desktop.readDesktopSelection(f.root), { code: 'CRABOT_DESKTOP_INSTALLATION' })
+  assert.throws(() => desktop.applyDesktopEnvironment(selected, {}), { code: 'CRABOT_DESKTOP_INSTALLATION' })
+  await assert.rejects(fs.lstat(dataDir), { code: 'ENOENT' })
+  assert.deepEqual(await fs.readdir(path.join(f.root, 'data')), [])
+})

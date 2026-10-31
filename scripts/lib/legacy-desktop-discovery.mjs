@@ -21,8 +21,8 @@ export async function discoverLegacyDesktopTakeover({ root, source = process.env
   if (desktop) {
     const { readVersionMaintenance } = await import('./version-maintenance.mjs')
     record = readVersionMaintenance(dataDir)
-    if (!record || [1, 3].includes(record.schema_version)) return null
-    if (record.schema_version !== 4) pending()
+    if (!record && await present(path.join(root, 'current-release.json')) || record && [1, 3].includes(record.schema_version)) return null
+    if (record && record.schema_version !== 4) pending()
   }
   if (await present(path.join(root, '.desktop-takeover'))) {
     const entry = await inspectLegacyEntryFence(root)
