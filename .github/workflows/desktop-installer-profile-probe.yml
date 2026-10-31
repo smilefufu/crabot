@@ -8,6 +8,10 @@ on:
       artifact_name:
         type: string
         default: 'crabot-win32-x64-offline-test-a34d9e253fa9ea565e29c0a34f8c2b8ed960b7a7'
+      ui_only:
+        description: 'Verify the completed EXE interface without repeating source builds or legacy acceptance'
+        type: boolean
+        default: false
 permissions:
   contents: read
   actions: read
@@ -25,6 +29,7 @@ jobs:
         with:
           node-version: '22.22.3'
       - name: Prepare the finite test dependencies
+        if: inputs.ui_only != true
         run: |
           node scripts/build-native.mjs
           pnpm --dir crabot-client install --frozen-lockfile
@@ -44,8 +49,10 @@ jobs:
           mkdir -p .desktop-build/manual/installer/distribution
           find .desktop-build/completed-exe -type f \( -name '*offline-candidate.exe' -o -name SHA256SUMS \) -exec cp {} .desktop-build/manual/installer/distribution/ \;
       - name: Exact EXE extraction with the original and sufficient output budgets
+        if: inputs.ui_only != true
         run: node .github/scripts/recheck-windows-single-layer.mjs 2>&1 | tee .desktop-build/exact-exe-recheck.log
       - name: Real v14 data confirmation in the unchanged packaged GUI
+        if: inputs.ui_only != true
         run: node .github/scripts/verify-legacy-user-takeover.mjs .desktop-build/manual/paired .desktop-build/manual/installer v2026.10.14.1 2>&1 | tee .desktop-build/exact-exe-legacy-gui.log
       - name: Real EXE Finish opens the GUI with 1.5 GiB free TEMP
         if: ${{ !cancelled() }}
@@ -53,6 +60,8 @@ jobs:
         run: |
           $files = @(Get-ChildItem .desktop-build/manual/installer/distribution -Filter '*offline-candidate.exe')
           if ($files.Count -ne 1) { throw 'Expected exactly one unchanged completed EXE' }
+          $expected = (Get-Content .desktop-build/manual/installer/distribution/SHA256SUMS -Raw).Trim().Split(' ')[0]
+          if ((Get-FileHash $files[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) { throw 'Completed EXE SHA mismatch' }
           & .github/scripts/smoke-windows-wrapper-capacity.ps1 -Installer $files[0].FullName -Expected complete | Tee-Object .desktop-build/exact-exe-ui.log
       - name: Retain exact package recheck evidence
         if: always()
