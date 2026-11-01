@@ -74,7 +74,7 @@ it.skipIf(process.platform !== 'win32')('keeps the CLI and its PowerShell hooks 
   const { pathToFileURL } = await import('node:url')
   root = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-slack-console-test-'))
   const fixture = path.join(root, 'inspect.cjs'), ownerFile = path.join(root, 'owner.mjs')
-  const shell = path.join(process.env.SystemRoot!, 'System32/WindowsPowerShell/v1.0/powershell.exe')
+  const shell = path.join(process.env.SystemRoot || process.env.SYSTEMROOT!, 'System32/WindowsPowerShell/v1.0/powershell.exe')
   const script = `Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class ConsoleProbe { [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow(); [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr window); }'; $window=[ConsoleProbe]::GetConsoleWindow(); @{has_console=($window -ne [IntPtr]::Zero); visible=[ConsoleProbe]::IsWindowVisible($window)} | ConvertTo-Json -Compress`
   // The grandchild is deliberately not hidden: real Slack CLI hooks launch PowerShell themselves.
   await fs.writeFile(fixture, `const{execFileSync}=require('node:child_process');process.stdout.write(execFileSync(${JSON.stringify(shell)},${JSON.stringify(['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script])},{stdio:['ignore','pipe','pipe']}));`)

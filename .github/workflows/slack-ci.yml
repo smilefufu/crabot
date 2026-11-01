@@ -104,8 +104,15 @@ jobs:
         shell: bash
         run: |
           node scripts/build-native.mjs
-          node --test scripts/lib/__tests__/background-core.test.mjs scripts/lib/__tests__/core-preflight.test.mjs
+          node --test scripts/lib/__tests__/background-core.test.mjs scripts/lib/__tests__/core-preflight.test.mjs scripts/lib/__tests__/desktop-data-import.test.mjs
           pnpm --dir crabot-core exec vitest run src/process-tree-windows.test.ts src/module-runtime-registry.test.ts --maxWorkers=1 --minWorkers=1
+
+      - name: Windows data copy comparison
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          git fetch --no-tags origin 059eaf466ebd4bef2f338a716d32ad53ebcfe5e7
+          node .github/scripts/probe-windows-data-copy-performance.mjs
 
       - name: Slack channel and process regressions
         shell: bash
