@@ -16,6 +16,11 @@ on:
         description: Verify an actual desktop.14 installation upgrades through the new EXE and GUI
         type: boolean
         default: false
+      upgrade_launch:
+        description: Actual candidate entry after stopping desktop.14
+        type: choice
+        options: [direct, finish, menu]
+        default: direct
       ui_only:
         description: 'Verify the completed EXE interface without repeating source builds or legacy acceptance'
         type: boolean
@@ -82,6 +87,7 @@ jobs:
       - name: Real EXE Finish opens the GUI with 1.5 GiB free TEMP
         env:
           CRABOT_UPGRADE_FROM14: ${{ inputs.upgrade_from14 }}
+          CRABOT_UPGRADE_LAUNCH: ${{ inputs.upgrade_launch }}
         if: ${{ !cancelled() && inputs.directory_only != true && inputs.ui_only == true }}
         shell: pwsh
         run: |
@@ -93,7 +99,7 @@ jobs:
             $old = @(Get-ChildItem .desktop-build/desktop14-baseline -Recurse -Filter '*offline-candidate.exe')
             if ($old.Count -ne 1 -or (Get-FileHash $old[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant() -ne '3c725b47a01d5c2c4211241c8c86b91c5829d60f4f5ed554ef21d1c8cf7a3d3a') { throw 'Pinned desktop.14 baseline mismatch' }
             $version = $files[0].Name -replace '^Crabot-(.+)-win-x64-offline-candidate\.exe$', '$1'
-            & .github/scripts/smoke-windows-wrapper-capacity.ps1 -Installer $old[0].FullName -UpgradeInstaller $files[0].FullName -ExpectedVersion $version -Expected complete | Tee-Object .desktop-build/exact-exe-ui.log
+            & .github/scripts/smoke-windows-wrapper-capacity.ps1 -Installer $old[0].FullName -UpgradeInstaller $files[0].FullName -ExpectedVersion $version -UpgradeLaunch $env:CRABOT_UPGRADE_LAUNCH -Expected complete | Tee-Object .desktop-build/exact-exe-ui.log
           } else {
             & .github/scripts/smoke-windows-wrapper-capacity.ps1 -Installer $files[0].FullName -Expected complete | Tee-Object .desktop-build/exact-exe-ui.log
           }

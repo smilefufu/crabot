@@ -3,12 +3,14 @@ param(
  [string]$TemporaryDirectory,
  [string]$UpgradeInstaller,
  [string]$ExpectedVersion,
+ [ValidateSet('direct','finish','menu')][string]$UpgradeLaunch = 'direct',
  [ValidateSet('complete','retry','space')][string]$Expected = 'complete'
 )
 $ErrorActionPreference = 'Stop'
 $Installer = (Resolve-Path $Installer).Path
 # A simulated user profile must inherit the real user's private temp ACL,
 # rather than the runner's shared workspace volume. The selected app root stays on D:.
+$osStartMenu = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'Microsoft/Windows/Start Menu/Programs/Crabot.lnk'
 $homeRoot = Join-Path ([IO.Path]::GetTempPath()) ('wrapper-home-' + [guid]::NewGuid().ToString('N'))
 $env:USERPROFILE = $homeRoot
 $env:HOME = $homeRoot
@@ -131,34 +133,82 @@ try {
   $credential = Join-Path $data 'admin/credentials.json'
   $credentialHash = if (Test-Path -LiteralPath $credential) { (Get-FileHash $credential).Hash } else { $null }
   $command = Join-Path $target 'bin/crabot.exe'
-  # Match the feedback: the user force-killed the old service. Preserve all old
-  # recovery files; the candidate must check OS processes and recover by itself.
-  $moduleFiles = @(Get-ChildItem (Join-Path $data 'module-runtime-registry/records') -Filter '*.json')
-  if ($moduleFiles.Count -lt 3) { throw 'Original modules have not registered their recovery records' }
-  $oldModules = @($moduleFiles | ForEach-Object { Get-Content $_.FullName -Raw | ConvertFrom-Json })
-  foreach ($oldProcess in @($beforeRuntime.mm, $beforeRuntime.controller)) {
-   if ($oldProcess) { & "$env:SystemRoot/System32/taskkill.exe" /PID $oldProcess.pid /F 2>&1 | Write-Output }
-  }
-  foreach ($oldModule in $oldModules) { & "$env:SystemRoot/System32/taskkill.exe" /PID $oldModule.root_pid /T /F 2>&1 | Write-Output }
-  if (@(Get-ChildItem (Join-Path $data 'module-runtime-registry/records') -Filter '*.json').Count -ne $moduleFiles.Count) { throw 'Force-kill fixture unexpectedly lost original recovery files' }
-  $oldGui = Join-Path $target ('app/releases/' + $beforeSelection.gui_id + '/Crabot.exe')
-  # Fixture cleanup of the known baseline GUI after its Core has stopped. The
-  # candidate must itself observe absence; no stop/migration receipt is forged.
-  foreach ($row in @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $oldGui })) {
-   & "$env:SystemRoot/System32/taskkill.exe" /PID $row.ProcessId /T /F 2>&1 | Write-Output
+  if ($UpgradeLaunch -eq 'direct') {
+   # Match the feedback: the user force-killed the old service. Preserve all old
+   # recovery files; the candidate must check OS processes and recover by itself.
+   $moduleFiles = @(Get-ChildItem (Join-Path $data 'module-runtime-registry/records') -Filter '*.json')
+   if ($moduleFiles.Count -lt 3) { throw 'Original modules have not registered their recovery records' }
+   $oldModules = @($moduleFiles | ForEach-Object { Get-Content $_.FullName -Raw | ConvertFrom-Json })
+   foreach ($oldProcess in @($beforeRuntime.mm, $beforeRuntime.controller)) {
+    if ($oldProcess) { & "$env:SystemRoot/System32/taskkill.exe" /PID $oldProcess.pid /F 2>&1 | Write-Output }
+   }
+   foreach ($oldModule in $oldModules) { & "$env:SystemRoot/System32/taskkill.exe" /PID $oldModule.root_pid /T /F 2>&1 | Write-Output }
+   if (@(Get-ChildItem (Join-Path $data 'module-runtime-registry/records') -Filter '*.json').Count -ne $moduleFiles.Count) { throw 'Force-kill fixture unexpectedly lost original recovery files' }
+   $oldGui = Join-Path $target ('app/releases/' + $beforeSelection.gui_id + '/Crabot.exe')
+   # Fixture cleanup of the known baseline GUI after its Core has stopped. The
+   # candidate must itself observe absence; no stop/migration receipt is forged.
+   foreach ($row in @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $oldGui })) {
+    & "$env:SystemRoot/System32/taskkill.exe" /PID $row.ProcessId /T /F 2>&1 | Write-Output
+   }
+  } else {
+   # Match normal Quit: use the baseline's own stop coordinator before exiting its GUI.
+   & $command stop 2>&1 | Write-Output
+   if ($LASTEXITCODE -ne 0) { throw 'Original desktop.14 did not stop normally' }
+   $oldGui = Join-Path $target ('app/releases/' + $beforeSelection.gui_id + '/Crabot.exe')
+   foreach ($row in @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $oldGui })) {
+    & "$env:SystemRoot/System32/taskkill.exe" /PID $row.ProcessId /T /F 2>&1 | Write-Output
+   }
+   $baselineMenu = (New-Object -ComObject WScript.Shell).CreateShortcut($osStartMenu)
+   if ($baselineMenu.TargetPath -ne $oldGui) { throw 'Original actual OS Start menu does not target desktop.14' }
   }
   Start-Sleep -Seconds 2
-  $candidate = Start-Process (Resolve-Path $UpgradeInstaller).Path -ArgumentList "/S /D=$target" -PassThru
+  $candidateArgs = if ($UpgradeLaunch -eq 'finish') { "/D=$target" } else { "/S /D=$target" }
+  $candidate = Start-Process (Resolve-Path $UpgradeInstaller).Path -ArgumentList $candidateArgs -PassThru
+  $null = $candidate.Handle
   [void]$owned.Add([uint32]$candidate.Id)
-  if (!$candidate.WaitForExit(600000) -or $candidate.ExitCode -ne 0) { throw 'Candidate program installation failed' }
+  if ($UpgradeLaunch -eq 'finish') {
+   $candidateFinished = $false
+   $finishLimit = (Get-Date).AddMinutes(10)
+   while ((Get-Date) -lt $finishLimit) {
+    foreach ($row in @(Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId)) {
+     if ($owned.Contains([uint32]$row.ParentProcessId)) { [void]$owned.Add([uint32]$row.ProcessId) }
+    }
+    foreach ($window in [WrapperUI]::Windows()) {
+     if (!$owned.Contains([WrapperUI]::Pid($window))) { continue }
+     $all = (@([WrapperUI]::Text($window)) + @([WrapperUI]::Children($window) | ForEach-Object { [WrapperUI]::Text($_) })) -join "`n"
+     if ($all -match '无法关闭|Can.t modify|安装已中止|无法创建程序目录|Installation Aborted') { throw ('Candidate installer failed: ' + $all) }
+     $next = [WrapperUI]::GetDlgItem($window,1)
+     if ($next -eq [IntPtr]::Zero -or ![WrapperUI]::IsWindowEnabled($next)) { continue }
+     $label = [WrapperUI]::Text($next)
+     if ($label -match '下一步|安装|Next|Install') { [WrapperUI]::Click($next); Start-Sleep -Milliseconds 300 }
+     elseif (!$candidateFinished -and $label -match '完成|Finish') {
+      $candidateFinished = $true
+      [WrapperUI]::Click($next)
+      Write-Output 'CRABOT_WINDOWS_UPGRADE finish_clicked=true direct_candidate_launch=false'
+     }
+    }
+    $candidate.Refresh()
+    if ($candidate.HasExited) { break }
+    Start-Sleep -Milliseconds 250
+   }
+   if (!$candidateFinished -or !$candidate.HasExited -or $candidate.ExitCode -ne 0) { throw 'Actual upgrade installer did not finish successfully' }
+  } elseif (!$candidate.WaitForExit(600000) -or $candidate.ExitCode -ne 0) { throw 'Candidate program installation failed' }
   $newRoots = @(Get-ChildItem (Join-Path $target 'app/releases') -Directory | Where-Object { $_.Name -ne $beforeSelection.gui_id })
   if ($newRoots.Count -ne 1) { throw 'Expected one newly unpacked GUI, retaining original GUI' }
   $newGui = Join-Path $newRoots[0].FullName 'Crabot.exe'
-  $candidateGui = Start-Process $newGui -PassThru
-  [void]$owned.Add([uint32]$candidateGui.Id)
+  if ($UpgradeLaunch -eq 'direct') {
+   $candidateGui = Start-Process $newGui -PassThru
+   [void]$owned.Add([uint32]$candidateGui.Id)
+  } elseif ($UpgradeLaunch -eq 'menu') {
+   $menu = (New-Object -ComObject WScript.Shell).CreateShortcut($osStartMenu)
+   if ($menu.TargetPath -ne $newGui) { throw ('Installed OS Start menu still targets original GUI: ' + $menu.TargetPath) }
+   Start-Process $osStartMenu
+   Write-Output 'CRABOT_WINDOWS_UPGRADE os_start_menu_launched=true direct_candidate_launch=false'
+  }
   $updated = $false
   $limit = (Get-Date).AddMinutes(4)
   while ((Get-Date) -lt $limit) {
+   foreach ($row in @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $newGui })) { [void]$owned.Add([uint32]$row.ProcessId) }
    foreach ($window in [WrapperUI]::Windows()) {
     if ([WrapperUI]::Console($window) -and [WrapperUI]::IsWindowVisible($window) -and !$originalConsoles.Contains($window)) {
      throw ('Upgrade/startup opened a console or Windows Terminal: ' + [WrapperUI]::Text($window))
@@ -201,6 +251,10 @@ try {
   $shortcut = Join-Path $env:APPDATA 'Microsoft/Windows/Start Menu/Programs/Crabot.lnk'
   $link = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcut)
   if ($link.TargetPath -ne $newGui) { throw 'Start menu still opens the previous GUI' }
+  if ($UpgradeLaunch -ne 'direct') {
+   $osMenu = (New-Object -ComObject WScript.Shell).CreateShortcut($osStartMenu)
+   if ($osMenu.TargetPath -ne $newGui) { throw 'Actual OS Start menu still targets original GUI after upgrade' }
+  }
   for ($cycle=1; $cycle -le 2; $cycle++) {
    & $command stop 2>&1 | Write-Output
    if ($LASTEXITCODE -ne 0) { throw "Candidate stop failed in cycle $cycle" }
@@ -213,7 +267,7 @@ try {
    $status = ((& $command status --json 2>&1) -join "`n") | ConvertFrom-Json
    if ($status.running -ne $true -or $status.data_dir -ne $data) { throw 'Restart did not recover the same data instance' }
   }
-  @{actual_exe_upgrade=$true; repeated_stop_start_cycles=2; force_killed_original=$true; from=$beforeSelection.version; to=$ExpectedVersion; actual_gui_version=$true; actual_new_core=$true; native_cli_same_data=$true; same_installation=$true; original_data_preserved=$true; start_menu_targets_new_gui=$true; no_new_visible_console=$true} | ConvertTo-Json -Compress | Write-Output
+  @{actual_exe_upgrade=$true; repeated_stop_start_cycles=2; force_killed_original=($UpgradeLaunch -eq 'direct'); candidate_launch=$UpgradeLaunch; actual_os_start_menu=($UpgradeLaunch -ne 'direct'); from=$beforeSelection.version; to=$ExpectedVersion; actual_gui_version=$true; actual_new_core=$true; native_cli_same_data=$true; same_installation=$true; original_data_preserved=$true; start_menu_targets_new_gui=$true; no_new_visible_console=$true} | ConvertTo-Json -Compress | Write-Output
   return
  }
  @{actual_exe_ui=$true; next_pages=$clicked; retry_dialog=$false; second_installer=$false; selected_path_with_spaces=$true; installer_exit_zero=$true; finish_launched_gui=$true; gui_started_actual_core=$true; native_cli_same_data=$true; no_new_visible_console=$true} | ConvertTo-Json -Compress | Write-Output
