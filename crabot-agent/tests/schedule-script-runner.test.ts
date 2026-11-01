@@ -22,9 +22,11 @@ async function waitUntil(predicate: () => Promise<boolean> | boolean, timeoutMs 
 
 describe('ScheduleScriptRunner', () => {
   const roots: string[] = []
+  const runners: ScheduleScriptRunner[] = []
 
   afterEach(async () => {
-    await Promise.all(roots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })))
+    await Promise.all(runners.splice(0).map(runner => runner.stop()))
+    await Promise.all(roots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true, maxRetries: 5 })))
   })
 
   async function fixture(
@@ -44,6 +46,7 @@ describe('ScheduleScriptRunner', () => {
       readProcessIdentity: async (pid) => String(pid),
       ...overrides,
     })
+    runners.push(runner)
     return { root, traceStore, markerDir, runner, deliver }
   }
 
@@ -57,7 +60,8 @@ describe('ScheduleScriptRunner', () => {
     })
 
     const markerPath = path.join(f.markerDir, 'trigger-1.json')
-    expect((await fs.stat(markerPath)).mode & 0o777).toBe(0o600)
+    // Windows reports emulated mode bits; this assertion is POSIX-specific.
+    if (process.platform !== 'win32') expect((await fs.stat(markerPath)).mode & 0o777).toBe(0o600)
     const marker = await fs.readFile(markerPath, 'utf8')
     expect(marker).not.toContain(source)
     expect(JSON.parse(marker).process_start_identity).toMatch(/\|nonce=[0-9a-f-]{36}$/i)
