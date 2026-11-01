@@ -1,14 +1,15 @@
 # Crabot 项目进度
 
-### 桌面化冻结范围：Windows第14版已交付，第15版反馈修复与原生验收中
+### 桌面化冻结范围：Windows第15版反馈修复已交付，完整功能继续收口
 
 - 2026-11-01在独立`fix/desktop-simple-import`构建并交付Windows desktop.14，来源aed22d45；最终EXE559338454字节、程序普通文件1855128966字节（不含data/workspace），SHA256 `3c725b47a01d5c2c4211241c8c86b91c5829d60f4f5ed554ef21d1c8cf7a3d3a`。位于Downloads/Crabot桌面验收包-20261101/Windows 11，官方归档/包内摘要/交付副本一致。
 - 同EXE真实界面41278349988成功：D盘不存在的空格目录、TEMP余1.5GiB，无Retry/第二安装器，安装退出0，Finish启动实际GUI/Core，原生CLI同data。完整构建41277405704的Windows导入回归、运行环境、源码冷启动、解包及v2026.10.14.1旧CLI接入步骤已通过；75MB副本导入保留来源/凭据/历史/workspace，原命令与新CLI正常，确认到健康/命令核验120秒目标通过。该run现已整组成功，包含源码GUI/release共存及最终同EXE实际安装。75MB/250文件确认到绑定2083ms（非纯复制）、到GUI/Core/新旧CLI核验7285ms；不代表海量小文件性能验收。
 - 本轮按已确认修订实现副本导入、复制后计数、持锁停服、已完成后不再复制/迁移、未知迁移保留、真实错误和日志位置。Windows原生回归复现复制后工作区权限属性遗漏后，以既有native创建器保留私有对象属性，未放宽读取检查；旧失败41276267118/41276978706/41277052576保留。[包与实施证据](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-30-windows-installation-feedback-fixes.md)。
 - 第12版不存在D:\Crabot误拒绝已由第13版修复：41267578010/41267714316复现create-parents/Win32=5，41269348309原生/NSIS和41269348044同EXE实际UI通过。第13版原生产run41268098768尾部测试夹具错误仍记失败；第14版不沿用旧成功作为自身验收。
 - 2026-11-01完成实际成品体积/依赖审计及两个subagent只读调查：[体积审计](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/research/2026-11-01-desktop-size-audit.md)、[Windows复制性能](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/research/2026-11-01-windows-data-import-performance.md)、[Windows代理缺口](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/research/2026-11-01-windows-system-proxy-gap.md)。体积候选未落为新包，不改冻结契约或用户数据。Windows固定代理最小修订已获用户确认，正式协议先行发布：只读当前用户HTTP/HTTPS地址，环境变量优先，排除列表/PAC/SOCKS不扩展。
-- Windows反馈修复：全局最多8个文件复制并合并进度，内容/私有ACL/flush保持；真实Windows两轮10000×4KiB（25%私有）由31–39秒降至18.8–19.6秒，字节/mode/ACL/catalog/源不变通过。后台Core、模块、身份查询及Slack supervisor增加隐藏窗口；Slack子工具继承EOF描述符保留隐藏控制台，尚待窗口回归最终通过，不能标为已解决。Slack错误区分验证码、App安装及凭据验证阶段，不暴露原始输出。
-- 第15版同源首次构建41283330174已通过实际WinHTTP当前用户读取→Shared→CONNECT/fetch、启停代理及恢复测试设置；后续Shared测试因Windows环境变量大小写别名的夹具假设失败，正在修正。独立41282910532四平台中Windows的窗口检查超时，其余三平台通过；整组仍失败。40项Slack本地测试通过、Windows可见性在Mac跳过，模拟外部CLI的真实子进程/hook/handoff回归不等于真实Slack建App成功。用户说明失败在验证码提交后且Slack后台无对应App，现场唯一原因仍待进一步证据。
+- 第15版反馈修复：文件复制最多8项并发并合并进度，内容/私有ACL/flush保持；真实Windows两轮10000×4KiB（25%私有）由31–39秒降至18.8–19.6秒，字节/mode/ACL/catalog/源不变通过。Windows固定代理已原生读取并实际CONNECT/fetch；保存后的多Shared副本缓存已同步，33项Shared回归通过。保留环境优先、内部直连和已确认PAC/SOCKS/系统排除列表边界。
+- Windows空白窗口/Slack配置阻断：官方CLI在解析参数前等待终端能力响应；普通隐藏控制台与NO_COLOR均未解决。现用Windows内置私有伪终端支持该工具，标准输入保持EOF、输出保留管道，Job负责拥有和收口完整进程树；Core/模块/身份查询/supervisor隐藏窗口。环境白名单补回PowerShell两个模块上下文字段，不传模型密钥。Slack错误只返回固定描述并区分失败阶段。
+- 第15版来源2cc1a412，EXE559436379字节，SHA256 `ba13ba7dd6c7e7501f81adaf619187a6a258805bda863a672bcabb6b7889ed95`，程序1855397628字节（不含data/workspace），Downloads同目录已交付；官方归档/包内/副本摘要一致。原生专项41287954611的Slack43项、实际子进程交接/清理、不可见PowerShell、EOF、父进程丢失收树及官方CLI实际PowerShell hooks/渠道名通过。完整生产run41287962446的installer与源码作业成功：代理/原位置停止更新、离线运行环境、v2026.10.14.1旧CLI接入、源码GUI与release两Core独立启停及完整删程序后的保留数据恢复通过。独立同EXE实际界面41289284281整组成功，D盘根不存在目录/TEMP余1.5GiB/Finish/GUI-Core-CLI/无新控制台通过。真实Slack账号创建和收发仍待用户验收；以前失败保留。
 - ARM Mac仍为已交付desktop.11（DMG537516782字节，程序1372029537字节），没有重打或替换本机源码。体积裁剪、各历史包/失败与完整组件证据见上述实施记录；可选旧程序清理WIP没有混入本分支。
 - 继续原冻结范围，未增加需求：已有GUI中断更新、保留数据修复/卸载简化、重复安装、其它平台及其余发行回归尚未全部验收；项目workspace、在线Admin迁移、受管环境与system批量管理保持既定边界。Windows结果来自Server2025 CI，Win11普通账号/真实业务仍待用户复验；缺失旧macOS/Ubuntu桌面资源按用户决定暂跳过。完整测好后按可独立构建/验证的依赖边界拆PR；产品main未推送。
 - 本机源码部署/data、Docker及Spotlight未动，没有在本机启动验收App/Core。下载阶段磁盘仍约198GiB空闲；仅清理本轮已验证且已交付的临时副本。
