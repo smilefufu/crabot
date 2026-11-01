@@ -84,7 +84,7 @@ async function terminatePosixTree(
 
 function execFileText(file: string, args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
-    execFile(file, args, { maxBuffer: 1024 * 1024 }, (error, stdout) => {
+    execFile(file, args, { maxBuffer: 1024 * 1024, windowsHide: true }, (error, stdout) => {
       if (error) reject(error)
       else resolve(stdout)
     })

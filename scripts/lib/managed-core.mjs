@@ -14,7 +14,7 @@ export async function runManagedCore({ root, dataDir, mmPort, env, stdio, cleanu
   delete childEnv.CRABOT_CLI_LOCK_HELD
   const mm = spawn(process.execPath, [join(root, 'crabot-core', 'dist', 'main.js')], {
     cwd: join(root, 'crabot-core'), stdio: [...stdio, 'ipc'],
-    env: childEnv,
+    env: childEnv, windowsHide: true,
   })
   const shutdown = createSupervisorShutdownController({
     mm, log,

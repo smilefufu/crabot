@@ -1,6 +1,7 @@
 name: Slack CI
 
 on:
+  workflow_dispatch:
   pull_request:
     paths:
       - 'crabot-channel-slack/**'
@@ -19,7 +20,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -51,7 +52,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '22.22.3'
           cache: 'pnpm'
 
       - name: Install dependencies (with devDeps for build)
@@ -95,6 +96,13 @@ jobs:
 
           # admin: 后端 build → 前端 build:web（顺序执行，build:web 会进入 web/ 子项目自己 install）
           (cd crabot-admin && pnpm run build && pnpm run build:web)
+
+      - name: Native process helper and background lifecycle
+        shell: bash
+        run: |
+          node scripts/build-native.mjs
+          node --test scripts/lib/__tests__/background-core.test.mjs scripts/lib/__tests__/core-preflight.test.mjs
+          pnpm --dir crabot-core exec vitest run src/process-tree-windows.test.ts src/module-runtime-registry.test.ts --maxWorkers=1 --minWorkers=1
 
       - name: Slack channel and process regressions
         shell: bash

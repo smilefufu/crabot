@@ -65,27 +65,53 @@ export async function copyDesktopData(source, target, { signal, progress = () =>
     throw new Error('目标数据目录非空，未覆盖已有数据。')
   }
   management.ensurePrivateDataRoot(target)
-  let files = 0, bytes = 0
+  let files = 0, bytes = 0, failure, lastProgress = -Infinity, reportedFiles = 0
+  const pending = new Set(), directories = []
+  const check = () => { if (failure) throw failure; signal?.throwIfAborted() }
+  const report = (final = false) => {
+    const now = performance.now()
+    if (files !== reportedFiles && (final || now - lastProgress >= 100)) {
+      progress({ phase: 'copying', files, bytes })
+      lastProgress = now; reportedFiles = files
+    }
+  }
   async function copy(file, destination) {
-    signal?.throwIfAborted()
+    check()
     const info = await fs.lstat(file)
+    check()
     if (info.isDirectory()) {
       if (process.platform === 'win32' && identity.isPrivateDirectory(file)) identity.createPrivateDirectory(destination)
       else await fs.mkdir(destination)
       for (const entry of await fs.readdir(file)) await copy(path.join(file, entry), path.join(destination, entry))
-      await fs.chmod(destination, info.mode)
+      directories.push([destination, info.mode])
     } else {
-      if (process.platform === 'win32' && info.isFile() && identity.isPrivateFile(file)) {
-        identity.writePrivateFile(destination, '')
-        await fs.copyFile(file, destination)
-      } else await fs.cp(file, destination, { verbatimSymlinks: true, mode: constants.COPYFILE_EXCL, errorOnExist: true, force: false })
-      if (info.isFile()) { files++; bytes += info.size; progress({ phase: 'copying', files, bytes }) }
+      while (pending.size >= 8) await Promise.race(pending)
+      check()
+      const task = (async () => {
+        if (process.platform === 'win32' && info.isFile() && identity.isPrivateFile(file)) {
+          identity.writePrivateFile(destination, '')
+          await fs.copyFile(file, destination)
+        } else if (info.isFile()) {
+          await fs.copyFile(file, destination, constants.COPYFILE_EXCL)
+          await fs.chmod(destination, info.mode)
+        } else await fs.cp(file, destination, { verbatimSymlinks: true, mode: constants.COPYFILE_EXCL, errorOnExist: true, force: false })
+        if (info.isFile()) { files++; bytes += info.size; if (!failure) report() }
+        check()
+      })().catch(error => { failure ??= error }).finally(() => pending.delete(task))
+      pending.add(task)
     }
-    signal?.throwIfAborted()
   }
-  for (const entry of await fs.readdir(source)) {
-    if (!['cli.lock', 'desktop-managed.json'].includes(entry)) await copy(path.join(source, entry), path.join(target, entry))
-  }
+  try {
+    for (const entry of await fs.readdir(source)) {
+      if (!['cli.lock', 'desktop-managed.json'].includes(entry)) await copy(path.join(source, entry), path.join(target, entry))
+    }
+  } catch (error) { failure ??= error }
+  // Drain every write before the caller can release locks, retry, or migrate.
+  await Promise.all(pending)
+  check()
+  for (const [directory, mode] of directories) { await fs.chmod(directory, mode); check() }
+  report(true)
+  check()
   return { files, bytes }
 }
 

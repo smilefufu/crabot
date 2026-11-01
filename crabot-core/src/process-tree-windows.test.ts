@@ -111,6 +111,7 @@ describe('Windows process ownership fallback', () => {
     })
 
     const powershell = execFileMock.mock.calls.find(([file]) => file === powershellExecutable)
+    expect(powershell?.[2]).toMatchObject({ windowsHide: true })
     expect(powershell?.[1].join(' ')).toContain('LocalPort 19042')
     const taskkills = execFileMock.mock.calls.filter(([file]) => file === 'taskkill')
     expect(taskkills.map(call => call[1])).toEqual([

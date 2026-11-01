@@ -157,6 +157,29 @@ describe('local Slack onboarding contract', () => {
     await onboarder.dispose()
     await expect(fs.access(path.join(dataDir, 'slack-onboarding', begin.session_id, 'cli'))).rejects.toThrow()
   })
+  it('reports a failed local App hook without exposing CLI output or credentials', async () => {
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-slack-hook-error-')); roots.push(dataDir)
+    const launch = (_executable: string, args: string[], project: string): CliJob => ({
+      result: (async () => {
+        if (args.includes('--challenge')) {
+          await fs.writeFile(args[args.indexOf('--config-dir') + 1] + '/credentials.json', JSON.stringify({ TTEST: { team_id: 'TTEST', user_id: 'UTEST' } }))
+          return { code: 0, output: '' }
+        }
+        if (args[0] === 'run') return { code: 1, output: 'sdk_hook_invocation_failed xoxb-SECRET fixture-challenge' }
+        return { code: 0, output: '/slackauthticket fixture-ticket' }
+      })(),
+      async stop() {},
+    })
+    const onboarder = new SlackOnboarder({ dataDir, ensureCli: async () => 'fixture', startCli: launch })
+    const begin = await onboarder.begin({ __admin_proxy: { mode: 'custom', custom_url: 'http://127.0.0.1:7890' } })
+    await onboarder.submit(begin.session_id, { challenge_code: 'fixture-challenge' })
+    const event = await terminal(onboarder, begin.session_id)
+    expect(event).toMatchObject({ type: 'error', message: expect.stringContaining('本地配置脚本') })
+    expect(JSON.stringify(event)).not.toMatch(/xoxb-SECRET|fixture-challenge/)
+    expect(event?.message).toContain('custom')
+    await onboarder.dispose()
+  })
+
   it('does not publish success if owned process shutdown cannot be confirmed', async () => {
     const { onboarder } = await setup({ stopFails: true })
     const begin = await onboarder.begin()

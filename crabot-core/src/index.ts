@@ -4838,6 +4838,7 @@ export class ModuleManager {
         env: childEnv,
         stdio: ['ignore', 'pipe', 'pipe'],
         detached: process.platform !== 'win32',
+        windowsHide: true,
       })
     } catch (error) {
       clearPendingCredentials()

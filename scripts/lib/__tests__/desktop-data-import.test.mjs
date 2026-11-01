@@ -164,3 +164,117 @@ test('copying source data never publishes the source desktop marker in the new d
   await assert.rejects(fs.stat(path.join(f.target, 'desktop-managed.json')), { code: 'ENOENT' })
   await fs.stat(path.join(f.source, 'desktop-managed.json'))
 })
+
+test('ordinary files use the direct copy path and retain their source mode', async t => {
+  const f = await fixture(t), file = path.join(f.source, 'agent/history.json')
+  await fs.chmod(file, 0o440)
+  t.mock.method(fs, 'cp', () => assert.fail('An already classified regular file does not need recursive cp checks'))
+  const result = await copyDesktopData(f.source, f.target)
+  assert.equal(result.files, 1)
+  assert.equal(await fs.readFile(path.join(f.target, 'agent/history.json'), 'utf8'), '{"original":true}')
+  assert.equal((await fs.stat(path.join(f.target, 'agent/history.json'))).mode & 0o777, (await fs.stat(file)).mode & 0o777)
+})
+
+test('ordinary-file fast copy never overwrites a destination created before its write', async t => {
+  const f = await fixture(t), original = fs.copyFile
+  if (process.platform === 'win32') t.mock.method(identity, 'isPrivateFile', () => false)
+  t.mock.method(fs, 'copyFile', async (source, target, mode) => {
+    await fs.writeFile(target, 'another file', { flag: 'wx' })
+    return original(source, target, mode)
+  })
+  await assert.rejects(copyDesktopData(f.source, f.target), { code: 'EEXIST' })
+  assert.equal(await fs.readFile(path.join(f.target, 'agent/history.json'), 'utf8'), 'another file')
+  assert.equal(await fs.readFile(path.join(f.source, 'agent/history.json'), 'utf8'), '{"original":true}')
+})
+
+test('copy progress is coalesced while always publishing the final completed totals', async t => {
+  const f = await fixture(t), updates = []
+  for (let index = 0; index < 32; index++) await fs.writeFile(path.join(f.source, 'agent', String(index)), 'extra')
+  t.mock.method(performance, 'now', () => 0)
+  const result = await copyDesktopData(f.source, f.target, { progress: value => updates.push(value) })
+  assert.equal(result.files, 33)
+  assert.equal(result.bytes, Buffer.byteLength('{"original":true}') + 32 * 5)
+  assert.equal(updates.length, 2, 'A burst needs its first progress event and exact final totals, not one IPC per file')
+  assert.equal(updates[0].files, 1)
+  assert.deepEqual(updates[1], { phase: 'copying', ...result })
+  for (let index = 0; index < 32; index++) assert.equal(await fs.readFile(path.join(f.target, 'agent', String(index)), 'utf8'), 'extra')
+})
+
+for (const abort of [false, true]) test(`bounded copying drains in-flight writes before ${abort ? 'cancellation' : 'failure'} releases either lifecycle lock`, async t => {
+  const f = await fixture(t), { acquireExistingCliLock, releaseCliLock } = await import('../cli-lock.mjs')
+  for (let index = 0; index < 24; index++) {
+    const directory = path.join(f.source, 'agent', 'nested-' + index)
+    await fs.mkdir(directory); await fs.writeFile(path.join(directory, 'content'), 'retained ' + index)
+  }
+  const controller = new AbortController(), original = fs.copyFile
+  let release, failFirst, active = 0, maximum = 0, started = 0, settled = false
+  const writes = new Promise(resolve => { release = resolve }), failure = new Promise((_resolve, reject) => { failFirst = reject })
+  void failure.catch(() => {})
+  t.mock.method(fs, 'copyFile', async (source, target, mode) => {
+    started++; active++; maximum = Math.max(maximum, active)
+    try {
+      if (!abort && started === 1) await failure
+      else await writes
+      return await original(source, target, mode)
+    } finally { active-- }
+  })
+  const outcome = importDesktopData({ source: { dataRoot: f.source }, root: f.code, target: f.target,
+    signal: controller.signal, stop: async () => {}, migrate: async () => assert.fail('Unfinished copying must never begin migration') })
+    .then(value => { settled = true; return { value } }, error => { settled = true; return { error } })
+  try {
+    const deadline = Date.now() + 3000
+    while (active < 8 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5))
+    assert.equal(active, 8, 'Different directories share a bounded pool instead of serializing every file')
+    if (abort) controller.abort()
+    else failFirst(Object.assign(new Error('copy fixture failed'), { code: 'EIO' }))
+    await new Promise(resolve => setTimeout(resolve, 25))
+    assert.equal(settled, false, 'The caller must wait for all outstanding filesystem operations')
+    assert.equal(started, 8, 'No new file starts after a failure or cancellation')
+    assert.equal(maximum, 8, 'Nested directories must not multiply the global concurrency limit')
+    await assert.rejects(acquireExistingCliLock(f.source, 'competing-start', 0), /another crabot CLI operation/)
+    await assert.rejects(acquireExistingCliLock(f.target, 'competing-start', 0), /another crabot CLI operation/)
+  } finally {
+    if (!abort) failFirst(Object.assign(new Error('copy fixture failed'), { code: 'EIO' }))
+    release()
+    await outcome
+  }
+  const result = await outcome
+  assert.match(result.error.message, abort ? /abort/i : /copy fixture failed/)
+  assert.equal(active, 0)
+  for (const data of [f.source, f.target]) { const lock = await acquireExistingCliLock(data, 'retry', 0); releaseCliLock(lock) }
+  await assert.rejects(fs.stat(path.join(f.target, 'desktop-managed.json')), { code: 'ENOENT' })
+  assert.equal(await fs.readFile(path.join(f.source, 'agent/history.json'), 'utf8'), '{"original":true}')
+})
+
+test('parallel file copying still preserves literal symbolic links without copying their targets', { skip: process.platform === 'win32' }, async t => {
+  const f = await fixture(t)
+  await fs.symlink('history.json', path.join(f.source, 'agent/history-link'))
+  const result = await copyDesktopData(f.source, f.target)
+  assert.equal(result.files, 1)
+  assert.equal(await fs.readlink(path.join(f.target, 'agent/history-link')), 'history.json')
+  assert.equal(await fs.readFile(path.join(f.target, 'agent/history-link'), 'utf8'), '{"original":true}')
+})
+
+test('read-only directory modes are applied only after all child file writes finish', { skip: process.platform === 'win32' }, async t => {
+  const f = await fixture(t), source = path.join(f.source, 'agent'), target = path.join(f.target, 'agent')
+  for (let index = 0; index < 7; index++) await fs.writeFile(path.join(source, String(index)), 'child')
+  await fs.chmod(source, 0o500)
+  const original = fs.copyFile
+  let release, active = 0
+  const writes = new Promise(resolve => { release = resolve })
+  t.mock.method(fs, 'copyFile', async (...args) => { active++; try { await writes; return await original(...args) } finally { active-- } })
+  const copying = copyDesktopData(f.source, f.target)
+  try {
+    const deadline = Date.now() + 3000
+    while (active < 8 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5))
+    assert.equal(active, 8)
+    assert.notEqual((await fs.stat(target)).mode & 0o200, 0, 'The target must remain writable until its in-flight children complete')
+    release()
+    assert.equal((await copying).files, 8)
+    assert.equal((await fs.stat(target)).mode & 0o777, 0o500)
+  } finally {
+    release(); await copying.catch(() => {})
+    await fs.chmod(source, 0o700)
+    await fs.chmod(target, 0o700).catch(error => { if (error.code !== 'ENOENT') throw error })
+  }
+})

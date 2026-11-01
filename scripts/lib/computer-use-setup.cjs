@@ -25,7 +25,7 @@ async function describeHost() {
     if (process.platform === 'darwin') session = (await fs.stat('/dev/console')).uid === process.getuid() ? 'active' : 'unavailable'
     else if (process.platform === 'linux') session = process.env.DISPLAY || process.env.WAYLAND_DISPLAY ? 'active' : 'unavailable'
     else if (process.platform === 'win32') {
-      const { stdout } = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '[System.Diagnostics.Process]::GetCurrentProcess().SessionId'], { timeout: 5000 })
+      const { stdout } = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '[System.Diagnostics.Process]::GetCurrentProcess().SessionId'], { timeout: 5000, windowsHide: true })
       session = /^\d+$/.test(stdout.trim()) && Number(stdout.trim()) > 0 ? 'active' : 'unavailable'
     } else session = 'unavailable'
   } catch { /* Unknown is not permission missing or a healthy desktop. */ }

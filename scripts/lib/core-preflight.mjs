@@ -21,7 +21,7 @@ export async function runCorePreflight({ root, dataDir, node, env, stdio = ['ign
   try {
     child = spawn(node, ['--import', new URL('./preflight-child.mjs', import.meta.url).href,
       path.join(root, 'crabot-core/dist/orphan-recovery-preflight.js')], {
-      cwd: path.join(root, 'crabot-core'), stdio, env: { ...env, CRABOT_PREFLIGHT_DATA_DIR: dataDir, CRABOT_PREFLIGHT_ID: record.id },
+      cwd: path.join(root, 'crabot-core'), stdio, windowsHide: true, env: { ...env, CRABOT_PREFLIGHT_DATA_DIR: dataDir, CRABOT_PREFLIGHT_ID: record.id },
     })
     child.stdout?.on('data', bytes => { stdout = (stdout + bytes.toString()).slice(-1024 * 1024) })
     child.stderr?.on('data', bytes => { stderr = (stderr + bytes.toString()).slice(-1024 * 1024) })

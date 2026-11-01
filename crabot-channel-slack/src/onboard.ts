@@ -16,6 +16,7 @@ interface Session {
   expires: number; phase: 'waiting' | 'processing' | 'ready' | 'error' | 'cancelled' | 'completed'
   abort: AbortController; job?: CliJob; task?: Promise<void>; result?: OnboarderFinishResult
   error?: { code: string; message: string }; app_id?: string; requested_name?: string; proxy?: ProxyConfig
+  step?: 'authorization' | 'app' | 'verification'; failure?: string
 }
 interface Options {
   dataDir?: string
@@ -61,13 +62,21 @@ export class SlackOnboarder implements Onboarder {
     const result = await job.result
     if (session.job === job) session.job = undefined
     session.abort.signal.throwIfAborted()
-    if (result.code !== 0) {
-      let code = 'unknown'
-      if (/expired|invalid_ticket/i.test(result.output)) code = 'expired_token'
-      else if (/denied|not_allowed|restricted|approval|permission|scope/i.test(result.output)) code = 'access_denied'
-      throw new OnboardingError(code, 400, 'Slack 授权或安装未完成')
-    }
+    this.checkCliResult(session, result)
     return result.output
+  }
+  private checkCliResult(session: Session, result: { code: number | null; output: string }): void {
+    if (result.code === 0) return
+    let code = 'unknown'
+    if (/expired|invalid_ticket/i.test(result.output)) code = 'expired_token'
+    else if (/denied|not_allowed|restricted|approval|permission|scope/i.test(result.output)) code = 'access_denied'
+    // Only controlled descriptions cross into the UI; CLI output may contain tokens.
+    if (/sdk_hook_invocation_failed|sdk_hook_not_found/i.test(result.output)) session.failure = '本地配置脚本执行失败。'
+    else if (/timeout|timed out|connection refused|connection reset|no such host|proxyconnect|network is unreachable|x509/i.test(result.output)) session.failure = '授权工具连接 Slack 失败，请检查代理连接和证书。'
+    else if (code === 'expired_token') session.failure = '授权票据或验证码已失效，请重新授权。'
+    else if (code === 'access_denied') session.failure = 'Slack 拒绝授权或安装，请检查工作区权限和审批状态。'
+    else session.failure = '授权工具未能完成当前操作。'
+    throw new OnboardingError(code, 400, 'Slack 授权或安装未完成')
   }
   begin(params?: Record<string, unknown>): Promise<OnboarderBeginResult> {
     const task = this.beginSession(params)
@@ -141,12 +150,14 @@ export class SlackOnboarder implements Onboarder {
   private async configure(session: Session, code: string): Promise<void> {
     const timer = setTimeout(() => session.abort.abort(), this.options.configureMs ?? 300000)
     try {
+      session.step = 'authorization'
       await this.command(session, ['auth', 'login', '--no-prompt', '--ticket', session.ticket!, '--challenge', code])
       session.ticket = undefined
       const auths = JSON.parse(await fs.readFile(path.join(session.root, 'cli', 'credentials.json'), 'utf8')) as Record<string, Identity>
       const values = Object.values(auths)
       if (values.length !== 1 || !/^T[A-Z0-9]+$/.test(values[0].team_id) || !/^U[A-Z0-9]+$/.test(values[0].user_id)) throw new Error('Invalid CLI identity')
       const identity = values[0]
+      session.step = 'app'
       const previous = await this.previousApp(session, identity)
       if (previous) await writePrivate(path.join(session.project, '.slack', 'apps.dev.json'), { [identity.team_id]: { app_id: previous, team_id: identity.team_id, user_id: identity.user_id, IsDev: true } })
       session.app_id = previous
@@ -160,7 +171,11 @@ export class SlackOnboarder implements Onboarder {
         await this.captureApp(session, identity)
         try { credentials = JSON.parse(await fs.readFile(path.join(session.root, 'handoff.json'), 'utf8')) as Credentials }
         catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error }
-        if (!credentials && exited) throw new Error('CLI stopped without credentials')
+        if (!credentials && exited) {
+          this.checkCliResult(session, await run.result)
+          session.failure = '配置工具已退出，但没有交回 Bot 授权信息。'
+          throw new Error('CLI stopped without credentials')
+        }
         if (!credentials) await delay(100, undefined, { signal: session.abort.signal })
       }
       await run.stop() // Do not report success while CLI/hook are alive.
@@ -171,6 +186,7 @@ export class SlackOnboarder implements Onboarder {
       if (!appId || !/^A[A-Z0-9]+$/.test(appId)) throw new Error('CLI App identity missing')
       session.app_id = appId
       await this.recordIntent(session, identity, 'configured')
+      session.step = 'verification'
       const displayName = await (this.options.verify ?? verifyCredentials)(credentials, identity, appId, session.abort.signal)
       session.abort.signal.throwIfAborted()
       session.result = { env: { SLACK_BOT_TOKEN: credentials.bot_token, SLACK_APP_TOKEN: credentials.app_token, SLACK_ONLY_RESPOND_TO_MENTIONS: 'true', SLACK_CACHE_MAX_DAYS: '30', SLACK_CACHE_MAX_MESSAGES: '1000' }, authorized_identity: { platform_user_id: identity.user_id, ...(typeof displayName === 'string' && displayName ? { platform_display_name: displayName } : {}) } }
@@ -242,7 +258,9 @@ export class SlackOnboarder implements Onboarder {
   private async fail(session: Session, cause?: unknown): Promise<void> {
     session.ticket = undefined
     session.result = undefined
-    session.error = { code: session.abort.signal.aborted ? 'expired_token' : cause instanceof OnboardingError ? cause.code : 'unknown', message: `Slack 授权或配置未完成（网络模式：${session.proxy?.mode ?? 'system'}）。请检查当前网络/代理、workspace 安装权限及审批状态后重新授权；若 App 已创建，请先在 https://api.slack.com/apps${session.app_id ? '/' + session.app_id : ''} 核对，避免重复创建。` }
+    const step = session.step === 'authorization' ? '验证码确认' : session.step === 'app' ? 'App 创建与安装' : session.step === 'verification' ? 'Bot 凭据验证' : '本地准备'
+    const detail = session.abort.signal.aborted ? '本轮操作超时或已取消。' : session.failure ?? ''
+    session.error = { code: session.abort.signal.aborted ? 'expired_token' : cause instanceof OnboardingError ? cause.code : 'unknown', message: `Slack 授权或配置未完成（网络模式：${session.proxy?.mode ?? 'system'}，阶段：${step}）。${detail}请检查当前网络/代理、workspace 安装权限及审批状态后重新授权；若 App 已创建，请先在 https://api.slack.com/apps${session.app_id ? '/' + session.app_id : ''} 核对，避免重复创建。` }
     session.phase = 'error'
     try { await session.job?.stop() } catch { throw new Error('Slack 授权进程清理未确认完成') }
     session.job = undefined

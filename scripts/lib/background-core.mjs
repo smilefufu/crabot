@@ -28,7 +28,7 @@ export async function launchBackgroundCore({ root, dataDir, env, mmPort, webPort
     let listening
     try {
       child = spawn(node, [join(root, 'scripts', 'supervisor.mjs')], {
-        detached: true, stdio: ['ignore', fd, fd, 'ipc'], env: {
+        detached: true, windowsHide: true, stdio: ['ignore', fd, fd, 'ipc'], env: {
           ...env, CRABOT_SUPERVISOR_DATA_DIR: dataDir,
           CRABOT_SUPERVISOR_MM_ENTRY: join(root, 'crabot-core', 'dist', 'main.js'),
         },

@@ -54,7 +54,7 @@ export interface CliJob {
   stop(): Promise<void>
 }
 export function startCli(executable: string, args: string[], cwd: string, proxy?: ProxyConfig): CliJob {
-  const child = fork(fileURLToPath(new URL('./cli-supervisor.cjs', import.meta.url)), [cwd], { cwd, env: cliEnvironment(proxy), execArgv: [], stdio: ['ignore', 'ignore', 'ignore', 'ipc'], windowsHide: false })
+  const child = fork(fileURLToPath(new URL('./cli-supervisor.cjs', import.meta.url)), [cwd], { cwd, env: cliEnvironment(proxy), execArgv: [], stdio: ['ignore', 'ignore', 'ignore', 'ipc'], windowsHide: true })
   let resultValue: { code: number | null; output: string } | undefined
   let failed = false
   const result = new Promise<{ code: number | null; output: string }>((resolve, reject) => {

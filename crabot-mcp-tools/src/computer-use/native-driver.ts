@@ -35,7 +35,7 @@ export async function createNativeDriver(root: string, stateDirectory: string): 
   const runtime = require(resolve(root, 'scripts/lib/computer-use-runtime.cjs')).loadRuntime(root)
   if (runtime.version !== DRIVER_VERSION) throw new Error('COMPUTER_USE_RUNTIME_MISMATCH')
   if (process.platform === 'win32') {
-    const session = await new Promise<string>((done, fail) => execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '[System.Diagnostics.Process]::GetCurrentProcess().SessionId'], { timeout: 5_000 }, (error, output) => error ? fail(error) : done(output.trim())))
+    const session = await new Promise<string>((done, fail) => execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '[System.Diagnostics.Process]::GetCurrentProcess().SessionId'], { timeout: 5_000, windowsHide: true }, (error, output) => error ? fail(error) : done(output.trim())))
     if (!/^\d+$/.test(session) || Number(session) === 0) throw new Error('COMPUTER_USE_INTERACTIVE_SESSION_REQUIRED')
   }
   if (process.platform === 'linux' && (!process.env.DISPLAY && !process.env.WAYLAND_DISPLAY)) throw new Error('COMPUTER_USE_INTERACTIVE_SESSION_REQUIRED')

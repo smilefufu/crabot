@@ -89,7 +89,7 @@ int wmain(int argc, wchar_t** argv) {
     startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE); startup.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE); startup.hStdError = GetStdHandle(STD_ERROR_HANDLE);
     PROCESS_INFORMATION process{};
     if (GetConsoleCP() && !SetConsoleCtrlHandler(ConsoleSignal, TRUE)) throw std::runtime_error("Cannot preserve console signals");
-    if (!CreateProcessW(node.c_str(), command.data(), nullptr, nullptr, TRUE, 0, nullptr, nullptr, &startup, &process)) throw std::runtime_error("Cannot start bundled Node");
+    if (!CreateProcessW(node.c_str(), command.data(), nullptr, nullptr, TRUE, GetConsoleCP() ? 0 : CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process)) throw std::runtime_error("Cannot start bundled Node");
     CloseHandle(process.hThread);
     DWORD code = 1; bool waited = WaitForSingleObject(process.hProcess, INFINITE) == WAIT_OBJECT_0;
     bool exited = waited && GetExitCodeProcess(process.hProcess, &code);

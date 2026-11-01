@@ -84,6 +84,7 @@ export interface ModuleRuntimeRegistryOptions {
 function execFileText(file: string, args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(file, args, {
+      windowsHide: true,
       maxBuffer: 1024 * 1024,
       env: { ...process.env, LC_ALL: 'C' },
     }, (error, stdout) => {
