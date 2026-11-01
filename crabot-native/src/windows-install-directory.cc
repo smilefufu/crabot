@@ -39,7 +39,7 @@ int wmain(int argc, wchar_t** argv) {
       if (!(attributes & FILE_ATTRIBUTE_DIRECTORY) || attributes & FILE_ATTRIBUTE_REPARSE_POINT) throw 1;
       stage = "existing-owner";
       PSID before = nullptr; PACL acl = nullptr;
-      DWORD error = GetNamedSecurityInfoW(root.data(), SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+      DWORD error = GetNamedSecurityInfoW(root.data(), SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
         &before, nullptr, &acl, nullptr, &existing);
       if (error != ERROR_SUCCESS) { SetLastError(error); throw 1; }
       if (!before || (!EqualSid(owner, before) && !(IsWellKnownSid(before, WinBuiltinAdministratorsSid)
