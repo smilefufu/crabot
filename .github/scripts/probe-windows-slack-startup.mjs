@@ -48,13 +48,29 @@ int main(){DWORD in=0,out=0; auto w=GetConsoleWindow(); printf("{\"window\":%d,\
   await run('cmd.exe', ['/d', '/s', '/c', compile], { cwd: root, windowsHide: true })
   const filtered = cliEnvironment({ mode: 'none' })
   console.log('CRABOT_SLACK_STARTUP_ENV_KEYS ' + JSON.stringify(Object.keys(process.env).filter(key => !(key in filtered)).sort()))
-  for (const [environment, env] of [['full', process.env], ['filtered', filtered]]) {
-    for (const style of ['normal', 'hidden', 'wrapper']) for (const input of ['ignore', 'pipe']) {
-      for (const [tool, executable, args] of [
-        ['console', probe, []],
-        ['powershell', path.join(system, 'WindowsPowerShell/v1.0/powershell.exe'), ['-NoProfile', '-NonInteractive', '-Command', 'Write-Output "fixture-output"']],
-        ['official-version', official, ['--version', '--skip-update', '--no-color']],
-      ]) console.log('CRABOT_SLACK_STARTUP ' + JSON.stringify({ environment, style, input, tool, result: await inspect(executable, args, env, style, input) }))
-    }
+  const shell = path.join(system, 'WindowsPowerShell/v1.0/powershell.exe')
+  const psArgs = ['-NoProfile', '-NonInteractive', '-Command', "Write-Output 'fixture-output'"]
+  const groups = {
+    windir: ['WINDIR'], modules: ['PSModulePath'], systemdrive: ['SYSTEMDRIVE'], executable_suffixes: ['PATHEXT'],
+    programfiles: ['PROGRAMFILES', 'ProgramFiles(x86)', 'ProgramW6432', 'ProgramData', 'COMMONPROGRAMFILES', 'CommonProgramFiles(x86)', 'CommonProgramW6432'],
+    user: ['USERNAME', 'USERDOMAIN', 'HOMEDRIVE', 'HOMEPATH', 'COMPUTERNAME'],
+    processor: ['OS', 'NUMBER_OF_PROCESSORS', 'PROCESSOR_ARCHITECTURE'],
   }
+  for (const [group, keys] of Object.entries(groups)) {
+    const env = { ...filtered }
+    for (const key of keys) if (process.env[key] !== undefined) env[key] = process.env[key]
+    console.log('CRABOT_SLACK_ENV_GROUP ' + JSON.stringify({ group, result: await inspect(shell, psArgs, env, 'normal', 'ignore') }))
+  }
+  const quote = value => "'" + value.replaceAll("'", "''") + "'"
+  for (const [name, env] of [
+    ['baseline', process.env], ['no-color', { ...process.env, NO_COLOR: '1' }],
+    ['dumb-terminal', { ...process.env, TERM: 'dumb', CLICOLOR: '0', NO_COLOR: '1' }],
+  ]) for (const style of ['hidden', 'wrapper']) {
+    console.log('CRABOT_SLACK_COLOR ' + JSON.stringify({ name, style, result: await inspect(official, ['--version', '--skip-update', '--no-color'], env, style, 'ignore') }))
+  }
+  for (const utf8 of [false, true]) {
+    const script = (utf8 ? `& ${quote(path.join(system, 'chcp.com'))} 65001 > $null; ` : '') + `& ${quote(official)} --version --skip-update --no-color`
+    console.log('CRABOT_SLACK_CODEPAGE ' + JSON.stringify({ utf8, result: await inspect(shell, ['-NoProfile', '-NonInteractive', '-Command', script], process.env, 'wrapper', 'ignore') }))
+  }
+
 } finally { await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
