@@ -3,9 +3,10 @@
 ### 桌面化冻结范围：Windows第14版安装专项已交付，完整验收继续
 
 - 2026-11-01在独立`fix/desktop-simple-import`构建并交付Windows desktop.14，来源aed22d45；最终EXE559338454字节、程序普通文件1855128966字节（不含data/workspace），SHA256 `3c725b47a01d5c2c4211241c8c86b91c5829d60f4f5ed554ef21d1c8cf7a3d3a`。位于Downloads/Crabot桌面验收包-20261101/Windows 11，官方归档/包内摘要/交付副本一致。
-- 同EXE真实界面41278349988成功：D盘不存在的空格目录、TEMP余1.5GiB，无Retry/第二安装器，安装退出0，Finish启动实际GUI/Core，原生CLI同data。完整构建41277405704的Windows导入回归、运行环境、源码冷启动、解包及v2026.10.14.1旧CLI接入步骤已通过；75MB副本导入保留来源/凭据/历史/workspace，原命令与新CLI正常，确认到健康/命令核验120秒目标通过。源码GUI/release共存仍在执行，未提前记整run成功。
+- 同EXE真实界面41278349988成功：D盘不存在的空格目录、TEMP余1.5GiB，无Retry/第二安装器，安装退出0，Finish启动实际GUI/Core，原生CLI同data。完整构建41277405704的Windows导入回归、运行环境、源码冷启动、解包及v2026.10.14.1旧CLI接入步骤已通过；75MB副本导入保留来源/凭据/历史/workspace，原命令与新CLI正常，确认到健康/命令核验120秒目标通过。该run现已整组成功，包含源码GUI/release共存及最终同EXE实际安装。75MB/250文件确认到绑定2083ms（非纯复制）、到GUI/Core/新旧CLI核验7285ms；不代表海量小文件性能验收。
 - 本轮按已确认修订实现副本导入、复制后计数、持锁停服、已完成后不再复制/迁移、未知迁移保留、真实错误和日志位置。Windows原生回归复现复制后工作区权限属性遗漏后，以既有native创建器保留私有对象属性，未放宽读取检查；旧失败41276267118/41276978706/41277052576保留。[包与实施证据](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-30-windows-installation-feedback-fixes.md)。
 - 第12版不存在D:\Crabot误拒绝已由第13版修复：41267578010/41267714316复现create-parents/Win32=5，41269348309原生/NSIS和41269348044同EXE实际UI通过。第13版原生产run41268098768尾部测试夹具错误仍记失败；第14版不沿用旧成功作为自身验收。
+- 2026-11-01完成实际成品体积/依赖审计及两个subagent只读调查：[体积审计](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/research/2026-11-01-desktop-size-audit.md)、[Windows复制性能](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/research/2026-11-01-windows-data-import-performance.md)、[Windows代理缺口](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/research/2026-11-01-windows-system-proxy-gap.md)。Windows固定系统代理尚未实现；复制可优化串行小文件开销；体积候选未落为新包，不改冻结契约或用户数据。
 - ARM Mac仍为已交付desktop.11（DMG537516782字节，程序1372029537字节），没有重打或替换本机源码。体积裁剪、各历史包/失败与完整组件证据见上述实施记录；可选旧程序清理WIP没有混入本分支。
 - 继续原冻结范围，未增加需求：已有GUI中断更新、保留数据修复/卸载简化、重复安装、其它平台及其余发行回归尚未全部验收；项目workspace、在线Admin迁移、受管环境与system批量管理保持既定边界。Windows结果来自Server2025 CI，Win11普通账号/真实业务仍待用户复验；缺失旧macOS/Ubuntu桌面资源按用户决定暂跳过。完整测好后按可独立构建/验证的依赖边界拆PR；产品main未推送。
 - 本机源码部署/data、Docker及Spotlight未动，没有在本机启动验收App/Core。下载阶段磁盘仍约198GiB空闲；仅清理本轮已验证且已交付的临时副本。
