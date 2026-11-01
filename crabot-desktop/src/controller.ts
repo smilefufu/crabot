@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { existsSync, realpathSync } from 'node:fs'
-import { lstat, readdir } from 'node:fs/promises'
+import { lstat } from 'node:fs/promises'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { ActivityClient, HttpClient, type DesktopHostState } from 'crabot-client'
@@ -55,14 +55,12 @@ export class DesktopController {
     this.host.status(migration ? 'migration_required' : 'error', message, code)
   }
   fail(error: unknown) { this.report(error) }
-  async updateActivity(): Promise<'idle' | 'active' | 'unknown'> {
+  async updateActivity(root = this.options.coreRoot): Promise<'idle' | 'active' | 'unknown'> {
     try {
-      const current = await this.current()
+      const current = await this.current(root)
       if (this.host.snapshot().phase === 'stopped' && current.state === 'stopped') {
-        const records = await readdir(path.join(this.options.dataRoot, 'module-runtime-registry/records')).catch(error => {
-          if (error.code === 'ENOENT') return []; throw error
-        })
-        return records.some(name => name.endsWith('.json')) ? 'unknown' : 'idle'
+        const { hasRunningModuleProcesses } = await this.load('scripts/lib/instance-controller.mjs', root)
+        return await hasRunningModuleProcesses(this.options.dataRoot) ? 'unknown' : 'idle'
       }
       const credential = await this.host.credential()
       if (!credential || !current.mmAlive || credential.generation !== current.record?.generation) return 'unknown'
@@ -134,7 +132,7 @@ export class DesktopController {
       const lock = await acquireCliLock(this.options.dataRoot, 'desktop-paired-update')
       let record
       try {
-        checkSource(); await this.current()
+        checkSource(); await this.current(root)
         record = maintenance.readVersionMaintenance(this.options.dataRoot)
         if (record && (record.schema_version !== 3 || record.data_protection !== 'scoped' || record.system_operation_id !== undefined
           || record.data_dir !== this.options.dataRoot || record.install_root !== this.options.coreRoot
@@ -144,14 +142,14 @@ export class DesktopController {
           throw Object.assign(new Error('The pending update belongs to another source or target'), { code: 'CRABOT_MAINTENANCE_PENDING' })
         }
         if (!record || record.phase === 'preparing') await inspectLocalMigrationData(this.options.dataRoot, core.verifyDataCompatibility(root, this.options.dataRoot), root)
-        if (await this.updateActivity() !== 'idle') throw Object.assign(new Error('Current activity cannot be confirmed idle'), { code: 'CRABOT_UPDATE_BUSY' })
-        checkSource(); await this.current()
+        if (await this.updateActivity(root) !== 'idle') throw Object.assign(new Error('Current activity cannot be confirmed idle'), { code: 'CRABOT_UPDATE_BUSY' })
+        checkSource(); await this.current(root)
         if (!record) record = await maintenance.beginVersionMaintenance(this.options.dataRoot, this.options.coreRoot, prepared.selection.version, this.options.appVersion, { dataProtection: 'scoped' })
         if (record.phase === 'preparing') {
           record = await maintenance.bindVersionMaintenanceTarget(this.options.dataRoot, record.id, root)
           if (this.options.loginStartup) {
             await this.captureLoginStartup(prepared, record.id)
-            checkSource(); await this.current(); checkSource()
+            checkSource(); await this.current(root); checkSource()
           }
         }
         this.host.status('stopping', '正在停止共享实例并准备更新所需的数据转换。')
@@ -307,8 +305,8 @@ export class DesktopController {
     this.operation = pending
     return pending.then(() => this.host.snapshot())
   }
-  private async current() {
-    const { inspectInstance, identity } = await this.load('scripts/lib/instance-runtime.mjs')
+  private async current(runtimeRoot = this.options.coreRoot) {
+    const { inspectInstance, identity } = await this.load('scripts/lib/instance-runtime.mjs', runtimeRoot)
     const current = inspectInstance(this.options.dataRoot)
     if (current.state === 'legacy' || current.record && realpathSync(current.record.install_root) !== realpathSync(this.options.coreRoot)) {
       throw Object.assign(new Error('An existing installation requires explicit takeover'), { code: 'CRABOT_DESKTOP_TAKEOVER_REQUIRED' })

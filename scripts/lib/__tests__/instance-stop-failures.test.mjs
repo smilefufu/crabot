@@ -16,7 +16,7 @@ async function fixture(t, { rpcFails = false, stale = false, denied = false } = 
   const signals = [], events = []
   const identity = {
     sameProcess: (expected, actual) => !!actual && expected.started === actual.started && expected.pid === actual.pid,
-    inspectProcess: pid => active.get(pid) ?? null,
+    inspectProcess: pid => pid === process.pid ? { ...controller, pid } : active.get(pid) ?? null,
     listProcessIds: () => [...active.keys()],
     terminateKnownProcess: target => {
       signals.push(target.pid)
@@ -36,7 +36,7 @@ async function fixture(t, { rpcFails = false, stale = false, denied = false } = 
   source = source.replaceAll("process.platform === 'win32'", 'true')
     .replace('const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))', 'let clock=0; const Date={now:()=>clock}; const sleep=async ms=>{clock+=ms}')
   await writeFile(join(root, 'controller.mjs'), source)
-  const { stopInstance } = await import(pathToFileURL(join(root, 'controller.mjs')).href)
+  const { stopInstance, hasRunningModuleProcesses } = await import(pathToFileURL(join(root, 'controller.mjs')).href)
   const originalFetch = globalThis.fetch
   globalThis.fetch = async () => {
     events.push('rpc')
@@ -48,7 +48,7 @@ async function fixture(t, { rpcFails = false, stale = false, denied = false } = 
   await mkdir(join(root, 'module-runtime-registry/records'), { recursive: true })
   await writeFile(join(root, 'module-runtime-registry/instance-id'), 'fixture')
   await writeFile(join(root, 'module-runtime-registry/records/stale.json'), JSON.stringify({ instance_id: 'fixture', root_pid: 103, process_start_identity: 'old' }))
-  return { stop: () => stopInstance(root), signals, events, cleared: () => cleared, active, root }
+  return { observe: () => hasRunningModuleProcesses(root), stop: () => stopInstance(root), signals, events, cleared: () => cleared, active, root }
 }
 
 test('Windows RPC failure still reaches exact-generation termination and completes stop', async t => {
@@ -78,4 +78,10 @@ test('a real termination denial identifies the exact PID and OS reason, preservi
     return true
   })
   assert.equal(f.cleared(), false)
+})
+
+
+test('departed module recovery files do not become live activity during an offline update', async t => {
+  const f = await fixture(t, { stale: true })
+  assert.equal(await f.observe(), false)
 })

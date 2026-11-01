@@ -28,6 +28,16 @@ async function moduleProcesses(dataDir, owner) {
   return result
 }
 
+// Read-only activity observation; retained files alone do not grant stop authority.
+export async function hasRunningModuleProcesses(dataDir) {
+  const owner = identity.inspectProcess(process.pid).owner
+  for (const item of await moduleProcesses(dataDir, owner)) {
+    if (await probeProcessStartIdentity(item.process.pid) === item.record.process_start_identity
+      && identity.sameProcess(item.process, identity.inspectProcess(item.process.pid))) return true
+  }
+  return false
+}
+
 async function collectOwned(record, dataDir) {
   const modules = [], admins = []
   for (const item of await moduleProcesses(dataDir, record.controller.owner)) {

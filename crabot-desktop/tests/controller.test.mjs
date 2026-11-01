@@ -75,17 +75,17 @@ test('a completed explicit stop invalidates a watcher still verifying the instal
   assert.equal(connects, 0)
 })
 
-test('a stopped host needs settled process records before it can report update-safe inactivity', async t => {
-  const root = await fs.mkdtemp(path.join(tmpdir(), 'crabot-update-activity-'))
-  const controller = new DesktopController({ coreRoot: '/unused', dataRoot: root, appVersion: 'fixture', platform: process.platform })
-  t.after(async () => { controller.close(); await fs.rm(root, { recursive: true, force: true }) })
+test('a stopped host checks actual modules rather than the presence of recovery files', async t => {
+  const controller = new DesktopController({ coreRoot: '/unused', dataRoot: '/unused', appVersion: 'fixture', platform: process.platform })
+  t.after(() => controller.close())
   controller.current = async () => ({ state: 'stopped', mmAlive: false, record: null })
+  let running = false
+  controller.load = async () => ({ hasRunningModuleProcesses: async () => running })
   controller.host.status('stopped')
   assert.equal(await controller.updateActivity(), 'idle')
-  await fs.mkdir(path.join(root, 'module-runtime-registry/records'), { recursive: true })
-  await fs.writeFile(path.join(root, 'module-runtime-registry/records/unsettled.json'), '{}')
+  running = true
   assert.equal(await controller.updateActivity(), 'unknown')
-  controller.current = async () => { throw new Error('Process ownership unknown') }
+  controller.load = async () => { throw new Error('OS process query failed') }
   assert.equal(await controller.updateActivity(), 'unknown')
 })
 

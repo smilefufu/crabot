@@ -128,8 +128,11 @@ try {
   $credential = Join-Path $data 'admin/credentials.json'
   $credentialHash = if (Test-Path -LiteralPath $credential) { (Get-FileHash $credential).Hash } else { $null }
   $command = Join-Path $target 'bin/crabot.exe'
-  & $command stop 2>&1 | Write-Output
-  if ($LASTEXITCODE -ne 0) { throw 'Baseline Core did not stop normally' }
+  # Match the feedback: the user force-killed the old service. Preserve all old
+  # recovery files; the candidate must check OS processes and recover by itself.
+  foreach ($oldProcess in @($beforeRuntime.mm, $beforeRuntime.controller)) {
+   if ($oldProcess) { & "$env:SystemRoot/System32/taskkill.exe" /PID $oldProcess.pid /T /F 2>&1 | Write-Output }
+  }
   $oldGui = Join-Path $target ('app/releases/' + $beforeSelection.gui_id + '/Crabot.exe')
   # Fixture cleanup of the known baseline GUI after its Core has stopped. The
   # candidate must itself observe absence; no stop/migration receipt is forged.
@@ -199,7 +202,7 @@ try {
    $status = ((& $command status --json 2>&1) -join "`n") | ConvertFrom-Json
    if ($status.running -ne $true -or $status.data_dir -ne $data) { throw 'Restart did not recover the same data instance' }
   }
-  @{actual_exe_upgrade=$true; repeated_stop_start_cycles=2; from=$beforeSelection.version; to=$ExpectedVersion; actual_gui_version=$true; actual_new_core=$true; native_cli_same_data=$true; same_installation=$true; original_data_preserved=$true; start_menu_targets_new_gui=$true; no_new_visible_console=$true} | ConvertTo-Json -Compress | Write-Output
+  @{actual_exe_upgrade=$true; repeated_stop_start_cycles=2; force_killed_original=$true; from=$beforeSelection.version; to=$ExpectedVersion; actual_gui_version=$true; actual_new_core=$true; native_cli_same_data=$true; same_installation=$true; original_data_preserved=$true; start_menu_targets_new_gui=$true; no_new_visible_console=$true} | ConvertTo-Json -Compress | Write-Output
   return
  }
  @{actual_exe_ui=$true; next_pages=$clicked; retry_dialog=$false; second_installer=$false; selected_path_with_spaces=$true; installer_exit_zero=$true; finish_launched_gui=$true; gui_started_actual_core=$true; native_cli_same_data=$true; no_new_visible_console=$true} | ConvertTo-Json -Compress | Write-Output
