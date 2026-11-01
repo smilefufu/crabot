@@ -11,7 +11,7 @@ import identity from '../../scripts/lib/process-identity.cjs'
 import management from '../../scripts/lib/desktop-management.cjs'
 import { writeCoreRelease } from '../../scripts/lib/core-release.mjs'
 
-for (const scenario of ['private-removal-on-original', 'malformed-removal-host', 'pin-mismatch', 'core-corrupt', 'detached-pair', 'removal', 'profile-before-ready', 'legacy-profile-before-ready']) test('actual GUI entry protects installation binding and profile initialization: ' + scenario, { timeout: 35_000 }, async t => {
+for (const scenario of ['private-removal-on-original', 'malformed-removal-host', 'pin-mismatch', 'core-metadata-mismatch', 'installed-program-not-rescanned', 'detached-pair', 'removal', 'profile-before-ready', 'legacy-profile-before-ready']) test('actual GUI entry protects installation binding and profile initialization: ' + scenario, { timeout: 35_000 }, async t => {
   const parent = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-gui-binding-')))
   t.after(() => fs.rm(parent, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
   const root = management.ensurePrivateDataRoot(path.join(parent, 'install')), profile = management.ensurePrivateDataRoot(path.join(parent, 'profile'))
@@ -41,7 +41,8 @@ for (const scenario of ['private-removal-on-original', 'malformed-removal-host',
     else await fs.writeFile(path.join(root, file), JSON.stringify(value) + '\n', { mode: 0o600 })
   }
   if (scenario === 'removal') await fs.writeFile(path.join(root, '.desktop-removal.json'), 'interrupted removal must block without executing Core')
-  if (scenario === 'core-corrupt') await fs.appendFile(path.join(core, 'scripts/lib/instance.mjs'), '\n// changed after sealing')
+  if (scenario === 'core-metadata-mismatch') await fs.writeFile(path.join(core, 'core-release.json'), JSON.stringify({ ...release, version: '9.9.9' }))
+  if (scenario === 'installed-program-not-rescanned') await fs.appendFile(path.join(core, 'scripts/lib/instance.mjs'), '\n// installer owns full byte validation; ordinary startup does not hash it again')
   if (scenario === 'detached-pair') {
     const moved = path.join(parent, 'detached/app/releases', selection.gui_id)
     await fs.mkdir(path.dirname(moved), { recursive: true }); await fs.rename(gui, moved)
@@ -63,10 +64,11 @@ for (const scenario of ['private-removal-on-original', 'malformed-removal-host',
   const evidence = JSON.parse(await fs.readFile(report, 'utf8'))
   if (scenario.endsWith('profile-before-ready')) {
     assert.deepEqual(evidence, { external_core_executed: true, profile_bound_before_ready: true, profile_matches_installation: true,
-      core_verification_waited_for_ready: true, instance_lock_before_verification: true, business_mm_started: false, actual_packaged_binary: false })
+      full_program_scan: false, instance_lock_before_verification: true, business_mm_started: false, actual_packaged_binary: false })
     if (scenario === 'legacy-profile-before-ready' && process.platform !== 'win32') for (const directory of [root, data]) assert.equal((await fs.stat(directory)).mode & 0o777, 0o755)
     return
   }
-  assert.deepEqual(evidence, { external_core_executed: false, repair_shown: true, removal_shown: ['removal', 'private-removal-on-original', 'malformed-removal-host'].includes(scenario), data_entries: scenario === 'core-corrupt' ? ['desktop-profile'] : [], business_mm_started: false, actual_packaged_binary: false })
+  const ordinaryStartup = scenario === 'installed-program-not-rescanned'
+  assert.deepEqual(evidence, { external_core_executed: ordinaryStartup, repair_shown: !ordinaryStartup, removal_shown: ['removal', 'private-removal-on-original', 'malformed-removal-host'].includes(scenario), data_entries: ordinaryStartup ? ['desktop-profile'] : [], business_mm_started: false, actual_packaged_binary: false })
   console.log('CRABOT_GUI_BINDING_REJECTION ' + JSON.stringify({ scenario, ...evidence }))
 })

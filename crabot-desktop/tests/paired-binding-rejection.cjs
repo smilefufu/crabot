@@ -34,7 +34,7 @@ if (options.scenario.endsWith('profile-before-ready')) {
     fs.writeFileSync(options.report, JSON.stringify({ external_core_executed: fs.existsSync(options.marker),
       profile_bound_before_ready: calls.length === 3 && calls.every(call => call.beforeReady),
       profile_matches_installation: calls.length === 3 && calls.every(call => call.directory === path.join(options.data, 'desktop-profile', call.name === 'temp' ? 'tmp' : '')),
-      core_verification_waited_for_ready: waited, instance_lock_before_verification: earlyLock, business_mm_started: false, actual_packaged_binary: false }) + '\n', { mode: 0o600 })
+      full_program_scan: waited, instance_lock_before_verification: earlyLock, business_mm_started: false, actual_packaged_binary: false }) + '\n', { mode: 0o600 })
     app.exit(0)
   }
   process.once('crabot-profile-binding-fixture-core', () => { if (calls.length === 3) setImmediate(reportProfile) })
