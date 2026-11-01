@@ -220,5 +220,18 @@ try {
 } finally {
  $command = Join-Path $target 'bin/crabot.exe'
  if (Test-Path -LiteralPath $command) { & $command stop 2>&1 | Write-Output }
- foreach ($id in $owned) { Stop-Process -Id $id -ErrorAction SilentlyContinue }
+ foreach ($id in $owned) {
+  $fixtureProcess = $null
+  try {
+   $fixtureProcess = [Diagnostics.Process]::GetProcessById($id)
+   $image = $fixtureProcess.MainModule.FileName
+   # Old numeric IDs may have been reused. Only our installed images are cleanup targets.
+   if ($image.StartsWith($target + '\', [StringComparison]::OrdinalIgnoreCase)) {
+    $fixtureProcess.Kill()
+    if (!$fixtureProcess.WaitForExit(5000)) { throw 'Fixture GUI did not exit' }
+   }
+  } catch {
+   if ($fixtureProcess -and !$fixtureProcess.HasExited) { throw }
+  } finally { if ($fixtureProcess) { $fixtureProcess.Dispose() } }
+ }
 }
