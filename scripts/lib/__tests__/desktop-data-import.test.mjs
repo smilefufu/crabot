@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { promises as fs } from 'node:fs'
+import { promises as fs, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
 import { copyDesktopData, importDesktopData, discoverDesktopDataSource } from '../desktop-data-import.mjs'
@@ -76,4 +76,84 @@ test('an unfinished source migration is retained and never rerun in a new copy',
   await assert.rejects(importDesktopData({ source: { dataRoot: f.source }, root: f.code, target: f.target,
     stop: async () => {}, migrate: async () => assert.fail('Unknown migration must not execute again') }), /尚未确认完成/)
   assert.equal(await fs.readFile(path.join(transaction, 'state.json'), 'utf8'), '{"phase":"running"}')
+})
+
+test('copy progress counts only files already present and complete at the destination', async t => {
+  const f = await fixture(t), updates = []
+  await copyDesktopData(f.source, f.target, { progress: value => {
+    updates.push(value)
+    const file = path.join(f.target, 'agent/history.json')
+    assert.equal(readFileSync(file, 'utf8'), '{"original":true}')
+    assert.equal(value.bytes, Buffer.byteLength('{"original":true}'))
+  } })
+  assert.equal(updates.length, 1)
+  assert.equal(updates[0].files, 1)
+})
+
+test('source lifecycle lock is held before stopping, and released after import failure', async t => {
+  const f = await fixture(t)
+  const { acquireExistingCliLock, releaseCliLock } = await import('../cli-lock.mjs')
+  await assert.rejects(importDesktopData({ source: { dataRoot: f.source }, root: f.code, target: f.target,
+    stop: async () => {
+      await assert.rejects(acquireExistingCliLock(f.source, 'competing-start', 0), /another crabot CLI operation/)
+      throw new Error('stop failed')
+    }, migrate: async () => assert.fail('Stop failed, must not migrate') }), /stop failed/)
+  const lock = await acquireExistingCliLock(f.source, 'retry', 0)
+  releaseCliLock(lock)
+})
+
+test('cancelling after the last copied file does not begin migration', async t => {
+  const f = await fixture(t), abort = new AbortController()
+  await assert.rejects(importDesktopData({ source: { dataRoot: f.source }, root: f.code, target: f.target,
+    stop: async () => {}, signal: abort.signal,
+    progress: value => { if (value.files === 1) abort.abort() },
+    migrate: async () => assert.fail('Cancelled copy must not start migration') }), /abort/i)
+  assert.equal(await fs.readFile(path.join(f.source, 'agent/history.json'), 'utf8'), '{"original":true}')
+})
+
+test('a copied source desktop marker does not mark an interrupted conversion as ready', async t => {
+  const f = await fixture(t)
+  await fs.writeFile(path.join(f.source, 'desktop-managed.json'), '{"schema_version":1,"install_kind":"desktop","admin_listen_host":"0.0.0.0"}')
+  await assert.rejects(importDesktopData({ source: { dataRoot: f.source }, root: f.code, target: f.target,
+    stop: async () => {}, migrate: async () => { throw new Error('conversion interrupted') } }), /conversion interrupted/)
+  await assert.rejects(fs.stat(path.join(f.target, 'desktop-managed.json')), { code: 'ENOENT' })
+  await fs.stat(path.join(f.target, 'imported-source-state/desktop-managed.json'))
+})
+
+test('successful conversion publishes desktop initialization and preserves explicit listening configuration', async t => {
+  const f = await fixture(t)
+  await fs.writeFile(path.join(f.source, 'desktop-managed.json'), '{"schema_version":1,"install_kind":"desktop","admin_listen_host":"0.0.0.0"}')
+  await importDesktopData({ source: { dataRoot: f.source }, root: f.code, target: f.target, stop: async () => {}, migrate: async target => {
+    await assert.rejects(fs.stat(path.join(target, 'desktop-managed.json')), { code: 'ENOENT' })
+  } })
+  assert.equal(JSON.parse(await fs.readFile(path.join(f.target, 'desktop-managed.json'))).admin_listen_host, '0.0.0.0')
+})
+
+test('explicit copy retry preserves the lock and recreates only the unfinished copy', async t => {
+  const f = await fixture(t)
+  await fs.mkdir(f.target, { mode: 0o700 }); await fs.writeFile(path.join(f.target, 'partial'), 'incomplete')
+  await importDesktopData({ source: { dataRoot: f.source }, root: f.code, target: f.target, restartCopy: true,
+    stop: async () => {}, migrate: async target => {
+      const { acquireExistingCliLock } = await import('../cli-lock.mjs')
+      await assert.rejects(acquireExistingCliLock(target, 'competing-start', 0), /another crabot CLI operation/)
+    } })
+  await assert.rejects(fs.stat(path.join(f.target, 'partial')), { code: 'ENOENT' })
+  assert.equal(await fs.readFile(path.join(f.target, 'agent/history.json'), 'utf8'), '{"original":true}')
+})
+
+test('copy retry never erases an existing migration with unknown writes', async t => {
+  const f = await fixture(t), record = path.join(f.target, '.upgrade-migrations/task/state.json')
+  await fs.mkdir(f.target, { mode: 0o700 }); await fs.mkdir(path.dirname(record), { recursive: true }); await fs.writeFile(record, '{"phase":"running"}')
+  await assert.rejects(importDesktopData({ source: { dataRoot: f.source }, root: f.code, target: f.target, restartCopy: true,
+    stop: async () => {}, migrate: async () => assert.fail('Must not rerun') }), /迁移/)
+  assert.equal(await fs.readFile(record, 'utf8'), '{"phase":"running"}')
+})
+
+// A crash during copying must never leave the source initialization marker active.
+test('copying source data never publishes the source desktop marker in the new data root', async t => {
+  const f = await fixture(t)
+  await fs.writeFile(path.join(f.source, 'desktop-managed.json'), '{"schema_version":1,"install_kind":"desktop","admin_listen_host":"127.0.0.1"}')
+  await copyDesktopData(f.source, f.target)
+  await assert.rejects(fs.stat(path.join(f.target, 'desktop-managed.json')), { code: 'ENOENT' })
+  await fs.stat(path.join(f.source, 'desktop-managed.json'))
 })

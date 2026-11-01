@@ -427,12 +427,12 @@ void boot().catch(async error => {
   bootstrapStage('failed', { code, detail: error instanceof Error ? error.message : String(error) })
   await app.whenReady()
   let message = 'Crabot 启动失败。'
-  if (error instanceof Error) message += `\n${error.message}`
-  message += `\n日志：${path.join(app.getPath('userData'), 'bootstrap.log')}`
   console.error(error)
   if (['CRABOT_MAC_APP_BINDING', 'CRABOT_MAC_ADMISSION', 'CRABOT_DATA_MISSING', 'CRABOT_DESKTOP_TAKEOVER_REQUIRED'].includes(error?.code)) message = error.message
   if (['CRABOT_DESKTOP_REMOVAL', 'CRABOT_DESKTOP_REMOVAL_PENDING'].includes(error?.code)) message = 'Crabot 卸载尚未完成。请继续卸载，或使用同版/更高版离线安装器修复。用户数据已保留。'
   else if (['CRABOT_DESKTOP_INSTALLATION', 'CRABOT_CORE_INTEGRITY'].includes(error?.code)) message = 'Crabot 安装位置、内置文件或版本对未通过校验，请使用同版或更高版安装包修复。已有数据保留。'
+  if (error instanceof Error && message !== error.message) message += `\n${error.message}`
+  message += `\n日志：${path.join(app.getPath('userData'), 'bootstrap.log')}`
   await dialog.showMessageBox({ type: 'error', message })
   quitting = true; app.quit()
 })

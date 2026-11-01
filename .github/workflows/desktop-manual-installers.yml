@@ -70,6 +70,9 @@ jobs:
         run: |
           mkdir -p .desktop-build
           node --input-type=module -e 'import{runBounded}from"./scripts/lib/run-bounded.mjs";await runBounded(process.execPath,["--test","--test-name-pattern=an extracted desktop update","scripts/lib/__tests__/desktop-payload.test.mjs"],{timeout:180000})' 2>&1 | tee .desktop-build/windows-first-use-pair.log
+      - name: Import retry and concrete startup failure regression
+        if: ${{ !cancelled() }}
+        run: node --test scripts/lib/__tests__/desktop-data-import.test.mjs crabot-desktop/tests/bootstrap-failure.test.mjs
       - name: GUI and original CLI preserve the actual legacy data binding
         if: ${{ !cancelled() }}
         run: |
@@ -195,10 +198,11 @@ jobs:
           pnpm --dir crabot-admin/web install --frozen-lockfile
           pnpm --dir crabot-desktop install --frozen-lockfile
           (cd crabot-desktop && node -e "require('electron')")
+          pnpm --dir crabot-desktop run build
       - name: Simplified data import and runtime regression
         run: |
           node --test scripts/lib/__tests__/desktop-data-import.test.mjs scripts/lib/__tests__/product-runtime.test.mjs
-          node --test crabot-desktop/tests/windows-first-launch.test.mjs
+          node --test crabot-desktop/tests/windows-first-launch.test.mjs crabot-desktop/tests/bootstrap-failure.test.mjs
       - name: Windows official installed launcher and folder picker regression
         if: runner.os == 'Windows'
         run: |

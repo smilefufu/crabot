@@ -13,6 +13,7 @@ import { verifyDataCompatibility } from './data-compatibility.mjs'
 import { runMigrations } from '../upgrade-lib/migrate.mjs'
 import { runScript } from '../upgrade-lib/runner.mjs'
 import product from './product-runtime.cjs'
+import { privateJson } from './desktop-preparation-files.mjs'
 
 const within = (parent, child) => { const relative = path.relative(parent, child); return !relative || relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative) }
 async function present(file) { try { return await fs.lstat(file) } catch (error) { if (error.code === 'ENOENT') return null; throw error } }
@@ -65,14 +66,22 @@ export async function copyDesktopData(source, target, { signal, progress = () =>
   }
   management.ensurePrivateDataRoot(target)
   let files = 0, bytes = 0
-  for (const entry of await fs.readdir(source)) await fs.cp(path.join(source, entry), path.join(target, entry), { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_EXCL, errorOnExist: true, force: false,
-    filter: async file => {
-      signal?.throwIfAborted()
-      if (file === path.join(source, 'cli.lock')) return false
-      const info = await fs.lstat(file)
+  async function copy(file, destination) {
+    signal?.throwIfAborted()
+    const info = await fs.lstat(file)
+    if (info.isDirectory()) {
+      await fs.mkdir(destination)
+      for (const entry of await fs.readdir(file)) await copy(path.join(file, entry), path.join(destination, entry))
+      await fs.chmod(destination, info.mode)
+    } else {
+      await fs.cp(file, destination, { verbatimSymlinks: true, mode: constants.COPYFILE_EXCL, errorOnExist: true, force: false })
       if (info.isFile()) { files++; bytes += info.size; progress({ phase: 'copying', files, bytes }) }
-      return true
-    } })
+    }
+    signal?.throwIfAborted()
+  }
+  for (const entry of await fs.readdir(source)) {
+    if (!['cli.lock', 'desktop-managed.json'].includes(entry)) await copy(path.join(source, entry), path.join(target, entry))
+  }
   return { files, bytes }
 }
 
@@ -80,6 +89,11 @@ async function prepareImportedData(source, target) {
   // Old process/maintenance receipts describe the source, never the new instance.
   const operational = ['desktop-maintenance.json', 'instance-runtime.json', 'startup-preflight.json', 'mm.pid', 'module-runtime-registry', '.upgrade-migrations', 'agent-python.json', 'agent-venv']
   const history = path.join(target, 'imported-source-state')
+  const marker = path.join(source, 'desktop-managed.json')
+  if (await present(marker)) {
+    management.ensurePrivateDataRoot(history)
+    await fs.copyFile(marker, path.join(history, 'desktop-managed.json'), constants.COPYFILE_EXCL)
+  }
   for (const name of operational) {
     const file = path.join(target, name)
     if (!await present(file)) continue
@@ -107,19 +121,31 @@ async function prepareImportedData(source, target) {
   }
 }
 
-export async function importDesktopData({ source, root, target, signal, progress = () => {}, stop = stopDesktopDataSource, migrate }) {
+export async function importDesktopData({ source, root, target, signal, progress = () => {}, stop = stopDesktopDataSource, migrate, restartCopy = false }) {
   let phase = '检查数据版本', sourceLock, targetLock
   const started = performance.now()
   const report = (next, values = {}) => { phase = next; progress({ phase, elapsed_ms: Math.round(performance.now() - started), ...values }) }
   try {
     if (within(source.dataRoot, path.resolve(target)) || within(path.resolve(target), source.dataRoot)) throw new Error('来源和目标数据目录不能重叠。')
     verifyDataCompatibility(root, source.dataRoot)
-    report('停止旧服务'); await stop(source, { signal })
     sourceLock = await acquireExistingCliLock(source.dataRoot, 'desktop-data-import')
+    report('停止旧服务'); await stop(source, { signal })
     management.ensurePrivateDataRoot(target)
     targetLock = await acquireExistingCliLock(target, 'desktop-data-import')
+    if (restartCopy) {
+      if (management.readDesktopManagement(target)) throw new Error('数据已初始化，请继续启动，不要重新导入。')
+      const migrations = path.join(target, '.upgrade-migrations')
+      if (await present(migrations)) for (const name of await fs.readdir(migrations)) {
+        const state = JSON.parse(await fs.readFile(path.join(migrations, name, 'state.json'), 'utf8'))
+        if (!['prepared', 'rolled_back'].includes(state.phase)) throw new Error('副本已有迁移记录，请保留当前数据并按原迁移记录恢复，未重新复制。')
+      }
+      for (const name of await fs.readdir(target)) {
+        if (name !== 'cli.lock') await fs.rm(path.join(target, name), { recursive: true, force: true })
+      }
+    }
     report('复制数据')
     const copied = await copyDesktopData(source.dataRoot, target, { signal, progress: value => progress({ ...value, phase, elapsed_ms: Math.round(performance.now() - started) }) })
+    const originalManagement = management.readDesktopManagement(source.dataRoot)
     await prepareImportedData(source.dataRoot, target)
     report('迁移数据', copied)
     if (migrate) await migrate(target)
@@ -130,6 +156,7 @@ export async function importDesktopData({ source, root, target, signal, progress
         { info: message => progress({ phase, message }), warn: message => progress({ phase, message }) }, { lockHeld: true })
       if (!result.ok) throw new Error(`迁移失败：${result.failedModule}/${result.failedAt}`)
     }
+    await privateJson(path.join(target, 'desktop-managed.json'), originalManagement ?? { schema_version: 1, install_kind: 'desktop', admin_listen_host: '127.0.0.1' })
     report('数据已导入', copied)
     return copied
   } catch (error) { throw failure(phase, error) }

@@ -10,9 +10,9 @@ const source = readFileSync(new URL('../src/windows-first-launch.ts', import.met
 const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText
 const root = path.resolve('/fixture/selected-programs'), old = path.resolve('/fixture/home/.crabot'), dataDir = path.join(old, 'data')
 const selection = { schema_version: 1, version: '1.2.3', gui_id: 'fixture-gui', core_id: 'fixture-core' }
-async function run({ initialized = false, legacy = false, source = false, cancel = false, bound = false, previousDesktop = false, previousVersion = '1.2.2', retained = false } = {}) {
+async function run({ initialized = false, legacy = false, source = false, cancel = false, bound = false, previousDesktop = false, previousVersion = '1.2.2', retained = false, pendingLocal = false, converted = false } = {}) {
   const effects = [], messages = [], queries = []
-  const own = { root, dataDir, record: { installation_id: 'fixture' } }
+  const own = { root, dataDir: pendingLocal ? path.join(root, 'data') : dataDir, record: { installation_id: 'fixture' } }
   const programs = { initialized, installRoot: root, selection, coreRoot: path.join(root, 'releases/core'), guiRoot: path.join(root, 'app/releases/gui'), ...(retained ? { removal: { phase: 'completed' } } : {}), ...(previousDesktop ? { source: { ...own, selection: { ...selection, version: previousVersion } } } : {}) }
   const original = { installation: { installRoot: old, dataRoot: dataDir, version: 'v2026.10.14.1' }, entryFenceId: 'previous-fence' }
   const modules = {
@@ -23,9 +23,9 @@ async function run({ initialized = false, legacy = false, source = false, cancel
       completeFreshFirstLaunch: async (value, register) => { await register({ installRoot: root }); effects.push(['fresh', value.dataDir]); return value },
     },
     'desktop-installation.cjs': { default: { readDesktopInstallation: value => { assert.equal(value, root); return own }, locatePinnedDesktopGui: () => own } },
-    'desktop-management.cjs': { default: { requireExistingDataRoot: value => { effects.push(['existing', value]); return value }, ensurePrivateDataRoot: value => { effects.push(['create', value]); return value }, readDesktopManagement: () => null } },
+    'desktop-management.cjs': { default: { requireExistingDataRoot: value => { effects.push(['existing', value]); return value }, ensurePrivateDataRoot: value => { effects.push(['create', value]); return value }, readDesktopManagement: () => converted ? { schema_version: 1, install_kind: 'desktop', admin_listen_host: '127.0.0.1' } : null } },
     'desktop-data-import.mjs': { discoverDesktopDataSource: async value => { queries.push(value); return legacy ? original.installation : null },
-      importDesktopData: async value => { effects.push(['import', value.source.dataRoot, value.target]) }, forwardImportedWindowsCommand: async () => {} },
+      importDesktopData: async value => { effects.push(['import', value.source.dataRoot, value.target]); if (value.restartCopy) effects.push(['restart-copy']) }, forwardImportedWindowsCommand: async () => {} },
     'source-installation.mjs': { discoverUserSourceDeployment: () => source ? { root: '/fixture/source' } : null },
     'legacy-desktop-handoff.mjs': { runPreparedLegacyDesktopTakeover: async options => {
       effects.push(['legacy', options.prepared.installRoot, options.prepared.installation.dataRoot]); assert.equal(options.entryFenceId, original.entryFenceId)
@@ -36,7 +36,7 @@ async function run({ initialized = false, legacy = false, source = false, cancel
   vm.runInNewContext(compiled, { exports, AbortController, require: name => {
     if (name === 'node:path') return path
     if (name === './release-signatures.js') return { compareVersions }
-    if (name === 'node:fs') return { existsSync: () => bound }
+    if (name === 'node:fs') return { existsSync: () => bound, promises: { readdir: async () => ['partial'], rm: () => assert.fail('GUI must not delete data outside the importer lock') } }
     if (name === './operation-progress-window.js') return { createOperationProgressWindow: () => ({ ready: Promise.resolve(), close() {}, update() {} }) }
     throw Error('Unexpected import: ' + name)
   } })
@@ -93,4 +93,16 @@ for (const cancel of [false, true]) test('retained first use routes only to orig
   const value = await run({ retained: true, cancel })
   assert.deepEqual(value.effects, [['repair', root]]); assert.deepEqual(value.queries, [])
   if (cancel) assert.equal(value.result, null)
+})
+
+test('converted data resumes registration without rediscovering or copying the old installation', async () => {
+  const value = await run({ bound: true, pendingLocal: true, converted: true, legacy: true })
+  assert.deepEqual(value.queries, []); assert.deepEqual(value.messages, [])
+  assert.deepEqual(value.effects, [['bind', path.join(root, 'data')], ['register', root]])
+})
+
+test('retry of an unfinished local copy delegates deletion to the importer under its lock', async () => {
+  const value = await run({ bound: true, pendingLocal: true, legacy: true })
+  assert.ok(value.effects.some(effect => effect[0] === 'restart-copy'))
+  assert.equal(value.messages.length, 2)
 })

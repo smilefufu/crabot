@@ -39,6 +39,10 @@ export async function prepareWindowsFirstLaunch(options: {
   }
   const metadata = path.join(programs.installRoot, 'desktop-installation.json')
   const bound = existsSync(metadata) ? desktop.readDesktopInstallation(programs.installRoot) : null
+  if (bound?.dataDir === path.join(programs.installRoot, 'data') && management.readDesktopManagement(bound.dataDir)) {
+    const selected = await first.bindFirstLaunchData(programs, bound.dataDir)
+    return first.completeImportedFirstLaunch(selected, options.registerEntries)
+  }
   let root = bound && bound.dataDir !== path.join(programs.installRoot, 'data') ? path.dirname(bound.dataDir) : path.join(options.home, '.crabot'), legacy
   if (!bound && discoverUserSourceDeployment({ home: options.home })) legacy = null
   else while (true) {
@@ -61,18 +65,19 @@ export async function prepareWindowsFirstLaunch(options: {
   }
   const dataDir = legacy ? management.ensurePrivateDataRoot(path.join(programs.installRoot, 'data'))
     : bound?.dataDir ?? management.ensurePrivateDataRoot(path.join(programs.installRoot, 'data'))
+  let restartCopy = false
   if (legacy && bound?.dataDir === dataDir && (await fs.readdir(dataDir)).some(name => name !== 'cli.lock')) {
     const retry = await dialog.showMessageBox({ type: 'warning', title: '重新导入数据', message: '上次导入尚未完成，重新复制原数据？',
       detail: `只重新建立尚未启用的副本：${dataDir}\n来源保留：${legacy.dataRoot}`, buttons: ['重新导入', '取消'], cancelId: 1 })
     if (retry.response !== 0) return null
-    await fs.rm(dataDir, { recursive: true }); management.ensurePrivateDataRoot(dataDir)
+    restartCopy = true
   }
   const selected = await first.bindFirstLaunchData(programs, dataDir)
   if (!legacy) return first.completeFreshFirstLaunch(selected, options.registerEntries)
   const abort = new AbortController(), progress = createOperationProgressWindow('admission', abort)
   try {
     await progress.ready
-    await importDesktopData({ source: legacy, root: programs.coreRoot, target: dataDir, signal: abort.signal,
+    await importDesktopData({ source: legacy, root: programs.coreRoot, target: dataDir, restartCopy, signal: abort.signal,
       progress: (value: { phase: string; files?: number; bytes?: number; message?: string; elapsed_ms?: number }) => {
         const copied = value.files === undefined ? '' : `，${value.files} 个文件，${((value.bytes || 0) / 1024 / 1024).toFixed(1)} MB`
         progress.update(`${value.phase}${copied}${value.message ? '：' + value.message : ''}`, value.phase !== '迁移数据')
