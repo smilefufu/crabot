@@ -70,11 +70,15 @@ export async function copyDesktopData(source, target, { signal, progress = () =>
     signal?.throwIfAborted()
     const info = await fs.lstat(file)
     if (info.isDirectory()) {
-      await fs.mkdir(destination)
+      if (process.platform === 'win32' && identity.isPrivateDirectory(file)) identity.createPrivateDirectory(destination)
+      else await fs.mkdir(destination)
       for (const entry of await fs.readdir(file)) await copy(path.join(file, entry), path.join(destination, entry))
       await fs.chmod(destination, info.mode)
     } else {
-      await fs.cp(file, destination, { verbatimSymlinks: true, mode: constants.COPYFILE_EXCL, errorOnExist: true, force: false })
+      if (process.platform === 'win32' && info.isFile() && identity.isPrivateFile(file)) {
+        identity.writePrivateFile(destination, '')
+        await fs.copyFile(file, destination)
+      } else await fs.cp(file, destination, { verbatimSymlinks: true, mode: constants.COPYFILE_EXCL, errorOnExist: true, force: false })
       if (info.isFile()) { files++; bytes += info.size; progress({ phase: 'copying', files, bytes }) }
     }
     signal?.throwIfAborted()

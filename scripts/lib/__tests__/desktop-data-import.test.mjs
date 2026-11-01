@@ -5,6 +5,7 @@ import path from 'node:path'
 import { tmpdir } from 'node:os'
 import { copyDesktopData, importDesktopData, discoverDesktopDataSource } from '../desktop-data-import.mjs'
 import management from '../desktop-management.cjs'
+import identity from '../process-identity.cjs'
 import { privateJson } from '../desktop-preparation-files.mjs'
 import { verifyDataCompatibility } from '../data-compatibility.mjs'
 
@@ -67,6 +68,8 @@ test('workspace paths inside copied data move while external project paths and s
   await privateJson(path.join(directory, 'catalog.json'), catalog)
   await importDesktopData({ source: { dataRoot: f.source }, root: f.code, target: f.target, stop: async () => {}, migrate: async () => {} })
   const copied = JSON.parse(await fs.readFile(path.join(f.target, 'workspace-control/catalog.json'), 'utf8'))
+  assert.doesNotThrow(() => management.requirePrivateDataRoot(path.join(f.target, 'workspace-control')))
+  if (process.platform === 'win32') assert.equal(identity.isPrivateFile(path.join(f.target, 'workspace-control/catalog.json')), true)
   assert.doesNotThrow(() => verifyDataCompatibility(f.code, f.target), 'Copied workspace remains usable by the actual startup compatibility reader')
   assert.equal(copied.storage_root, path.join(f.target, 'workspaces'))
   assert.equal(copied.workspaces[0].root, path.join(f.target, 'workspaces/default'))
