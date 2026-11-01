@@ -23,7 +23,7 @@ test('the GUI ships its exact fixed maintenance bootstrap and loads it independe
     }
   }
   await walk(generated)
-  assert.deepEqual(files.sort(), [...desktopMaintenanceBootstrap, 'scripts/desktop/extract-paired-release.py', 'crabot-native/build/Release/crabot-native.node'].sort())
+  assert.deepEqual(files.sort(), [...desktopMaintenanceBootstrap, 'scripts/lib/desktop-first-launch.mjs', 'scripts/desktop/extract-paired-release.py', 'crabot-native/build/Release/crabot-native.node'].sort())
   const source = path.join(root, 'source'), bootstrap = path.join(source, 'dist/bootstrap')
   await fs.mkdir(source); await fs.cp(generated, bootstrap, { recursive: true })
   for (const file of ['installation-entries.js', 'installation-removal.js', 'login-startup.js']) await fs.copyFile(path.join(desktop, 'dist', file), path.join(source, 'dist', file))
