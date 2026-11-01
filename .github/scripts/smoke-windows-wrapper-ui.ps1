@@ -1,4 +1,4 @@
-param(
+﻿param(
  [Parameter(Mandatory=$true)][string]$Installer,
  [string]$TemporaryDirectory,
  [string]$UpgradeInstaller,
@@ -117,7 +117,19 @@ try {
   }
   Start-Sleep -Milliseconds 250
  }
- if (!$verified) { throw 'Timed out waiting for the actual single-layer installation and first GUI startup' }
+ if (!$verified) {
+  $baselineStage = if($UpgradeInstaller){'desktop14-before-candidate'}else{'fresh-candidate'}
+  $state = @{stage=$baselineStage; installer_exited=$process.HasExited; finish_clicked=$finished; target=$target}
+  if($status){$state.running=$status.running; $state.modules=@($status.modules | Select-Object module_id,status,pid)}
+  Write-Output ('CRABOT_INITIAL_ENTRY_FAILURE ' + ($state | ConvertTo-Json -Depth 4 -Compress))
+  foreach($log in @('desktop-profile/bootstrap.log','logs/mm.stdout.log','logs/mm.stderr.log','logs/admin-web.log','logs/crabot-agent.log','logs/memory-default.log')) {
+   $file=Join-Path (Join-Path $target 'data') $log
+   if(Test-Path -LiteralPath $file){Write-Output ('CRABOT_INITIAL_ENTRY_LOG '+$log); Get-Content -LiteralPath $file -Tail 12 | Write-Output}
+  }
+  $bootstrap=Join-Path $env:APPDATA 'Crabot/bootstrap/desktop-profile/bootstrap.log'
+  if(Test-Path -LiteralPath $bootstrap){Write-Output 'CRABOT_INITIAL_ENTRY_BOOTSTRAP'; Get-Content -LiteralPath $bootstrap -Tail 12 | Write-Output}
+  throw 'Timed out waiting for the actual single-layer installation and first GUI startup'
+ }
  if ($Expected -eq 'space') { return }
  $installed=Get-Content (Join-Path $target 'desktop-installation.json') -Raw | ConvertFrom-Json
  if ($installed.install_root -ne $target) { throw 'GUI bound another installation root' }
