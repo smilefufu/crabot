@@ -305,7 +305,7 @@ export class DesktopController {
     this.operation = pending
     return pending.then(() => this.host.snapshot())
   }
-  private async current(runtimeRoot = this.options.coreRoot) {
+  private async current(runtimeRoot = this.options.coreRoot, stopping = false) {
     const { inspectInstance, identity } = await this.load('scripts/lib/instance-runtime.mjs', runtimeRoot)
     const current = inspectInstance(this.options.dataRoot)
     if (current.state === 'legacy') throw Object.assign(new Error('An existing installation requires explicit takeover'), { code: 'CRABOT_DESKTOP_TAKEOVER_REQUIRED' })
@@ -314,9 +314,9 @@ export class DesktopController {
       const own = installation.locateDesktopCore(this.options.coreRoot)
       const relative = own ? path.relative(own.root, current.record.install_root).split(path.sep).join('/') : ''
       const { hasRunningModuleProcesses } = await this.load('scripts/lib/instance-controller.mjs', runtimeRoot)
-      if (current.state !== 'stopped' || !own || !installation.isFixedDesktopInstallation(own.record)
+      if (!own || !installation.isFixedDesktopInstallation(own.record)
         || own.dataDir !== this.options.dataRoot || !/^releases\/[a-f0-9]{64}$/.test(relative)
-        || await hasRunningModuleProcesses(this.options.dataRoot)) {
+        || !stopping && (current.state !== 'stopped' || await hasRunningModuleProcesses(this.options.dataRoot))) {
         throw Object.assign(new Error('An existing installation requires explicit takeover'), { code: 'CRABOT_DESKTOP_TAKEOVER_REQUIRED' })
       }
     }
@@ -349,7 +349,7 @@ export class DesktopController {
       const { acquireCliLock, releaseCliLock } = await this.load('scripts/lib/cli-lock.mjs')
       const { stopInstance } = await this.load('scripts/lib/instance-controller.mjs')
       const lock = await acquireCliLock(this.options.dataRoot, 'desktop-stop')
-      try { await this.current(); await stopInstance(this.options.dataRoot) } finally { releaseCliLock(lock) }
+      try { await this.current(this.options.coreRoot, true); await stopInstance(this.options.dataRoot) } finally { releaseCliLock(lock) }
       this.host.status('stopped', '服务已停止。可在需要时重新启动。')
     })
   }

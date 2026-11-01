@@ -520,3 +520,26 @@ for (const scenario of ['stopped-retained', 'live-module', 'live-core', 'other-r
   if (scenario === 'stopped-retained') assert.equal((await controller.current()).state, 'stopped')
   else await assert.rejects(controller.current(), { code: 'CRABOT_DESKTOP_TAKEOVER_REQUIRED' })
 })
+
+for (const scenario of ['retained-module', 'other-root']) test('explicit GUI stop can settle its bound retained instance without admitting foreign roots: ' + scenario, async t => {
+  const parent = await fs.mkdtemp(path.join(tmpdir(), 'desktop-fixed-stop-'))
+  t.after(() => fs.rm(parent, { recursive: true, force: true }))
+  const coreRoot = path.join(parent, 'program/core'), dataRoot = path.join(parent, 'data')
+  await fs.mkdir(coreRoot, { recursive: true })
+  const controller = new DesktopController({ coreRoot, dataRoot, appVersion: '1.2.3', platform: process.platform })
+  t.after(() => controller.close())
+  let stopped = 0, released = 0
+  const record = { install_root: path.join(parent, scenario === 'other-root' ? 'unrelated' : 'releases', 'a'.repeat(64)), mm: null }
+  controller.load = async file => {
+    if (file.endsWith('cli-lock.mjs')) return { acquireCliLock: async value => { assert.equal(value, dataRoot); return 'own-lock' }, releaseCliLock: () => { released++ } }
+    if (file.endsWith('instance-runtime.mjs')) return { inspectInstance: () => ({ state: 'stopped', record }), identity: { sameProcess: () => false } }
+    if (file.endsWith('desktop-installation.cjs')) return { default: { locateDesktopCore: () => ({ root: parent, record: {}, dataDir: dataRoot }), isFixedDesktopInstallation: () => true } }
+    if (file.endsWith('instance-controller.mjs')) return { hasRunningModuleProcesses: async () => true, stopInstance: async value => { assert.equal(value, dataRoot); stopped++ } }
+    throw new Error('Unexpected module ' + file)
+  }
+  const result = await controller.stop()
+  assert.equal(result.phase, scenario === 'other-root' ? 'migration_required' : 'stopped')
+  if (scenario === 'other-root') assert.equal(result.code, 'CRABOT_DESKTOP_TAKEOVER_REQUIRED')
+  assert.equal(stopped, scenario === 'other-root' ? 0 : 1)
+  assert.equal(released, 1)
+})
