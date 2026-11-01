@@ -20,7 +20,7 @@ if(args[0]==='auth') {
  } else console.log('/slackauthticket fixture-ticket');
 } else if(args[0]==='run') {
  const shell=process.platform==='win32'?'powershell':'sh';
- const command=value=>process.platform==='win32'?['-Command',value]:['-c',value];
+ const command=value=>process.platform==='win32'?['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(value,'utf16le').toString('base64')]:['-c',value];
  const hooks=JSON.parse(fs.readFileSync(path.join(project,'.slack/hooks.json'),'utf8'));
  const config=JSON.parse(execFileSync(shell,command(hooks.hooks['get-hooks']),{encoding:'utf8',stdio:['ignore','pipe','pipe']}));
  const manifest=JSON.parse(execFileSync(shell,command(config.hooks['get-manifest']),{encoding:'utf8',stdio:['ignore','pipe','pipe']}));
