@@ -37,40 +37,32 @@ async function inspect(executable, args, env, style, input) {
 }
 try {
   const official = await ensureCli(root, AbortSignal.timeout(120000))
-  const compiler = path.join(process.env['ProgramFiles(x86)'], 'Microsoft Visual Studio/Installer/vswhere.exe')
-  const { stdout } = await run(compiler, ['-latest', '-products', '*', '-requires', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64', '-property', 'installationPath'])
-  const source = path.join(root, 'console.cc'), probe = path.join(root, 'console.exe'), compile = path.join(root, 'compile.cmd')
-  await fs.writeFile(source, String.raw`#include <windows.h>
-#include <cstdio>
-int main(){DWORD in=0,out=0; auto w=GetConsoleWindow(); printf("{\"window\":%d,\"visible\":%d,\"cp\":%u,\"stdin_console\":%d,\"stdout_console\":%d}\n",w!=nullptr,IsWindowVisible(w),GetConsoleCP(),GetConsoleMode(GetStdHandle(STD_INPUT_HANDLE),&in),GetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE),&out));}
-`)
-  await fs.writeFile(compile, `@echo off\r\ncall "${stdout.trim()}\\Common7\\Tools\\VsDevCmd.bat" -arch=x64 >nul\r\ncl.exe /nologo /MT /O2 "${source}" /link User32.lib /OUT:"${probe}"\r\n`)
-  await run('cmd.exe', ['/d', '/s', '/c', compile], { cwd: root, windowsHide: true })
   const filtered = cliEnvironment({ mode: 'none' })
-  console.log('CRABOT_SLACK_STARTUP_ENV_KEYS ' + JSON.stringify(Object.keys(process.env).filter(key => !(key in filtered)).sort()))
   const shell = path.join(system, 'WindowsPowerShell/v1.0/powershell.exe')
   const psArgs = ['-NoProfile', '-NonInteractive', '-Command', "Write-Output 'fixture-output'"]
   const groups = {
-    windir: ['WINDIR'], modules: ['PSModulePath'], systemdrive: ['SYSTEMDRIVE'], executable_suffixes: ['PATHEXT'],
+    windir: ['WINDIR'], modules: ['PSModulePath', 'PSModuleAnalysisCachePath'], systemdrive: ['SYSTEMDRIVE'], executable_suffixes: ['PATHEXT'],
     programfiles: ['PROGRAMFILES', 'ProgramFiles(x86)', 'ProgramW6432', 'ProgramData', 'COMMONPROGRAMFILES', 'CommonProgramFiles(x86)', 'CommonProgramW6432'],
     user: ['USERNAME', 'USERDOMAIN', 'HOMEDRIVE', 'HOMEPATH', 'COMPUTERNAME'],
     processor: ['OS', 'NUMBER_OF_PROCESSORS', 'PROCESSOR_ARCHITECTURE'],
+    terminal: ['TERM', 'MSYSTEM', 'EXEPATH', 'SHLVL', 'POWERSHELL_DISTRIBUTION_CHANNEL', 'POWERSHELL_UPDATECHECK'],
   }
-  for (const [group, keys] of Object.entries(groups)) {
-    const env = { ...filtered }
-    for (const key of keys) if (process.env[key] !== undefined) env[key] = process.env[key]
-    console.log('CRABOT_SLACK_ENV_GROUP ' + JSON.stringify({ group, result: await inspect(shell, psArgs, env, 'normal', 'ignore') }))
+  let env = { ...filtered }
+  for (const keys of Object.values(groups)) for (const key of keys) if (process.env[key] !== undefined) env[key] = process.env[key]
+  let result = await inspect(shell, psArgs, env, 'normal', 'ignore')
+  console.log('CRABOT_SLACK_ENV_GROUP ' + JSON.stringify({ group: 'all-os', result }))
+  if (result.code === 0 && result.output.includes('fixture-output')) for (const [group, keys] of Object.entries(groups)) {
+    const candidate = { ...env }
+    for (const key of keys) delete candidate[key]
+    const result = await inspect(shell, psArgs, candidate, 'normal', 'ignore')
+    const unnecessary = result.code === 0 && result.output.includes('fixture-output')
+    if (unnecessary) env = candidate
+    console.log('CRABOT_SLACK_ENV_GROUP ' + JSON.stringify({ group, removal_succeeded: unnecessary, result }))
   }
+  console.log('CRABOT_SLACK_REQUIRED_ENV_KEYS ' + JSON.stringify(Object.keys(env).filter(key => !(key in filtered))))
   const quote = value => "'" + value.replaceAll("'", "''") + "'"
-  for (const [name, env] of [
-    ['baseline', process.env], ['no-color', { ...process.env, NO_COLOR: '1' }],
-    ['dumb-terminal', { ...process.env, TERM: 'dumb', CLICOLOR: '0', NO_COLOR: '1' }],
-  ]) for (const style of ['hidden', 'wrapper']) {
-    console.log('CRABOT_SLACK_COLOR ' + JSON.stringify({ name, style, result: await inspect(official, ['--version', '--skip-update', '--no-color'], env, style, 'ignore') }))
-  }
-  for (const utf8 of [false, true]) {
-    const script = (utf8 ? `& ${quote(path.join(system, 'chcp.com'))} 65001 > $null; ` : '') + `& ${quote(official)} --version --skip-update --no-color`
-    console.log('CRABOT_SLACK_CODEPAGE ' + JSON.stringify({ utf8, result: await inspect(shell, ['-NoProfile', '-NonInteractive', '-Command', script], process.env, 'wrapper', 'ignore') }))
-  }
+  const enableVT = `Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class VTProbe { [DllImport("kernel32.dll",CharSet=CharSet.Unicode)] static extern IntPtr CreateFileW(string name,uint access,uint share,IntPtr security,uint create,uint flags,IntPtr template); [DllImport("kernel32.dll")] static extern bool GetConsoleMode(IntPtr h,out uint mode); [DllImport("kernel32.dll")] static extern bool SetConsoleMode(IntPtr h,uint mode); [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h); public static void Enable(){var h=CreateFileW("CONOUT$",0xC0000000,3,IntPtr.Zero,3,0,IntPtr.Zero);uint mode;if(!GetConsoleMode(h,out mode)||!SetConsoleMode(h,mode|4))throw new Exception("Cannot enable VT");CloseHandle(h);} }'; [VTProbe]::Enable(); `
+  const script = enableVT + `& ${quote(official)} --version --skip-update --no-color`
+  console.log('CRABOT_SLACK_VT ' + JSON.stringify({ result: await inspect(shell, ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], process.env, 'wrapper', 'ignore') }))
 
 } finally { await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
