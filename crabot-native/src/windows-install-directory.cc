@@ -29,22 +29,22 @@ int wmain(int argc, wchar_t** argv) {
       // Observe only this installation's known executable files. A real sharing
       // violation is actionable; no global process/handle enumeration is needed.
       stage = "program-files";
-      for (const auto& part : {L"program", L"program/gui", L"program/core"}) {
+      for (const auto& part : {L"program", L"program\\gui", L"program\\core"}) {
         const auto directory = std::filesystem::path(root) / part;
         const DWORD attributes = GetFileAttributesW(directory.c_str());
         if (attributes != INVALID_FILE_ATTRIBUTES && (!(attributes & FILE_ATTRIBUTE_DIRECTORY) || attributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
           SetLastError(ERROR_REPARSE_TAG_INVALID); throw 1;
         }
       }
-      std::vector<std::filesystem::path> programs{std::filesystem::path(root) / L"program/gui/Crabot.exe",
-        std::filesystem::path(root) / L"program/core/.product-runtime/node/node.exe", std::filesystem::path(root) / L"bin/crabot.exe"};
-      for (const auto& directory : {std::filesystem::path(root) / L"app/releases", std::filesystem::path(root) / L"releases"}) {
+      std::vector<std::filesystem::path> programs{std::filesystem::path(root) / L"program\\gui\\Crabot.exe",
+        std::filesystem::path(root) / L"program\\core\\.product-runtime\\node\\node.exe", std::filesystem::path(root) / L"bin\\crabot.exe"};
+      for (const auto& directory : {std::filesystem::path(root) / L"app\\releases", std::filesystem::path(root) / L"releases"}) {
         std::error_code error;
         if (!std::filesystem::exists(directory, error)) { if (error) throw 1; continue; }
         for (const auto& item : std::filesystem::directory_iterator(directory)) {
           if (item.is_symlink() || !item.is_directory()) continue;
           programs.push_back(item.path() / (directory.filename() == L"releases" && directory.parent_path().filename() == L"app"
-            ? L"Crabot.exe" : L".product-runtime/node/node.exe"));
+            ? L"Crabot.exe" : L".product-runtime\\node\\node.exe"));
         }
       }
       for (const auto& file : programs) {
