@@ -47,6 +47,8 @@ jobs:
           node scripts/build-native.mjs
           node .github/scripts/probe-windows-install-directory.mjs 2>&1 | tee .desktop-build/directory-regression.log
           node --test scripts/lib/__tests__/private-file-paths.test.mjs scripts/lib/__tests__/process-identity.test.mjs
+          pnpm --dir crabot-client install --frozen-lockfile
+          pnpm --dir crabot-client run build
           pnpm --dir crabot-desktop install --frozen-lockfile
           node .github/scripts/probe-windows-single-layer-installer.mjs 2>&1 | tee .desktop-build/directory-extraction-regression.log
           pnpm --dir crabot-desktop run build
