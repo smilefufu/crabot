@@ -4,6 +4,9 @@ import { promises as fs, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
 import { copyDesktopData, importDesktopData, discoverDesktopDataSource } from '../desktop-data-import.mjs'
+import management from '../desktop-management.cjs'
+import { privateJson } from '../desktop-preparation-files.mjs'
+import { verifyDataCompatibility } from '../data-compatibility.mjs'
 
 async function fixture(t) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-import-')))
@@ -55,15 +58,16 @@ test('migration failure exposes its real phase and cause while preserving the so
 
 test('workspace paths inside copied data move while external project paths and source catalog remain unchanged', async t => {
   const f = await fixture(t), directory = path.join(f.source, 'workspace-control')
-  await fs.mkdir(directory, { mode: 0o700 })
+  management.ensurePrivateDataRoot(directory)
   await fs.mkdir(path.join(f.code, 'crabot-agent'))
   await fs.writeFile(path.join(f.code, 'crabot-agent/workspace-data-compat.json'), '{"schema_version":1,"workspace_data_versions":[1]}')
   const catalog = { version: 1, revision: 2, storage_root: path.join(f.source, 'workspaces'), workspaces: [
     { workspace_id: 'default', root: path.join(f.source, 'workspaces/default') },
     { workspace_id: 'external', root: path.join(f.root, 'external-project') } ] }
-  await fs.writeFile(path.join(directory, 'catalog.json'), JSON.stringify(catalog), { mode: 0o600 })
+  await privateJson(path.join(directory, 'catalog.json'), catalog)
   await importDesktopData({ source: { dataRoot: f.source }, root: f.code, target: f.target, stop: async () => {}, migrate: async () => {} })
   const copied = JSON.parse(await fs.readFile(path.join(f.target, 'workspace-control/catalog.json'), 'utf8'))
+  assert.doesNotThrow(() => verifyDataCompatibility(f.code, f.target), 'Copied workspace remains usable by the actual startup compatibility reader')
   assert.equal(copied.storage_root, path.join(f.target, 'workspaces'))
   assert.equal(copied.workspaces[0].root, path.join(f.target, 'workspaces/default'))
   assert.equal(copied.workspaces[1].root, catalog.workspaces[1].root)
@@ -131,7 +135,7 @@ test('successful conversion publishes desktop initialization and preserves expli
 
 test('explicit copy retry preserves the lock and recreates only the unfinished copy', async t => {
   const f = await fixture(t)
-  await fs.mkdir(f.target, { mode: 0o700 }); await fs.writeFile(path.join(f.target, 'partial'), 'incomplete')
+  management.ensurePrivateDataRoot(f.target); await fs.writeFile(path.join(f.target, 'partial'), 'incomplete')
   await importDesktopData({ source: { dataRoot: f.source }, root: f.code, target: f.target, restartCopy: true,
     stop: async () => {}, migrate: async target => {
       const { acquireExistingCliLock } = await import('../cli-lock.mjs')
@@ -143,7 +147,7 @@ test('explicit copy retry preserves the lock and recreates only the unfinished c
 
 test('copy retry never erases an existing migration with unknown writes', async t => {
   const f = await fixture(t), record = path.join(f.target, '.upgrade-migrations/task/state.json')
-  await fs.mkdir(f.target, { mode: 0o700 }); await fs.mkdir(path.dirname(record), { recursive: true }); await fs.writeFile(record, '{"phase":"running"}')
+  management.ensurePrivateDataRoot(f.target); await fs.mkdir(path.dirname(record), { recursive: true }); await fs.writeFile(record, '{"phase":"running"}')
   await assert.rejects(importDesktopData({ source: { dataRoot: f.source }, root: f.code, target: f.target, restartCopy: true,
     stop: async () => {}, migrate: async () => assert.fail('Must not rerun') }), /迁移/)
   assert.equal(await fs.readFile(record, 'utf8'), '{"phase":"running"}')
