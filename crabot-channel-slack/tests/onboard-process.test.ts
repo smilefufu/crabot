@@ -11,7 +11,7 @@ it('completes code submission and native project hooks through real supervised p
   // Simulate only the remote CLI responses; the supervisor, PowerShell/sh,
   // generated project hooks, credential handoff and stop/join are real.
   await fs.writeFile(fixture, `
-const fs=require('node:fs'),path=require('node:path'),{spawn,execFileSync}=require('node:child_process');
+const fs=require('node:fs'),path=require('node:path'),{spawn,spawnSync}=require('node:child_process');
 const args=process.argv.slice(2),project=process.cwd();
 if(args[0]==='auth') {
  if(args.includes('--challenge')) {
@@ -22,8 +22,13 @@ if(args[0]==='auth') {
  const shell=process.platform==='win32'?'powershell':'sh';
  const command=value=>process.platform==='win32'?['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(value,'utf16le').toString('base64')]:['-c',value];
  const hooks=JSON.parse(fs.readFileSync(path.join(project,'.slack/hooks.json'),'utf8'));
- const config=JSON.parse(execFileSync(shell,command(hooks.hooks['get-hooks']),{encoding:'utf8',stdio:['ignore','pipe','pipe']}));
- const manifest=JSON.parse(execFileSync(shell,command(config.hooks['get-manifest']),{encoding:'utf8',stdio:['ignore','pipe','pipe']}));
+ const readHook=value=>{
+  const result=spawnSync(shell,command(value),{encoding:'utf8',stdio:['ignore','pipe','pipe'],timeout:10000});
+  if(result.error||result.status!==0||!result.stdout)throw Error('Fixture hook did not return JSON: '+String(result.error||result.status)+' '+result.stderr);
+  return JSON.parse(result.stdout);
+ };
+ const config=readHook(hooks.hooks['get-hooks']);
+ const manifest=readHook(config.hooks['get-manifest']);
  if(manifest.display_information.name!=='Slack-native-fixture'||manifest.features.bot_user.display_name!=='Slack-native-fixture')process.exit(3);
  fs.writeFileSync(path.join(project,'.slack/apps.dev.json'),JSON.stringify({TTEST:{app_id:'ATEST'}}));
  const child=spawn(shell,command(config.hooks.start),{env:{...process.env,SLACK_BOT_TOKEN:'xoxb-fixture',SLACK_APP_TOKEN:'xapp-fixture'},stdio:'inherit'});
