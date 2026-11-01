@@ -77,7 +77,7 @@ try {
 export function previewPreparedDesktopReinstallData(options) {
   return withReinstallData(options, async ({ own, source, context, pending, current, rootToken, dataToken }) => {
     if (pending?.phase !== 'prepared') fail()
-    const core = path.join(own.root, 'releases', source.record.selection.core_id), gui = path.join(own.root, 'app/releases', source.record.selection.gui_id)
+    const core = installation.desktopProgramPaths(own.root, source.record.selection, own.record).coreRoot, gui = installation.desktopProgramPaths(own.root, source.record.selection, own.record).guiRoot
     const directories = [core, gui].map(directory => {
       const stat = physical.lstatSync(directory, { bigint: true })
       if (!stat.isDirectory() || stat.isSymbolicLink() || !identity.isOwnedDirectory(directory)) fail()
@@ -129,8 +129,8 @@ async function reinstallSource({ payload, prepared, installRoot }) {
   if (!prepared) return verifyDesktopPayload(payload)
   const own = installation.readDesktopInstallation(installRoot)
   if (prepared.installRoot !== own.root || prepared.installation_id !== own.record.installation_id
-    || prepared.coreRoot !== path.join(own.root, 'releases', prepared.selection.core_id)
-    || prepared.guiRoot !== path.join(own.root, 'app/releases', prepared.selection.gui_id)) fail()
+    || prepared.coreRoot !== installation.desktopProgramPaths(own.root, prepared.selection, own.record).coreRoot
+    || prepared.guiRoot !== installation.desktopProgramPaths(own.root, prepared.selection, own.record).guiRoot) fail()
   const proof = await readOriginalDesktopPayload(own.root, prepared.selection)
   if (prepared.proof?.file !== proof.file || prepared.proof.sha256 !== proof.sha256) fail()
   await verifyDesktopPrograms(prepared.coreRoot, prepared.guiRoot, proof.record)
@@ -142,7 +142,7 @@ async function reinstallSource({ payload, prepared, installRoot }) {
 export async function handoffPreparedDesktopReinstall({ payload, prepared: installed, installRoot, operationId, registerEntries }) {
   if (process.versions.electron || typeof registerEntries !== 'function') fail()
   const source = await reinstallSource({ payload, prepared: installed, installRoot }), own = installation.readDesktopInstallation(installRoot)
-  const core = path.join(own.root, 'releases', source.record.selection.core_id), gui = path.join(own.root, 'app/releases', source.record.selection.gui_id)
+  const core = installation.desktopProgramPaths(own.root, source.record.selection, own.record).coreRoot, gui = installation.desktopProgramPaths(own.root, source.record.selection, own.record).guiRoot
   // Run the target's own lock/maintenance modules in its bundled Node, rather
   // than borrowing a second module-local lock map from installer bootstrap.
   if (physical.realpathSync(fileURLToPath(new URL('../../', import.meta.url))) !== core) fail()
@@ -160,7 +160,7 @@ export async function handoffPreparedDesktopReinstall({ payload, prepared: insta
     if (pending && (pending.phase !== 'prepared' || pending.installation_id !== own.record.installation_id
       || !same(pending.selection, prepared.selection) || pending.payload_sha256 !== payloadSha)) fail()
     const versions = await import('./version-maintenance.mjs'), original = context.record.source_selection
-    const sourceRoot = path.join(own.root, 'releases', original.core_id)
+    const sourceRoot = installation.desktopProgramPaths(own.root, original, own.record).coreRoot
     let expectedSelection = context.selection
     if (!same(expectedSelection, original) && !same(expectedSelection, prepared.selection)) fail()
     const matching = record => record?.schema_version === 3 && record.system_operation_id === undefined
@@ -207,7 +207,7 @@ export async function handoffPreparedDesktopReinstall({ payload, prepared: insta
       if (process.platform === 'win32') return
       const directory = await fs.open(own.root, 'r'); try { await directory.sync() } finally { await directory.close() }
     }
-    if (!same(expectedSelection, prepared.selection)) {
+    if (!same(expectedSelection, prepared.selection) && !installation.isFixedDesktopInstallation(own.record)) {
       await privateJson(path.join(own.root, 'current-release.json'), prepared.selection, true)
       expectedSelection = prepared.selection
       await current()
@@ -248,7 +248,7 @@ try {
 export async function runPreparedDesktopReinstallHandoff({ payload, prepared: installed, installRoot, operationId, registerEntries }) {
   if (typeof registerEntries !== 'function') fail()
   const source = await reinstallSource({ payload, prepared: installed, installRoot }), own = installation.readDesktopInstallation(installRoot)
-  const core = path.join(own.root, 'releases', source.record.selection.core_id), gui = path.join(own.root, 'app/releases', source.record.selection.gui_id)
+  const core = installation.desktopProgramPaths(own.root, source.record.selection, own.record).coreRoot, gui = installation.desktopProgramPaths(own.root, source.record.selection, own.record).guiRoot
   await verifyDesktopPrograms(core, gui, source.record)
   const runtime = product.loadProductRuntime(core, { required: true, full: true })
   const prepared = { installRoot: own.root, installation_id: own.record.installation_id, selection: source.record.selection, coreRoot: core, guiRoot: gui }

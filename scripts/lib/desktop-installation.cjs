@@ -28,6 +28,18 @@ function json(file, privateFile = false) {
     || privateFile && (process.platform === 'win32' ? !identity.isPrivateFile(file) : (stat.mode & 0o777) !== 0o600)) fail()
   return JSON.parse(fs.readFileSync(file, 'utf8'))
 }
+function isFixedDesktopInstallation(record) {
+  return record?.paths?.app === 'program/gui' && record?.paths?.core === 'program/core'
+}
+function desktopProgramPaths(root, selection, record = readDesktopInstallation(root).record) {
+  return isFixedDesktopInstallation(record)
+    ? { guiRoot: path.join(root, 'program/gui'), coreRoot: path.join(root, 'program/core') }
+    : { guiRoot: path.join(root, 'app/releases', selection.gui_id), coreRoot: path.join(root, 'releases', selection.core_id) }
+}
+function guiInstallationRoot(guiRoot) {
+  return path.basename(guiRoot) === 'gui' && path.basename(path.dirname(guiRoot)) === 'program'
+    ? path.resolve(guiRoot, '../..') : path.resolve(guiRoot, '../../..')
+}
 function readDesktopInstallation(root) {
   try {
     root = path.resolve(root)
@@ -39,10 +51,10 @@ function readDesktopInstallation(root) {
       || ![1, 2].includes(record.schema_version) || !uuid(record.installation_id) || record.owner !== identity.inspectProcess(process.pid).owner
       || record.install_root !== canonical || !keys(record.root_identity, ['dev', 'ino'])
       || record.root_identity.dev !== String(stat.dev) || record.root_identity.ino !== String(stat.ino)
-      || !keys(record.paths, external ? ['app', 'core', 'bin'] : ['app', 'core', 'data', 'bin']) || record.paths.app !== 'app/releases' || record.paths.core !== 'releases'
+      || !keys(record.paths, external ? ['app', 'core', 'bin'] : ['app', 'core', 'data', 'bin']) || !isFixedDesktopInstallation(record) && (record.paths.app !== 'app/releases' || record.paths.core !== 'releases')
       || !external && record.paths.data !== 'data' || record.paths.bin !== 'bin'
       || present(path.join(root, 'current-core')) || present(path.join(root, 'cli-installation.json'))) fail()
-    for (const name of ['app', 'app/releases', 'releases', 'bin']) directory(path.join(root, name))
+    for (const name of isFixedDesktopInstallation(record) ? ['program', 'program/gui', 'program/core', 'bin'] : ['app', 'app/releases', 'releases', 'bin']) directory(path.join(root, name))
     const dataDir = external ? record.data_dir : path.join(canonical, 'data')
     if (typeof dataDir !== 'string' || !path.isAbsolute(dataDir)) fail()
     directory(dataDir, true)
@@ -55,11 +67,16 @@ function readDesktopInstallation(root) {
   } catch { fail() }
 }
 function readPairSelection(installation) {
-  const selection = json(path.join(installation.root, 'current-release.json'), true)
+  const fixed = isFixedDesktopInstallation(installation.record)
+  if (fixed && present(path.join(installation.root, '.desktop-removal.json'))) {
+    return require('./desktop-removal-record.cjs').readDesktopRemoval(installation.root).source_selection
+  }
+  const file = fixed ? path.join(installation.root, 'program/gui', process.platform === 'darwin' ? 'Crabot.app/Contents/Resources' : 'resources', 'desktop-release.json') : path.join(installation.root, 'current-release.json')
+  const selection = json(file, !fixed)
   if (!keys(selection, ['schema_version', 'version', 'gui_id', 'core_id']) || selection.schema_version !== 1
     || !version(selection.version) || !uuid(selection.gui_id) || !digest(selection.core_id)) fail()
   const serialized = JSON.stringify({ schema_version: 1, version: selection.version, gui_id: selection.gui_id, core_id: selection.core_id }) + '\n'
-  if (Buffer.byteLength(serialized) > 1024 || fs.readFileSync(path.join(installation.root, 'current-release.json'), 'utf8') !== serialized) fail()
+  if (Buffer.byteLength(serialized) > 1024 || !fixed && fs.readFileSync(file, 'utf8') !== serialized) fail()
   return selection
 }
 // Read-only maintenance reference. This has no executable or code-loading context.
@@ -78,8 +95,7 @@ function readDesktopSelection(root) {
     assertDesktopRemovalAllowsStart(installation.root)
     if (present(path.join(installation.root, '.desktop-installing.json'))) fail()
     const selection = readPairSelection(installation)
-    const guiRoot = path.join(installation.root, 'app/releases', selection.gui_id)
-    const coreRoot = path.join(installation.root, 'releases', selection.core_id)
+    const { guiRoot, coreRoot } = desktopProgramPaths(installation.root, selection, installation.record)
     directory(guiRoot); directory(coreRoot)
     const resources = process.platform === 'darwin' ? path.join(guiRoot, 'Crabot.app/Contents/Resources') : path.join(guiRoot, 'resources')
     const executable = process.platform === 'darwin' ? path.join(guiRoot, 'Crabot.app/Contents/MacOS/Crabot')
@@ -100,7 +116,8 @@ function readDesktopSelection(root) {
 function locateDesktopCore(coreRoot) {
   coreRoot = fs.realpathSync.native(coreRoot)
   const releases = path.dirname(coreRoot), root = path.dirname(releases)
-  if (path.basename(releases) !== 'releases') return null
+  const fixed = path.basename(releases) === 'program' && path.basename(coreRoot) === 'core'
+  if (!fixed && path.basename(releases) !== 'releases') return null
   if (!present(path.join(root, 'desktop-installation.json')) && !present(path.join(root, 'current-release.json'))) {
     if (present(path.join(coreRoot, 'desktop-host.json')) && json(path.join(coreRoot, 'desktop-host.json')).schema_version === 2) fail()
     return null
@@ -112,7 +129,7 @@ function locateDesktopCore(coreRoot) {
 function locateDesktopGui(resources) {
   resources = fs.realpathSync.native(resources)
   const guiRoot = path.resolve(resources, process.platform === 'darwin' ? '../../..' : '..')
-  const root = path.resolve(guiRoot, '../../..')
+  const root = guiInstallationRoot(guiRoot)
   const registered = present(path.join(root, 'desktop-installation.json')) || present(path.join(root, 'current-release.json'))
   if (!present(path.join(resources, 'desktop-release.json')) && !registered) return null
   const selected = readDesktopSelection(root)
@@ -125,10 +142,10 @@ function locateDesktopRemovalGui(resources, pinText) {
   try {
     resources = fs.realpathSync.native(resources)
     const guiRoot = path.resolve(resources, process.platform === 'darwin' ? '../../..' : '..')
-    const own = readDesktopInstallation(path.resolve(guiRoot, '../../..')), reference = readDesktopPairReference(own.root)
+    const own = readDesktopInstallation(guiInstallationRoot(guiRoot)), reference = readDesktopPairReference(own.root)
     if (reference.installation_id !== own.record.installation_id || reference.data_dir !== own.dataDir
       || typeof pinText !== 'string' || pinText !== JSON.stringify(reference.selection) + '\n'
-      || guiRoot !== path.join(own.root, 'app/releases', reference.selection.gui_id)) fail()
+      || guiRoot !== desktopProgramPaths(own.root, reference.selection, own.record).guiRoot) fail()
     directory(guiRoot)
     const expectedResources = path.join(guiRoot, process.platform === 'darwin' ? 'Crabot.app/Contents/Resources' : 'resources')
     if (resources !== expectedResources) fail()
@@ -153,7 +170,7 @@ function applyDesktopEnvironment(installation, env = process.env) {
   try {
     if (!installation || typeof installation.root !== 'string' || !path.isAbsolute(installation.root)
       || installation.dataDir !== readDesktopInstallation(installation.root).dataDir || !digest(installation.selection?.core_id)
-      || installation.coreRoot !== path.join(installation.root, 'releases', installation.selection.core_id)
+      || installation.coreRoot !== desktopProgramPaths(installation.root, installation.selection).coreRoot
       || typeof installation.executable !== 'string' || !path.isAbsolute(installation.executable)) fail()
     if (env.CRABOT_DEV === 'true' || Number(env.CRABOT_PORT_OFFSET || 0) !== 0
       || env.DATA_DIR && fs.realpathSync.native(path.resolve(env.DATA_DIR)) !== installation.dataDir) fail()
@@ -164,4 +181,4 @@ function applyDesktopEnvironment(installation, env = process.env) {
   env.CRABOT_DEV = 'false'
   env.CRABOT_PRODUCT_REQUIRED = '1'
 }
-module.exports = { assertDesktopRemovalAllowsStart, readDesktopInstallation, readDesktopPairReference, readDesktopSelection, locateDesktopCore, locateDesktopGui, locateDesktopRemovalGui, locatePinnedDesktopGui, applyDesktopEnvironment }
+module.exports = { isFixedDesktopInstallation, desktopProgramPaths, guiInstallationRoot, assertDesktopRemovalAllowsStart, readDesktopInstallation, readDesktopPairReference, readDesktopSelection, locateDesktopCore, locateDesktopGui, locateDesktopRemovalGui, locatePinnedDesktopGui, applyDesktopEnvironment }

@@ -25,7 +25,7 @@ async function captureGuiHost({ installRoot, operationId, signal }, existing) {
     stage = 'source-peer'
     const base = existing ? installation.readDesktopInstallation(installRoot) : installation.readDesktopSelection(installRoot)
     const selection = existing ? installation.readDesktopPairReference(base.root).selection : base.selection
-    const guiRootAtSource = path.join(base.root, 'app/releases', selection.gui_id)
+    const guiRootAtSource = installation.desktopProgramPaths(base.root, selection, base.record).guiRoot
     const own = { ...base, selection, guiRoot: guiRootAtSource, executable: path.join(guiRootAtSource,
       process.platform === 'darwin' ? 'Crabot.app/Contents/MacOS/Crabot' : 'Crabot.exe') }
     const self = identity.inspectProcess(process.pid)
@@ -85,7 +85,7 @@ async function captureRemovalNodeHost({ installRoot, operationId, signal }, exis
     signal?.throwIfAborted()
     const base = existing ? installation.readDesktopInstallation(installRoot) : installation.readDesktopSelection(installRoot)
     const selection = existing ? installation.readDesktopPairReference(base.root).selection : base.selection
-    const guiRoot = path.join(base.root, 'app/releases', selection.gui_id)
+    const guiRoot = installation.desktopProgramPaths(base.root, selection, base.record).guiRoot
     const own = { ...base, selection, guiRoot, executable: path.join(guiRoot, 'crabot-desktop') }, self = identity.inspectProcess(process.pid)
     const parent = self && identity.inspectProcess(self.parent), policy = { executable: own.executable, development: false }
     if (!self || !parent || self.owner !== own.record.owner || parent.owner !== self.owner || !processBirthAtLeast(self.started, parent.started)

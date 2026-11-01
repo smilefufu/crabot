@@ -28,7 +28,7 @@ export async function captureDesktopRemovalFacts(options) {
   // Capture immutable document bytes once, then revalidate their complete file
   // generations and access on every admission. Changed generations take the
   // original full readers again; no live process/lock/permission result is cached.
-  const directories = [own.root, own.dataDir, ...['app', 'app/releases', 'releases', 'bin'].map(name => path.join(own.root, name))]
+  const directories = [own.root, own.dataDir, ...(installation.isFixedDesktopInstallation(own.record) ? ['program', 'program/gui', 'program/core', 'bin'] : ['app', 'app/releases', 'releases', 'bin']).map(name => path.join(own.root, name))]
   const documents = ['desktop-installation.json', '.desktop-removal.json'].map(name => path.join(own.root, name))
   let documentVersions
   const observeDocument = file => {
@@ -51,7 +51,7 @@ export async function captureDesktopRemovalFacts(options) {
   // still allow their caller to verify its explicit old-to-new handoff.
   let selectionVersion
   const assertSourceSelection = () => {
-    const file = path.join(own.root, 'current-release.json'), before = observeDocument(file)
+    const file = path.join(own.root, installation.isFixedDesktopInstallation(own.record) ? '.desktop-removal.json' : 'current-release.json'), before = observeDocument(file)
     if (before === selectionVersion) return
     if (!same(installation.readDesktopPairReference(own.root).selection, initial.record.source_selection)
       || observeDocument(file) !== before) removalFail()

@@ -501,3 +501,22 @@ test('stop exposes a concrete native process failure instead of a generic unavai
   controller.current = async () => ({ state: 'stopped' })
   assert.equal((await controller.stop()).phase, 'stopped')
 })
+
+
+for (const scenario of ['stopped-retained', 'live-module', 'live-core', 'other-root']) test('fixed installation recognizes only its actually stopped retained runtime: ' + scenario, async t => {
+  const parent = await fs.mkdtemp(path.join(tmpdir(), 'desktop-fixed-controller-'))
+  t.after(() => fs.rm(parent, { recursive: true, force: true }))
+  const coreRoot = path.join(parent, 'program/core'), dataRoot = path.join(parent, 'data')
+  await fs.mkdir(coreRoot, { recursive: true })
+  const controller = new DesktopController({ coreRoot, dataRoot, appVersion: '1.2.3', platform: process.platform })
+  t.after(() => controller.close())
+  const record = { install_root: path.join(parent, scenario === 'other-root' ? 'unrelated' : 'releases', 'a'.repeat(64)), mm: null }
+  controller.load = async file => {
+    if (file.endsWith('instance-runtime.mjs')) return { inspectInstance: () => ({ state: scenario === 'live-core' ? 'running' : 'stopped', record }), identity: { sameProcess: () => false } }
+    if (file.endsWith('desktop-installation.cjs')) return { default: { locateDesktopCore: () => ({ root: parent, record: {}, dataDir: dataRoot }), isFixedDesktopInstallation: () => true } }
+    if (file.endsWith('instance-controller.mjs')) return { hasRunningModuleProcesses: async () => scenario === 'live-module' }
+    throw new Error('Unexpected module ' + file)
+  }
+  if (scenario === 'stopped-retained') assert.equal((await controller.current()).state, 'stopped')
+  else await assert.rejects(controller.current(), { code: 'CRABOT_DESKTOP_TAKEOVER_REQUIRED' })
+})

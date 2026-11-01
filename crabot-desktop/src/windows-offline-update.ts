@@ -55,7 +55,8 @@ export async function applyWindowsOfflineUpdate(options: {
 // even if its Core has been deleted. The existing target-Node handoff alone
 // transfers that root guard to the normal data/health recovery coordinator.
 export async function repairWindowsRetainedData(options: {
-  programs: any; home: string; app: App; dialog: Pick<typeof ElectronDialog, 'showMessageBox'>; shell: Shell
+  programs: any; home: string; app: App; dialog: Pick<typeof ElectronDialog, 'showMessageBox'>; shell: Shell;
+  progress?: (message: string) => void
 }): Promise<boolean> {
   const { programs, dialog, home, shell } = options
   const load = (name: string): Promise<any> => import(new URL('./bootstrap/scripts/lib/' + name, import.meta.url).href)
@@ -71,16 +72,21 @@ export async function repairWindowsRetainedData(options: {
   const { inspectInstance } = await load('instance-runtime.mjs')
   const identity = createRequire(import.meta.url)('./bootstrap/scripts/lib/process-identity.cjs')
   const original = programs.removal.source_selection
-  const observation = await identity.inspectProgramReferences({ roots: [path.join(own.root, 'app/releases', original.gui_id), path.join(own.root, 'releases', original.core_id)], files: [own.command] })
-  // Only this verified GUI and its OS-pinned child tree are the repair host.
-  // Other original processes remain blockers; no stop signal is sent.
-  const self = identity.inspectProcess(process.pid)
-  const host = identity.captureProcessTreeGeneration(self.pid, self.started, self.owner)
-  if (inspectInstance(own.dataDir).state !== 'stopped' || !observation.complete || observation.incomplete
-    || observation.unknown_pids?.length || observation.processes.some((value: any) => !host.some((member: any) => identity.sameProcess(member, value)))) {
-    throw new Error('原应用或服务仍在使用程序，请正常退出后重新打开；尚未转换数据。')
+  if (programs.fixed) {
+    const { hasRunningModuleProcesses } = await load('instance-controller.mjs')
+    if (inspectInstance(own.dataDir).state !== 'stopped' || await hasRunningModuleProcesses(own.dataDir)) throw new Error('原服务仍在运行，请正常退出后重试；尚未转换数据。')
+  } else {
+    const observation = await identity.inspectProgramReferences({ roots: [path.join(own.root, 'app/releases', original.gui_id), path.join(own.root, 'releases', original.core_id)], files: [own.command] })
+    // Only this verified GUI and its OS-pinned child tree are the repair host.
+    // Other original processes remain blockers; no stop signal is sent.
+    const self = identity.inspectProcess(process.pid)
+    const host = identity.captureProcessTreeGeneration(self.pid, self.started, self.owner)
+    if (inspectInstance(own.dataDir).state !== 'stopped' || !observation.complete || observation.incomplete
+      || observation.unknown_pids?.length || observation.processes.some((value: any) => !host.some((member: any) => identity.sameProcess(member, value)))) {
+      throw new Error('原应用或服务仍在使用程序，请正常退出后重新打开；尚未转换数据。')
+    }
   }
-  const progress = createOperationProgressWindow('admission', new AbortController())
+  const progress = options.progress ? { ready: Promise.resolve(), update: options.progress, close() {} } : createOperationProgressWindow('admission', new AbortController())
   try {
     await progress.ready; progress.update('正在恢复程序入口，随后核验原数据并启动服务…', false)
     const first = await load('desktop-first-launch.mjs'), bound = await first.bindFirstLaunchData(programs, own.dataDir)

@@ -137,7 +137,7 @@ async function removeJobEntries(options: RemovalJobOptions & Pick<EntryRemovalOp
   scope: 'menu-only' | 'menu-and-locator'): Promise<void> {
   const { own, record, assertJob, proofCurrent } = await captureRemovalJob(options)
   const prepared = { installRoot: own.root, installation_id: own.record.installation_id, selection: record.source_selection,
-    coreRoot: path.join(own.root, 'releases', record.source_selection.core_id), guiRoot: path.join(own.root, 'app/releases', record.source_selection.gui_id) }
+    coreRoot: installation.desktopProgramPaths(own.root, record.source_selection, own.record).coreRoot, guiRoot: installation.desktopProgramPaths(own.root, record.source_selection, own.record).guiRoot }
   await removeEntries(prepared, { ...options, platform: process.platform, verifyStopped: async () => { await proofCurrent(); assertJob() } }, assertJob, scope)
 }
 export function removeDesktopMenuEntry(options: RemovalJobOptions & Pick<EntryRemovalOptions, 'home' | 'env' | 'shell' | 'unregisterMac'>): Promise<void> {
@@ -212,7 +212,7 @@ export async function removeUbuntuAutostartEntry(options: RemovalJobOptions & { 
   if (!path.isAbsolute(configHome)) fail()
   const entry = path.join(configHome, 'autostart/crabot.desktop'), item = await snapshot(entry)
   if (item && (!Buffer.isBuffer(item.content) || !item.content.equals(Buffer.from(ubuntuLoginStartupEntry(
-    path.join(own.root, 'app/releases', record.source_selection.gui_id, 'crabot-desktop'))))
+    path.join(installation.desktopProgramPaths(own.root, record.source_selection, own.record).guiRoot, 'crabot-desktop'))))
     || process.platform !== 'win32' && (item.stat.mode & 0o777n) !== 0o600n)) fail()
   await current()
   if (!item) return
@@ -242,7 +242,7 @@ export async function removeWindowsLoginStartupEntry(options: RemovalJobOptions 
   }
   await current()
   if (typeof identity.removeDesktopLoginStartup !== 'function' || typeof identity.inspectDesktopLoginStartup !== 'function') fail()
-  const executable = path.join(own.root, 'app/releases', record.source_selection.gui_id, 'Crabot.exe')
+  const executable = path.join(installation.desktopProgramPaths(own.root, record.source_selection, own.record).guiRoot, 'Crabot.exe')
   assertJob()
   if (identity.removeDesktopLoginStartup(executable) !== true) fail()
   await current()
@@ -292,7 +292,7 @@ export async function removeWindowsUninstallEntry(options: RemovalJobOptions): P
   if (process.platform !== 'win32') fail()
   const { own, record, assertJob, proofCurrent } = await captureRemovalJob(options)
   await proofCurrent(); assertJob()
-  const original = { installRoot: own.root, executable: path.join(own.root, 'app/releases', record.source_selection.gui_id, 'Crabot.exe'),
+  const original = { installRoot: own.root, executable: path.join(installation.desktopProgramPaths(own.root, record.source_selection, own.record).guiRoot, 'Crabot.exe'),
     version: record.source_selection.version }
   if (typeof identity.removeDesktopUninstallEntry !== 'function'
     || identity.removeDesktopUninstallEntry(own.record.installation_id, original) !== true) fail()

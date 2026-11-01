@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 #include <cstdio>
+#include <filesystem>
 
 int wmain(int argc, wchar_t** argv) {
   HANDLE token = nullptr;
@@ -15,7 +16,7 @@ int wmain(int argc, wchar_t** argv) {
   int result = 1;
   const char* stage = "arguments";
   try {
-    if (argc != 2) throw 1;
+    if (argc != 2 && !(argc == 3 && std::wstring(argv[2]) == L"--check-programs")) throw 1;
     stage = "resolve-path";
     std::vector<wchar_t> full(32768);
     DWORD length = GetFullPathNameW(argv[1], static_cast<DWORD>(full.size()), full.data(), nullptr);
@@ -24,6 +25,39 @@ int wmain(int argc, wchar_t** argv) {
     while (root.size() > 3 && root.back() == L'\\') root.pop_back();
     if (root.size() <= 3 || root[1] != L':' || root[2] != L'\\') throw 1;
     root = L"\\\\?\\" + root;
+    if (argc == 3) {
+      // Observe only this installation's known executable files. A real sharing
+      // violation is actionable; no global process/handle enumeration is needed.
+      stage = "program-files";
+      for (const auto& part : {L"program", L"program/gui", L"program/core"}) {
+        const auto directory = std::filesystem::path(root) / part;
+        const DWORD attributes = GetFileAttributesW(directory.c_str());
+        if (attributes != INVALID_FILE_ATTRIBUTES && (!(attributes & FILE_ATTRIBUTE_DIRECTORY) || attributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+          SetLastError(ERROR_REPARSE_TAG_INVALID); throw 1;
+        }
+      }
+      std::vector<std::filesystem::path> programs{std::filesystem::path(root) / L"program/gui/Crabot.exe",
+        std::filesystem::path(root) / L"program/core/.product-runtime/node/node.exe", std::filesystem::path(root) / L"bin/crabot.exe"};
+      for (const auto& directory : {std::filesystem::path(root) / L"app/releases", std::filesystem::path(root) / L"releases"}) {
+        std::error_code error;
+        if (!std::filesystem::exists(directory, error)) { if (error) throw 1; continue; }
+        for (const auto& item : std::filesystem::directory_iterator(directory)) {
+          if (item.is_symlink() || !item.is_directory()) continue;
+          programs.push_back(item.path() / (directory.filename() == L"releases" && directory.parent_path().filename() == L"app"
+            ? L"Crabot.exe" : L".product-runtime/node/node.exe"));
+        }
+      }
+      for (const auto& file : programs) {
+        HANDLE handle = CreateFileW(file.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+          nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (handle != INVALID_HANDLE_VALUE) { CloseHandle(handle); continue; }
+        const DWORD error = GetLastError();
+        if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) continue;
+        std::fwprintf(stderr, L"%ls (win32=%lu)\n", file.c_str(), error);
+        return error == ERROR_SHARING_VIOLATION || error == ERROR_LOCK_VIOLATION ? 2 : 1;
+      }
+      return 0;
+    }
     stage = "current-user";
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) throw 1;
     DWORD size = 0;

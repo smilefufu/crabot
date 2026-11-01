@@ -98,7 +98,7 @@ export async function prepareDesktopRemovalReinstall({ payload, installRoot, ope
     let pending = await readPending(own.root)
     if (pending && (pending.installation_id !== own.record.installation_id || !same(pending.selection, source.record.selection) || pending.payload_sha256 !== payloadSha)) fail()
     const prepared = { installRoot: own.root, installation_id: own.record.installation_id, selection: source.record.selection,
-      coreRoot: path.join(own.root, 'releases', source.record.selection.core_id), guiRoot: path.join(own.root, 'app/releases', source.record.selection.gui_id) }
+      coreRoot: installation.desktopProgramPaths(own.root, source.record.selection, own.record).coreRoot, guiRoot: installation.desktopProgramPaths(own.root, source.record.selection, own.record).guiRoot }
     const assertCurrent = () => {
       if (!same(readDesktopRemoval(own.root), record) || fileIdentity(physical.lstatSync(proofFile, { bigint: true })) !== proofIdentity
         || !same(installation.readDesktopInstallation(own.root).record, own.record)

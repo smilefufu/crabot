@@ -32,7 +32,7 @@ function createSourceExitVerifier({ installRoot, prepared, child }, existing, ro
     : path.dirname(guiRoot) === directory && path.basename(guiRoot) === 'gui' && physical.realpathSync(guiRoot) === guiRoot
   const originalData = generation(physical.lstatSync(own.dataDir, { bigint: true }))
   const originalDirectory = generation(physical.lstatSync(directory, { bigint: true }))
-  const sourceExecutable = path.join(own.root, 'app/releases', proof.source_selection.gui_id,
+  const sourceExecutable = path.join(installation.desktopProgramPaths(own.root, proof.source_selection, own.record).guiRoot,
     process.platform === 'darwin' ? 'Crabot.app/Contents/MacOS/Crabot' : process.platform === 'linux' ? 'crabot-desktop' : 'Crabot.exe')
   let host, stage
   const current = () => {

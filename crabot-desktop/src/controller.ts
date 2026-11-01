@@ -308,8 +308,17 @@ export class DesktopController {
   private async current(runtimeRoot = this.options.coreRoot) {
     const { inspectInstance, identity } = await this.load('scripts/lib/instance-runtime.mjs', runtimeRoot)
     const current = inspectInstance(this.options.dataRoot)
-    if (current.state === 'legacy' || current.record && realpathSync(current.record.install_root) !== realpathSync(this.options.coreRoot)) {
-      throw Object.assign(new Error('An existing installation requires explicit takeover'), { code: 'CRABOT_DESKTOP_TAKEOVER_REQUIRED' })
+    if (current.state === 'legacy') throw Object.assign(new Error('An existing installation requires explicit takeover'), { code: 'CRABOT_DESKTOP_TAKEOVER_REQUIRED' })
+    if (current.record && path.resolve(current.record.install_root) !== realpathSync(this.options.coreRoot)) {
+      const { default: installation } = await this.load('scripts/lib/desktop-installation.cjs', runtimeRoot)
+      const own = installation.locateDesktopCore(this.options.coreRoot)
+      const relative = own ? path.relative(own.root, current.record.install_root).split(path.sep).join('/') : ''
+      const { hasRunningModuleProcesses } = await this.load('scripts/lib/instance-controller.mjs', runtimeRoot)
+      if (current.state !== 'stopped' || !own || !installation.isFixedDesktopInstallation(own.record)
+        || own.dataDir !== this.options.dataRoot || !/^releases\/[a-f0-9]{64}$/.test(relative)
+        || await hasRunningModuleProcesses(this.options.dataRoot)) {
+        throw Object.assign(new Error('An existing installation requires explicit takeover'), { code: 'CRABOT_DESKTOP_TAKEOVER_REQUIRED' })
+      }
     }
     return { ...current, mmAlive: current.record?.mm && identity.sameProcess(current.record.mm, identity.inspectProcess(current.record.mm.pid)) }
   }

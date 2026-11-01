@@ -21,7 +21,7 @@ async function privateJson(file, value) {
   if (windows) identity.writePrivateFile(file, text)
   else await fs.writeFile(file, text, { flag: 'wx', mode: 0o600 })
 }
-async function fixture(t) {
+async function fixture(t, fixed = false) {
   const parent = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'Crabot 桌面配对 ')))
   t.after(() => fs.rm(parent, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
   const root = management.ensurePrivateDataRoot(path.join(parent, '完整 安装'))
@@ -29,7 +29,7 @@ async function fixture(t) {
   management.ensurePrivateDataRoot(path.join(root, 'data'))
   const stat = await fs.stat(root, { bigint: true })
   const record = { schema_version: 1, installation_id: randomUUID(), owner: identity.inspectProcess(process.pid).owner,
-    install_root: root, root_identity: { dev: String(stat.dev), ino: String(stat.ino) }, paths: { app: 'app/releases', core: 'releases', data: 'data', bin: 'bin' } }
+    install_root: root, root_identity: { dev: String(stat.dev), ino: String(stat.ino) }, paths: { app: fixed ? 'program/gui' : 'app/releases', core: fixed ? 'program/core' : 'releases', data: 'data', bin: 'bin' } }
   await privateJson(path.join(root, 'desktop-installation.json'), record)
   const temporary = path.join(root, 'releases/preparing'); await fs.mkdir(temporary)
   const nodeRelative = windows ? '.product-runtime/node/node.exe' : '.product-runtime/node/bin/node'
@@ -46,15 +46,15 @@ async function fixture(t) {
   await writeCoreRelease(temporary, { schema_version: 1, version: '1.2.3', platform: process.platform, arch: process.arch, commit: '1'.repeat(40), source_dirty: false })
   const release = JSON.parse(await fs.readFile(path.join(temporary, 'core-release.json'), 'utf8'))
   const selection = { schema_version: 1, version: '1.2.3', gui_id: randomUUID(), core_id: release.inventory_sha256 }
-  const coreRoot = path.join(root, 'releases', selection.core_id); await fs.rename(temporary, coreRoot)
-  const guiRoot = path.join(root, 'app/releases', selection.gui_id)
+  const coreRoot = fixed ? path.join(root, 'program/core') : path.join(root, 'releases', selection.core_id); await fs.mkdir(path.dirname(coreRoot), { recursive: true }); await fs.rename(temporary, coreRoot)
+  const guiRoot = fixed ? path.join(root, 'program/gui') : path.join(root, 'app/releases', selection.gui_id)
   const resources = path.join(guiRoot, process.platform === 'darwin' ? 'Crabot.app/Contents/Resources' : 'resources')
   const executable = path.join(guiRoot, process.platform === 'darwin' ? 'Crabot.app/Contents/MacOS/Crabot' : windows ? 'Crabot.exe' : 'crabot-desktop')
   await fs.mkdir(resources, { recursive: true }); await fs.mkdir(path.dirname(executable), { recursive: true })
   await fs.writeFile(executable, 'fixture GUI executable; never launched')
   await fs.writeFile(path.join(resources, 'desktop-release.json'), JSON.stringify(selection))
-  await privateJson(path.join(root, 'current-release.json'), selection)
-  await fs.copyFile(path.join(binary, nativeName), path.join(root, 'bin', nativeName)); if (!windows) await fs.chmod(path.join(root, 'bin', nativeName), 0o755)
+  if (!fixed) await privateJson(path.join(root, 'current-release.json'), selection)
+  await fs.copyFile(process.env.CRABOT_TEST_CLI_LAUNCHER || path.join(binary, nativeName), path.join(root, 'bin', nativeName)); if (!windows) await fs.chmod(path.join(root, 'bin', nativeName), 0o755)
   return { parent, root, record, coreRoot, guiRoot, resources, executable, selection }
 }
 test('GUI, native CLI bootstrap and peer policy use the same selected pair and root-local data', async t => {
@@ -444,4 +444,54 @@ test('external data identity, missing directory and explicit conflicts cannot re
   assert.throws(() => desktop.applyDesktopEnvironment(selected, {}), { code: 'CRABOT_DESKTOP_INSTALLATION' })
   await assert.rejects(fs.lstat(dataDir), { code: 'ENOENT' })
   assert.deepEqual(await fs.readdir(path.join(f.root, 'data')), [])
+})
+
+
+test('fixed desktop reads the installed GUI/Core with no selector and never runs a retained version', async t => {
+  const f = await fixture(t, true)
+  const own = desktop.readDesktopSelection(f.root)
+  assert.equal(own.coreRoot, f.coreRoot)
+  assert.equal(desktop.locatePinnedDesktopGui(f.resources, JSON.stringify(f.selection) + '\n').executable, f.executable)
+  assert.equal(location.assertSelectedCli(f.coreRoot).scope, 'desktop')
+  assert.equal(entry.loadDesktopEntry(f.coreRoot).executable, f.executable)
+  await privateJson(path.join(f.root, 'current-release.json'), { ...f.selection, version: '0.1.0-desktop.14' })
+  assert.equal(desktop.readDesktopSelection(f.root).selection.version, '1.2.3', 'old selector must have no authority over fixed programs')
+  const env = { PATH: '' }; desktop.applyDesktopEnvironment(own, env)
+  const { stdout } = await promisify(execFile)(own.command, ['help'], { env })
+  assert.deepEqual(JSON.parse(stdout), { data: own.dataDir, core: own.coreRoot })
+  await fs.writeFile(path.join(f.coreRoot, 'core-release.json'), JSON.stringify({ ...JSON.parse(await fs.readFile(path.join(f.coreRoot, 'core-release.json'))), version: '1.2.2' }))
+  assert.throws(() => desktop.readDesktopSelection(f.root), { code: 'CRABOT_DESKTOP_INSTALLATION' }, 'mixed GUI/Core never starts')
+})
+
+
+for (const external of [false, true]) test('installer finishes fixed programs before GUI/data preparation and preserves the actual data binding; external=' + external, async t => {
+  const f = await fixture(t), data = external ? management.ensurePrivateDataRoot(path.join(f.parent, 'external-data')) : path.join(f.root, 'data')
+  if (external) {
+    const stat = await fs.lstat(data, { bigint: true })
+    const value = { ...f.record, schema_version: 2, paths: { app: 'app/releases', core: 'releases', bin: 'bin' }, data_dir: data, data_identity: { dev: String(stat.dev), ino: String(stat.ino) } }
+    await fs.rm(path.join(f.root, 'desktop-installation.json')); await privateJson(path.join(f.root, 'desktop-installation.json'), value)
+  }
+  await fs.writeFile(path.join(data, 'user-sentinel'), 'untouched data')
+  const gui = path.join(f.root, 'program/gui'), core = path.join(f.root, 'program/core')
+  await fs.mkdir(path.dirname(gui), { recursive: true })
+  await fs.cp(f.guiRoot, gui, { recursive: true, mode: constants.COPYFILE_FICLONE })
+  await fs.cp(f.coreRoot, core, { recursive: true, mode: constants.COPYFILE_FICLONE })
+  const next = { ...f.selection, gui_id: randomUUID() }
+  const resources = path.join(gui, process.platform === 'darwin' ? 'Crabot.app/Contents/Resources' : 'resources')
+  await fs.writeFile(path.join(resources, 'desktop-release.json'), JSON.stringify(next))
+  await fs.writeFile(path.join(f.root, 'program/desktop-payload.json'), JSON.stringify({ selection: next }))
+  const { finishFixedDesktopInstall } = await import('../../desktop/finish-fixed-install.mjs')
+  let scans = 0
+  await finishFixedDesktopInstall(f.root, { verify: async (actualCore, actualGui) => { scans++; assert.equal(actualCore, core); assert.equal(actualGui, gui) } })
+  assert.equal(scans, 1)
+  const installed = desktop.readDesktopSelection(f.root)
+  assert.deepEqual(installed.selection, next)
+  assert.equal(installed.coreRoot, core); assert.equal(installed.dataDir, data)
+  assert.equal(await fs.readFile(path.join(data, 'user-sentinel'), 'utf8'), 'untouched data')
+  assert.deepEqual((await fs.readdir(data)).sort(), ['user-sentinel'])
+  assert.equal(JSON.parse(await fs.readFile(path.join(f.root, 'current-release.json'))).gui_id, f.selection.gui_id, 'old selector was not rewritten or used to commit programs')
+  const { readFirstLaunchPrograms } = await import('../desktop-first-launch.mjs')
+  await privateJson(path.join(data, 'desktop-managed.json'), { schema_version: 1, install_kind: 'desktop', admin_listen_host: '127.0.0.1' })
+  const first = await readFirstLaunchPrograms({ resources, pinText: JSON.stringify(next) + '\n' })
+  assert.equal(first.initialized, true); assert.equal(first.dataDir, data)
 })

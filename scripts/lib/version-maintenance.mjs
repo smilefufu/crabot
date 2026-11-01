@@ -121,7 +121,7 @@ export async function beginRetainedDesktopVersionMaintenance({ installRoot, oper
       || JSON.stringify(installation.readDesktopPairReference(own.root).selection) !== JSON.stringify(source)) fail()
   }
   current(); assertReinstallVersion(source.version, selection.version)
-  const targetRoot = realpathSync(path.join(own.root, 'releases', selection.core_id))
+  const targetRoot = realpathSync(installation.desktopProgramPaths(own.root, selection, own.record).coreRoot)
   const target = await verifyCoreRelease(targetRoot, { version: selection.version })
   if (target.inventory_sha256 !== selection.core_id) fail()
   const payload = await readOriginalDesktopPayload(own.root, selection), pending = await readPending(own.root)
@@ -131,7 +131,7 @@ export async function beginRetainedDesktopVersionMaintenance({ installRoot, oper
   current(); await context.proofCurrent(); current()
   if (JSON.stringify(await readPending(own.root)) !== JSON.stringify(pending)) fail()
   const record = { schema_version: 3, id: randomUUID(), data_dir: dataDir,
-    install_root: path.join(own.root, 'releases', source.core_id), source_version: source.version, source_inventory_sha256: source.core_id,
+    install_root: installation.desktopProgramPaths(own.root, source, own.record).coreRoot, source_version: source.version, source_inventory_sha256: source.core_id,
     target_version: target.version, target_core: { root: targetRoot, inventory_sha256: target.inventory_sha256 },
     phase: 'preparing', backup: null, data_protection: 'scoped' }
   write(dataDir, record, true); return record

@@ -3,6 +3,7 @@
 import path from 'node:path'
 import physical from './physical-fs.cjs'
 import identity from './process-identity.cjs'
+import installation from './desktop-installation.cjs'
 import { captureMacRemovalSystemProcesses, captureLinuxRemovalSystemProcesses } from './desktop-removal-system-processes.mjs'
 import { captureDesktopRemovalJob } from './desktop-removal-context.mjs'
 import { inspectDesktopRemovalPrograms, desktopRemovalProgramEntries, matchesDesktopRemovalProgram, desktopProgramGeneration } from './desktop-removal-programs.mjs'
@@ -14,14 +15,14 @@ const referenceFailure = stage => { throw Object.assign(new Error('程序仍被�
 // Read-only resource observation. A caller still needs its live job, source-exit
 // and lock admission; this fact alone grants no phase change or deletion.
 export async function assertDesktopRemovalProgramsUnused({ installRoot, proof }, stage) {
-  const files = []
-  for (const entry of desktopRemovalProgramEntries(proof)) {
+  const files = [], own = installation.readDesktopInstallation(installRoot)
+  for (const entry of desktopRemovalProgramEntries(proof, own.record)) {
     const file = path.join(installRoot, entry.name)
     try { physical.lstatSync(file); files.push(file) }
     catch (error) { if (error.code !== 'ENOENT') throw error }
   }
-  const programDirectories = [path.join(installRoot, 'releases', proof.source_selection.core_id),
-    path.join(installRoot, 'app/releases', proof.source_selection.gui_id)]
+  const paths = installation.desktopProgramPaths(installRoot, proof.source_selection, own.record)
+  const programDirectories = [paths.coreRoot, paths.guiRoot]
   // Once every proved program file and both program directories are absent,
   // there is no remaining deletion target. The bin base is retained. Job,
   // source-exit and lock checks remain the caller's independent responsibility.
@@ -46,11 +47,11 @@ export async function removeDesktopRemovalPrograms({ installRoot, operationId })
   const context = await captureDesktopRemovalJob(scope), { own, proof } = context
   const current = async () => { await context.proofCurrent(); context.assertJob() }
   await current()
-  const entries = desktopRemovalProgramEntries(proof), parents = new Map(), removed = []
+  const entries = desktopRemovalProgramEntries(proof, own.record), parents = new Map(), removed = []
   const root = physical.lstatSync(own.root, { bigint: true })
   const owned = (file, stat) => process.platform === 'win32'
     ? stat.isDirectory() ? identity.isOwnedDirectory(file) : identity.isOwnedFile(file) : stat.uid === root.uid
-  const baseDirectories = new Set(['app', 'app/releases', 'releases', 'bin'].map(name => path.join(own.root, name)))
+  const baseDirectories = new Set((installation.isFixedDesktopInstallation(own.record) ? ['program', 'program/gui', 'program/core', 'bin'] : ['app', 'app/releases', 'releases', 'bin']).map(name => path.join(own.root, name)))
   async function captureParents(file) {
     const list = []
     for (let parent = path.dirname(file); parent !== own.root; parent = path.dirname(parent)) {

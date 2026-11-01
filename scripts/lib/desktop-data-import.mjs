@@ -61,7 +61,7 @@ export async function copyDesktopData(source, target, { signal, progress = () =>
   target = path.join(parent, path.basename(target))
   if (within(source, target) || within(target, source)) throw new Error('来源和目标数据目录不能重叠。')
   const existing = await present(target)
-  if (existing && (!(await fs.stat(target)).isDirectory() || (await fs.readdir(target)).some(name => name !== 'cli.lock'))) {
+  if (existing && (!(await fs.stat(target)).isDirectory() || (await fs.readdir(target)).some(name => !['cli.lock', 'desktop-profile'].includes(name)))) {
     throw new Error('目标数据目录非空，未覆盖已有数据。')
   }
   management.ensurePrivateDataRoot(target)
@@ -103,7 +103,7 @@ export async function copyDesktopData(source, target, { signal, progress = () =>
   }
   try {
     for (const entry of await fs.readdir(source)) {
-      if (!['cli.lock', 'desktop-managed.json'].includes(entry)) await copy(path.join(source, entry), path.join(target, entry))
+      if (!['cli.lock', 'desktop-managed.json', 'desktop-profile'].includes(entry)) await copy(path.join(source, entry), path.join(target, entry))
     }
   } catch (error) { failure ??= error }
   // Drain every write before the caller can release locks, retry, or migrate.
@@ -170,7 +170,7 @@ export async function importDesktopData({ source, root, target, signal, progress
         if (!['prepared', 'rolled_back'].includes(state.phase)) throw new Error('副本已有迁移记录，请保留当前数据并按原迁移记录恢复，未重新复制。')
       }
       for (const name of await fs.readdir(target)) {
-        if (name !== 'cli.lock') await fs.rm(path.join(target, name), { recursive: true, force: true })
+        if (!['cli.lock', 'desktop-profile'].includes(name)) await fs.rm(path.join(target, name), { recursive: true, force: true })
       }
     }
     report('复制数据')

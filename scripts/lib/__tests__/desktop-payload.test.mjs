@@ -2277,16 +2277,16 @@ for (const previouslyFenced of [false, true]) test('pre-data preparation failure
   assert.equal(await fs.readFile(path.join(f.data, 'fixture/executions'), 'utf8'), 'once\n')
 })
 
-async function extractedFirstLaunch(f, selectedRoot) {
+async function extractedFirstLaunch(f, selectedRoot, fixed = false) {
   const { default: management } = await import('../desktop-management.cjs')
   const root = selectedRoot ?? management.ensurePrivateDataRoot(path.join(f.parent, '选择的程序目录'))
-  const coreRoot = path.join(root, 'releases', f.selection.core_id), guiRoot = path.join(root, 'app/releases', f.selection.gui_id)
+  const coreRoot = fixed ? path.join(root, 'program/core') : path.join(root, 'releases', f.selection.core_id), guiRoot = fixed ? path.join(root, 'program/gui') : path.join(root, 'app/releases', f.selection.gui_id)
   await fs.mkdir(path.dirname(coreRoot), { recursive: true }); await fs.mkdir(path.dirname(guiRoot), { recursive: true }); await fs.mkdir(path.join(root, 'bin'), { recursive: true })
   await fs.rename(f.core, coreRoot); await fs.rename(f.gui, guiRoot)
   if (!(await fs.lstat(path.join(root, 'bin', launcher)).catch(error => { if (error.code !== 'ENOENT') throw error; return null }))) await fs.copyFile(path.join(coreRoot, 'bin', launcher), path.join(root, 'bin', launcher))
   if (!windows) await fs.chmod(path.join(root, 'bin', launcher), 0o755)
   await fs.mkdir(path.join(root, 'app/installers'), { recursive: true })
-  await fs.copyFile(path.join(f.payload, 'desktop-payload.json'), path.join(root, 'app/installers', f.selection.gui_id + '.json'))
+  await fs.copyFile(path.join(f.payload, 'desktop-payload.json'), fixed ? path.join(root, 'program/desktop-payload.json') : path.join(root, 'app/installers', f.selection.gui_id + '.json'))
   const resources = path.join(guiRoot, path.relative(f.gui, f.resources))
   return { root, coreRoot, guiRoot, resources, pinText: JSON.stringify(f.selection) + '\n' }
 }
@@ -2449,4 +2449,33 @@ for (const version of ['1.2.3', '1.2.4']) test('an extracted retained reinstall 
   assert.equal(await fs.readFile(path.join(data, 'retained-user-file'), 'utf8'), 'user content')
   await assert.rejects(fs.lstat(path.join(data, 'mm.pid')), { code: 'ENOENT' })
   await assert.rejects(fs.lstat(path.join(f.target, '.desktop-removal.json')), { code: 'ENOENT' })
+})
+
+
+test('fixed first use has no selector commit and its maintenance proof survives removal of program metadata', async t => {
+  const f = await fixture(t, { functional: true, schema: 'v2' }), extracted = await extractedFirstLaunch(f, undefined, true)
+  const first = await import('../../../crabot-desktop/dist/bootstrap/scripts/lib/desktop-first-launch.mjs')
+  const { default: management } = await import('../desktop-management.cjs')
+  const programs = await first.readFirstLaunchPrograms(extracted)
+  assert.equal(programs.fixed, true)
+  const data = management.ensurePrivateDataRoot(path.join(extracted.root, 'data'))
+  const bound = await first.bindFirstLaunchData(programs, data)
+  const installed = await first.completeFreshFirstLaunch(bound, async () => {})
+  assert.equal(installed.coreRoot, extracted.coreRoot)
+  await assert.rejects(fs.lstat(path.join(extracted.root, 'current-release.json')), { code: 'ENOENT' })
+  const operationId = randomUUID(), { captureDesktopRemovalProof } = await import('../desktop-removal-proof.mjs')
+  const proof = await captureDesktopRemovalProof(extracted.root, operationId)
+  const { desktopRemovalProgramEntries } = await import('../desktop-removal-programs.mjs')
+  const entries = desktopRemovalProgramEntries(proof, installed.record)
+  assert.ok(entries.some(entry => entry.name.startsWith('program/gui/')))
+  assert.ok(entries.some(entry => entry.name.startsWith('program/core/')))
+  assert.ok(!entries.some(entry => entry.name.startsWith('releases/') || entry.name.startsWith('app/releases/')))
+  const text = JSON.stringify(proof) + '\n'
+  const { privateJson } = await import('../desktop-preparation-files.mjs')
+  await privateJson(path.join(extracted.root, '.desktop-removal.json'), { schema_version: 1, installation_id: installed.record.installation_id,
+    operation_id: operationId, source_selection: installed.selection, phase: 'removing', proof_sha256: createHash('sha256').update(text).digest('hex') })
+  await fs.unlink(path.join(extracted.resources, 'desktop-release.json'))
+  assert.deepEqual(installation.readDesktopPairReference(extracted.root).selection, installed.selection)
+  assert.throws(() => installation.readDesktopSelection(extracted.root), { code: 'CRABOT_DESKTOP_REMOVAL_PENDING' })
+  assert.equal((await fs.readdir(data)).filter(name => name !== 'cli.lock').join(','), 'desktop-managed.json')
 })

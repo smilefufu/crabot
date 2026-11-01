@@ -278,3 +278,18 @@ test('read-only directory modes are applied only after all child file writes fin
     await fs.chmod(target, 0o700).catch(error => { if (error.code !== 'ENOENT') throw error })
   }
 })
+
+
+test('data copy preserves the active first-launch profile and does not import another desktop session', async t => {
+  const parent = await fs.mkdtemp(path.join(tmpdir(), 'Crabot active profile '))
+  t.after(() => fs.rm(parent, { recursive: true, force: true }))
+  const source = management.ensurePrivateDataRoot(path.join(parent, 'source')), target = management.ensurePrivateDataRoot(path.join(parent, 'target'))
+  for (const directory of [source, target]) await fs.mkdir(path.join(directory, 'desktop-profile'))
+  await fs.writeFile(path.join(source, 'desktop-profile', 'session'), 'old display session')
+  await fs.writeFile(path.join(target, 'desktop-profile', 'session'), 'active display session')
+  await fs.writeFile(path.join(source, 'history'), 'user history')
+  await copyDesktopData(source, target)
+  assert.equal(await fs.readFile(path.join(target, 'desktop-profile', 'session'), 'utf8'), 'active display session')
+  assert.equal(await fs.readFile(path.join(source, 'desktop-profile', 'session'), 'utf8'), 'old display session')
+  assert.equal(await fs.readFile(path.join(target, 'history'), 'utf8'), 'user history')
+})

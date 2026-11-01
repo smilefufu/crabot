@@ -54,7 +54,7 @@ function matchingPending(state, ctx) {
 }
 function preparedFor(ctx) {
   return { installRoot: ctx.own.root, installation_id: ctx.own.record.installation_id, selection: ctx.reference.selection,
-    coreRoot: path.join(ctx.own.root, 'releases', ctx.reference.selection.core_id), guiRoot: path.join(ctx.own.root, 'app/releases', ctx.reference.selection.gui_id) }
+    coreRoot: installation.desktopProgramPaths(ctx.own.root, ctx.reference.selection, ctx.own.record).coreRoot, guiRoot: installation.desktopProgramPaths(ctx.own.root, ctx.reference.selection, ctx.own.record).guiRoot }
 }
 export async function prepareDesktopRepair({ payload, installRoot, verifyStopped, signal, progress = () => {} }) {
   progress('verifying')

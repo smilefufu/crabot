@@ -32,9 +32,9 @@ static std::vector<DesktopUninstallValue> DesktopUninstallValues(napi_env env, n
     || napi_get_named_property(env, record, "version", &versionValue) != napi_ok) throw std::runtime_error("Invalid uninstall record");
   auto executable = DesktopLoginPath(env, executableValue), root = DesktopLoginPath(env, rootValue), version = DesktopUninstallText(env, versionValue, 128);
   const auto prefix = root + L"\\app\\releases\\";
-  if (executable.size() <= prefix.size() + 11 || _wcsnicmp(executable.c_str(), prefix.c_str(), prefix.size()) != 0
+  if (executable != root + L"\\program\\gui\\Crabot.exe" && (executable.size() <= prefix.size() + 11 || _wcsnicmp(executable.c_str(), prefix.c_str(), prefix.size()) != 0
     || executable.substr(executable.size() - 11) != L"\\Crabot.exe"
-    || !DesktopUninstallId(executable.substr(prefix.size(), executable.size() - prefix.size() - 11))) throw std::runtime_error("Uninstall program outside installation");
+    || !DesktopUninstallId(executable.substr(prefix.size(), executable.size() - prefix.size() - 11)))) throw std::runtime_error("Uninstall program outside installation");
   for (auto letter : version) if (!((letter >= L'0' && letter <= L'9') || (letter >= L'A' && letter <= L'Z') || (letter >= L'a' && letter <= L'z') || letter == L'.' || letter == L'-')) throw std::runtime_error("Invalid uninstall version");
   return {{L"DisplayName", L"Crabot"}, {L"DisplayVersion", version}, {L"Publisher", L"Crabot"}, {L"InstallLocation", root},
     {L"DisplayIcon", L"\"" + executable + L"\",0"}, {L"UninstallString", L"\"" + executable + L"\" --uninstall"},
@@ -79,6 +79,14 @@ static napi_value ReplaceDesktopUninstall(napi_env env, napi_callback_info info)
     DesktopLoginKey key;
     if (RegCreateKeyExW(HKEY_CURRENT_USER, keyPath.c_str(), 0, nullptr, 0, KEY_QUERY_VALUE | KEY_SET_VALUE | KEY_ENUMERATE_SUB_KEYS,
       nullptr, &key.value, nullptr) != ERROR_SUCCESS) throw std::runtime_error("Cannot register uninstall entry");
+    if (before[4].text == after[4].text && after[4].text == L"\"" + after[3].text + L"\\program\\gui\\Crabot.exe\",0") {
+      // A fixed-path update has already replaced the old executable metadata.
+      // Read only its display version; every location/command/owner field below
+      // still has to match this exact installation before any registry write.
+      wchar_t value[129]{}; DWORD type = 0, bytes = sizeof(value);
+      if (RegQueryValueExW(key.value, L"DisplayVersion", nullptr, &type, reinterpret_cast<BYTE*>(value), &bytes) == ERROR_SUCCESS
+        && type == REG_SZ && bytes >= sizeof(wchar_t) && bytes <= sizeof(value) && value[bytes / sizeof(wchar_t) - 1] == 0) before[1].text = value;
+    }
     // Missing fields or a mixture of these exact old/new values can be left by
     // interruption. Unknown values are preserved, never repaired by overwriting.
     VerifyDesktopUninstall(key.value, before, after, false);

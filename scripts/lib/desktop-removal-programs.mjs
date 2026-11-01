@@ -48,11 +48,12 @@ function programMaps(proof) {
   return { core, launcher, launcherRecord }
 }
 
-export function desktopRemovalProgramEntries(proof) {
+export function desktopRemovalProgramEntries(proof, record) {
   const { core, launcher, launcherRecord } = programMaps(proof), selected = proof.source_selection
+  const fixed = installation.isFixedDesktopInstallation(record)
   return [
-    ...Object.entries(core).map(([name, expected]) => ({ name: 'releases/' + selected.core_id + '/' + name, expected })),
-    ...Object.entries(proof.payload.gui).map(([name, expected]) => ({ name: 'app/releases/' + selected.gui_id + '/' + name, expected })),
+    ...Object.entries(core).map(([name, expected]) => ({ name: (fixed ? 'program/core/' : 'releases/' + selected.core_id + '/') + name, expected })),
+    ...Object.entries(proof.payload.gui).map(([name, expected]) => ({ name: (fixed ? 'program/gui/' : 'app/releases/' + selected.gui_id + '/') + name, expected })),
     { name: 'bin/' + launcher, expected: launcherRecord },
   ].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
 }
@@ -139,8 +140,8 @@ export async function inspectDesktopRemovalPrograms({ installRoot, operationId, 
     } catch { signal?.throwIfAborted(); retain(file, 'unverified') }
   }
   const { core, launcher, launcherRecord } = programMaps(proof)
-  await inspect(path.join(own.root, 'releases', record.source_selection.core_id), tree(core))
-  await inspect(path.join(own.root, 'app/releases', record.source_selection.gui_id), tree(proof.payload.gui))
+  await inspect(installation.desktopProgramPaths(own.root, record.source_selection, own.record).coreRoot, tree(core))
+  await inspect(installation.desktopProgramPaths(own.root, record.source_selection, own.record).guiRoot, tree(proof.payload.gui))
   await inspect(path.join(own.root, 'bin', launcher), { record: launcherRecord })
   signal?.throwIfAborted()
   const current = await readDesktopRemovalProof(own.root)

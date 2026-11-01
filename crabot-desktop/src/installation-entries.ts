@@ -79,7 +79,7 @@ export async function registerInstallationEntries(prepared: PreparedInstallation
   registerMac?: (application: string) => Promise<unknown>
 }) {
   const { home, platform, env, shell } = options, root = installation.readDesktopInstallation(prepared.installRoot)
-  if (root.record.installation_id !== prepared.installation_id || prepared.guiRoot !== path.join(root.root, 'app/releases', prepared.selection.gui_id)) fail()
+  if (root.record.installation_id !== prepared.installation_id || prepared.guiRoot !== installation.desktopProgramPaths(root.root, prepared.selection, root.record).guiRoot) fail()
   const locator = await readInstallationLocator(home, platform, env)
   if (locator && (locator.install_root !== root.root || locator.installation_id !== prepared.installation_id)) fail()
   const registration = integrationRoot(home, platform, env)
@@ -123,7 +123,7 @@ function assertPairMember(prepared: PreparedInstallation, root: string, installa
   if (!value || value.schema_version !== 1 || Object.keys(value).sort().join(',') !== 'core_id,gui_id,schema_version,version'
     || !/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(value.version) || !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(value.gui_id)
     || !/^[a-f0-9]{64}$/.test(value.core_id) || prepared.installRoot !== root || prepared.installation_id !== installationId
-    || prepared.guiRoot !== path.join(root, 'app/releases', value.gui_id) || prepared.coreRoot !== path.join(root, 'releases', value.core_id)) fail()
+    || prepared.guiRoot !== installation.desktopProgramPaths(root, value).guiRoot || prepared.coreRoot !== installation.desktopProgramPaths(root, value).coreRoot) fail()
 }
 const samePair = (a: PreparedInstallation['selection'], b: PreparedInstallation['selection']) =>
   a.schema_version === b.schema_version && a.version === b.version && a.gui_id === b.gui_id && a.core_id === b.core_id
@@ -224,8 +224,7 @@ export async function registerRetainedInstallationEntries(prepared: PreparedInst
   const record = removal.readDesktopRemoval(own.root)
   if (!record || record.operation_id !== options.operationId || !['removing', 'completed'].includes(record.phase)) fail()
   const source: PreparedInstallation = { installRoot: own.root, installation_id: own.record.installation_id,
-    selection: record.source_selection, guiRoot: path.join(own.root, 'app/releases', record.source_selection.gui_id),
-    coreRoot: path.join(own.root, 'releases', record.source_selection.core_id) }
+    selection: record.source_selection, ...installation.desktopProgramPaths(own.root, record.source_selection, own.record) }
   assertPairMember(prepared, own.root, own.record.installation_id)
   const assertCurrent = () => {
     const current = installation.readDesktopPairReference(own.root)

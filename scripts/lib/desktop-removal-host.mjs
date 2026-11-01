@@ -76,7 +76,7 @@ async function copyRemovalGui(sourceGui, payload, current, signal, progress) {
 export async function prepareExistingDesktopRemovalGui({ installRoot, operationId, signal, progress = () => {} }) {
   if (!['darwin', 'win32'].includes(process.platform)) fail()
   const installationRoot = installation.readDesktopInstallation(installRoot)
-  const own = { ...installationRoot, guiRoot: path.join(installationRoot.root, 'app/releases', installation.readDesktopPairReference(installRoot).selection.gui_id) }
+  const own = { ...installationRoot, guiRoot: installation.desktopProgramPaths(installationRoot.root, installation.readDesktopPairReference(installRoot).selection, installationRoot.record).guiRoot }
   const lock = await acquireExistingCliLock(own.root, 'prepare-existing-removal-host'), token = cliLockToken(lock)
   try {
     const original = await readDesktopRemovalProof(own.root), { record, proof } = original
@@ -136,7 +136,7 @@ async function prepareRemovalNode({ installRoot, operationId, signal, progress =
   if (process.platform !== 'linux') fail()
   const base = existing ? installation.readDesktopInstallation(installRoot) : installation.readDesktopSelection(installRoot)
   const selection = existing ? installation.readDesktopPairReference(base.root).selection : base.selection
-  const own = { ...base, selection, coreRoot: path.join(base.root, 'releases', selection.core_id), guiRoot: path.join(base.root, 'app/releases', selection.gui_id) }
+  const own = { ...base, selection, coreRoot: installation.desktopProgramPaths(base.root, selection, base.record).coreRoot, guiRoot: installation.desktopProgramPaths(base.root, selection, base.record).guiRoot }
   const lock = await acquireExistingCliLock(own.root, 'prepare-removal-node'), token = cliLockToken(lock)
   let directory, createdIdentity, stage = 'capture-proof'
   try {

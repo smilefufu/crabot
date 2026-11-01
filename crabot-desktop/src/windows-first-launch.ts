@@ -3,12 +3,12 @@ import { compareVersions } from './release-signatures.js'
 import { existsSync, promises as fs } from 'node:fs'
 import type { dialog as ElectronDialog } from 'electron'
 import type { PreparedInstallation } from './installation-entries.js'
-import { createOperationProgressWindow } from './operation-progress-window.js'
 
 // Programs are already at their final location. This UI chooses existing data;
 // the common target-Node role alone performs its stopped conversion.
 export async function prepareWindowsFirstLaunch(options: {
   resources: string; pinText: string; home: string;
+  progress?: (message: string, cancellable: boolean) => void; signal?: AbortSignal;
   dialog: Pick<typeof ElectronDialog, 'showMessageBox' | 'showOpenDialog'>;
   load: (name: string, verifiedCore?: string) => Promise<any>;
   registerEntries: (prepared: PreparedInstallation) => Promise<void>
@@ -16,6 +16,7 @@ export async function prepareWindowsFirstLaunch(options: {
   upgradeExisting?: (prepared: PreparedInstallation & { source: PreparedInstallation['selection']; proof: { file: string; sha256: string } }, source: any) => Promise<boolean>
 }): Promise<any | null> {
   const { dialog } = options
+  options.progress?.('正在准备 Crabot，核对程序与已有数据位置…', false)
   const first = await options.load('desktop-first-launch.mjs')
   const programs = await first.readFirstLaunchPrograms(options)
   if (programs.initialized) return programs
@@ -66,7 +67,7 @@ export async function prepareWindowsFirstLaunch(options: {
   const dataDir = legacy ? management.ensurePrivateDataRoot(path.join(programs.installRoot, 'data'))
     : bound?.dataDir ?? management.ensurePrivateDataRoot(path.join(programs.installRoot, 'data'))
   let restartCopy = false
-  if (legacy && bound?.dataDir === dataDir && (await fs.readdir(dataDir)).some(name => name !== 'cli.lock')) {
+  if (legacy && bound?.dataDir === dataDir && (await fs.readdir(dataDir)).some(name => !['cli.lock', 'desktop-profile'].includes(name))) {
     const retry = await dialog.showMessageBox({ type: 'warning', title: '重新导入数据', message: '上次导入尚未完成，重新复制原数据？',
       detail: `只重新建立尚未启用的副本：${dataDir}\n来源保留：${legacy.dataRoot}`, buttons: ['重新导入', '取消'], cancelId: 1 })
     if (retry.response !== 0) return null
@@ -74,17 +75,13 @@ export async function prepareWindowsFirstLaunch(options: {
   }
   const selected = await first.bindFirstLaunchData(programs, dataDir)
   if (!legacy) return first.completeFreshFirstLaunch(selected, options.registerEntries)
-  const abort = new AbortController(), progress = createOperationProgressWindow('admission', abort)
-  try {
-    await progress.ready
-    await importDesktopData({ source: legacy, root: programs.coreRoot, target: dataDir, restartCopy, signal: abort.signal,
-      progress: (value: { phase: string; files?: number; bytes?: number; message?: string; elapsed_ms?: number }) => {
-        const copied = value.files === undefined ? '' : `，${value.files} 个文件，${((value.bytes || 0) / 1024 / 1024).toFixed(1)} MB`
-        progress.update(`${value.phase}${copied}${value.message ? '：' + value.message : ''}`, value.phase !== '迁移数据')
-        console.info(JSON.stringify({ component: 'desktop-data-import', ...value }))
-      } })
-    const installed = await first.completeImportedFirstLaunch(selected, options.registerEntries)
-    await forwardImportedWindowsCommand(legacy, programs.installRoot)
-    return installed
-  } finally { progress.close() }
+  await importDesktopData({ source: legacy, root: programs.coreRoot, target: dataDir, restartCopy, signal: options.signal,
+    progress: (value: { phase: string; files?: number; bytes?: number; message?: string; elapsed_ms?: number }) => {
+      const copied = value.files === undefined ? '' : `，${value.files} 个文件，${((value.bytes || 0) / 1024 / 1024).toFixed(1)} MB`
+      options.progress?.(`${value.phase}${copied}${value.message ? '：' + value.message : ''}`, value.phase !== '迁移数据')
+      console.info(JSON.stringify({ component: 'desktop-data-import', ...value }))
+    } })
+  const installed = await first.completeImportedFirstLaunch(selected, options.registerEntries)
+  await forwardImportedWindowsCommand(legacy, programs.installRoot)
+  return installed
 }

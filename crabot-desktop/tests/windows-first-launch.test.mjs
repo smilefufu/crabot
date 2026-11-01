@@ -45,6 +45,7 @@ async function run({ initialized = false, legacy = false, source = false, cancel
   } })
   const result = await exports.prepareWindowsFirstLaunch({ resources: '/fixture/resources', pinText: 'pin', home: path.dirname(old),
     load: async name => { assert.ok(modules[name], name); return modules[name] },
+    progress: (message, cancellable) => progressEvents.push(['update', message, cancellable]),
     registerEntries: async value => { effects.push(['register', value.installRoot]) },
     repairExisting: async value => { assert.equal(value, programs); effects.push(['repair', root]); return !cancel },
     upgradeExisting: async (prepared, source) => { effects.push(['update', prepared.installRoot, source.dataDir]); return !cancel },
@@ -111,18 +112,17 @@ test('retry of an unfinished local copy delegates deletion to the importer under
 })
 
 
-test('first Windows launch presents preparation before reading the large candidate and closes it before proceeding', async () => {
+test('first Windows launch updates its existing main window before reading programs without creating another progress window', async () => {
   const progressEvents = []
   await run({ previousDesktop: true, progressEvents })
-  assert.deepEqual(progressEvents.slice(0, 2), ['open', 'ready'])
-  assert.equal(progressEvents[2][0], 'update')
-  assert.match(progressEvents[2][1], /准备/)
-  assert.equal(progressEvents[2][2], false)
-  assert.deepEqual(progressEvents.slice(3), ['read-programs', 'close'])
+  assert.equal(progressEvents[0][0], 'update')
+  assert.match(progressEvents[0][1], /准备/)
+  assert.equal(progressEvents[0][2], false)
+  assert.deepEqual(progressEvents.slice(1), ['read-programs'])
 })
-test('a failed first-launch read closes preparation and preserves its actual error', async () => {
+test('a failed first-launch read preserves its concrete error for the main window retry', async () => {
   const progressEvents = [], error = new Error('candidate file unreadable')
   await assert.rejects(run({ progressEvents, programFailure: error }), value => value === error)
-  assert.deepEqual(progressEvents.slice(0, 2), ['open', 'ready'])
-  assert.deepEqual(progressEvents.slice(3), ['read-programs', 'close'])
+  assert.equal(progressEvents[0][0], 'update')
+  assert.deepEqual(progressEvents.slice(1), ['read-programs'])
 })

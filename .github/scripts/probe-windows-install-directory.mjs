@@ -2,7 +2,8 @@
 import assert from 'node:assert/strict'
 import path from 'node:path'
 import { promises as fs } from 'node:fs'
-import { execFile } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
+import { once } from 'node:events'
 import { promisify } from 'node:util'
 import identity from '../../scripts/lib/process-identity.cjs'
 assert.equal(process.platform, 'win32')
@@ -51,6 +52,21 @@ try {
   const file = path.join(root, 'ordinary-file'); await fs.writeFile(file, 'never overwrite')
   await assert.rejects(run(file)); assert.equal(await fs.readFile(file, 'utf8'), 'never overwrite')
   await assert.rejects(run(path.parse(root).root))
+  const program = path.join(selected, 'program/gui/Crabot.exe'), ready = path.join(root, 'loaded-program-ready')
+  await fs.mkdir(path.dirname(program), { recursive: true }); await fs.copyFile(process.execPath, program)
+  const child = spawn(program, ['-e', 'require("fs").writeFileSync(process.argv[1],"ready");setInterval(()=>{},1000)', ready], { stdio: 'ignore', windowsHide: true })
+  const exited = once(child, 'exit')
+  try {
+    const limit = Date.now() + 15000
+    while (!await fs.lstat(ready).catch(() => null)) {
+      if (Date.now() > limit || child.exitCode !== null) throw new Error('Known program did not load')
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+    await assert.rejects(execute(helper, [selected, '--check-programs'], { timeout: 10000 }), error => error.code === 2)
+    child.kill(); await exited
+    await execute(helper, [selected, '--check-programs'], { timeout: 10000 })
+    assert.equal(await fs.readFile(path.join(selected, 'preserve.txt'), 'utf8'), 'existing installation and data stay')
+  } finally { if (child.exitCode === null) { child.kill(); await exited } }
   console.log('CRABOT_INSTALL_DIRECTORY ' + JSON.stringify({ previous_plain_mkdir: previous, new_selected_private: true,
-    selected_empty_private: true, absent_drive_root_child_created: true, missing_nested_parents_created: true, administrators_owned_empty_accepted: true, nonempty_identity_and_contents_preserved: true, redirection_and_file_rejected: true }))
+    selected_empty_private: true, absent_drive_root_child_created: true, missing_nested_parents_created: true, administrators_owned_empty_accepted: true, nonempty_identity_and_contents_preserved: true, running_installed_image_blocks_before_write: true, exited_image_passes_without_global_process_query: true, redirection_and_file_rejected: true }))
 } finally { await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }

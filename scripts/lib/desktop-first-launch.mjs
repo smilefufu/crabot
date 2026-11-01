@@ -17,13 +17,30 @@ async function present(file) { try { return await fs.lstat(file) } catch (error)
 export async function readFirstLaunchPrograms({ resources, pinText }) {
   resources = await fs.realpath(resources)
   const guiRoot = path.resolve(resources, process.platform === 'darwin' ? '../../..' : '..')
-  const installRoot = management.requireExistingDataRoot(path.resolve(guiRoot, '../../..'))
+  const installRoot = management.requireExistingDataRoot(installation.guiInstallationRoot(guiRoot))
+  const fixed = guiRoot === path.join(installRoot, 'program/gui')
   let selection
   try { selection = JSON.parse(pinText) } catch { fail() }
   if (typeof pinText !== 'string' || pinText !== JSON.stringify(selection) + '\n'
     || selection.schema_version !== 1 || !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(selection.gui_id)
     || !/^[a-f0-9]{64}$/.test(selection.core_id) || Object.keys(selection).join(',') !== 'schema_version,version,gui_id,core_id'
-    || guiRoot !== path.join(installRoot, 'app/releases', selection.gui_id)) fail()
+    || !fixed && guiRoot !== path.join(installRoot, 'app/releases', selection.gui_id)) fail()
+  if (fixed) {
+    const coreRoot = path.join(installRoot, 'program/core')
+    const release = JSON.parse(await fs.readFile(path.join(coreRoot, 'core-release.json'), 'utf8'))
+    if (release.version !== selection.version || release.inventory_sha256 !== selection.core_id
+      || release.platform !== process.platform || release.arch !== process.arch) fail()
+    const payloadFile = path.join(installRoot, 'program/desktop-payload.json')
+    const payloadText = await fs.readFile(payloadFile, 'utf8'), payload = JSON.parse(payloadText)
+    if (JSON.stringify(payload.selection) + '\n' !== pinText) fail()
+    const removal = await present(path.join(installRoot, '.desktop-removal.json')) ? readDesktopRemoval(installRoot) : null
+    if (!removal && await present(path.join(installRoot, 'desktop-installation.json'))) {
+      const own = installation.readDesktopInstallation(installRoot)
+      if (!installation.isFixedDesktopInstallation(own.record)) fail() // Installer must finish replacing program entries first.
+      if (management.readDesktopManagement(own.dataDir)) return { initialized: true, fixed: true, ...installation.locatePinnedDesktopGui(resources, pinText) }
+    }
+    return { initialized: false, fixed: true, installRoot, selection, coreRoot, guiRoot, payload, payloadText, payloadFile, removal }
+  }
   // An existing selected installation stays on its normal startup/update path.
   // Missing or damaged selected programs cannot turn into fresh initialization.
   let source
@@ -89,7 +106,7 @@ export async function bindFirstLaunchData(programs, dataDir) {
       const external = dataDir !== path.join(root, 'data')
       await privateJson(metadata, { schema_version: external ? 2 : 1, installation_id: randomUUID(), owner: identity.inspectProcess(process.pid).owner,
         install_root: root, root_identity: { dev: String(stat.dev), ino: String(stat.ino) },
-        paths: { app: 'app/releases', core: 'releases', ...(external ? {} : { data: 'data' }), bin: 'bin' },
+        paths: { app: programs.fixed ? 'program/gui' : 'app/releases', core: programs.fixed ? 'program/core' : 'releases', ...(external ? {} : { data: 'data' }), bin: 'bin' },
         ...(external ? { data_dir: dataDir, data_identity: { dev: String(data.dev), ino: String(data.ino) } } : {}) })
     }
     const own = installation.readDesktopInstallation(root)
@@ -113,7 +130,7 @@ export async function completeFreshFirstLaunch(bound, registerEntries) {
     management.initializeDesktopManagement(bound.dataDir)
     await registerEntries({ installRoot: bound.root, installation_id: bound.record.installation_id,
       selection: bound.selection, coreRoot: bound.coreRoot, guiRoot: bound.guiRoot })
-    await privateJson(path.join(bound.root, 'current-release.json'), bound.selection)
+    if (!installation.isFixedDesktopInstallation(current.record)) await privateJson(path.join(bound.root, 'current-release.json'), bound.selection)
     return installation.readDesktopSelection(bound.root)
   } finally { releaseCliLock(lock) }
 }

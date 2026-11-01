@@ -51,7 +51,7 @@ async function openDesktopRemoval({ installRoot, operationId, signal, preparePla
   if (preparePlatformRemoval !== undefined && (!['node', 'installer-node'].includes(role) || typeof preparePlatformRemoval !== 'function')) fail()
   const base = existing ? installation.readDesktopInstallation(installRoot) : installation.readDesktopSelection(installRoot)
   const selection = existing ? installation.readDesktopPairReference(base.root).selection : base.selection
-  const own = { ...base, coreRoot: path.join(base.root, 'releases', selection.core_id), guiRoot: path.join(base.root, 'app/releases', selection.gui_id) }
+  const own = { ...base, coreRoot: installation.desktopProgramPaths(base.root, selection, base.record).coreRoot, guiRoot: installation.desktopProgramPaths(base.root, selection, base.record).guiRoot }
   const rootLock = await acquireExistingCliLock(own.root, 'desktop-removal'), rootToken = cliLockToken(rootLock)
   let dataLock, dataToken, job, pendingStop, pendingPhase, stopFailed = false, pendingSourceExit, sourceExitFailed = false, closed = false, busy = false, cancelIssued = false
   let pendingRemoval, pendingRemovalPhase, removalFailed = false

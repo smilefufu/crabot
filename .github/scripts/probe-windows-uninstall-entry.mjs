@@ -11,7 +11,7 @@ assert.equal(typeof identity.replaceDesktopUninstallEntry, 'function')
 assert.equal(typeof identity.removeDesktopUninstallEntry, 'function')
 const id = randomUUID(), root = fs.mkdtempSync(path.join(os.tmpdir(), 'Crabot 卸载 & [] '))
 const source = { installRoot: root, executable: path.join(root, 'app/releases', randomUUID(), 'Crabot.exe'), version: '1.2.3' }
-const target = { ...source, executable: path.join(root, 'app/releases', randomUUID(), 'Crabot.exe'), version: '1.2.4' }
+const target = { ...source, executable: path.join(root, 'program/gui/Crabot.exe'), version: '1.2.4' }
 for (const record of [source, target]) { fs.mkdirSync(path.dirname(record.executable), { recursive: true }); fs.writeFileSync(record.executable, 'inert, never execute') }
 const powershell = path.join(process.env.SystemRoot, 'System32/WindowsPowerShell/v1.0/powershell.exe')
 const script = String.raw`$ErrorActionPreference='Stop'
@@ -58,7 +58,11 @@ try {
   const after = observe(); assert.equal(after.DisplayVersion.value, target.version); assert.equal(after.UninstallString.value, command(target))
   identity.replaceDesktopUninstallEntry(id, source, target); assert.deepEqual(observe(), after)
   assert.throws(() => identity.removeDesktopUninstallEntry(id, source)); assert.deepEqual(observe(), after)
-  assert.equal(identity.removeDesktopUninstallEntry(id, target), true); assert.equal(observe(), null)
+  const next = { ...target, version: '1.2.5' }
+  identity.replaceDesktopUninstallEntry(id, next, next); current = next
+  assert.equal(observe().DisplayVersion.value, next.version)
+  assert.equal(observe().UninstallString.value, command(next))
+  assert.equal(identity.removeDesktopUninstallEntry(id, next), true); assert.equal(observe(), null)
   assert.equal(identity.removeDesktopUninstallEntry(id, target), true); assert.equal(observe(), null)
   console.log('CRABOT_WINDOWS_UNINSTALL_ENTRY ' + JSON.stringify({ actual_hkcu_registry: true, unique_installation: true,
     unicode_paths: true, fixed_interactive_command: true, repeated_registration: true, interrupted_fields_recovered: true,
