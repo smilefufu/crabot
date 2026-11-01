@@ -14,8 +14,12 @@ const run = target => execute(helper, [target], { timeout: 10000 })
 try {
   const direct = path.join(path.parse(root).root, 'Crabot-directory-proof-' + path.basename(root))
   await assert.rejects(fs.lstat(direct), { code: 'ENOENT' })
+  await fs.mkdir(direct); await fs.rmdir(direct) // Ordinary creation works with this same user and path.
   try { await run(direct); assert.equal(identity.isPrivateDirectory(direct), true) }
   finally { await fs.rm(direct, { recursive: true, force: true }) }
+  const nested = path.join(path.parse(root).root, 'Crabot-nested-proof-' + path.basename(root), 'missing parent', '程序')
+  try { await run(nested); assert.equal(identity.isPrivateDirectory(nested), true) }
+  finally { await fs.rm(path.dirname(path.dirname(nested)), { recursive: true, force: true }) }
   const inherited = path.join(root, 'old plain mkdir'); await fs.mkdir(inherited)
   const previous = { owned: identity.isOwnedDirectory(inherited), data_acl: identity.isExistingDataDirectory(inherited) }
   const selected = path.join(root, '中文 程序'); await run(selected)
@@ -29,6 +33,12 @@ try {
   assert.equal(identity.isOwnedDirectory(administrators), true, 'current user can manage this directory under the existing product rule')
   await run(administrators)
   assert.equal(identity.isPrivateDirectory(administrators), true)
+  await fs.writeFile(path.join(administrators, 'keep.txt'), 'keep existing ACL and contents')
+  await execute(path.join(process.env.SystemRoot, 'System32/icacls.exe'), [administrators, '/setowner', '*S-1-5-32-544'], { timeout: 10000 })
+  const administratorBefore = await fs.stat(administrators, { bigint: true })
+  await run(administrators)
+  assert.equal((await fs.stat(administrators, { bigint: true })).ino, administratorBefore.ino)
+  assert.equal(await fs.readFile(path.join(administrators, 'keep.txt'), 'utf8'), 'keep existing ACL and contents')
   await fs.writeFile(path.join(selected, 'preserve.txt'), 'existing installation and data stay')
   const before = await fs.stat(selected, { bigint: true })
   await run(selected)
@@ -42,5 +52,5 @@ try {
   await assert.rejects(run(file)); assert.equal(await fs.readFile(file, 'utf8'), 'never overwrite')
   await assert.rejects(run(path.parse(root).root))
   console.log('CRABOT_INSTALL_DIRECTORY ' + JSON.stringify({ previous_plain_mkdir: previous, new_selected_private: true,
-    selected_empty_private: true, absent_drive_root_child_created: true, administrators_owned_empty_accepted: true, nonempty_identity_and_contents_preserved: true, redirection_and_file_rejected: true }))
+    selected_empty_private: true, absent_drive_root_child_created: true, missing_nested_parents_created: true, administrators_owned_empty_accepted: true, nonempty_identity_and_contents_preserved: true, redirection_and_file_rejected: true }))
 } finally { await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }

@@ -28,8 +28,8 @@ try {
   const installers = (await fs.readdir(path.join(output, 'distribution'))).filter(file => file.endsWith('offline-candidate.exe'))
   assert.equal(installers.length, 1)
   const cases = []
-  for (const name of ['ordinary', '中文 空格', 'deep']) {
-    const target = name === 'deep' ? path.join(root, 'target', ...Array.from({ length: 8 }, (_, index) => 'long-directory-' + index)) : path.join(root, 'target', name)
+  for (const name of ['drive-root', 'ordinary', '中文 空格', 'deep']) {
+    const target = name === 'drive-root' ? path.join(path.parse(root).root, 'Crabot-decoder-' + selection.gui_id) : name === 'deep' ? path.join(root, 'target', ...Array.from({ length: 8 }, (_, index) => 'long-directory-' + index)) : path.join(root, 'target', name)
     await fs.mkdir(path.dirname(target), { recursive: true })
     try {
       await execute(path.join(output, 'distribution', installers[0]), ['/S', '/D=' + target], { windowsVerbatimArguments: true, timeout: 120000, maxBuffer: 65536 })
@@ -44,6 +44,7 @@ try {
       await assert.rejects(fs.lstat(path.join(target, absent)), { code: 'ENOENT' })
     }
     cases.push({ name, path_length: installed.length, exact_bytes: true, data_initialized: false, gui_or_core_started: false })
+    if (name === 'drive-root') await fs.rm(target, { recursive: true, force: true })
   }
   assert.ok(cases.find(value => value.name === 'deep').path_length > 320)
   console.log('CRABOT_SINGLE_LAYER_DECODER ' + JSON.stringify({ actual_product_nsis: true, cases }))

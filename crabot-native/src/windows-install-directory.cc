@@ -3,7 +3,7 @@
 #include <windows.h>
 #include <sddl.h>
 #include <aclapi.h>
-#include <filesystem>
+#include "existing-directory-access.h"
 #include <string>
 #include <vector>
 #include <cstdio>
@@ -38,9 +38,12 @@ int wmain(int argc, wchar_t** argv) {
     if (attributes != INVALID_FILE_ATTRIBUTES) {
       if (!(attributes & FILE_ATTRIBUTE_DIRECTORY) || attributes & FILE_ATTRIBUTE_REPARSE_POINT) throw 1;
       stage = "existing-owner";
-      PSID before = nullptr;
-      if (GetNamedSecurityInfoW(root.data(), SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION,
-        &before, nullptr, nullptr, nullptr, &existing) != ERROR_SUCCESS || !EqualSid(owner, before)) throw 1;
+      PSID before = nullptr; PACL acl = nullptr;
+      DWORD error = GetNamedSecurityInfoW(root.data(), SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+        &before, nullptr, &acl, nullptr, &existing);
+      if (error != ERROR_SUCCESS) { SetLastError(error); throw 1; }
+      if (!before || (!EqualSid(owner, before) && !(IsWellKnownSid(before, WinBuiltinAdministratorsSid)
+        && ExistingDataAccess(existing, acl, owner)))) { SetLastError(ERROR_ACCESS_DENIED); throw 1; }
       stage = "list-existing";
       WIN32_FIND_DATAW entry{};
       HANDLE search = FindFirstFileW((root + L"\\*").c_str(), &entry);
@@ -56,7 +59,19 @@ int wmain(int argc, wchar_t** argv) {
     } else if (GetLastError() != ERROR_FILE_NOT_FOUND && GetLastError() != ERROR_PATH_NOT_FOUND) throw 1;
     if (result != 0) {
       stage = "create-parents";
-      std::filesystem::create_directories(std::filesystem::path(root).parent_path());
+      // Never attempt to create the existing drive root: Windows can return
+      // ACCESS_DENIED for mkdir("D:\\") even when creating children is allowed.
+      for (size_t end = root.find(L'\\', 7); end != std::wstring::npos; end = root.find(L'\\', end + 1)) {
+        const std::wstring parent = root.substr(0, end);
+        const DWORD before = GetFileAttributesW(parent.c_str());
+        if (before != INVALID_FILE_ATTRIBUTES && (before & FILE_ATTRIBUTE_DIRECTORY)) continue;
+        if (!CreateDirectoryW(parent.c_str(), nullptr)) {
+          const DWORD error = GetLastError(), attributes = GetFileAttributesW(parent.c_str());
+          if (error != ERROR_ALREADY_EXISTS || attributes == INVALID_FILE_ATTRIBUTES || !(attributes & FILE_ATTRIBUTE_DIRECTORY)) {
+            SetLastError(error); throw 1;
+          }
+        }
+      }
       stage = "prepare-private-access";
       std::wstring acl = L"O:" + std::wstring(sid) + L"D:P(A;OICI;GA;;;" + sid + L")";
       if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(acl.c_str(), SDDL_REVISION_1, &descriptor, nullptr)) throw 1;
@@ -65,9 +80,6 @@ int wmain(int argc, wchar_t** argv) {
       if (!CreateDirectoryW(root.c_str(), &access)) throw 1;
       result = 0;
     }
-  } catch (const std::filesystem::filesystem_error& error) {
-    std::fprintf(stderr, "CRABOT_INSTALL_DIRECTORY stage=%s win32=%d\n", stage, error.code().value());
-    result = 1;
   } catch (...) {
     std::fprintf(stderr, "CRABOT_INSTALL_DIRECTORY stage=%s win32=%lu\n", stage, GetLastError());
     result = 1;

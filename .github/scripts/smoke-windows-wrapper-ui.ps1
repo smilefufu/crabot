@@ -13,7 +13,8 @@ $env:HOME = $homeRoot
 $env:APPDATA = Join-Path $homeRoot 'AppData/Roaming'
 $env:LOCALAPPDATA = Join-Path $homeRoot 'AppData/Local'
 New-Item $env:APPDATA,$env:LOCALAPPDATA -ItemType Directory -Force | Out-Null
-$target = Join-Path $env:RUNNER_TEMP ('crabot wrapper UI ' + [guid]::NewGuid().ToString('N'))
+$target = Join-Path ([IO.Path]::GetPathRoot($env:RUNNER_TEMP)) ('Crabot wrapper UI ' + [guid]::NewGuid().ToString('N'))
+if (Test-Path -LiteralPath $target) { throw 'Expected an absent new folder directly under the selected drive' }
 Add-Type @'
 using System;
 using System.Text;
