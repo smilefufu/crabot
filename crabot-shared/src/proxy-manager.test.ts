@@ -117,11 +117,18 @@ test('Windows environment priority and custom/none do not read OS settings', t =
   manager.updateConfig({ mode: 'none' }); assert.equal(manager.getProxyUrl(), null)
   manager.updateConfig({ mode: 'custom', custom_url: 'http://custom.example:8080' })
   assert.equal(manager.getProxyUrl(), 'http://custom.example:8080')
-  for (const key of [...proxyKeys].reverse()) {
+  // Windows aliases environment keys by case; test each spelling in isolation.
+  for (const key of proxyKeys) {
+    for (const existing of proxyKeys) delete process.env[existing]
     process.env[key] = `http://${key.toLowerCase().replace('_', '-')}.example:8000`
     manager.updateConfig({ mode: 'system' })
     assert.equal(manager.getProxyUrl(), process.env[key])
   }
+  for (const key of proxyKeys) delete process.env[key]
+  process.env.HTTP_PROXY = 'http://http.example:8000'
+  process.env.HTTPS_PROXY = 'http://https.example:9000'
+  manager.updateConfig({ mode: 'system' })
+  assert.equal(manager.getProxyUrl(), 'http://https.example:9000')
   assert.equal(read.mock.callCount(), 0)
 })
 
@@ -142,11 +149,18 @@ test('environment precedence and custom/none do not invoke macOS detection', t =
   manager.updateConfig({ mode: 'none' }); assert.equal(manager.getProxyUrl(), null)
   manager.updateConfig({ mode: 'custom', custom_url: 'http://custom.example:8080' })
   assert.equal(manager.getProxyUrl(), 'http://custom.example:8080')
-  for (const key of [...proxyKeys].reverse()) {
+  // Windows aliases environment keys by case; test each spelling in isolation.
+  for (const key of proxyKeys) {
+    for (const existing of proxyKeys) delete process.env[existing]
     process.env[key] = `http://${key.toLowerCase().replace('_', '-')}.example:8000`
     manager.updateConfig({ mode: 'system' })
     assert.equal(manager.getProxyUrl(), process.env[key])
   }
+  for (const key of proxyKeys) delete process.env[key]
+  process.env.HTTP_PROXY = 'http://http.example:8000'
+  process.env.HTTPS_PROXY = 'http://https.example:9000'
+  manager.updateConfig({ mode: 'system' })
+  assert.equal(manager.getProxyUrl(), 'http://https.example:9000')
   assert.equal(command.mock.callCount(), 0)
 })
 
