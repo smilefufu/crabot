@@ -40,11 +40,14 @@ if (process.platform === 'win32') {
   if (!installation || installation.includes('\n')) throw new Error('Microsoft C++ build tools not found')
   const script = join(cache, 'compile.cmd')
   await fs.writeFile(script, '@echo off\r\ncall "%CRABOT_NATIVE_VS%\\Common7\\Tools\\VsDevCmd.bat" -arch=x64 >nul\r\nif errorlevel 1 exit /b %errorlevel%\r\ncl.exe /nologo /LD /MT /EHsc /O2 /std:c++17 /I"%CRABOT_NATIVE_INCLUDE%" "%CRABOT_NATIVE_SOURCE%" "%CRABOT_NATIVE_HOST_HOOK%" /link "%CRABOT_NATIVE_LIBRARY%" Rstrtmgr.lib Advapi32.lib Shell32.lib User32.lib Iphlpapi.lib Ws2_32.lib Winhttp.lib delayimp.lib /DELAYLOAD:node.exe /OUT:"%CRABOT_NATIVE_BINARY%"\r\nif errorlevel 1 exit /b %errorlevel%\r\ncl.exe /nologo /MT /EHsc /O2 /std:c++17 "%CRABOT_CLI_SOURCE%" /link /OUT:"%CRABOT_CLI_BINARY%"\r\nif errorlevel 1 exit /b %errorlevel%\r\ncl.exe /nologo /MT /EHsc /O2 /std:c++17 "%CRABOT_CLEANUP_SOURCE%" /link Advapi32.lib /OUT:"%CRABOT_CLEANUP_BINARY%"\r\nif errorlevel 1 exit /b %errorlevel%\r\ncl.exe /nologo /MT /EHsc /O2 /std:c++17 "%CRABOT_INSTALL_DIRECTORY_SOURCE%" /link Advapi32.lib /OUT:"%CRABOT_INSTALL_DIRECTORY_BINARY%"\r\n')
+  await fs.appendFile(script, 'if errorlevel 1 exit /b %errorlevel%\r\ncl.exe /nologo /MT /EHsc /O2 /std:c++17 "%CRABOT_HIDDEN_CONSOLE_SOURCE%" /link /OUT:"%CRABOT_HIDDEN_CONSOLE_BINARY%"\r\n')
   await runBounded('cmd.exe', ['/d', '/s', '/c', script], { cwd: output, env: { ...process.env,
     CRABOT_NATIVE_VS: installation, CRABOT_NATIVE_INCLUDE: include,
     CRABOT_NATIVE_SOURCE: source, CRABOT_NATIVE_LIBRARY: library, CRABOT_NATIVE_BINARY: binary,
     CRABOT_NATIVE_HOST_HOOK: join(root, 'crabot-native/src/win-host-hook.cc'),
     CRABOT_CLI_SOURCE: cliSource, CRABOT_CLI_BINARY: cliBinary,
+    CRABOT_HIDDEN_CONSOLE_SOURCE: join(root, 'crabot-native/src/hidden-console-launcher.cc'),
+    CRABOT_HIDDEN_CONSOLE_BINARY: join(output, 'crabot-hidden-console.exe'),
     CRABOT_CLEANUP_SOURCE: cleanupSource, CRABOT_CLEANUP_BINARY: cleanupBinary,
     CRABOT_INSTALL_DIRECTORY_SOURCE: join(root, 'crabot-native/src/windows-install-directory.cc'),
     CRABOT_INSTALL_DIRECTORY_BINARY: join(output, 'crabot-install-directory.exe'),

@@ -2,7 +2,6 @@
 import { spawn, execFile, type ChildProcess } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
-import { devNull } from 'node:os'
 const project = process.argv[2]
 const stateFile = path.join(project, 'process-state.json')
 let child: ChildProcess | undefined
@@ -62,12 +61,12 @@ process.on('message', (message: { type: string; executable: string; args: string
   if (message.type === 'stop') { finishStop(); return }
   if (message.type !== 'start' || child || finishing) return
   fs.rmSync(path.join(project, 'stop'), { force: true })
-  // Inherit an EOF-only descriptor on Windows so libuv creates a hidden console,
-  // rather than no console. Slack's nested PowerShell hooks inherit it too.
-  const stdin = process.platform === 'win32' ? fs.openSync(devNull, 'r') : undefined
-  try {
-    child = spawn(message.executable, message.args, { cwd: message.cwd, env: process.env, detached: process.platform !== 'win32', windowsHide: true, stdio: [stdin ?? 'ignore', 'pipe', 'pipe'] })
-  } finally { if (stdin !== undefined) fs.closeSync(stdin) }
+  // CREATE_NEW_CONSOLE + SW_HIDE preserves console-dependent tool behavior.
+  // This wrapper and all descendants remain in this invocation's owned tree.
+  const hiddenConsole = path.resolve(__dirname, '../../crabot-native/build/Release/crabot-hidden-console.exe')
+  child = spawn(process.platform === 'win32' ? hiddenConsole : message.executable,
+    process.platform === 'win32' ? [message.executable, ...message.args] : message.args,
+    { cwd: message.cwd, env: process.env, detached: process.platform !== 'win32', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
   child.on('spawn', () => fs.writeFileSync(stateFile, JSON.stringify({ cli_pid: child!.pid, supervisor_pid: process.pid }), { mode: 0o600 }))
   closed = new Promise(resolve => child!.once('close', code => { exitCode = code; resolve(); finishStop() }))
   const capture = (chunk: Buffer) => {

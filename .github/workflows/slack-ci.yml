@@ -44,6 +44,7 @@ jobs:
           node-version: '22.22.3'
       - name: Build native Slack process dependencies
         run: |
+          node scripts/build-native.mjs
           pnpm --dir crabot-shared install --frozen-lockfile
           pnpm --dir crabot-shared run build
           pnpm --dir crabot-channel-slack install --frozen-lockfile
