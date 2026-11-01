@@ -22,9 +22,8 @@ for (const maxBuffer of [16 * 1024 * 1024]) {
   const pending = execute(executable, ['/S', '/D=' + target], { windowsVerbatimArguments: true, timeout: 600000, maxBuffer })
   try {
     const result = await pending
-    const inventories = await fs.readdir(path.join(target, 'app/installers')); assert.equal(inventories.length, 1)
-    const record = JSON.parse(await fs.readFile(path.join(target, 'app/installers', inventories[0]), 'utf8'))
-    const core = path.join(target, 'releases', record.selection.core_id), gui = path.join(target, 'app/releases', record.selection.gui_id)
+    const record = JSON.parse(await fs.readFile(path.join(target, 'program/desktop-payload.json'), 'utf8'))
+    const core = path.join(target, 'program/core'), gui = path.join(target, 'program/gui')
     await verifyDesktopPrograms(core, gui, record)
     for (const name of ['data', 'current-release.json', 'desktop-installation.json']) await assert.rejects(fs.lstat(path.join(target, name)), { code: 'ENOENT' })
     reports.push({ maxBuffer, success: true, stdout_bytes: Buffer.byteLength(result.stdout), stderr_bytes: Buffer.byteLength(result.stderr), elapsed_ms: Date.now() - started })

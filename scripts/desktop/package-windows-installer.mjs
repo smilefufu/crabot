@@ -4,14 +4,13 @@ import { promises as fs, constants } from 'node:fs'
 import path from 'node:path'
 import { createRequire } from 'node:module'
 export async function packageWindowsInstaller({ root, output, source, payload, distribute }) {
-  const selected = payload.record.selection, programs = path.join(output, 'programs')
-  const gui = path.join(programs, 'app/releases', selected.gui_id), core = path.join(programs, 'releases', selected.core_id)
+  const programs = path.join(output, 'programs')
+  const gui = path.join(programs, 'program/gui'), core = path.join(programs, 'program/core')
   await fs.mkdir(path.dirname(gui), { recursive: true }); await fs.mkdir(path.dirname(core), { recursive: true }); await fs.mkdir(path.join(programs, 'bin'))
   await fs.cp(payload.guiRoot, gui, { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE })
   await fs.cp(payload.coreRoot, core, { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE })
-  const inventories = path.join(programs, 'app/installers')
-  await fs.mkdir(inventories)
-  await fs.writeFile(path.join(inventories, selected.gui_id + '.json'), JSON.stringify(payload.record) + '\n')
+  await fs.copyFile(path.join(core, 'bin/crabot.exe'), path.join(programs, 'bin/crabot.exe'))
+  await fs.writeFile(path.join(programs, 'program/desktop-payload.json'), JSON.stringify(payload.record) + '\n')
   const executable = path.join(gui, 'Crabot.exe')
   await fs.writeFile(path.join(output, 'installer-location.json'), JSON.stringify({ schema_version: 1, candidate_only: true, release_signed: false,
     bootstrap: 'windows-first-launch', executable: path.relative(output, executable).split(path.sep).join('/'),

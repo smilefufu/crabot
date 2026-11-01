@@ -19,8 +19,8 @@ try {
   await execute(path.join(distribution, installers[0]), ['/S', '/D=' + target], { windowsVerbatimArguments: true, timeout: 600000, maxBuffer: 16 * 1024 * 1024 })
   const originalGui = path.dirname(path.resolve(project, info.executable)), gui = path.join(target, path.relative(path.resolve(project, info.programs), originalGui))
   const pin = JSON.parse(await fs.readFile(path.join(gui, 'resources/desktop-release.json'), 'utf8'))
-  const record = JSON.parse(await fs.readFile(path.join(target, 'app/installers', pin.gui_id + '.json'), 'utf8'))
-  await verifyDesktopPrograms(path.join(target, 'releases', pin.core_id), gui, record)
+  const record = JSON.parse(await fs.readFile(path.join(target, 'program/desktop-payload.json'), 'utf8'))
+  await verifyDesktopPrograms(path.join(target, 'program/core'), gui, record)
   for (const absent of ['data', 'desktop-installation.json', 'current-release.json', 'CrabotInstaller.exe', 'resources/offline']) await assert.rejects(fs.lstat(path.join(target, absent)), { code: 'ENOENT' })
   console.log('CRABOT_WINDOWS_SINGLE_LAYER ' + JSON.stringify({ exact_exe: true, full_gui_and_core_inventory: true, elapsed_ms: Date.now() - started, data_initialized: false, second_installer: false, gui_or_core_started: false }))
 } catch (error) { failure = error; throw error } finally {

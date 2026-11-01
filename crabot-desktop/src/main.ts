@@ -11,6 +11,7 @@ import { randomUUID } from 'node:crypto'
 import type { DesktopDiagnostics } from 'crabot-client'
 import { pathToFileURL, fileURLToPath } from 'node:url'
 import { DesktopController } from './controller.js'
+import { showStartupPage } from './startup-page.js'
 import { attachLocalPages } from './local-pages.js'
 import { attachDesktopNetwork } from './desktop-network.js'
 import { registerDesktopIpc } from './desktop-ipc.js'
@@ -45,6 +46,9 @@ let uninstallRequested = process.platform === 'win32' && process.argv.includes('
 let requestUninstall: (() => Promise<void>) | undefined
 let pendingUninstall: Promise<void> | undefined
 let instanceHandlerRegistered = false
+let preparingData = false
+let startupPage: Awaited<ReturnType<typeof showStartupPage>> | undefined
+let mainSession: Electron.Session | undefined
 
 function uninstallInstallation(installRoot: string): Promise<void> {
   return pendingUninstall ||= (async () => {
@@ -78,6 +82,7 @@ async function bootUninstall() {
 }
 
 async function quit(): Promise<boolean> {
+  if (preparingData) return false
   if (pendingUninstall) return false
   if (pendingQuit) return pendingQuit
   pendingQuit = (async () => {
@@ -135,6 +140,15 @@ function claimInstance() {
   return true
 }
 
+function createMainWindow(privateSession: Electron.Session) {
+  const result = new BrowserWindow({ width: 1180, height: 800, minWidth: 800, minHeight: 560, show: false, title: 'Crabot',
+    backgroundColor: '#202127', autoHideMenuBar: process.platform !== 'darwin',
+    webPreferences: { session: privateSession, preload: path.join(directory, 'preload.cjs'), nodeIntegration: false,
+      contextIsolation: true, sandbox: true, webSecurity: true, webviewTag: false, allowRunningInsecureContent: false } })
+  result.on('close', event => { if (!quitting) { event.preventDefault(); result.hide() } })
+  return result
+}
+
 async function boot() {
   const removal = readRemovalHostRequest(process.argv)
   if (removal) {
@@ -163,27 +177,65 @@ async function boot() {
     catch (error: any) { if (error.code !== 'ENOENT') throw error }
   }
   bootstrapStage('installation-pin-read')
-  let windowsInstallation
-  const windowsRoot = path.resolve(process.resourcesPath, '../../../..')
-  const windowsFirstUse = app.isPackaged && process.platform === 'win32' && pin !== undefined
+  let windowsInstallation, dataLocationError: unknown
+  const guiRoot = path.resolve(process.resourcesPath, '..')
+  const windowsRoot = verifier?.guiInstallationRoot(guiRoot)
+  const fixedWindows = app.isPackaged && process.platform === 'win32' && pin !== undefined && guiRoot === path.join(windowsRoot, 'program/gui')
+  const windowsFirstUse = fixedWindows || app.isPackaged && process.platform === 'win32' && pin !== undefined
     && (existsSync(path.join(windowsRoot, '.desktop-removal.json')) || !existsSync(path.join(windowsRoot, 'current-release.json')) || readFileSync(path.join(windowsRoot, 'current-release.json'), 'utf8') !== pin)
   if (windowsFirstUse) {
-    configureProfile(path.join(app.getPath('appData'), 'Crabot/bootstrap'))
+    if (fixedWindows) {
+      try {
+        const own = existsSync(path.join(windowsRoot, 'desktop-installation.json')) ? verifier.readDesktopInstallation(windowsRoot) : null
+        const management = createRequire(import.meta.url)('./bootstrap/scripts/lib/desktop-management.cjs')
+        const profileData = own && management.readDesktopManagement(own.dataDir) ? own.dataDir : management.ensurePrivateDataRoot(path.join(windowsRoot, 'data'))
+        configureProfile(profileData)
+      } catch (error) {
+        dataLocationError = error
+        configureProfile(path.join(app.getPath('appData'), 'Crabot/bootstrap'))
+      }
+    } else configureProfile(path.join(app.getPath('appData'), 'Crabot/bootstrap'))
     if (!claimInstance()) return
     await app.whenReady()
+    if (fixedWindows) {
+      app.setAppUserModelId('com.crabot.desktop')
+      mainSession = session.fromPartition('persist:crabot-desktop')
+      window = createMainWindow(mainSession)
+      startupPage = await showStartupPage(window, app.getVersion())
+      if (!process.argv.includes('--background')) show()
+    }
+    if (dataLocationError) {
+      show()
+      if (await startupPage!.retry(dataLocationError, path.join(app.getPath('userData'), 'bootstrap.log'))) app.relaunch()
+      quitting = true; app.quit(); return
+    }
     const { prepareWindowsFirstLaunch } = await import('./windows-first-launch.js')
     const { registerInstallationEntries } = await import('./installation-entries.js')
-    windowsInstallation = await prepareWindowsFirstLaunch({ resources: process.resourcesPath, pinText: pin!, home: homedir(), dialog,
-      load: (name, verifiedCore) => import(verifiedCore ? pathToFileURL(path.join(verifiedCore, 'scripts/lib', name)).href : new URL('./bootstrap/scripts/lib/' + name, import.meta.url).href),
-      registerEntries: prepared => registerInstallationEntries(prepared, { home: homedir(), platform: process.platform, env: process.env, shell }),
-      repairExisting: async programs => {
-        const { repairWindowsRetainedData } = await import('./windows-offline-update.js')
-        return repairWindowsRetainedData({ programs, app, dialog, shell, home: homedir() })
-      },
-      upgradeExisting: async (prepared, source) => {
-        const { applyWindowsOfflineUpdate } = await import('./windows-offline-update.js')
-        return applyWindowsOfflineUpdate({ prepared, source, app, dialog, shell, home: homedir() })
-      } })
+    while (true) {
+      preparingData = true
+      try {
+        windowsInstallation = await prepareWindowsFirstLaunch({
+          resources: process.resourcesPath, pinText: pin!, home: homedir(), dialog,
+          progress: message => { void startupPage?.update(message).catch(() => {}) },
+          load: (name, verifiedCore) => import(verifiedCore ? pathToFileURL(path.join(verifiedCore, 'scripts/lib', name)).href : new URL('./bootstrap/scripts/lib/' + name, import.meta.url).href),
+          registerEntries: prepared => registerInstallationEntries(prepared, { home: homedir(), platform: process.platform, env: process.env, shell }),
+          repairExisting: async programs => {
+            const { repairWindowsRetainedData } = await import('./windows-offline-update.js')
+            return repairWindowsRetainedData({ programs, app, dialog, shell, home: homedir(), progress: message => { void startupPage?.update(message).catch(() => {}) } })
+          },
+          upgradeExisting: async (prepared, source) => {
+            const { applyWindowsOfflineUpdate } = await import('./windows-offline-update.js')
+            return applyWindowsOfflineUpdate({ prepared, source, app, dialog, shell, home: homedir() })
+          } })
+        break
+      } catch (error) {
+        if (!startupPage) throw error
+        preparingData = false
+        bootstrapStage('data-preparation-failed', { detail: error instanceof Error ? error.message : String(error) })
+        show()
+        if (!await startupPage.retry(error, path.join(app.getPath('userData'), 'bootstrap.log'))) { quitting = true; app.quit(); return }
+      } finally { preparingData = false }
+    }
     if (!windowsInstallation) { quitting = true; app.quit(); return }
     app.releaseSingleInstanceLock()
   }
@@ -193,7 +245,7 @@ async function boot() {
   bootstrapStage('installation-validated')
   if (installation) {
     // Electron needs its UI profile and instance lock before the first await.
-    // Only protected GUI code touches this profile; Core still requires a full hash.
+    // Only protected GUI code touches this profile; installation owns full program verification.
     verifier.applyDesktopEnvironment(installation)
     bootstrapStage('environment-bound')
     const management = createRequire(import.meta.url)('./bootstrap/scripts/lib/desktop-management.cjs')
@@ -280,17 +332,15 @@ async function boot() {
       }
     } })
   artifacts = new ArtifactWindows(controller.host, () => { if (!quitting) updateMenus() })
-  const privateSession = session.fromPartition('persist:crabot-desktop')
+  const privateSession = mainSession ?? session.fromPartition('persist:crabot-desktop')
   privateSession.setPermissionRequestHandler((contents, permission, callback, details) =>
     callback(allowsDesktopClipboardWrite(contents, window?.webContents, permission, details)))
   privateSession.setPermissionCheckHandler((contents, permission, origin, details) =>
     isAppUrl(origin) && allowsDesktopClipboardWrite(contents, window?.webContents, permission, details))
   attachLocalPages(privateSession, path.join(coreRoot, 'crabot-admin/dist/web'))
   attachDesktopNetwork(privateSession, controller.host, () => window?.webContents)
-  window = new BrowserWindow({ width: 1180, height: 800, minWidth: 800, minHeight: 560, show: false, title: 'Crabot',
-    backgroundColor: '#f5f5f7', autoHideMenuBar: process.platform !== 'darwin',
-    webPreferences: { session: privateSession, preload: path.join(directory, 'preload.cjs'), nodeIntegration: false,
-      contextIsolation: true, sandbox: true, webSecurity: true, webviewTag: false, allowRunningInsecureContent: false } })
+  window ??= createMainWindow(privateSession)
+  startupPage?.close(); startupPage = undefined
   const reports = new Map<string, DesktopDiagnostics>()
   const diagnostics = async () => {
     const report = await collectDiagnostics(coreRoot, controller!.host.snapshot(), controller!.host.recent())
@@ -337,7 +387,6 @@ async function boot() {
     if (contents === window?.webContents && item.getInitiatorOrigin() === 'app://crabot') artifacts!.open(item.getURL(), true)
   })
   window.webContents.on('will-attach-webview', event => event.preventDefault())
-  window.on('close', event => { if (!quitting) { event.preventDefault(); window?.hide() } })
   window.once('ready-to-show', () => { if (!background) show() })
   const trayImage = nativeImage.createFromBuffer(await readFile(path.join(directory, 'assets/tray.png')))
   if (trayImage.isEmpty()) throw new Error('Desktop tray asset is invalid')
@@ -400,7 +449,7 @@ async function boot() {
   bootstrapStage('local-interface-loaded')
   if (installation) { requestUninstall = () => uninstallInstallation(installation.root); updateMenus() }
   if (uninstallRequested && requestUninstall) { await requestUninstall(); controller.watch(); return }
-  // The local UI is visible while the controller verifies the large payload.
+  // Program verification belongs to installation; the visible UI now starts/reconnects the service.
   if (initialError) controller.fail(initialError)
   else {
     bootstrapStage('recovering-service')

@@ -1,4 +1,4 @@
-; Extract immutable programs directly to their final location. GUI first use
+; Replace the fixed program directory; user data remains outside it. GUI first use
 ; owns existing-data admission; no second installer or business process waits here.
 !include "common.nsh"
 !include "MUI2.nsh"
@@ -18,6 +18,7 @@
 !macroend
 RequestExecutionLevel user
 InstallDir "$PROFILE\Crabot"
+InstallDirRegKey HKCU "Software\Crabot\Desktop" "InstallLocation"
 Var ExistingDesktopRoot
 !define MUI_FINISHPAGE_RUN
 !define MUI_FINISHPAGE_RUN_FUNCTION OpenCrabot
@@ -58,6 +59,13 @@ Function .onInit
     SetErrorLevel 1
     Quit
   FindDesktop:
+  IfFileExists "$INSTDIR\desktop-installation.json" RegisteredTarget
+  StrCmp $INSTDIR "$PROFILE\Crabot" 0 RegistryDone
+  Goto RegistrySearch
+  RegisteredTarget:
+    StrCpy $ExistingDesktopRoot $INSTDIR
+    Goto RegistryDone
+  RegistrySearch:
   ; Existing desktop upgrades retain their original program location. This OS
   ; registration is a location hint; the GUI verifies actual binding and data.
   StrCpy $0 0
@@ -81,6 +89,7 @@ Function DirectoryPage
   Done:
 FunctionEnd
 Section "安装 Crabot"
+  IfFileExists "$INSTDIR\program\desktop-payload.json" +2
   AddSize ${APP_64_UNPACKED_SIZE}
   InitPluginsDir
   File /oname=$PLUGINSDIR\7za.exe "${CRABOT_DECODER}"
@@ -93,14 +102,55 @@ Section "安装 Crabot"
     DetailPrint "$1"
     Abort "无法创建程序目录 $INSTDIR。尚未解包程序；原数据未改动。错误：$0 $1"
   ${EndIf}
+  CheckRunning:
+  nsExec::ExecToStack '"$PLUGINSDIR\directory.exe" "$INSTDIR" --check-programs'
+  Pop $0
+  Pop $1
+  StrCmp $0 0 NotRunning
+  StrCmp $0 2 InUse
+  SetErrorLevel 1
+  Abort "无法检查本安装的程序文件。错误：$1"
+  InUse:
+  MessageBox MB_RETRYCANCEL|MB_ICONINFORMATION "Crabot 程序文件仍在使用中。请退出 Crabot（包括托盘后台），然后重试。$\r$\n$1" /SD IDCANCEL IDRETRY CheckRunning
+  SetErrorLevel 1
+  Abort "已取消安装，尚未替换程序，原数据保留。"
+  NotRunning:
+  ; Only the dedicated product directory is replaced. Never remove INSTDIR,
+  ; data, workspaces, historical runtimes or the installation/data binding.
+  IfFileExists "$INSTDIR\program\*" 0 ProgramReady
+  IfFileExists "$INSTDIR\program\desktop-payload.json" KnownProgram
+  ReadRegStr $0 HKCU "Software\Crabot\Desktop" "InstallLocation"
+  StrCmp $0 "$INSTDIR" KnownProgram
+  SetErrorLevel 1
+  Abort "所选位置已有无法识别的 program 文件夹，未删除或覆盖。请选择其它程序位置。"
+  KnownProgram:
+  ClearErrors
+  RMDir /r "\\?\$INSTDIR\program\gui"
+  RMDir /r "\\?\$INSTDIR\program\core"
+  IfErrors 0 ProgramReady
+  SetErrorLevel 1
+  Abort "无法替换程序目录，请退出本安装后重新运行安装包。用户数据未改动。"
+  ProgramReady:
+  WriteRegStr HKCU "Software\Crabot\Desktop" "InstallLocation" "$INSTDIR"
   SetOutPath "$INSTDIR"
   !insertmacro extractEmbeddedAppPackage
   IfFileExists "\\?\$INSTDIR\${CRABOT_GUI}" Ready
     SetErrorLevel 1
     Abort "程序解包尚未完成，原数据未改动。请重新运行安装包。"
   Ready:
-  IfFileExists "$SMPROGRAMS\Crabot.lnk" ShortcutReady
+  DetailPrint "正在核对程序并更新启动入口（不转换数据）"
+  nsExec::ExecToStack '"$INSTDIR\program\core\.product-runtime\node\node.exe" "$INSTDIR\program\core\scripts\desktop\finish-fixed-install.mjs" "$INSTDIR"'
+  Pop $0
+  Pop $1
+  StrCmp $0 0 EntriesReady
+  SetErrorLevel 1
+  Abort "程序安装尚未完成。用户数据未改动，请重新运行安装包。错误：$1"
+  EntriesReady:
+  ClearErrors
   CreateShortcut "$SMPROGRAMS\Crabot.lnk" "$INSTDIR\${CRABOT_GUI}"
+  IfErrors 0 ShortcutReady
+  SetErrorLevel 1
+  Abort "无法更新开始菜单入口，请重新运行安装包。用户数据未改动。"
   ShortcutReady:
 SectionEnd
 Function OpenCrabot

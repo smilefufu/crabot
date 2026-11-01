@@ -24,6 +24,10 @@ try {
   await fs.writeFile(path.join(guiRoot, 'Crabot.exe'), 'inert GUI entry; never executed')
   await fs.mkdir(path.dirname(path.join(coreRoot, relative)), { recursive: true })
   await fs.writeFile(path.join(coreRoot, relative), 'complete long-path payload bytes')
+  await fs.mkdir(path.join(coreRoot, '.product-runtime/node'), { recursive: true })
+  await fs.copyFile(process.execPath, path.join(coreRoot, '.product-runtime/node/node.exe'))
+  await fs.mkdir(path.join(coreRoot, 'scripts/desktop'), { recursive: true })
+  await fs.writeFile(path.join(coreRoot, 'scripts/desktop/finish-fixed-install.mjs'), "console.log('inert decoder fixture: no verification or business startup')")
   const record = { schema_version: 1, platform: 'win32', arch: 'x64', selection, gui: {} }
   await packageWindowsInstaller({ root: process.cwd(), source, output, payload: { directory, coreRoot, guiRoot, record }, distribute: true })
   const installers = (await fs.readdir(path.join(output, 'distribution'))).filter(file => file.endsWith('offline-candidate.exe'))
@@ -35,16 +39,30 @@ try {
     try {
       await execute(path.join(output, 'distribution', installers[0]), ['/S', '/D=' + target], { windowsVerbatimArguments: true, timeout: 120000, maxBuffer: 65536 })
     } catch (error) {
-      console.log('CRABOT_DECODER_FAILURE ' + JSON.stringify({ name, code: error.code, gui_present: !!await fs.lstat(path.join(target, 'app/releases', selection.gui_id, 'Crabot.exe')).catch(() => null), nested_present: !!await fs.lstat(path.join(target, 'releases', selection.core_id, relative)).catch(() => null) }))
+      console.log('CRABOT_DECODER_FAILURE ' + JSON.stringify({ name, code: error.code, gui_present: !!await fs.lstat(path.join(target, 'program/gui/Crabot.exe')).catch(() => null), nested_present: !!await fs.lstat(path.join(target, 'program/core', relative)).catch(() => null) }))
       throw error
     }
-    const installed = path.join(target, 'releases', selection.core_id, relative)
+    const installed = path.join(target, 'program/core', relative)
     console.log('CRABOT_DECODER_DESTINATION ' + JSON.stringify({ name, target, entries: await fs.readdir(target).catch(error => error.code), default_entries: await fs.readdir(path.join(process.env.USERPROFILE, 'Crabot')).catch(error => error.code) }))
     assert.equal(await fs.readFile(installed, 'utf8'), 'complete long-path payload bytes')
     for (const absent of ['desktop-installation.json', 'current-release.json', 'data', 'CrabotInstaller.exe', 'resources/offline']) {
       await assert.rejects(fs.lstat(path.join(target, absent)), { code: 'ENOENT' })
     }
     cases.push({ name, path_length: installed.length, exact_bytes: true, data_initialized: false, gui_or_core_started: false })
+    if (name === 'ordinary') {
+      await fs.mkdir(path.join(target, 'data'))
+      await fs.writeFile(path.join(target, 'data/user-data'), 'preserve user data')
+      await fs.writeFile(path.join(target, 'program/core/obsolete-program-file'), 'old product file')
+      await execute(path.join(output, 'distribution', installers[0]), ['/S', '/D=' + target], { windowsVerbatimArguments: true, timeout: 120000, maxBuffer: 65536 })
+      await assert.rejects(fs.stat(path.join(target, 'program/core/obsolete-program-file')), { code: 'ENOENT' })
+      assert.equal(await fs.readFile(path.join(target, 'data/user-data'), 'utf8'), 'preserve user data')
+      // Re-run after a partial program extraction: no second program backup or
+      // application/data conversion is required to restore the standard files.
+      await fs.rm(path.join(target, 'program/core'), { recursive: true })
+      await execute(path.join(output, 'distribution', installers[0]), ['/S', '/D=' + target], { windowsVerbatimArguments: true, timeout: 120000, maxBuffer: 65536 })
+      assert.equal(await fs.readFile(installed, 'utf8'), 'complete long-path payload bytes')
+      assert.equal(await fs.readFile(path.join(target, 'data/user-data'), 'utf8'), 'preserve user data')
+    }
     if (name === 'drive-root') await fs.rm(target, { recursive: true, force: true })
   }
   assert.ok(cases.find(value => value.name === 'deep').path_length > 320)

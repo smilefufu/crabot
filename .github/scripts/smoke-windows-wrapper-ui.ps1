@@ -8,9 +8,12 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $Installer = (Resolve-Path $Installer).Path
+if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') { throw 'Disposable Windows CI only' }
 # A simulated user profile must inherit the real user's private temp ACL,
 # rather than the runner's shared workspace volume. The selected app root stays on D:.
 $osStartMenu = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'Microsoft/Windows/Start Menu/Programs/Crabot.lnk'
+$menuBefore = if(Test-Path -LiteralPath $osStartMenu){[IO.File]::ReadAllBytes($osStartMenu)}else{$null}
+if(Test-Path -LiteralPath $osStartMenu){Remove-Item -LiteralPath $osStartMenu}
 $homeRoot = Join-Path ([IO.Path]::GetTempPath()) ('wrapper-home-' + [guid]::NewGuid().ToString('N'))
 $env:USERPROFILE = $homeRoot
 $env:HOME = $homeRoot
@@ -92,7 +95,7 @@ try {
     [WrapperUI]::Click($next); $clicked++
     Start-Sleep -Milliseconds 300
    } elseif (!$finished -and $label -match '完成|Finish') {
-    if (!(Test-Path -LiteralPath (Join-Path $target 'app/installers'))) { throw 'Finish appeared before the final programs were extracted' }
+    if (!(Test-Path -LiteralPath (Join-Path $target 'app/installers')) -and !(Test-Path -LiteralPath (Join-Path $target 'program/desktop-payload.json'))) { throw 'Finish appeared before the final programs were extracted' }
     if (Test-Path -LiteralPath (Join-Path $target 'data')) { throw 'Installer initialized business data before first GUI launch' }
     $finished=$true
     [WrapperUI]::Click($next)
@@ -103,7 +106,7 @@ try {
   $process.Refresh()
   if ($process.HasExited) {
    if (!$finished -or $process.ExitCode -ne 0) { throw "Installer exited before Finish or returned $($process.ExitCode)" }
-   $selection = Join-Path $target 'current-release.json'
+   $selection = if(Test-Path (Join-Path $target 'program/gui/resources/desktop-release.json')){Join-Path $target 'program/gui/resources/desktop-release.json'}else{Join-Path $target 'current-release.json'}
    $command = Join-Path $target 'bin/crabot.exe'
    if ((Test-Path -LiteralPath $selection) -and (Test-Path -LiteralPath $command)) {
     $raw = & $command status --json 2>&1
@@ -193,9 +196,8 @@ try {
    }
    if (!$candidateFinished -or !$candidate.HasExited -or $candidate.ExitCode -ne 0) { throw 'Actual upgrade installer did not finish successfully' }
   } elseif (!$candidate.WaitForExit(600000) -or $candidate.ExitCode -ne 0) { throw 'Candidate program installation failed' }
-  $newRoots = @(Get-ChildItem (Join-Path $target 'app/releases') -Directory | Where-Object { $_.Name -ne $beforeSelection.gui_id })
-  if ($newRoots.Count -ne 1) { throw 'Expected one newly unpacked GUI, retaining original GUI' }
-  $newGui = Join-Path $newRoots[0].FullName 'Crabot.exe'
+  $newGui = Join-Path $target 'program/gui/Crabot.exe'
+  if (!(Test-Path -LiteralPath $newGui)) { throw 'Expected the fixed newly installed GUI' }
   if ($UpgradeLaunch -eq 'direct') {
    $candidateGui = Start-Process $newGui -PassThru
    [void]$owned.Add([uint32]$candidateGui.Id)
@@ -217,7 +219,7 @@ try {
     $all = (@([WrapperUI]::Text($window)) + @([WrapperUI]::Children($window) | ForEach-Object { [WrapperUI]::Text($_) })) -join "`n"
     if ($all -match '启动失败|退出状态尚未核实|尚未转换数据|尚未完成|无法创建') { throw ('Actual upgrade failed: ' + $all) }
    }
-   $current = Get-Content (Join-Path $target 'current-release.json') -Raw | ConvertFrom-Json
+   $current = Get-Content (Join-Path $target 'program/gui/resources/desktop-release.json') -Raw | ConvertFrom-Json
    $bootLog = Join-Path $data 'desktop-profile/bootstrap.log'
    if ($current.version -eq $ExpectedVersion -and (Test-Path $bootLog)) {
     $boot = @(Get-Content $bootLog | ForEach-Object { $_ | ConvertFrom-Json })
@@ -240,15 +242,15 @@ try {
    }
    throw 'Candidate did not select and start its actual GUI/Core version'
   }
-  $current = Get-Content (Join-Path $target 'current-release.json') -Raw | ConvertFrom-Json
+  $current = Get-Content (Join-Path $target 'program/gui/resources/desktop-release.json') -Raw | ConvertFrom-Json
   $afterRuntime = Get-Content (Join-Path $data 'instance-runtime.json') -Raw | ConvertFrom-Json
   $afterInstallation = Get-Content (Join-Path $target 'desktop-installation.json') -Raw | ConvertFrom-Json
-  if ($afterRuntime.install_root -ne (Join-Path $target ('releases/' + $current.core_id))) { throw 'CLI still uses original Core' }
+  if ($afterRuntime.install_root -ne (Join-Path $target 'program/core')) { throw 'CLI still uses original Core' }
   if ($afterRuntime.instance_id -ne $beforeRuntime.instance_id -or $afterRuntime.generation -eq $beforeRuntime.generation) { throw 'Expected same data instance, new Core generation' }
   if ($afterInstallation.installation_id -ne $installed.installation_id) { throw 'Upgrade created a different installation' }
   if ([IO.File]::ReadAllText($sentinel) -ne 'preserve existing desktop data') { throw 'Original data changed' }
   if ($credentialHash -and (Get-FileHash $credential).Hash -ne $credentialHash) { throw 'Original credentials changed' }
-  $shortcut = Join-Path $env:APPDATA 'Microsoft/Windows/Start Menu/Programs/Crabot.lnk'
+  $shortcut = $osStartMenu
   $link = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcut)
   if ($link.TargetPath -ne $newGui) { throw 'Start menu still opens the previous GUI' }
   if ($UpgradeLaunch -ne 'direct') {
@@ -280,7 +282,7 @@ try {
    $fixtureProcess = [Diagnostics.Process]::GetProcessById($id)
    $image = $fixtureProcess.MainModule.FileName
    # Old numeric IDs may have been reused. Only our installed images are cleanup targets.
-   if ($image.StartsWith($target + '\', [StringComparison]::OrdinalIgnoreCase)) {
+   if ($image -and $image.StartsWith($target + '\', [StringComparison]::OrdinalIgnoreCase)) {
     $fixtureProcess.Kill()
     if (!$fixtureProcess.WaitForExit(5000)) { throw 'Fixture GUI did not exit' }
    }
@@ -288,4 +290,6 @@ try {
    if ($fixtureProcess -and !$fixtureProcess.HasExited) { throw }
   } finally { if ($fixtureProcess) { $fixtureProcess.Dispose() } }
  }
+ if($menuBefore){[IO.File]::WriteAllBytes($osStartMenu,$menuBefore)}elseif(Test-Path -LiteralPath $osStartMenu){Remove-Item -LiteralPath $osStartMenu}
+
 }
