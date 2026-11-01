@@ -182,6 +182,7 @@ for (const scenario of ['publish-source-remove-public-open-window', 'publish-sou
     await fs.mkdir(env.HOME, { mode: 0o700 })
     env.USERPROFILE = env.HOME; env.APPDATA = path.join(env.HOME, 'Roaming'); env.LOCALAPPDATA = path.join(env.HOME, 'Local')
     env.XDG_CONFIG_HOME = path.join(env.HOME, '.config')
+    if (process.platform === 'win32') for (const directory of [env.APPDATA, env.LOCALAPPDATA]) await fs.mkdir(directory, { recursive: true, mode: 0o700 })
   }
   for (const key of ['ELECTRON_RUN_AS_NODE', 'NODE_OPTIONS', 'NODE_PATH', 'DATA_DIR', 'CRABOT_HOME', 'CRABOT_DEV', 'CRABOT_PORT_OFFSET']) delete env[key]
   const args = mode === 'publish-source-remove-windows-uninstall' || scenario === 'publish-source-remove-windows-entry' ? ['--uninstall'] : ['--background', ...(mode === 'unexpected-source-args' ? ['--unexpected-maintenance-source'] : [])]
@@ -340,6 +341,7 @@ for (const mode of ['installer-valid', 'installer-wrong-operation', 'installer-c
     const home = path.join(area, 'private-home'); await fs.mkdir(home, { mode: 0o700 })
     const env = { ...process.env, CRABOT_REMOVAL_FRAME_CONFIG: config, HOME: home, USERPROFILE: home,
       APPDATA: path.join(home, 'Roaming'), LOCALAPPDATA: path.join(home, 'Local'), XDG_CONFIG_HOME: path.join(home, '.config') }
+    if (process.platform === 'win32') for (const directory of [env.APPDATA, env.LOCALAPPDATA]) await fs.mkdir(directory, { recursive: true, mode: 0o700 })
     for (const key of ['ELECTRON_RUN_AS_NODE', 'NODE_OPTIONS', 'NODE_PATH', 'DATA_DIR', 'CRABOT_HOME', 'CRABOT_DEV', 'CRABOT_PORT_OFFSET']) delete env[key]
     const child = spawn(await removalInstaller(), mode === 'installer-source-args' ? ['--unexpected'] : [], {
       env, cwd: area, stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
