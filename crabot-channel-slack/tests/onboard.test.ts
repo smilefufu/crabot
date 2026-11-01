@@ -192,6 +192,21 @@ describe('local Slack onboarding contract', () => {
     expect(SLACK_MANIFEST.settings).toMatchObject({ token_rotation_enabled: false, socket_mode_enabled: true })
     expect(SLACK_MANIFEST.settings.event_subscriptions.bot_events).toEqual(['message.channels', 'message.groups', 'message.im'])
   })
+  it('retains Windows PowerShell module lookup/cache without forwarding model credentials', () => {
+    const keys = ['PSModulePath', 'PSModuleAnalysisCachePath', 'OPENAI_API_KEY']
+    const original = Object.fromEntries(keys.map(key => [key, process.env[key]]))
+    try {
+      process.env.PSModulePath = 'fixture-module-path'
+      process.env.PSModuleAnalysisCachePath = 'fixture-cache-path'
+      process.env.OPENAI_API_KEY = 'fixture-model-secret'
+      const env = cliEnvironment({ mode: 'none' })
+      expect(env.PSModulePath).toBe('fixture-module-path')
+      expect(env.PSModuleAnalysisCachePath).toBe('fixture-cache-path')
+      expect(env.OPENAI_API_KEY).toBeUndefined()
+    } finally {
+      for (const key of keys) { if (original[key] === undefined) delete process.env[key]; else process.env[key] = original[key] }
+    }
+  })
   it('passes a detected native proxy to its CLI without overwriting an inherited shell proxy', () => {
     const keys = ['HTTPS_PROXY', 'HTTP_PROXY', 'https_proxy', 'http_proxy']
     const original = Object.fromEntries(keys.map(key => [key, process.env[key]]))

@@ -33,7 +33,7 @@ export async function writePrivate(file: string, value: unknown): Promise<void> 
 }
 export function cliEnvironment(config?: ProxyConfig): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {}
-  for (const key of ['PATH', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'TMPDIR', 'TMP', 'TEMP', 'SystemRoot', 'SYSTEMROOT', 'COMSPEC', 'LANG', 'LC_ALL', 'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY']) {
+  for (const key of ['PATH', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'TMPDIR', 'TMP', 'TEMP', 'SystemRoot', 'SYSTEMROOT', 'COMSPEC', 'PSModulePath', 'PSModuleAnalysisCachePath', 'LANG', 'LC_ALL', 'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY']) {
     if (process.env[key] !== undefined) env[key] = process.env[key]
   }
   const proxy = config ?? proxyManager.getConfig()

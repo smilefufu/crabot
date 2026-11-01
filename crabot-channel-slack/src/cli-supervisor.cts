@@ -61,8 +61,8 @@ process.on('message', (message: { type: string; executable: string; args: string
   if (message.type === 'stop') { finishStop(); return }
   if (message.type !== 'start' || child || finishing) return
   fs.rmSync(path.join(project, 'stop'), { force: true })
-  // CREATE_NEW_CONSOLE + SW_HIDE preserves console-dependent tool behavior.
-  // This wrapper and all descendants remain in this invocation's owned tree.
+  // A private PTY supports console queries without any desktop window.
+  // The wrapper owns descendants in a kill-on-close Windows job.
   const hiddenConsole = path.resolve(__dirname, '../../crabot-native/build/Release/crabot-hidden-console.exe')
   child = spawn(process.platform === 'win32' ? hiddenConsole : message.executable,
     process.platform === 'win32' ? [message.executable, ...message.args] : message.args,

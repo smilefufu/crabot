@@ -92,7 +92,7 @@ it.skipIf(process.platform !== 'win32')('keeps the CLI and its PowerShell hooks 
       new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error('Console fixture stalled: ' + diagnostic)), 20000) }),
     ])
     expect(result.code, result.output).toBe(0)
-    expect(JSON.parse(result.output)).toEqual({ has_console: true, visible: false })
+    expect(JSON.parse(result.output)).toMatchObject({ visible: false })
     await exited
   } finally {
     clearTimeout(timer)

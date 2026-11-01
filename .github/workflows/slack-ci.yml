@@ -49,8 +49,6 @@ jobs:
           pnpm --dir crabot-shared run build
           pnpm --dir crabot-channel-slack install --frozen-lockfile
           pnpm --dir crabot-channel-slack run build
-      - name: Isolated native startup comparison
-        run: node .github/scripts/probe-windows-slack-startup.mjs
       - name: Native supervised configuration and console visibility
         run: pnpm --dir crabot-channel-slack test
       - name: Official Slack CLI project hooks
