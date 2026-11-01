@@ -14,6 +14,8 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <winhttp.h>
+#include <cwchar>
 #include <iphlpapi.h>
 #include <tlhelp32.h>
 #include <sddl.h>
@@ -634,6 +636,7 @@ static napi_value ReleaseLock(napi_env env, napi_callback_info info) {
 #include "local-pipe.h"
 #include "private-file.h"
 #include "user-path.h"
+#include "system-proxy.h"
 #include "desktop-login.h"
 #include "desktop-uninstall.h"
 #include "install-filesystem.h"
@@ -652,6 +655,7 @@ static napi_value ReleaseLock(napi_env env, napi_callback_info info) {
 static napi_value Initialize(napi_env env, napi_value exports) {
   napi_property_descriptor methods[] = {
 #ifdef _WIN32
+    {"readWindowsFixedProxy", nullptr, ReadWindowsFixedProxy, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"replaceDesktopUninstallEntry", nullptr, ReplaceDesktopUninstall, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"removeDesktopUninstallEntry", nullptr, RemoveDesktopUninstall, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"inspectDesktopLoginStartup", nullptr, InspectDesktopLogin, nullptr, nullptr, nullptr, napi_default, nullptr},

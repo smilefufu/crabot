@@ -2,28 +2,40 @@ import assert from 'node:assert/strict'
 import childProcess from 'node:child_process'
 import http from 'node:http'
 import net from 'node:net'
+import nodeModule from 'node:module'
+import path from 'node:path'
 import test, { type TestContext } from 'node:test'
 import { getGlobalDispatcher, setGlobalDispatcher } from 'undici'
 import { ProxyManager } from './proxy-manager.js'
 
 const proxyKeys = ['HTTPS_PROXY', 'HTTP_PROXY', 'https_proxy', 'http_proxy'] as const
-function systemFixture(t: TestContext, output: string) {
+function systemFixture(t: TestContext, output: string, os = 'darwin') {
   const platform = Object.getOwnPropertyDescriptor(process, 'platform')!
-  const environment = Object.fromEntries(proxyKeys.map(key => [key, process.env[key]]))
+  const environmentKeys = [...proxyKeys, 'CRABOT_PRODUCT_ROOT', 'CRABOT_HOME']
+  const environment = Object.fromEntries(environmentKeys.map(key => [key, process.env[key]]))
   const original = getGlobalDispatcher()
-  for (const key of proxyKeys) delete process.env[key]
-  Object.defineProperty(process, 'platform', { ...platform, value: 'darwin' })
+  for (const key of environmentKeys) delete process.env[key]
+  Object.defineProperty(process, 'platform', { ...platform, value: os })
   const command = t.mock.method(childProcess, 'execFileSync', () => output)
   t.after(async () => {
     const current = getGlobalDispatcher(); setGlobalDispatcher(original)
     await current.destroy()
     Object.defineProperty(process, 'platform', platform)
-    for (const key of proxyKeys) {
+    for (const key of environmentKeys) {
       if (environment[key] === undefined) delete process.env[key]
       else process.env[key] = environment[key]
     }
   })
   return command
+}
+function windowsFixture(t: TestContext, proxy: string | null, nativeFile = '../../crabot-native/build/Release/crabot-native.node') {
+  systemFixture(t, '', 'win32')
+  const read = t.mock.fn(() => proxy)
+  t.mock.method(nodeModule, 'createRequire', () => ((file: string) => {
+    assert.equal(file, nativeFile)
+    return { readWindowsFixedProxy: read }
+  }) as NodeJS.Require)
+  return read
 }
 const fixedProxy = (port = 7890) => `<dictionary> {\n  HTTPSEnable : 1\n  HTTPSProxy : 127.0.0.1\n  HTTPSPort : ${port}\n}`
 
@@ -46,15 +58,82 @@ test('system mode discovers the macOS fixed proxy without shell variables and ca
   assert.equal(command.mock.callCount(), 2)
 })
 
-test('Windows and Linux retain the environment-only behavior', t => {
-  const command = systemFixture(t, fixedProxy())
-  const manager = new ProxyManager()
-  for (const platform of ['win32', 'linux']) {
-    Object.defineProperty(process, 'platform', { configurable: true, value: platform })
-    manager.updateConfig({ mode: 'system' })
-    assert.equal(manager.getProxyUrl(), null)
-  }
+test('Linux retains the environment-only behavior', t => {
+  const command = systemFixture(t, fixedProxy(), 'linux')
+  const manager = new ProxyManager(); manager.updateConfig({ mode: 'system' })
+  assert.equal(manager.getProxyUrl(), null)
   assert.equal(command.mock.callCount(), 0)
+})
+
+test('Windows reads a current-user fixed proxy once and rereads after saving system', t => {
+  const read = windowsFixture(t, '127.0.0.1:7890')
+  const manager = new ProxyManager(); manager.updateConfig({ mode: 'system' })
+  assert.equal(manager.getProxyUrl(), 'http://127.0.0.1:7890')
+  assert.equal(ProxyManager.resolveSystemProxyUrl(), 'http://127.0.0.1:7890')
+  assert.equal(read.mock.callCount(), 1)
+  read.mock.mockImplementation(() => '127.0.0.1:7891')
+  assert.equal(manager.getProxyUrl(), 'http://127.0.0.1:7890')
+  manager.updateConfig({ mode: 'system' })
+  assert.equal(manager.getProxyUrl(), 'http://127.0.0.1:7891')
+  assert.equal(read.mock.callCount(), 2)
+})
+
+test('Windows resolves the root helper when Shared is a copied production dependency', t => {
+  const root = path.resolve('fixture-core')
+  const read = windowsFixture(t, '127.0.0.1:7890', path.join(root, 'crabot-native/build/Release/crabot-native.node'))
+  process.env.CRABOT_PRODUCT_ROOT = root
+  process.env.CRABOT_HOME = path.resolve('unrelated-old-install')
+  const manager = new ProxyManager(); manager.updateConfig({ mode: 'system' })
+  assert.equal(manager.getProxyUrl(), 'http://127.0.0.1:7890')
+  assert.equal(read.mock.callCount(), 1)
+})
+
+for (const [name, value, expected] of [
+  ['HTTPS priority', 'http=http.example:8000;https=https.example:9000', 'http://https.example:9000'],
+  ['HTTP fallback', 'ftp=ftp.example:21;http=http.example:8000', 'http://http.example:8000'],
+  ['case-insensitive protocol', 'HTTPS=127.0.0.1:7890', 'http://127.0.0.1:7890'],
+  ['default port', 'proxy.example', 'http://proxy.example'],
+  ['HTTP URL', 'http://127.0.0.1:7890', 'http://127.0.0.1:7890'],
+  ['IPv6', '[::1]:7890', 'http://[::1]:7890'],
+  ['disabled or missing fixed proxy', null, null],
+  ['empty fixed proxy', '', null],
+  ['SOCKS only', 'socks=127.0.0.1:7890', null],
+  ['FTP only', 'ftp=127.0.0.1:7890', null],
+  ['invalid port', '127.0.0.1:65536', null],
+  ['empty port', '127.0.0.1:', null],
+  ['credentials', 'user:password@127.0.0.1:7890', null],
+  ['path', 'http://127.0.0.1:7890/path', null],
+] as const) {
+  test(`Windows fixed proxy: ${name}`, t => {
+    windowsFixture(t, value)
+    const manager = new ProxyManager(); manager.updateConfig({ mode: 'system' })
+    assert.equal(manager.getProxyUrl(), expected)
+  })
+}
+
+test('Windows environment priority and custom/none do not read OS settings', t => {
+  const read = windowsFixture(t, '127.0.0.1:7890')
+  const manager = new ProxyManager()
+  manager.updateConfig({ mode: 'none' }); assert.equal(manager.getProxyUrl(), null)
+  manager.updateConfig({ mode: 'custom', custom_url: 'http://custom.example:8080' })
+  assert.equal(manager.getProxyUrl(), 'http://custom.example:8080')
+  for (const key of [...proxyKeys].reverse()) {
+    process.env[key] = `http://${key.toLowerCase().replace('_', '-')}.example:8000`
+    manager.updateConfig({ mode: 'system' })
+    assert.equal(manager.getProxyUrl(), process.env[key])
+  }
+  assert.equal(read.mock.callCount(), 0)
+})
+
+test('unavailable Windows native settings remain nonfatal and can be reread', t => {
+  const read = windowsFixture(t, null)
+  read.mock.mockImplementation(() => { throw new Error('fixture native read failure') })
+  const manager = new ProxyManager()
+  assert.doesNotThrow(() => manager.updateConfig({ mode: 'system' }))
+  assert.equal(manager.getProxyUrl(), null)
+  read.mock.mockImplementation(() => '127.0.0.1:7890')
+  manager.updateConfig({ mode: 'system' })
+  assert.equal(manager.getProxyUrl(), 'http://127.0.0.1:7890')
 })
 
 test('environment precedence and custom/none do not invoke macOS detection', t => {
@@ -99,7 +178,7 @@ test('failed native reads remain nonfatal and can be retried by saving system', 
   assert.equal(manager.getProxyUrl(), 'http://127.0.0.1:7890')
 })
 
-test('the detected proxy carries actual fetch and HTTP Agent requests while loopback remains direct', { timeout: 8000 }, async t => {
+for (const platform of ['darwin', 'win32']) test(`the detected ${platform} proxy carries actual fetch and HTTP Agent requests while loopback remains direct`, { timeout: 8000 }, async t => {
   const endpoint = http.createServer((_req, res) => { res.end('fixture-response') })
   const sockets = new Set<net.Socket>(), tunnels: string[] = []
   const proxy = http.createServer()
@@ -118,7 +197,8 @@ test('the detected proxy carries actual fetch and HTTP Agent requests while loop
     socket.on('error', () => upstream.destroy()); upstream.on('error', () => socket.destroy())
   })
   t.after(async () => { for (const socket of sockets) socket.destroy(); await Promise.all([endpoint, proxy].map(server => new Promise<void>(resolve => server.close(() => resolve())))) })
-  systemFixture(t, fixedProxy((proxy.address() as net.AddressInfo).port))
+  if (platform === 'darwin') systemFixture(t, fixedProxy((proxy.address() as net.AddressInfo).port))
+  else windowsFixture(t, `127.0.0.1:${(proxy.address() as net.AddressInfo).port}`)
   const manager = new ProxyManager(); manager.updateConfig({ mode: 'system' })
   assert.equal(await (await fetch('http://proxy-fixture.invalid/fetch', { signal: AbortSignal.timeout(2000) })).text(), 'fixture-response')
   const agentBody = await new Promise<string>((resolve, reject) => {

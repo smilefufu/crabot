@@ -11,6 +11,8 @@
 import https from 'node:https'
 import childProcess from 'node:child_process'
 import net from 'node:net'
+import nodeModule from 'node:module'
+import path from 'node:path'
 import { getGlobalDispatcher, setGlobalDispatcher, ProxyAgent, Agent, Dispatcher } from 'undici'
 import { HttpsProxyAgent } from 'https-proxy-agent'
 import type { ProxyConfig } from './base-protocol.js'
@@ -143,6 +145,30 @@ function readMacOSFixedProxy(): string | null {
   return null
 }
 
+function readWindowsFixedProxy(): string | null {
+  try {
+    // Production file dependencies may be copies inside each module's node_modules.
+    const root = process.env.CRABOT_PRODUCT_ROOT || process.env.CRABOT_HOME
+    const file = root ? path.join(root, 'crabot-native/build/Release/crabot-native.node') : '../../crabot-native/build/Release/crabot-native.node'
+    const native = nodeModule.createRequire(import.meta.url)(file) as {
+      readWindowsFixedProxy(): string | null
+    }
+    const value = native.readWindowsFixedProxy()
+    if (!value) return null
+    const entries = value.trim().split(/[;\s]+/)
+    const byScheme = (scheme: string) => entries.find(entry => entry.toLowerCase().startsWith(scheme + '='))?.slice(scheme.length + 1)
+    // This is a single fixed HTTP CONNECT endpoint, not a per-URL proxy engine.
+    for (const entry of [byScheme('https'), byScheme('http'), ...entries.filter(entry => !entry.includes('='))]) {
+      if (!entry) continue
+      const match = entry.match(/^(?:http:\/\/)?(\[[^\]]+\]|[^:/\s@?#\\]+)(?::([0-9]+))?$/i)
+      if (!match || match[2] !== undefined && (Number(match[2]) < 1 || Number(match[2]) > 65535)) continue
+      try { return new URL(`http://${match[1]}${match[2] ? ':' + match[2] : ''}`).origin }
+      catch { /* Try the next supported fixed entry. */ }
+    }
+  } catch { /* Missing settings/helper must not block local Admin. */ }
+  return null
+}
+
 export class ProxyManager {
   private static nativeSystemProxyUrl: string | null | undefined
   private config: ProxyConfig = { mode: 'system' }
@@ -182,12 +208,12 @@ export class ProxyManager {
     return this.config
   }
 
-  /** 环境变量保持原优先级；macOS 固定系统代理在首次使用/保存 system 时检测。 */
+  /** 环境变量保持原优先级；macOS/Windows 固定系统代理在首次使用/保存 system 时检测。 */
   static resolveSystemProxyUrl(): string | null {
     const inherited = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || process.env.https_proxy || process.env.http_proxy
     if (inherited) return inherited
-    if (process.platform !== 'darwin') return null
-    if (this.nativeSystemProxyUrl === undefined) this.nativeSystemProxyUrl = readMacOSFixedProxy()
+    if (process.platform !== 'darwin' && process.platform !== 'win32') return null
+    if (this.nativeSystemProxyUrl === undefined) this.nativeSystemProxyUrl = process.platform === 'win32' ? readWindowsFixedProxy() : readMacOSFixedProxy()
     return this.nativeSystemProxyUrl
   }
 

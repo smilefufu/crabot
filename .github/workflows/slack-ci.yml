@@ -107,6 +107,11 @@ jobs:
           node --test scripts/lib/__tests__/background-core.test.mjs scripts/lib/__tests__/core-preflight.test.mjs scripts/lib/__tests__/desktop-data-import.test.mjs
           pnpm --dir crabot-core exec vitest run src/process-tree-windows.test.ts src/module-runtime-registry.test.ts --maxWorkers=1 --minWorkers=1
 
+      - name: Windows native fixed proxy discovery
+        if: runner.os == 'Windows'
+        shell: bash
+        run: CRABOT_SYSTEM_PROXY_CI=1 node .github/scripts/probe-windows-system-proxy.mjs
+
       - name: Windows data copy comparison
         if: runner.os == 'Windows'
         shell: bash

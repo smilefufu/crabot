@@ -11,13 +11,14 @@ beforeEach(() => {
   vi.mocked(proxyService.updateConfig).mockResolvedValue({ mode: 'system' })
 })
 describe('system proxy detection feedback', () => {
-  it('describes native macOS detection and refreshes the effective address after saving system', async () => {
+  it('describes native macOS and Windows address detection and refreshes the effective address after saving system', async () => {
     vi.mocked(proxyService.getConfig)
       .mockResolvedValueOnce({ config: { mode: 'system' }, system_proxy_url: null })
       .mockResolvedValueOnce({ config: { mode: 'system' }, system_proxy_url: 'http://127.0.0.1:17890' })
     render(<ProxyConfigCard />)
     await screen.findByRole('button', { name: '保存' })
-    expect(screen.getByText(/macOS/)).toHaveTextContent('HTTP/HTTPS')
+    expect(screen.getByText(/macOS.*Windows/)).toHaveTextContent('HTTP/HTTPS')
+    expect(screen.getByText(/系统排除列表暂未同步/)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '保存' }))
     await screen.findByText('http://127.0.0.1:17890')
     expect(proxyService.getConfig).toHaveBeenCalledTimes(2)

@@ -199,6 +199,13 @@ jobs:
           pnpm --dir crabot-desktop install --frozen-lockfile
           (cd crabot-desktop && node -e "require('electron')")
           pnpm --dir crabot-desktop run build
+      - name: Windows native proxy and Slack configuration regression
+        if: runner.os == 'Windows'
+        run: |
+          CRABOT_SYSTEM_PROXY_CI=1 node .github/scripts/probe-windows-system-proxy.mjs
+          (cd crabot-shared && node --import tsx --test src/proxy-manager.test.ts)
+          pnpm --dir crabot-channel-slack test
+          node .github/scripts/smoke-slack-onboarding.mjs
       - name: Simplified data import and runtime regression
         run: |
           node --test scripts/lib/__tests__/desktop-data-import.test.mjs scripts/lib/__tests__/product-runtime.test.mjs
@@ -235,7 +242,7 @@ jobs:
           node .github/scripts/smoke-development-coexistence.mjs --background-only 2>&1 | tee .desktop-build/development-source-boot.log
       - name: Build same-source offline GUI and Core installer
         run: |
-          node scripts/desktop/stage-core.mjs --out=.desktop-build/manual/core --version=0.1.0-desktop.14
+          node scripts/desktop/stage-core.mjs --out=.desktop-build/manual/core --version=0.1.0-desktop.15
           node .github/scripts/verify-release-payload.mjs "$GITHUB_WORKSPACE/.desktop-build/manual/core"
           node --input-type=module <<'NODE'
           import { createRequire } from 'node:module';

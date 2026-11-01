@@ -32,6 +32,9 @@ public class WrapperUI {
  public static string Text(IntPtr hwnd) { var text=new StringBuilder(4096);IntPtr result;ReadText(hwnd,0xD,(IntPtr)text.Capacity,text,2,500,out result);return text.ToString(); }
  public static IntPtr[] Windows() { var result=new List<IntPtr>();EnumWindows((hwnd,unused)=>{result.Add(hwnd);return true;},IntPtr.Zero);return result.ToArray(); }
  public static IntPtr[] Children(IntPtr hwnd) { var result=new List<IntPtr>();EnumChildWindows(hwnd,(child,unused)=>{result.Add(child);return true;},IntPtr.Zero);return result.ToArray(); }
+ [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
+ [DllImport("user32.dll",CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr hwnd,StringBuilder text,int length);
+ public static bool Console(IntPtr hwnd) { var name=new StringBuilder(256);GetClassName(hwnd,name,name.Capacity);return name.ToString()=="ConsoleWindowClass"; }
  public static uint Pid(IntPtr hwnd) { uint pid;GetWindowThreadProcessId(hwnd,out pid);return pid; }
  public static void Click(IntPtr hwnd) { SendMessage(hwnd,0xF5,IntPtr.Zero,IntPtr.Zero); }
 }
@@ -39,6 +42,10 @@ public class WrapperUI {
 if ($TemporaryDirectory) {
  $env:TEMP = (Resolve-Path $TemporaryDirectory).Path
  $env:TMP = $env:TEMP
+}
+$originalConsoles = [Collections.Generic.HashSet[IntPtr]]::new()
+foreach ($window in [WrapperUI]::Windows()) {
+ if ([WrapperUI]::Console($window) -and [WrapperUI]::IsWindowVisible($window)) { [void]$originalConsoles.Add($window) }
 }
 $process = Start-Process $Installer -ArgumentList "/D=$target" -PassThru
 $null = $process.Handle
@@ -55,6 +62,9 @@ try {
    if ($owned.Contains([uint32]$row.ParentProcessId)) { [void]$owned.Add([uint32]$row.ProcessId) }
   }
   foreach ($window in [WrapperUI]::Windows()) {
+   if ([WrapperUI]::Console($window) -and [WrapperUI]::IsWindowVisible($window) -and !$originalConsoles.Contains($window)) {
+    throw ('Crabot installation/startup opened a visible console: ' + [WrapperUI]::Text($window))
+   }
    if (!$owned.Contains([WrapperUI]::Pid($window))) { continue }
    $children = [WrapperUI]::Children($window)
    $text = @([WrapperUI]::Text($window)) + @($children | ForEach-Object { [WrapperUI]::Text($_) })
@@ -105,7 +115,7 @@ try {
  if ($Expected -eq 'space') { return }
  $installed=Get-Content (Join-Path $target 'desktop-installation.json') -Raw | ConvertFrom-Json
  if ($installed.install_root -ne $target) { throw 'GUI bound another installation root' }
- @{actual_exe_ui=$true; next_pages=$clicked; retry_dialog=$false; second_installer=$false; selected_path_with_spaces=$true; installer_exit_zero=$true; finish_launched_gui=$true; gui_started_actual_core=$true; native_cli_same_data=$true} | ConvertTo-Json -Compress | Write-Output
+ @{actual_exe_ui=$true; next_pages=$clicked; retry_dialog=$false; second_installer=$false; selected_path_with_spaces=$true; installer_exit_zero=$true; finish_launched_gui=$true; gui_started_actual_core=$true; native_cli_same_data=$true; no_new_visible_console=$true} | ConvertTo-Json -Compress | Write-Output
 } finally {
  $command = Join-Path $target 'bin/crabot.exe'
  if (Test-Path -LiteralPath $command) { & $command stop 2>&1 | Write-Output }

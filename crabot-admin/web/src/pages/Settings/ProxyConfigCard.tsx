@@ -7,7 +7,7 @@ import { proxyService, type ProxyConfig } from '../../services/proxy'
 type ProxyMode = ProxyConfig['mode']
 
 const MODES: ReadonlyArray<{ value: ProxyMode; title: string; hint: string }> = [
-  { value: 'system', title: '系统代理', hint: '优先使用代理环境变量；macOS 无变量时读取系统 HTTP/HTTPS 代理' },
+  { value: 'system', title: '系统代理', hint: '优先使用代理环境变量；macOS / Windows 无变量时读取系统固定 HTTP/HTTPS 代理' },
   { value: 'custom', title: '自定义代理', hint: '指定代理服务器地址' },
   { value: 'none', title: '不使用代理', hint: '直接连接' },
 ]
@@ -101,6 +101,7 @@ export const ProxyConfigCard: React.FC = () => {
                   ? <>当前系统代理：<code>{systemProxyUrl}</code></>
                   : '未检测到可用的系统代理；可检查系统设置或使用自定义代理。'}
                 <p>系统代理更改后，点击“保存”重新检测并应用。暂不支持 PAC 自动配置和仅 SOCKS 的系统代理。</p>
+                <p>仅读取系统代理地址，系统排除列表暂未同步；内部连接仍直连。</p>
               </div>
             )}
 
