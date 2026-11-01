@@ -46,6 +46,7 @@ app.on('will-quit', () => {
   clearTimeout(timeout)
   fs.writeFileSync(options.report, JSON.stringify({ external_core_executed: fs.existsSync(options.marker),
     repair_shown: /修复/.test(message), removal_shown: /卸载/.test(message), data_entries: fs.readdirSync(options.data), business_mm_started: false,
+    ...(options.scenario === 'detached-pair' ? { failure_message: message } : {}),
     actual_packaged_binary: false }) + '\n', { mode: 0o600, flush: true })
 })
 void import(pathToFileURL(path.resolve(__dirname, '../dist/main.js')).href).catch(error => {
