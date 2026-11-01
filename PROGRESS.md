@@ -2,6 +2,8 @@
 
 ### 桌面化冻结范围：Windows安装纠错及完整验收中
 
+- 2026-11-01真人反馈推翻Windows12新目录覆盖结论：选择不存在的D:\Crabot时安装中止。41267578010修改前原生复现失败，41267714316确认create-parents/Win32=5；父目录递归创建误触已存在盘根，尚未创建目标目录。19f5e34f改为仅创建缺失的盘根以下组件，新目录私有ACL不变，已有目录沿原访问判定；系统错误阶段保留，错误文案不再直接归因用户可写性。目录回归41267941659与Windows13完整构建/验收41267941731运行中，未交付、未宣称修复包通过；Mac11及本机源码部署不变。
+
 - 继续原冻结范围：Electron＋React、共享HTTP/SDK与独立宿主IPC、统一内置环境与依赖隔离、GUI/CLI共享实例、项目workspace、在线Admin迁移、旧目录权限兼容及system批量管理；本轮不扩需求。源码dev/release隔离、固定29000/13000和原源码部署保留规则继续有效。
 - 最新瘦身包已交付ARM Mac desktop.11（f87e4d46）/Windows desktop.12（c2eaa3bc）：包537516782/559310933字节，程序1372029537/1855100146字节，较第10版再少266875713/154797274字节。Mac41199706942整组成功；Windows41201950600主installer/source成功，同EXE41203266373实际UI成功，旧数据/源码共存/完整程序删除后保留数据恢复及实际GUI-Core-CLI通过。Windows11恢复失败包已归档；12原run附属UI旧desktop.10过滤器误报保持failure，3562d082仅修CI发现器。程序删除/恢复仍慢、真人业务及原冻结项继续；本机源码部署不动，产品main未推。
 - 上轮已交付ARM Mac/Windows desktop.10（同源a150015c），位于20261031 Downloads；包分别625558061/598808085字节，官方产物/包内摘要/本地副本一致，Mac签名与完整Core已只读核验。原源码服务不动；包名/SHA及分层证据见[验收记录](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-30-windows-installation-feedback-fixes.md)。
