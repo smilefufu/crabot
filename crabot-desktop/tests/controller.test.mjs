@@ -29,20 +29,26 @@ test('restoring a stopped GUI while its core remains stopped never starts or aut
   assert.equal(controller.host.snapshot().phase, 'stopped')
 })
 
-test('a damaged packaged version cannot bypass verification through reconnect or an external CLI start', async t => {
-  const controller = new DesktopController({ coreRoot: fileURLToPath(new URL('../..', import.meta.url)), dataRoot: '/unused',
-    appVersion: '0.1.0-desktop.2', platform: process.platform, packaged: true })
+test('packaged reconnect checks binding without reading the complete program inventory', async t => {
+  let bindings = 0, connects = 0
+  const controller = new DesktopController({ coreRoot: '/unused', dataRoot: '/unused', appVersion: '0.1.0-desktop.14',
+    platform: process.platform, packaged: true, verifyBinding: () => { bindings++ } })
   t.after(() => controller.close())
-  let connects = 0
-  controller.current = async () => ({ mmAlive: true, record: { generation: 'external-start' } })
+  controller.current = async () => ({ state: 'running', mmAlive: true, record: { generation: 'external-start' } })
+  controller.load = async () => { throw new Error('Reconnect must not load a full integrity scanner') }
   controller.host.reconnect = async () => { connects++ }
-  assert.equal((await controller.start()).phase, 'error')
-  assert.equal((await controller.reconnect()).phase, 'error')
+  await controller.reconnect()
   controller.host.status('stopped')
   await controller.reconnectIfChanged()
-  assert.equal(controller.host.snapshot().phase, 'error')
-  assert.equal(controller.host.snapshot().code, 'CRABOT_CORE_INTEGRITY')
-  assert.equal(connects, 0)
+  assert.equal(bindings, 2); assert.equal(connects, 2)
+})
+
+test('invalid installation binding still blocks reconnect without falling back to another Core', async t => {
+  const controller = new DesktopController({ coreRoot: '/unused', dataRoot: '/unused', appVersion: 'fixture',
+    platform: process.platform, packaged: true, verifyBinding: () => { throw Object.assign(new Error('Wrong binding'), { code: 'CRABOT_DESKTOP_INSTALLATION' }) } })
+  t.after(() => controller.close())
+  controller.host.reconnect = async () => assert.fail('Must not connect through a bad binding')
+  assert.equal((await controller.reconnect()).phase, 'error')
 })
 
 test('a completed explicit stop invalidates a watcher still verifying the installation', async t => {

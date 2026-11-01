@@ -33,7 +33,7 @@ import { assertVersionMaintenanceAllowsStart } from './lib/version-maintenance.m
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(__dirname, '..')
 const HOME_CRABOT = resolve(homedir(), '.crabot')
-if (existsSync(resolve(ROOT, 'core-release.json'))) await verifyCoreRelease(ROOT)
+if (existsSync(resolve(ROOT, 'core-release.json')) && !existsSync(resolve(ROOT, 'desktop-host.json'))) await verifyCoreRelease(ROOT)
 assertVersionMaintenanceAllowsStart(resolveCliDataDir({ homeDir: HOME_CRABOT }))
 
 // auto-init：缺 instance.json → 同步调 crabot init（在 const OFFSET 读取前）

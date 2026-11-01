@@ -99,7 +99,7 @@ function show() { window?.show(); window?.focus() }
 const bootstrapHistory: { phase: string; at: string; code?: string; app_version?: string }[] = []
 let bootstrapLog: ReturnType<typeof openBootstrapLog>
 process.on('uncaughtExceptionMonitor', error => logBootstrapException(event => bootstrapLog?.(event), error))
-function bootstrapStage(phase: string, fields: { code?: string; app_version?: string } = {}) {
+function bootstrapStage(phase: string, fields: { code?: string; app_version?: string; detail?: string } = {}) {
   const event = { phase, at: new Date().toISOString(), ...fields }
   const line = JSON.stringify({ component: 'desktop-bootstrap', ...event })
   if (phase === 'failed') console.error(line); else console.info(line)
@@ -200,9 +200,6 @@ async function boot() {
     configureProfile(dataRoot)
     bootstrapStage('profile-configured')
     if (!claimInstance()) return
-    const { verifyCoreRelease } = await import(pathToFileURL(path.join(directory, 'bootstrap/scripts/lib/core-release.mjs')).href)
-    const release = await verifyCoreRelease(installation.coreRoot, { version: installation.selection.version })
-    if (release.inventory_sha256 !== installation.selection.core_id) throw Object.assign(new Error('Protected Core identity changed'), { code: 'CRABOT_CORE_INTEGRITY' })
     verifyBinding = () => { verifier.locatePinnedDesktopGui(process.resourcesPath, pin) }
     coreRoot = installation.coreRoot
   }
@@ -427,9 +424,12 @@ void boot().catch(async error => {
     try { await bootUninstall(); return } catch (failure) { error = failure }
   }
   const code = typeof error?.code === 'string' && /^[A-Z0-9_]{1,128}$/.test(error.code) ? error.code : 'DESKTOP_BOOT_FAILED'
-  bootstrapStage('failed', { code })
+  bootstrapStage('failed', { code, detail: error instanceof Error ? error.message : String(error) })
   await app.whenReady()
-  let message = 'Crabot 界面启动失败，请修复安装。'
+  let message = 'Crabot 启动失败。'
+  if (error instanceof Error) message += `\n${error.message}`
+  message += `\n日志：${path.join(app.getPath('userData'), 'bootstrap.log')}`
+  console.error(error)
   if (['CRABOT_MAC_APP_BINDING', 'CRABOT_MAC_ADMISSION', 'CRABOT_DATA_MISSING', 'CRABOT_DESKTOP_TAKEOVER_REQUIRED'].includes(error?.code)) message = error.message
   if (['CRABOT_DESKTOP_REMOVAL', 'CRABOT_DESKTOP_REMOVAL_PENDING'].includes(error?.code)) message = 'Crabot 卸载尚未完成。请继续卸载，或使用同版/更高版离线安装器修复。用户数据已保留。'
   else if (['CRABOT_DESKTOP_INSTALLATION', 'CRABOT_CORE_INTEGRITY'].includes(error?.code)) message = 'Crabot 安装位置、内置文件或版本对未通过校验，请使用同版或更高版安装包修复。已有数据保留。'

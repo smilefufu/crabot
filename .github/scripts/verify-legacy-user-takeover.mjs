@@ -95,7 +95,7 @@ try {
     const home = path.join(temporary, version), programRoot = singleLayer ? path.join(repository, '.desktop-build/first-use-' + randomUUID()) : path.join(home, '.crabot'), root = path.join(home, '.crabot'), dataDir = path.join(root, 'data'), control = path.join(home, 'control')
     await fs.mkdir(control, { recursive: true, mode: 0o700 })
     const archive = path.join(home, process.platform === 'win32' ? 'old.zip' : 'old.tar.gz'), extracted = path.join(home, 'extracted')
-    let gui, exited, peer, prepared, stale, passed = false
+    let gui, exited, peer, prepared, stale, admissionStarted, activeDataDir = dataDir, passed = false
     const env = { ...process.env, HOME: home, USERPROFILE: home, APPDATA: path.join(home, 'Roaming'), LOCALAPPDATA: path.join(home, 'Local') }
     if (process.platform === 'win32') {
       // Real Windows profiles already contain these OS-owned parent locations.
@@ -123,6 +123,11 @@ try {
       await fs.writeFile(path.join(dataDir, 'admin/credentials.json'), credentials, { mode: 0o600 })
       const sentinels = ['agent/preserved-history.txt', 'memory/preserved.txt', 'mcp-deps/preserved.txt', 'workspaces/old-project/content.txt']
       for (const file of sentinels) { await fs.mkdir(path.dirname(path.join(dataDir, file)), { recursive: true }); await fs.writeFile(path.join(dataDir, file), 'retained ' + version + '\n') }
+      if (singleLayer) {
+        const history = path.join(dataDir, 'agent/import-volume')
+        await fs.mkdir(history)
+        for (let index = 0; index < 250; index++) await fs.writeFile(path.join(history, String(index) + '.bin'), Buffer.alloc(300000, index % 255))
+      }
       const prefix = path.join(home, '.local/bin'), command = process.platform === 'win32' ? path.join(root, 'crabot.cmd') : path.join(prefix, 'crabot')
       if (process.platform !== 'win32') { await fs.mkdir(prefix, { recursive: true }); await fs.symlink(path.join(root, 'cli.mjs'), command) }
       env.PATH = process.platform === 'win32' ? path.join(process.env.SystemRoot, 'System32') : '/usr/bin:/bin'
@@ -158,7 +163,8 @@ try {
         const confirmation = await execute(path.join(process.env.SystemRoot, 'System32/WindowsPowerShell/v1.0/powershell.exe'),
           ['-NoProfile', '-NonInteractive', '-File', path.join(repository, '.github/scripts/accept-windows-legacy-data-dialog.ps1'), '-GuiPid', String(gui.pid), '-DataDirectory', dataDir, '-Version', version], { env, timeout: 250000, maxBuffer: 65536 })
         output += confirmation.stdout + confirmation.stderr
-        const selectionStarted = Date.now(), selectedBy = selectionStarted + 600000
+        const selectionStarted = Date.now(), selectedBy = selectionStarted + 120000
+        admissionStarted = selectionStarted
         stage('actual-data-consent-dismissed')
         while (true) {
           try {
@@ -184,10 +190,11 @@ try {
         assert.ok(JSON.parse(await fs.readFile(path.join(control, 'takeover-confirmed.json'), 'utf8')).detail.includes(version))
       }
       const own = installation.readDesktopSelection(programRoot)
+      activeDataDir = singleLayer ? path.join(programRoot, 'data') : dataDir
       prepared = { installRoot: programRoot, installation_id: own.record.installation_id, selection: own.selection, coreRoot: own.coreRoot, guiRoot: own.guiRoot }
-      assert.equal(own.dataDir, dataDir); assert.deepEqual(own.selection, target.record.selection)
-      if (!singleLayer) assert.equal(JSON.parse(await fs.readFile(path.join(dataDir, 'desktop-maintenance.json'), 'utf8')).phase, 'verifying')
-      if (stale) for (const file of stale.files) assert.equal(await absent(file), true, 'Exited legacy record must settle before ordinary Main')
+      assert.equal(own.dataDir, activeDataDir); assert.deepEqual(own.selection, target.record.selection)
+      if (!singleLayer) assert.equal(JSON.parse(await fs.readFile(path.join(activeDataDir, 'desktop-maintenance.json'), 'utf8')).phase, 'verifying')
+      if (stale) for (const file of stale.files) assert.equal(await absent(file), !singleLayer, 'Copy import preserves source records; old in-place flow removes them')
       stage('ordinary-target-main')
       if (!gui) { gui = spawn(own.executable, ['--background'], { env, stdio: ['ignore', 'pipe', 'pipe'] }); peer = identity.inspectProcess(gui.pid); assert.ok(peer); exited = once(gui, 'exit'); void exited.catch(() => {}) }
       let ready = singleLayer && output.split('\n').some(line => { try { const value = JSON.parse(line); return value.component === 'desktop' && value.phase === 'ready' } catch { return false } }), buffered = '', failed
@@ -202,14 +209,14 @@ try {
         }
       })
       const deadline = Date.now() + (process.platform === 'darwin' && process.arch === 'x64' ? 360000 : 180000)
-      while (!ready || !await absent(path.join(dataDir, 'desktop-maintenance.json'))) {
+      while (!ready || !await absent(path.join(activeDataDir, 'desktop-maintenance.json'))) {
         if (failed || gui.exitCode !== null || Date.now() >= deadline) throw failed || new Error('Ordinary legacy target did not become healthy: ' + output)
         await new Promise(resolve => setTimeout(resolve, 100))
       }
-      const instance = inspectInstance(dataDir); assert.equal(instance.state, 'running'); assert.equal(instance.record.install_root, own.coreRoot)
+      const instance = inspectInstance(activeDataDir); assert.equal(instance.state, 'running'); assert.equal(instance.record.install_root, own.coreRoot)
       const nativeCli = path.join(programRoot, 'bin', process.platform === 'win32' ? 'crabot.exe' : 'crabot')
       const nativeStatus = JSON.parse((await execute(nativeCli, ['status', '--json'], { env, timeout: 30000, maxBuffer: 128000 })).stdout)
-      assert.equal(nativeStatus.running, true); assert.equal(nativeStatus.data_dir, dataDir)
+      assert.equal(nativeStatus.running, true); assert.equal(nativeStatus.data_dir, activeDataDir)
       if (process.platform === 'win32') {
         const script = path.join(control, 'probe.cmd'); await fs.writeFile(script, '@echo off\r\ncall "%CRABOT_OLD_COMMAND%" status --json\r\nexit /b %errorlevel%\r\n')
         const original = await execute(path.join(process.env.SystemRoot, 'System32/cmd.exe'), ['/d', '/c', script], { env: { ...env, CRABOT_OLD_COMMAND: command }, timeout: 30000, maxBuffer: 128000 })
@@ -218,13 +225,21 @@ try {
         assert.equal(await fs.readlink(command), nativeCli)
         assert.equal(JSON.parse((await execute(command, ['status', '--json'], { env: { ...env, PATH: '/no-host-node' }, timeout: 30000, maxBuffer: 128000 })).stdout).running, true)
       }
-      assert.equal(await fs.readFile(path.join(dataDir, 'admin/credentials.json'), 'utf8'), credentials)
-      for (const file of sentinels) assert.equal(await fs.readFile(path.join(dataDir, file), 'utf8'), 'retained ' + version + '\n')
+      assert.equal(await fs.readFile(path.join(activeDataDir, 'admin/credentials.json'), 'utf8'), credentials)
+      for (const file of sentinels) {
+        assert.equal(await fs.readFile(path.join(dataDir, file), 'utf8'), 'retained ' + version + '\n')
+        assert.equal(await fs.readFile(path.join(activeDataDir, file), 'utf8'), 'retained ' + version + '\n')
+      }
+      if (admissionStarted) {
+        const elapsed_ms = Date.now() - admissionStarted
+        console.log('CRABOT_COPY_IMPORT_TIMING ' + JSON.stringify({ version, data_bytes: 75000000, elapsed_ms }))
+        assert.ok(elapsed_ms < 120000, '75MB copy import through actual GUI/Core/CLI must complete within 120 seconds')
+      }
       const runtime = product.loadProductRuntime(own.coreRoot, { required: true, full: true })
-      const scriptFile = path.join(dataDir, 'workspaces/old-project/new-script.txt')
+      const scriptFile = path.join(activeDataDir, 'workspaces/old-project/new-script.txt')
       await execute(runtime.executables.python, ['-c', 'import pathlib,sys;pathlib.Path(sys.argv[1]).write_text("old workspace usable")', scriptFile], { env, timeout: 10000 })
       assert.equal(await fs.readFile(scriptFile, 'utf8'), 'old workspace usable')
-      assert.equal(inspectInstance(dataDir).record.generation, instance.record.generation)
+      assert.equal(inspectInstance(activeDataDir).record.generation, instance.record.generation)
       reports.push({ version, platform, published_archive_verified: true, official_windows_installer_launcher: process.platform === 'win32', actual_installer_loaded: true, single_layer_exe: singleLayer, actual_gui_first_use: singleLayer, native_dialog_input_substituted: !linux && !singleLayer, actual_ubuntu_backend: linux,
         graphical_polkit_tested: false, actual_gtk_flow_driven: false,
         old_data_fixture_stopped: true, old_fenced_stale_records_settled: Boolean(stale), ordinary_main_core_healthy: true, actual_native_and_original_cli_same_instance: true, host_node_required: false,
@@ -236,7 +251,7 @@ try {
       if (!passed) {
         const diagnostics = []
         try {
-          const state = inspectInstance(dataDir), record = state.record
+          const state = inspectInstance(activeDataDir), record = state.record
           const modules = record ? await probeMmModules(record.mm_port) : null
           const statuses = new Set(['registered', 'starting', 'running', 'stopping', 'stopped', 'error', 'disconnected'])
           diagnostics.push({ name: 'startup-health', state: state.state,
@@ -276,7 +291,7 @@ try {
         if (process.platform === 'win32') diagnostics.push({ name: 'native-crash-frame', frames: await (await import('./read-ci-crash-frame.mjs')).readCiCrashFrames(path.join(control, 'crashes')) })
         await fs.writeFile(path.join(repository, '.desktop-build/legacy-user-diagnostic' + suffix + '.json'), JSON.stringify({ version, platform, diagnostics }) + '\n')
       }
-      if (!await absent(dataDir) && inspectInstance(dataDir).state === 'running') await stopInstance(dataDir)
+      if (!await absent(dataDir) && inspectInstance(activeDataDir).state === 'running') await stopInstance(activeDataDir)
       if (peer && identity.sameProcess(peer, identity.inspectProcess(peer.pid))) process.kill(peer.pid, 'SIGKILL')
       if (exited) await exited
       if (passed && prepared) {
@@ -285,7 +300,7 @@ try {
           const { removeInstallationEntries } = await import(pathToFileURL(path.join(bundle, 'backend/dist/installation-removal.js')))
           await removeInstallationEntries(prepared, { home, platform: 'linux', env,
             shell: { readShortcutLink: () => { throw new Error('Windows only') } },
-            verifyStopped: async () => assert.equal(inspectInstance(dataDir).state, 'stopped') })
+            verifyStopped: async () => assert.equal(inspectInstance(activeDataDir).state, 'stopped') })
           await fs.writeFile(path.join(control, 'entries-cleaned.json'), 'true\n')
         } else if (singleLayer) {
           const script = path.join(control, 'cleanup-entries.cjs')

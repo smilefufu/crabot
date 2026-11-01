@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, writeFile, rm, rename, symlink, realpath } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, readFile, rm, rename, symlink, realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, dirname, delimiter } from 'node:path'
 import { createHash } from 'node:crypto'
@@ -150,4 +150,15 @@ test('product PATH and caches are private without altering Worker CLI install po
   assert.equal(env.PYTHONIOENCODING, 'utf-8')
   const explicit = productEnvironment(runtime, join(f.parent, 'data'), { PYTHONUTF8: '0', PYTHONIOENCODING: 'latin1' })
   assert.equal(explicit.PYTHONUTF8, '0'); assert.equal(explicit.PYTHONIOENCODING, 'latin1')
+})
+
+test('desktop normal resolution reads metadata without hashing program bytes; explicit full verification still detects damage', async t => {
+  const f = await fixture(t)
+  await writeFile(join(f.root, 'desktop-host.json'), JSON.stringify({ schema_version: 2, platform: process.platform, arch: process.arch }))
+  const record = f.manifest ?? JSON.parse(await readFile(join(f.root, 'product-runtime.json'), 'utf8'))
+  const entry = join(f.root, record.executables.node)
+  const original = await readFile(entry)
+  await writeFile(entry, Buffer.alloc(original.length, 88))
+  assert.ok(loadProductRuntime(f.root).executables.node)
+  assert.throws(() => loadProductRuntime(f.root, { full: true }), /integrity|完整性/i)
 })

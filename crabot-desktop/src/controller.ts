@@ -27,11 +27,6 @@ export class DesktopController {
   private load(file: string, root = this.options.coreRoot): Promise<any> { return import(pathToFileURL(path.join(root, file)).href) }
   private async verifyInstallation() {
     this.options.verifyBinding?.()
-    if (this.options.packaged || existsSync(path.join(this.options.coreRoot, 'core-release.json'))) {
-      this.host.status('discovering', '正在校验内置组件和应用版本。')
-      const { verifyCoreRelease } = await this.load('scripts/lib/core-release.mjs')
-      await verifyCoreRelease(this.options.coreRoot, { version: this.options.appVersion })
-    }
   }
   private async connect(operation: Promise<void>) {
     await this.verifyInstallation()

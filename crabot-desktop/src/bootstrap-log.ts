@@ -9,7 +9,7 @@ type Files = {
   writePrivateFile?: (file: string, text: string) => void
 }
 const close = (fd: number | undefined) => { if (fd !== undefined) try { fs.closeSync(fd) } catch { /* Diagnostics cannot block startup. */ } }
-type Event = { phase: string; at: string; code?: string; app_version?: string }
+type Event = { phase: string; at: string; code?: string; app_version?: string; detail?: string }
 export function openBootstrapLog(profile: string, files: Files): ((event: Event) => void) | undefined {
   let fd: number | undefined
   try {
@@ -18,7 +18,7 @@ export function openBootstrapLog(profile: string, files: Files): ((event: Event)
       const current = fs.lstatSync(profile)
       return current.isDirectory() && !current.isSymbolicLink() && current.dev === directory.dev && current.ino === directory.ino
         && fs.realpathSync(profile) === profile && files.isOwnedDirectory(profile)
-        && (process.platform === 'win32' ? files.isOwnerOnlyDirectory?.(profile) : (current.mode & 0o777) === 0o700)
+
     }
     if (!profileCurrent()) return
     const open = (append = true) => {
@@ -48,7 +48,8 @@ export function openBootstrapLog(profile: string, files: Files): ((event: Event)
         handle = open(); const current = fs.fstatSync(handle)
         if (current.dev !== original.dev || current.ino !== original.ino) throw new Error('Replaced bootstrap log')
         const line = JSON.stringify({ component: 'desktop-bootstrap', phase: event.phase, at: event.at,
-          ...(event.code === undefined ? {} : { code: event.code }), ...(event.app_version === undefined ? {} : { app_version: event.app_version }) }) + '\n'
+          ...(event.code === undefined ? {} : { code: event.code }), ...(event.app_version === undefined ? {} : { app_version: event.app_version }),
+          ...(typeof event.detail === 'string' ? { detail: event.detail.slice(0, 2048) } : {}) }) + '\n'
         if (current.size + Buffer.byteLength(line) > 16384) return
         fs.writeSync(handle, line); count++
       } catch { failed = true } finally { close(handle) }

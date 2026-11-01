@@ -58,9 +58,10 @@ export async function bindFirstLaunchData(programs, dataDir) {
       if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) fail()
       const bytes = await fs.readFile(command)
       if (!bytes.equals(await fs.readFile(expected))) {
-        if (!programs.removal) fail()
-        const { proof } = await readDesktopRemovalProof(root), original = JSON.parse(proof.core.inventory).files['bin/' + name]
-        if (original?.type !== 'file' || original.size !== bytes.length || original.sha256 !== hash(bytes)) fail()
+        if (programs.removal) {
+          const { proof } = await readDesktopRemovalProof(root), original = JSON.parse(proof.core.inventory).files['bin/' + name]
+          if (original?.type !== 'file' || original.size !== bytes.length || original.sha256 !== hash(bytes)) fail()
+        } else if (programs.source || await present(path.join(root, 'current-release.json'))) fail()
         const temporary = command + '.tmp-' + randomUUID()
         try {
           await fs.copyFile(expected, temporary, constants.COPYFILE_EXCL)
@@ -75,7 +76,14 @@ export async function bindFirstLaunchData(programs, dataDir) {
     }
     const metadata = path.join(root, 'desktop-installation.json')
     if (await present(metadata)) {
-      if (installation.readDesktopInstallation(root).dataDir !== dataDir) fail()
+      const current = installation.readDesktopInstallation(root)
+      if (current.dataDir !== dataDir) {
+        // Only a never-committed first launch may move its old external binding to the new copy.
+        if (programs.source || await present(path.join(root, 'current-release.json')) || dataDir !== path.join(root, 'data') || current.record.schema_version !== 2) fail()
+        const record = { ...current.record, schema_version: 1, paths: { ...current.record.paths, data: 'data' } }
+        delete record.data_dir; delete record.data_identity
+        await privateJson(metadata, record, true)
+      }
     } else {
       const stat = await fs.lstat(root, { bigint: true }), data = await fs.lstat(dataDir, { bigint: true })
       const external = dataDir !== path.join(root, 'data')
@@ -108,4 +116,12 @@ export async function completeFreshFirstLaunch(bound, registerEntries) {
     await privateJson(path.join(bound.root, 'current-release.json'), bound.selection)
     return installation.readDesktopSelection(bound.root)
   } finally { releaseCliLock(lock) }
+}
+
+// The copied data is already converted; fresh initialization must not reject its business files.
+export async function completeImportedFirstLaunch(bound, registerEntries) {
+  if (!management.readDesktopManagement(bound.dataDir)) {
+    await privateJson(path.join(bound.dataDir, 'desktop-managed.json'), { schema_version: 1, install_kind: 'desktop', admin_listen_host: '127.0.0.1' })
+  }
+  return completeFreshFirstLaunch(bound, registerEntries)
 }

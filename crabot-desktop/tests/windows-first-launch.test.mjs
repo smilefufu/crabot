@@ -19,11 +19,13 @@ async function run({ initialized = false, legacy = false, source = false, cancel
     'desktop-first-launch.mjs': {
       readFirstLaunchPrograms: async () => programs,
       bindFirstLaunchData: async (value, data) => { assert.ok(!previousDesktop || previousVersion !== '1.2.4', 'No binding writes on downgrade'); assert.equal(value, programs); effects.push(['bind', data]); return { ...own, dataDir: data, proof: { file: 'proof', sha256: 'digest' } } },
+      completeImportedFirstLaunch: async (value, register) => { await register({ installRoot: root }); return value },
       completeFreshFirstLaunch: async (value, register) => { await register({ installRoot: root }); effects.push(['fresh', value.dataDir]); return value },
     },
     'desktop-installation.cjs': { default: { readDesktopInstallation: value => { assert.equal(value, root); return own }, locatePinnedDesktopGui: () => own } },
     'desktop-management.cjs': { default: { requireExistingDataRoot: value => { effects.push(['existing', value]); return value }, ensurePrivateDataRoot: value => { effects.push(['create', value]); return value }, readDesktopManagement: () => null } },
-    'legacy-desktop-discovery.mjs': { discoverLegacyDesktopTakeover: async value => { queries.push(value); return legacy ? original : null } },
+    'desktop-data-import.mjs': { discoverDesktopDataSource: async value => { queries.push(value); return legacy ? original.installation : null },
+      importDesktopData: async value => { effects.push(['import', value.source.dataRoot, value.target]) }, forwardImportedWindowsCommand: async () => {} },
     'source-installation.mjs': { discoverUserSourceDeployment: () => source ? { root: '/fixture/source' } : null },
     'legacy-desktop-handoff.mjs': { runPreparedLegacyDesktopTakeover: async options => {
       effects.push(['legacy', options.prepared.installRoot, options.prepared.installation.dataRoot]); assert.equal(options.entryFenceId, original.entryFenceId)
@@ -60,15 +62,15 @@ test('legacy data confirmation shows both locations, then registers the selected
   assert.equal(value.messages.length, 1)
   assert.match(value.messages[0].detail, /v2026\.10\.14\.1/)
   assert.ok(value.messages[0].detail.includes(dataDir)); assert.ok(value.messages[0].detail.includes(root))
-  assert.deepEqual(value.effects, [['existing', dataDir], ['bind', dataDir], ['legacy', root, dataDir], ['register', root]])
+  assert.ok(value.effects.some(effect => effect[0] === 'import' && effect[2] === path.join(root, 'data')), 'legacy data must be copied into the selected installation, not bound in place')
 })
 test('cancelling legacy data confirmation has no binding, migration, directory or registration effects', async () => {
   const value = await run({ legacy: true, cancel: true }); assert.equal(value.result, null); assert.deepEqual(value.effects, [])
 })
-test('a pending first launch resumes from the actual bound data without prompting for another directory', async () => {
+test('a pending external first-use binding copies the original data after explicit confirmation', async () => {
   const value = await run({ legacy: true, bound: true })
-  assert.equal(value.messages.length, 0); assert.equal(value.queries[0].root, old)
-  assert.deepEqual(value.effects, [['bind', dataDir], ['legacy', root, dataDir], ['register', root]])
+  assert.equal(value.messages.length, 1); assert.equal(value.queries[0].root, old)
+  assert.deepEqual(value.effects, [['create', path.join(root, 'data')], ['bind', path.join(root, 'data')], ['import', dataDir, path.join(root, 'data')], ['register', root]])
 })
 
 

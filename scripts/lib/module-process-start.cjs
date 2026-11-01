@@ -8,6 +8,8 @@ function execFileText(file, args) {
   return new Promise((resolve, reject) => {
     execFile(file, args, {
       maxBuffer: 1024 * 1024,
+      timeout: 10000,
+      windowsHide: true,
       env: { ...process.env, LC_ALL: 'C' },
     }, (error, stdout) => {
       if (error) reject(error)

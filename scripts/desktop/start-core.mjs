@@ -7,7 +7,6 @@ import { prepareCoreEnvironment, applyStartupMigrations } from '../lib/core-prep
 import { launchBackgroundCore } from '../lib/background-core.mjs'
 import management from '../lib/desktop-management.cjs'
 import { detectMode } from '../lib/mode.mjs'
-import { verifyCoreRelease } from '../lib/core-release.mjs'
 import { assertVersionMaintenanceAllowsStart } from '../lib/version-maintenance.mjs'
 import { runCorePreflight } from '../lib/core-preflight.mjs'
 
@@ -15,8 +14,7 @@ import { runCorePreflight } from '../lib/core-preflight.mjs'
 // no TTY, password, task source, session, delivery or recovery-task semantics.
 export async function startDesktopCore({ root, dataDir, source = process.env, onStage }) {
   const stage = value => { try { onStage?.(value) } catch {} }
-  stage('verify_core')
-  if (existsSync(join(root, 'core-release.json'))) await verifyCoreRelease(root)
+  stage('check_binding')
   if (detectMode() === 'system' || source.CRABOT_DEV === 'true' || Number(source.CRABOT_PORT_OFFSET ?? 0) !== 0) {
     throw Object.assign(new Error('此部署需要使用原管理方式；桌面不会自动接管 system/dev 实例。'), { code: 'CRABOT_DESKTOP_TAKEOVER_REQUIRED' })
   }

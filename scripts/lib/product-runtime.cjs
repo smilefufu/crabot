@@ -34,11 +34,11 @@ function inside(root, relative) {
   return target
 }
 
-function verifyFile(root, relative, entry) {
+function verifyFile(root, relative, entry, full) {
   const target = inside(root, relative)
   const stat = fs.statSync(target)
   if (!stat.isFile() || stat.size !== entry.size
-    || crypto.createHash('sha256').update(fs.readFileSync(target)).digest('hex') !== entry.sha256) {
+    || full && crypto.createHash('sha256').update(fs.readFileSync(target)).digest('hex') !== entry.sha256) {
     invalid('组件完整性 integrity 校验失败: ' + relative)
   }
   return target
@@ -72,12 +72,13 @@ function loadProductRuntime(root, { required = false, full = false } = {}) {
       invalid('inventory 文件清单损坏: ' + name)
     }
   }
+  const verifyCommands = full || !fs.existsSync(path.join(root, 'desktop-host.json'))
   const executables = {}, verified = new Set()
   for (const name of COMMANDS) {
     const relative = relativePath(manifest.executables?.[name])
     const entry = manifest.files[relative]
     if (!entry) invalid('inventory 未收录必需命令: ' + name)
-    executables[name] = verifyFile(root, relative, entry)
+    executables[name] = verifyFile(root, relative, entry, verifyCommands)
     verified.add(relative)
     if (process.platform !== 'win32' && !(fs.statSync(executables[name]).mode & 0o111)) {
       invalid('组件不可执行: ' + name)
@@ -92,12 +93,12 @@ function loadProductRuntime(root, { required = false, full = false } = {}) {
   for (const relative of manifest.seed_wheels) {
     relativePath(relative)
     if (!manifest.files[relative]) invalid('inventory 未收录 seed wheel')
-    verifyFile(root, relative, manifest.files[relative])
+    verifyFile(root, relative, manifest.files[relative], verifyCommands)
     verified.add(relative)
   }
   if (full) {
     // Required commands and seed wheels were fully hashed in this same call.
-    for (const [relative, entry] of Object.entries(manifest.files)) if (!verified.has(relative)) verifyFile(root, relative, entry)
+    for (const [relative, entry] of Object.entries(manifest.files)) if (!verified.has(relative)) verifyFile(root, relative, entry, full)
   }
   return {
     root, manifest, executables,
