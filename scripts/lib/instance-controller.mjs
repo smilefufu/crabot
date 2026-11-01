@@ -38,6 +38,36 @@ export async function hasRunningModuleProcesses(dataDir) {
   return false
 }
 
+function observedProcesses(owner) {
+  const processes = []
+  for (const pid of identity.listProcessIds()) {
+    try {
+      const process = identity.inspectProcess(pid)
+      if (process?.owner === owner) processes.push(process)
+    } catch { /* unrelated inaccessible or already-exited process */ }
+  }
+  return processes
+}
+
+function extendOwned(known, independent, processes) {
+  const owned = new Map(known.map(item => [item.pid, item]))
+  for (let changed = true; changed;) {
+    changed = false
+    for (const process of processes) {
+      const parent = owned.get(process.parent)
+      if (!independent.has(process.pid) && !owned.has(process.pid) && parent && alive(parent) && alive(process)) {
+        let notOlderThanParent
+        try { notOlderThanParent = processBirthAtLeast(process.started, parent.started) }
+        catch { throw Object.assign(new Error('进程创建代际无法比较；未停止实例，保留运行记录。'), { code: 'CRABOT_STOP_UNKNOWN' }) }
+        // Windows retains the creator PID after exit. Its reuse is not a new parent relationship.
+        if (!notOlderThanParent) continue
+        owned.set(process.pid, process); changed = true
+      }
+    }
+  }
+  return [...owned.values()]
+}
+
 async function collectOwned(record, dataDir) {
   const modules = [], admins = []
   for (const item of await moduleProcesses(dataDir, record.controller.owner)) {
@@ -47,14 +77,7 @@ async function collectOwned(record, dataDir) {
       if (item.record.module_id === 'admin-web' && item.process.parent === record.mm?.pid) admins.push(item.process)
     }
   }
-  // Capture descendants before their parent exits; never adopt processes just because they own a port.
-  const processes = []
-  for (const pid of identity.listProcessIds()) {
-    try {
-      const process = identity.inspectProcess(pid)
-      if (process?.owner === record.controller.owner) processes.push(process)
-    } catch { /* unrelated inaccessible or already-exited process */ }
-  }
+  const processes = observedProcesses(record.controller.owner)
   // The existing UI upgrader is an independent maintenance process. It and
   // its stop CLI must survive Core shutdown; arbitrary detached children do not
   // gain this exemption. Only the registered Admin's exact native entry does.
@@ -71,22 +94,7 @@ async function collectOwned(record, dataDir) {
     }
     if (args.length === 2 && isAbsolute(args[1]) && normalize(args[1]) === updater && alive(process)) independent.add(process.pid)
   }
-  const owned = new Map([record.controller, record.mm, ...modules].filter(Boolean).map(item => [item.pid, item]))
-  for (let changed = true; changed;) {
-    changed = false
-    for (const process of processes) {
-      const parent = owned.get(process.parent)
-      if (!independent.has(process.pid) && !owned.has(process.pid) && parent && alive(parent) && alive(process)) {
-        let notOlderThanParent
-        try { notOlderThanParent = processBirthAtLeast(process.started, parent.started) }
-        catch { throw Object.assign(new Error('进程创建代际无法比较；未停止实例，保留运行记录。'), { code: 'CRABOT_STOP_UNKNOWN' }) }
-        // Windows retains the creator PID after exit. Its reuse is not a new parent relationship.
-        if (!notOlderThanParent) continue
-        owned.set(process.pid, process); changed = true
-      }
-    }
-  }
-  return [...owned.values()]
+  return { owned: extendOwned([record.controller, record.mm, ...modules].filter(Boolean), independent, processes), independent }
 }
 
 function processState(process) {
@@ -115,16 +123,24 @@ export async function stopInstance(dataDir, { timeoutMs = SUPERVISOR_FORCE_TIMEO
   if (current.state === 'starting') throw Object.assign(new Error('服务正在启动，进程登记尚未完成；请稍候重新检查后再停止。'), { code: 'CRABOT_INSTANCE_STARTING' })
   if (!current.record) { log('Stopped.'); return }
   const record = current.record
-  const owned = await collectOwned(record, dataDir)
+  const scope = await collectOwned(record, dataDir)
+  let owned = scope.owned, shutdownFailed = false
   log(`Stopping generation ${record.generation}...`)
   if (process.platform === 'win32') {
     try { await shutdownRpc(record) }
-    catch { log('Shutdown RPC unavailable; waiting for this generation before native termination.') }
+    catch { shutdownFailed = true; log('Shutdown RPC unavailable; waiting for this generation before native termination.') }
   }
   else if (alive(record.controller)) process.kill(record.controller.pid, 'SIGTERM')
   else if (record.mm && alive(record.mm)) process.kill(record.mm.pid, 'SIGTERM')
   const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline && owned.some(unsettled)) await sleep(pollMs)
+  let lastObservation = 0
+  const refresh = () => { owned = extendOwned(owned, scope.independent, observedProcesses(record.controller.owner)); lastObservation = Date.now() }
+  while (Date.now() < deadline && owned.some(unsettled)) {
+    // A failed RPC leaves Core running; include tools it starts during the grace period.
+    if (shutdownFailed && Date.now() - lastObservation >= 1000) refresh()
+    await sleep(pollMs)
+  }
+  if (shutdownFailed) refresh()
   const remaining = owned.filter(alive)
   const signalFailures = []
   if (remaining.length) {

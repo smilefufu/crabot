@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-async function fixture(t, { rpcFails = false, stale = false, denied = false } = {}) {
+async function fixture(t, { rpcFails = false, stale = false, denied = false, lateChild = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'crabot-stop-failure-'))
   t.after(() => rm(root, { recursive: true, force: true }))
   const controller = { pid: 101, parent: 1, owner: 'fixture', started: '1', executable: '/node' }
@@ -40,6 +40,7 @@ async function fixture(t, { rpcFails = false, stale = false, denied = false } = 
   const originalFetch = globalThis.fetch
   globalThis.fetch = async () => {
     events.push('rpc')
+    if (lateChild) active.set(104, { ...mm, pid: 104, parent: mm.pid, started: '3' })
     if (rpcFails) throw new Error('fixture connection reset')
     active.clear()
     return { ok: true, json: async () => ({ success: true }) }
@@ -84,4 +85,12 @@ test('a real termination denial identifies the exact PID and OS reason, preservi
 test('departed module recovery files do not become live activity during an offline update', async t => {
   const f = await fixture(t, { stale: true })
   assert.equal(await f.observe(), false)
+})
+
+
+test('a child started while the shutdown RPC fails is included in native termination', async t => {
+  const f = await fixture(t, { rpcFails: true, lateChild: true })
+  await f.stop()
+  assert.equal(f.active.size, 0)
+  assert.ok(f.signals.includes(104))
 })
