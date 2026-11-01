@@ -22,8 +22,8 @@ if(args[0]==='auth') {
  const shell=process.platform==='win32'?'powershell':'sh';
  const command=value=>process.platform==='win32'?['-Command',value]:['-c',value];
  const hooks=JSON.parse(fs.readFileSync(path.join(project,'.slack/hooks.json'),'utf8'));
- const config=JSON.parse(execFileSync(shell,command(hooks.hooks['get-hooks']),{encoding:'utf8'}));
- const manifest=JSON.parse(execFileSync(shell,command(config.hooks['get-manifest']),{encoding:'utf8'}));
+ const config=JSON.parse(execFileSync(shell,command(hooks.hooks['get-hooks']),{encoding:'utf8',stdio:['ignore','pipe','pipe']}));
+ const manifest=JSON.parse(execFileSync(shell,command(config.hooks['get-manifest']),{encoding:'utf8',stdio:['ignore','pipe','pipe']}));
  if(manifest.display_information.name!=='Slack-native-fixture'||manifest.features.bot_user.display_name!=='Slack-native-fixture')process.exit(3);
  fs.writeFileSync(path.join(project,'.slack/apps.dev.json'),JSON.stringify({TTEST:{app_id:'ATEST'}}));
  const child=spawn(shell,command(config.hooks.start),{env:{...process.env,SLACK_BOT_TOKEN:'xoxb-fixture',SLACK_APP_TOKEN:'xapp-fixture'},stdio:'inherit'});

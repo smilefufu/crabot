@@ -13,7 +13,7 @@ try {
   if (process.env.SLACK_CLI_TEST_ARCHIVE) globalThis.fetch = async () => new Response(await fs.readFile(process.env.SLACK_CLI_TEST_ARCHIVE))
   try { executable = await ensureCli(root, AbortSignal.timeout(300000)) }
   finally { globalThis.fetch = originalFetch }
-  const project = await prepareProject(root)
+  const project = await prepareProject(root, 'Crabot-native-ci')
   await privateDirectory(path.join(root, 'cli'))
   console.log('Slack CLI smoke: checking owned executable startup (15 second limit)')
   job = startCli(executable, ['--version'], project)
@@ -34,6 +34,8 @@ try {
   assert.equal(result.code, 0, 'Official CLI must execute get-hooks and get-manifest on this native platform')
   const first = result.output.indexOf('{'), last = result.output.lastIndexOf('}')
   const manifest = JSON.parse(result.output.slice(first, last + 1))
+  assert.equal(manifest.display_information.name, 'Crabot-native-ci')
+  assert.equal(manifest.features.bot_user.display_name, 'Crabot-native-ci')
   assert.deepEqual(manifest.oauth_config.scopes.bot, SLACK_MANIFEST.oauth_config.scopes.bot)
   assert.deepEqual(manifest.settings.event_subscriptions.bot_events, SLACK_MANIFEST.settings.event_subscriptions.bot_events)
   assert.equal(manifest.settings.socket_mode_enabled, true)

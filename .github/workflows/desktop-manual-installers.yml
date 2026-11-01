@@ -206,6 +206,9 @@ jobs:
           (cd crabot-shared && node --import tsx --test src/proxy-manager.test.ts)
           pnpm --dir crabot-channel-slack test
           node .github/scripts/smoke-slack-onboarding.mjs
+      - name: Existing stopped GUI update retains location and data
+        if: runner.os == 'Windows'
+        run: node --test --test-name-pattern='an extracted desktop update.*: none$' scripts/lib/__tests__/desktop-payload.test.mjs
       - name: Simplified data import and runtime regression
         run: |
           node --test scripts/lib/__tests__/desktop-data-import.test.mjs scripts/lib/__tests__/product-runtime.test.mjs

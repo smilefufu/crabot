@@ -24,6 +24,12 @@ it('returns output only after a normal short command has exited', async () => {
   expect(await job.result).toEqual({ code: 0, output: 'fixture-ticket\n' })
 })
 
+it('keeps user stdin at EOF while terminal capability queries are handled privately', async () => {
+  root = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-slack-stdin-test-'))
+  job = startCli(process.execPath, ['-e', "process.stdin.on('end',()=>console.log('fixture-eof'));process.stdin.resume();setTimeout(()=>process.exit(9),2000).unref()"], root)
+  expect(await job.result).toEqual({ code: 0, output: 'fixture-eof\n' })
+}, 15000)
+
 it('does not terminate a foreign process even if a stale receipt contains its PID', async () => {
   const { recoverSession } = await import('../dist/cli-tools.js')
   root = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-slack-stale-test-'))
