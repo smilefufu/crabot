@@ -53,5 +53,6 @@ try {
   const cleanup = path.join(root, 'cleanup-shortcut.ps1')
   await fs.writeFile(cleanup, `$p=Join-Path ([Environment]::GetFolderPath('Programs')) 'Crabot.lnk'; if(Test-Path -LiteralPath $p){$s=New-Object -ComObject WScript.Shell; $t=$s.CreateShortcut($p).TargetPath; if($t.StartsWith($env:CRABOT_PROBE_ROOT+'\\',[StringComparison]::OrdinalIgnoreCase) -or $t.StartsWith($env:CRABOT_PROBE_DRIVE_ROOT+'\\',[StringComparison]::OrdinalIgnoreCase)){Remove-Item -LiteralPath $p;}}`)
   await execute(path.join(process.env.SystemRoot, 'System32/WindowsPowerShell/v1.0/powershell.exe'), ['-NoProfile', '-NonInteractive', '-File', cleanup], { env: { ...process.env, CRABOT_PROBE_ROOT: root, CRABOT_PROBE_DRIVE_ROOT: driveTarget }, timeout: 30000 })
+  await fs.rm(driveTarget, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
 }

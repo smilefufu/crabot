@@ -62,6 +62,7 @@ try {
    $description = ($text | Where-Object { $_ } | Select-Object -First 12) -join ' | '
    if ($description -and $observed.Add($description)) { Write-Output "CRABOT_WINDOWS_WRAPPER_UI window=$description" }
    if ($all -match '无法关闭|cannot be closed|Can.t modify') { throw "Unexpected Retry: $all" }
+   if ($all -match '安装已中止|安装程序并未成功|无法创建程序目录|无法准备所选程序目录|Installation Aborted') { throw "Installer visibly aborted: $all" }
    if ($all -match '系统临时目录' -and $all -match '空间不足') {
     if ($Expected -ne 'space') { throw "Unexpected TEMP rejection: $all" }
     if (Test-Path -LiteralPath $target) { throw 'Capacity rejection wrote the target' }

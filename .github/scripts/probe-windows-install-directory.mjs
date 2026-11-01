@@ -27,7 +27,7 @@ try {
   assert.equal(identity.isExistingDataDirectory(selected), true)
   const empty = path.join(root, 'selected empty'); identity.createPrivateDirectory(empty); await run(empty)
   assert.equal(identity.isPrivateDirectory(empty), true)
-  const administrators = path.join(root, 'NSIS-created administrator-owned empty')
+  const administrators = path.join(root, 'administrator-owned writable empty')
   identity.createPrivateDirectory(administrators)
   await execute(path.join(process.env.SystemRoot, 'System32/icacls.exe'), [administrators, '/setowner', '*S-1-5-32-544'], { timeout: 10000 })
   assert.equal(identity.isOwnedDirectory(administrators), true, 'current user can manage this directory under the existing product rule')
