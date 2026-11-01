@@ -1,12 +1,12 @@
 # Crabot 项目进度
 
-### 桌面化冻结范围：Windows17已交付，扩大GUI回归收口中
+### 桌面化冻结范围：Windows17安装入口通过，补测卸载恢复缺陷，18构建中
 
 - 16版用户实测退出14后Finish仍报“旧版应用退出状态尚未核实”，菜单打开14。根因是安装版本及入口依赖首启全系统进程观察；旧直接EXE验收绕开Finish/菜单，不能证明修复。[根因及逐项授权](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/research/2026-11-01-desktop16-installation-root-causes.md)。
 - 按D1/R1–R4实现：安装器一次解包、标准覆盖固定`program/gui`和`program/core`，成功即更新入口；只在实际程序文件占用时提示退出，无全局观察/强杀。首启数据准备在正常主窗口显示版本、进度、具体错误与重试，复制可取消、转换不可取消。普通启动不再全量哈希；data/workspace及实例身份保留；程序中断用同一完整包补齐，不自制整程序回滚。
 - 最终来源cabfedb8生产41318335652整组成功（旧CLI副本导入、源码共存、实际新装/Finish）；同EXE的41319938994通过14正常退出后Finish启动17、OS开始菜单重开、同UUID/data/凭据及两轮启停；41319941854通过强杀旧实例后恢复，41321409174独立新装通过。实际Windows渲染器41319434697验证同窗取消/迁移禁取消/错误重试。53项控制器回归通过，显式停止可清理同绑定旧模块，启动仍拒绝活旧实例和其它根。
 - Windows17包已代下载至`Downloads/Crabot桌面验收包-20261101/Windows 11`，EXE559579257字节，SHA256`e24b5e01dc8dab3e240192f298e1870d55b4b52169324729e5d2704888d77920`，程序常规文件1855497362字节。Mac仍11版；本机源码服务/data、Docker、Spotlight未动，未在本机启动验收App/Core。产品main未推送。
-- 扩大GUI回归尚未通过：41318338461的5项profile夹具错误和1项旧布局诊断断言已定向修正；41321792908中9项真实主入口通过，但首次并发下载Electron的EBUSY阻断后续测试，串行41322206593的13项主入口/渲染检查通过，随后卸载探针导入缺少根依赖而未执行；已补齐测试依赖，41322466669继续定向复验；全Windows GUI复验41322309496进行中。依赖分支41318482387另有3项R4旧全量扫描断言，已对齐。历史失败/撤回中间包保留，不改写为通过。后续仅测试/CI修改，产品源码未改。
+- 扩大GUI回归未完成：模拟账号appData需显式绑定；41322787428排除夹具后真实复现原GUI恢复`preparing/stopping`卸载误入首次安装，加载缺失Core。4c0b6508只将匹配原GUI的现有卸载记录导回既有入口；不同目标/已开始删除仍保留原修复路径，无新状态或清理策略。本地19项通过，原生41323263382复验；新成品以18版单独构建41323332667，17原文件/SHA不变，附说明已注明该未修场景。完整GUI41322309496仍在跑旧来源；历史失败不改写。
 - 既有修正随包：数据复制最多8并发；Windows固定系统HTTP/HTTPS代理和实际CONNECT通过（env优先）；Slack官方CLI私有伪终端、受控退出、隐藏PowerShell及43项原生回归通过。真实Slack授权/收发和Win11普通账号仍待用户真机，不把组件通过当业务成功。
 - [路径清单](https://github.com/smilefufu/crabot-docs/blob/main/guides/installation-upgrade-paths.md)、[完整实施证据](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-30-windows-installation-feedback-fixes.md)持续更新。Mac R3/R4、Ubuntu固定布局及其余冻结安装路径尚未完成；缺少旧Mac/Ubuntu真桌面资源按用户决定暂跳过。500MB目标尚未实现，见[体积审计](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/research/2026-11-01-desktop-size-audit.md)。完整测好再按依赖拆可review PR，不自行merge。
 
