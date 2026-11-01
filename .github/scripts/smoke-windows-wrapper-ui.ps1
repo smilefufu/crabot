@@ -9,17 +9,13 @@ param(
 $ErrorActionPreference = 'Stop'
 $Installer = (Resolve-Path $Installer).Path
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') { throw 'Disposable Windows CI only' }
-# A simulated user profile must inherit the real user's private temp ACL,
-# rather than the runner's shared workspace volume. The selected app root stays on D:.
+# OS entry acceptance uses the disposable runner's real user profile. Changing
+# USERPROFILE/APPDATA splits installer known folders from the Start menu we open.
+$homeRoot = [Environment]::GetFolderPath('UserProfile')
+if ([IO.Path]::GetFullPath($env:USERPROFILE) -ne $homeRoot -or (Test-Path -LiteralPath (Join-Path $homeRoot '.crabot'))) { throw 'Expected an unused hosted CI user profile' }
 $osStartMenu = Join-Path ([Environment]::GetFolderPath('Programs')) 'Crabot.lnk'
 $menuBefore = if(Test-Path -LiteralPath $osStartMenu){[IO.File]::ReadAllBytes($osStartMenu)}else{$null}
 if(Test-Path -LiteralPath $osStartMenu){Remove-Item -LiteralPath $osStartMenu}
-$homeRoot = Join-Path ([IO.Path]::GetTempPath()) ('wrapper-home-' + [guid]::NewGuid().ToString('N'))
-$env:USERPROFILE = $homeRoot
-$env:HOME = $homeRoot
-$env:APPDATA = Join-Path $homeRoot 'AppData/Roaming'
-$env:LOCALAPPDATA = Join-Path $homeRoot 'AppData/Local'
-New-Item $env:APPDATA,$env:LOCALAPPDATA -ItemType Directory -Force | Out-Null
 $target = Join-Path ([IO.Path]::GetPathRoot($env:RUNNER_TEMP)) ('Crabot wrapper UI ' + [guid]::NewGuid().ToString('N'))
 if (Test-Path -LiteralPath $target) { throw 'Expected an absent new folder directly under the selected drive' }
 Add-Type @'
@@ -162,7 +158,7 @@ try {
     & "$env:SystemRoot/System32/taskkill.exe" /PID $row.ProcessId /T /F 2>&1 | Write-Output
    }
    $baselineMenu = (New-Object -ComObject WScript.Shell).CreateShortcut($osStartMenu)
-   Write-Output ('CRABOT_BASELINE_MENU ' + (@{link=$osStartMenu; exists=(Test-Path -LiteralPath $osStartMenu); target=$baselineMenu.TargetPath; expected=$oldGui; simulated_profile_menu=(Join-Path $env:APPDATA 'Microsoft/Windows/Start Menu/Programs/Crabot.lnk')} | ConvertTo-Json -Compress))
+   Write-Output ('CRABOT_BASELINE_MENU ' + (@{link=$osStartMenu; exists=(Test-Path -LiteralPath $osStartMenu); target=$baselineMenu.TargetPath; expected=$oldGui} | ConvertTo-Json -Compress))
    if ($baselineMenu.TargetPath -ne $oldGui) { throw ('Original actual OS Start menu mismatch: expected=' + $oldGui + '; actual=' + $baselineMenu.TargetPath + '; link=' + $osStartMenu) }
   }
   Start-Sleep -Seconds 2
