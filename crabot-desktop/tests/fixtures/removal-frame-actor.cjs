@@ -6,6 +6,14 @@ const { pathToFileURL } = require('node:url')
 const { spawn } = require('node:child_process')
 const { once } = require('node:events')
 const cfg = JSON.parse(fs.readFileSync(process.env.CRABOT_REMOVAL_FRAME_CONFIG, 'utf8'))
+// The isolated HOME is a fixture, not a registered Windows account profile.
+// Bind Electron's OS directory to the same existing private fixture explicitly.
+if (process.platform === 'win32' && process.env.APPDATA === path.join(cfg.root, 'data/finite-user-home/Roaming')) {
+  fs.mkdirSync(process.env.APPDATA, { recursive: true })
+  app.setPath('appData', process.env.APPDATA)
+  require('node:assert/strict').equal(app.getPath('appData'), process.env.APPDATA)
+}
+
 if (['publish-source-remove-main', 'publish-source-remove-source', 'resume-source-remove-main', 'installer-source', 'installer-ui'].includes(cfg.mode) && process.argv.some(value => value.startsWith('--crabot-removal-host='))) {
   const assert = require('node:assert/strict'), electron = require('electron')
   const native = require('./bootstrap/scripts/lib/process-identity.cjs')
