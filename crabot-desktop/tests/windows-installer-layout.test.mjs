@@ -18,22 +18,28 @@ test('Windows packaging contains one final program tree and no Electron installe
   const record = { schema_version: 1, platform: 'win32', arch: 'x64', selection, gui: {} }
   await packageWindowsInstaller({ root, output, source, payload: { directory, coreRoot, guiRoot, record }, distribute: false })
   const files = (await fs.readdir(path.join(output, 'programs'), { recursive: true, withFileTypes: true })).filter(entry => entry.isFile())
-  assert.equal(files.length, 4)
-  assert.equal(await fs.readFile(path.join(output, 'programs/app/releases', selection.gui_id, 'Crabot.exe'), 'utf8'), 'actual user GUI bytes')
-  assert.equal(await fs.readFile(path.join(output, 'programs/releases', selection.core_id, 'runtime.bin'), 'utf8'), 'one runtime copy')
+  assert.equal(files.length, 5)
+  assert.equal(await fs.readFile(path.join(output, 'programs/program/gui/Crabot.exe'), 'utf8'), 'actual user GUI bytes')
+  assert.equal(await fs.readFile(path.join(output, 'programs/program/core/runtime.bin'), 'utf8'), 'one runtime copy')
+  assert.equal(await fs.readFile(path.join(output, 'programs/bin/crabot.exe'), 'utf8'), 'native CLI bytes')
   const location = JSON.parse(await fs.readFile(path.join(output, 'installer-location.json'), 'utf8'))
   assert.equal(location.bootstrap, 'windows-first-launch')
-  assert.equal(path.resolve(output, location.executable), path.join(output, 'programs/app/releases', selection.gui_id, 'Crabot.exe'))
-  for (const absent of ['data', 'desktop-installation.json', 'current-release.json', 'resources/offline', 'CrabotInstaller.exe', 'bin/crabot.exe']) {
+  assert.equal(path.resolve(output, location.executable), path.join(output, 'programs/program/gui/Crabot.exe'))
+  for (const absent of ['data', 'desktop-installation.json', 'current-release.json', 'resources/offline', 'CrabotInstaller.exe', 'app/releases', 'releases']) {
     await assert.rejects(fs.lstat(path.join(output, 'programs', absent)), { code: 'ENOENT' })
   }
 })
 
-test('Windows install section only decodes to the chosen directory and launches GUI after Finish', async () => {
+test('Windows install section replaces only fixed programs and launches GUI after Finish without data admission', async () => {
   const source = await fs.readFile(new URL('../../scripts/desktop/windows-offline-installer.nsi', import.meta.url), 'utf8')
   const section = source.slice(source.indexOf('Section "安装 Crabot"'), source.indexOf('SectionEnd'))
   assert.match(section, /SetOutPath "\$INSTDIR"/)
-  assert.doesNotMatch(section, /ExecWait|--install-root|RMDir|StrCpy \$INSTDIR/)
+  assert.doesNotMatch(section, /ExecWait|--install-root|StrCpy \$INSTDIR|taskkill|Stop-Process|migrate/i)
+  const removals = section.split('\n').filter(line => /^\s*RMDir/.test(line))
+  assert.equal(removals.length, 2)
+  for (const line of removals) assert.match(line, /program\\(?:gui|core)"$/)
+  assert.match(section, /finish-fixed-install\.mjs/)
+  assert.match(section, /--check-programs/)
   assert.match(source, /7za\.exe.*-o\$INSTDIR/)
   assert.match(source, /Function OpenCrabot[\s\S]*Exec '/)
   assert.doesNotMatch(source, /Nsis7z::Extract|APP_64_UNPACKED_SIZE\} \* 1024/)
