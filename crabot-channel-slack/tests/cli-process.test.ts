@@ -69,7 +69,7 @@ it('passes the detected system proxy into an actual isolated CLI child process',
 
 
 it.skipIf(process.platform !== 'win32')('keeps the CLI and its PowerShell hooks in a hidden console from a GUI-style parent', async () => {
-  const { fork } = await import('node:child_process')
+  const { fork, execFile } = await import('node:child_process')
   const { once } = await import('node:events')
   const { pathToFileURL } = await import('node:url')
   root = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-slack-console-test-'))
@@ -77,14 +77,28 @@ it.skipIf(process.platform !== 'win32')('keeps the CLI and its PowerShell hooks 
   const shell = path.join(process.env.SystemRoot || process.env.SYSTEMROOT!, 'System32/WindowsPowerShell/v1.0/powershell.exe')
   const script = `Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class ConsoleProbe { [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow(); [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr window); }'; $window=[ConsoleProbe]::GetConsoleWindow(); @{has_console=($window -ne [IntPtr]::Zero); visible=[ConsoleProbe]::IsWindowVisible($window)} | ConvertTo-Json -Compress`
   // The grandchild is deliberately not hidden: real Slack CLI hooks launch PowerShell themselves.
-  await fs.writeFile(fixture, `const{execFileSync}=require('node:child_process');process.stdout.write(execFileSync(${JSON.stringify(shell)},${JSON.stringify(['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script])},{stdio:['ignore','pipe','pipe']}));`)
-  await fs.writeFile(ownerFile, `import{startCli}from ${JSON.stringify(pathToFileURL(path.resolve('dist/cli-tools.js')).href)};const job=startCli(process.execPath,[${JSON.stringify(fixture)}],${JSON.stringify(root)});try{process.send(await job.result,()=>process.disconnect())}catch{process.send({code:1},()=>process.disconnect())}`)
-  const owner = fork(ownerFile, [], { execArgv: [], windowsHide: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'] })
+  await fs.writeFile(fixture, `const{execFileSync}=require('node:child_process');process.stdout.write(execFileSync(${JSON.stringify(shell)},${JSON.stringify(['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script])},{stdio:['ignore','pipe','pipe'],timeout:10000}));`)
+  await fs.writeFile(ownerFile, `import{startCli}from ${JSON.stringify(pathToFileURL(path.resolve('dist/cli-tools.js')).href)};const job=startCli(process.execPath,[${JSON.stringify(fixture)}],${JSON.stringify(root)});try{process.send(await job.result,()=>process.disconnect())}catch(error){process.send({code:1,output:String(error)},()=>process.disconnect())}`)
+  const owner = fork(ownerFile, [], { execArgv: [], windowsHide: true, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] })
+  let diagnostic = ''
+  owner.stderr?.on('data', bytes => { diagnostic += bytes.toString() })
   const exited = once(owner, 'exit')
+  const message = once(owner, 'message')
+  let timer: ReturnType<typeof setTimeout> | undefined
   try {
-    const [result] = await once(owner, 'message')
-    expect(result.code).toBe(0)
+    const [result] = await Promise.race([
+      message,
+      exited.then(() => { throw new Error('Console fixture exited before result: ' + diagnostic) }),
+      new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error('Console fixture stalled: ' + diagnostic)), 20000) }),
+    ])
+    expect(result).toMatchObject({ code: 0 })
     expect(JSON.parse(result.output)).toEqual({ has_console: true, visible: false })
     await exited
-  } finally { if (owner.exitCode === null) owner.kill() }
-}, 30000)
+  } finally {
+    clearTimeout(timer)
+    if (owner.exitCode === null) {
+      await new Promise<void>(resolve => execFile('taskkill', ['/PID', String(owner.pid), '/T', '/F'], { windowsHide: true }, () => resolve()))
+      await exited
+    }
+  }
+}, 45000)
