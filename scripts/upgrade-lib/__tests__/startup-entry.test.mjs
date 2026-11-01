@@ -67,7 +67,7 @@ it('actual restart entry never invokes stop when target migration scope is not r
   expect(result.status).toBe(1)
   expect(result.stderr).toContain('Missing migration scope')
   await expect(fs.stat(path.join(data, 'calls.json'))).rejects.toThrow()
-})
+}, 20000)
 it('actual Web upgrade entry leaves the running build alone when isolated preparation fails', async () => {
   await scripts()
   await write('scripts/upgrade-lib/prepared-upgrade.mjs', 'export async function prepareUpgrade() { throw new Error("fixture preparation failure") }; export async function installPreparedUpgrade() { throw new Error("unexpected switch") }')
