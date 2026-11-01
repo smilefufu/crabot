@@ -78,6 +78,17 @@ test('Windows reads a current-user fixed proxy once and rereads after saving sys
   assert.equal(read.mock.callCount(), 2)
 })
 
+test('saving system refreshes the CLI reader in a second Shared module copy', async t => {
+  const read = windowsFixture(t, '127.0.0.1:7890')
+  const { ProxyManager: CliProxyManager } = await import('./proxy-manager.js?proxy-refresh-regression')
+  const admin = new ProxyManager(); admin.updateConfig({ mode: 'system' })
+  assert.equal(CliProxyManager.resolveSystemProxyUrl(), 'http://127.0.0.1:7890')
+  read.mock.mockImplementation(() => '127.0.0.1:7891')
+  admin.updateConfig({ mode: 'system' })
+  assert.equal(admin.getProxyUrl(), 'http://127.0.0.1:7891')
+  assert.equal(CliProxyManager.resolveSystemProxyUrl(), 'http://127.0.0.1:7891')
+})
+
 test('Windows resolves the root helper when Shared is a copied production dependency', t => {
   const root = path.resolve('fixture-core')
   const read = windowsFixture(t, '127.0.0.1:7890', path.join(root, 'crabot-native/build/Release/crabot-native.node'))

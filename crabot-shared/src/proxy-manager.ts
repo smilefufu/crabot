@@ -169,8 +169,11 @@ function readWindowsFixedProxy(): string | null {
   return null
 }
 
+// file: dependencies can load several Shared copies in the same Admin process.
+// A settings save must invalidate the CLI reader as well as Admin's reader.
+const nativeSystemProxy = ((globalThis as typeof globalThis & Record<symbol, { url?: string | null }>)[Symbol.for('crabot.native-system-proxy')] ??= {})
+
 export class ProxyManager {
-  private static nativeSystemProxyUrl: string | null | undefined
   private config: ProxyConfig = { mode: 'system' }
   private cachedHttpsAgent: https.Agent | InstanceType<typeof HttpsProxyAgent> | null = null
 
@@ -181,7 +184,7 @@ export class ProxyManager {
   updateConfig(config: ProxyConfig): void {
     this.config = config
     this.cachedHttpsAgent = null
-    if (config.mode === 'system') ProxyManager.nativeSystemProxyUrl = undefined
+    if (config.mode === 'system') nativeSystemProxy.url = undefined
 
     const url = this.resolveProxyUrl(config)
     if (url) {
@@ -213,8 +216,8 @@ export class ProxyManager {
     const inherited = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || process.env.https_proxy || process.env.http_proxy
     if (inherited) return inherited
     if (process.platform !== 'darwin' && process.platform !== 'win32') return null
-    if (this.nativeSystemProxyUrl === undefined) this.nativeSystemProxyUrl = process.platform === 'win32' ? readWindowsFixedProxy() : readMacOSFixedProxy()
-    return this.nativeSystemProxyUrl
+    if (nativeSystemProxy.url === undefined) nativeSystemProxy.url = process.platform === 'win32' ? readWindowsFixedProxy() : readMacOSFixedProxy()
+    return nativeSystemProxy.url
   }
 
   /** SDK 自有连接也使用当前网络出口；不捕获旧配置的 dispatcher。 */
