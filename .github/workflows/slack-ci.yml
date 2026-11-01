@@ -2,6 +2,11 @@ name: Slack CI
 
 on:
   workflow_dispatch:
+    inputs:
+      windows_feedback:
+        description: 'Only native Slack process and configuration feedback regressions'
+        type: boolean
+        default: false
   pull_request:
     paths:
       - 'crabot-channel-slack/**'
@@ -24,7 +29,32 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  windows-feedback:
+    if: inputs.windows_feedback == true
+    runs-on: windows-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Build native Slack process dependencies
+        run: |
+          pnpm --dir crabot-shared install --frozen-lockfile
+          pnpm --dir crabot-shared run build
+          pnpm --dir crabot-channel-slack install --frozen-lockfile
+          pnpm --dir crabot-channel-slack run build
+      - name: Native supervised configuration and console visibility
+        run: pnpm --dir crabot-channel-slack test
+      - name: Official Slack CLI project hooks
+        if: ${{ !cancelled() }}
+        run: node .github/scripts/smoke-slack-onboarding.mjs
   slack:
+    if: inputs.windows_feedback != true
     name: Slack (${{ matrix.platform }}-${{ matrix.arch }})
     timeout-minutes: 20
     strategy:

@@ -91,7 +91,7 @@ it.skipIf(process.platform !== 'win32')('keeps the CLI and its PowerShell hooks 
       exited.then(() => { throw new Error('Console fixture exited before result: ' + diagnostic) }),
       new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error('Console fixture stalled: ' + diagnostic)), 20000) }),
     ])
-    expect(result).toMatchObject({ code: 0 })
+    expect(result.code, result.output).toBe(0)
     expect(JSON.parse(result.output)).toEqual({ has_console: true, visible: false })
     await exited
   } finally {

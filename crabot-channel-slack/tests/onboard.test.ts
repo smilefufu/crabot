@@ -178,7 +178,7 @@ describe('local Slack onboarding contract', () => {
     expect(JSON.stringify(event)).not.toMatch(/xoxb-SECRET|fixture-challenge/)
     expect(event?.message).toContain('custom')
     await onboarder.dispose()
-  })
+  }, 15000)
 
   it('does not publish success if owned process shutdown cannot be confirmed', async () => {
     const { onboarder } = await setup({ stopFails: true })

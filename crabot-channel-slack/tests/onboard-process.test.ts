@@ -30,10 +30,15 @@ if(args[0]==='auth') {
  child.on('error',()=>process.exit(4));child.on('exit',code=>process.exit(code??1));
 } else process.exit(5);
 `)
+  const outputs: Array<{ code: number | null; output: string }> = []
   const verify = vi.fn(async () => 'Fixture user')
   const onboarder = new SlackOnboarder({
     dataDir, ensureCli: async () => process.execPath, configureMs: 45000, verify,
-    startCli: (_executable, args, cwd, proxy) => startCli(process.execPath, [fixture, ...args], cwd, proxy),
+    startCli: (_executable, args, cwd, proxy) => {
+      const job = startCli(process.execPath, [fixture, ...args], cwd, proxy)
+      void job.result.then(result => { outputs.push(result) }).catch(() => {})
+      return job
+    },
   })
   try {
     const begin = await onboarder.begin({ instance_name: 'Slack-native-fixture', __admin_proxy: { mode: 'custom', custom_url: 'http://127.0.0.1:17890' } })
@@ -43,7 +48,7 @@ if(args[0]==='auth') {
     for await (const event of onboarder.poll(begin.session_id)) {
       if (event.type !== 'pending') { terminal = event; break }
     }
-    expect(terminal).toEqual({ type: 'success' })
+    expect(terminal, JSON.stringify(outputs)).toEqual({ type: 'success' })
     expect(verify).toHaveBeenCalledWith(
       { bot_token: 'xoxb-fixture', app_token: 'xapp-fixture' },
       { team_id: 'TTEST', user_id: 'UTEST' }, 'ATEST', expect.any(AbortSignal),
