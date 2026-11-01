@@ -14,6 +14,7 @@ const root = await fs.mkdtemp(path.join(tmpdir(), 'Crabot decoder proof ')), exe
 const source = path.join(root, 'source'), output = path.join(root, 'output'), directory = path.join(source, 'offline')
 const coreRoot = path.join(directory, 'core'), guiRoot = path.join(directory, 'gui')
 const selection = { schema_version: 1, version: '1.2.3', gui_id: randomUUID(), core_id: 'a'.repeat(64) }
+const driveTarget = path.join(path.parse(process.cwd()).root, 'Crabot-decoder-' + selection.gui_id)
 const relative = '.scrapling-runtime-desktop-ci-b21869a0a229da99-8413626c/packages/playwright/driver/package/lib/tools/skills/playwright-component-testing/references/gallery-spec.md'
 try {
   await fs.mkdir(path.join(source, 'app'), { recursive: true }); await fs.mkdir(output)
@@ -29,8 +30,8 @@ try {
   assert.equal(installers.length, 1)
   const cases = []
   for (const name of ['drive-root', 'ordinary', '中文 空格', 'deep']) {
-    const target = name === 'drive-root' ? path.join(path.parse(root).root, 'Crabot-decoder-' + selection.gui_id) : name === 'deep' ? path.join(root, 'target', ...Array.from({ length: 8 }, (_, index) => 'long-directory-' + index)) : path.join(root, 'target', name)
-    await fs.mkdir(path.dirname(target), { recursive: true })
+    const target = name === 'drive-root' ? driveTarget : name === 'deep' ? path.join(root, 'target', ...Array.from({ length: 8 }, (_, index) => 'long-directory-' + index)) : path.join(root, 'target', name)
+    if (name !== 'drive-root') await fs.mkdir(path.dirname(target), { recursive: true })
     try {
       await execute(path.join(output, 'distribution', installers[0]), ['/S', '/D=' + target], { windowsVerbatimArguments: true, timeout: 120000, maxBuffer: 65536 })
     } catch (error) {
@@ -50,7 +51,7 @@ try {
   console.log('CRABOT_SINGLE_LAYER_DECODER ' + JSON.stringify({ actual_product_nsis: true, cases }))
 } finally {
   const cleanup = path.join(root, 'cleanup-shortcut.ps1')
-  await fs.writeFile(cleanup, `$p=Join-Path ([Environment]::GetFolderPath('Programs')) 'Crabot.lnk'; if(Test-Path -LiteralPath $p){$s=New-Object -ComObject WScript.Shell; $t=$s.CreateShortcut($p).TargetPath; if($t.StartsWith($env:CRABOT_PROBE_ROOT+'\\',[StringComparison]::OrdinalIgnoreCase)){Remove-Item -LiteralPath $p;}}`)
-  await execute(path.join(process.env.SystemRoot, 'System32/WindowsPowerShell/v1.0/powershell.exe'), ['-NoProfile', '-NonInteractive', '-File', cleanup], { env: { ...process.env, CRABOT_PROBE_ROOT: root }, timeout: 30000 })
+  await fs.writeFile(cleanup, `$p=Join-Path ([Environment]::GetFolderPath('Programs')) 'Crabot.lnk'; if(Test-Path -LiteralPath $p){$s=New-Object -ComObject WScript.Shell; $t=$s.CreateShortcut($p).TargetPath; if($t.StartsWith($env:CRABOT_PROBE_ROOT+'\\',[StringComparison]::OrdinalIgnoreCase) -or $t.StartsWith($env:CRABOT_PROBE_DRIVE_ROOT+'\\',[StringComparison]::OrdinalIgnoreCase)){Remove-Item -LiteralPath $p;}}`)
+  await execute(path.join(process.env.SystemRoot, 'System32/WindowsPowerShell/v1.0/powershell.exe'), ['-NoProfile', '-NonInteractive', '-File', cleanup], { env: { ...process.env, CRABOT_PROBE_ROOT: root, CRABOT_PROBE_DRIVE_ROOT: driveTarget }, timeout: 30000 })
   await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
 }
