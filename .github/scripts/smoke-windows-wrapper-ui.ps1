@@ -1,4 +1,4 @@
-﻿param(
+param(
  [Parameter(Mandatory=$true)][string]$Installer,
  [string]$TemporaryDirectory,
  [string]$UpgradeInstaller,
@@ -124,10 +124,10 @@ try {
   Write-Output ('CRABOT_INITIAL_ENTRY_FAILURE ' + ($state | ConvertTo-Json -Depth 4 -Compress))
   foreach($log in @('desktop-profile/bootstrap.log','logs/mm.stdout.log','logs/mm.stderr.log','logs/admin-web.log','logs/crabot-agent.log','logs/memory-default.log')) {
    $file=Join-Path (Join-Path $target 'data') $log
-   if(Test-Path -LiteralPath $file){Write-Output ('CRABOT_INITIAL_ENTRY_LOG '+$log); Get-Content -LiteralPath $file -Tail 12 | Write-Output}
+   if(Test-Path -LiteralPath $file){Write-Output ('CRABOT_INITIAL_ENTRY_LOG '+$log); Get-Content -LiteralPath $file -Tail 12 -ErrorAction Continue | Write-Output}
   }
   $bootstrap=Join-Path $env:APPDATA 'Crabot/bootstrap/desktop-profile/bootstrap.log'
-  if(Test-Path -LiteralPath $bootstrap){Write-Output 'CRABOT_INITIAL_ENTRY_BOOTSTRAP'; Get-Content -LiteralPath $bootstrap -Tail 12 | Write-Output}
+  if(Test-Path -LiteralPath $bootstrap){Write-Output 'CRABOT_INITIAL_ENTRY_BOOTSTRAP'; Get-Content -LiteralPath $bootstrap -Tail 12 -ErrorAction Continue | Write-Output}
   throw 'Timed out waiting for the actual single-layer installation and first GUI startup'
  }
  if ($Expected -eq 'space') { return }
