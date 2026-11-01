@@ -107,7 +107,10 @@ try {
     $raw = & $command status --json 2>&1
     if ($LASTEXITCODE -eq 0) {
      try { $status = ($raw -join "`n") | ConvertFrom-Json } catch { $status=$null }
-     if ($status.running -eq $true -and $status.data_dir -eq (Join-Path $target 'data')) { $verified=$true; break }
+     if ($status.running -eq $true -and $status.data_dir -eq (Join-Path $target 'data')) {
+      $readyModules = @($status.modules | Where-Object { $_.module_id -in @('admin-web','crabot-agent','memory-default') -and $_.status -eq 'running' })
+      if (!$UpgradeInstaller -or $readyModules.Count -eq 3) { $verified=$true; break }
+     }
     }
    }
   }
@@ -130,9 +133,14 @@ try {
   $command = Join-Path $target 'bin/crabot.exe'
   # Match the feedback: the user force-killed the old service. Preserve all old
   # recovery files; the candidate must check OS processes and recover by itself.
+  $moduleFiles = @(Get-ChildItem (Join-Path $data 'module-runtime-registry/records') -Filter '*.json')
+  if ($moduleFiles.Count -lt 3) { throw 'Original modules have not registered their recovery records' }
+  $oldModules = @($moduleFiles | ForEach-Object { Get-Content $_.FullName -Raw | ConvertFrom-Json })
   foreach ($oldProcess in @($beforeRuntime.mm, $beforeRuntime.controller)) {
-   if ($oldProcess) { & "$env:SystemRoot/System32/taskkill.exe" /PID $oldProcess.pid /T /F 2>&1 | Write-Output }
+   if ($oldProcess) { & "$env:SystemRoot/System32/taskkill.exe" /PID $oldProcess.pid /F 2>&1 | Write-Output }
   }
+  foreach ($oldModule in $oldModules) { & "$env:SystemRoot/System32/taskkill.exe" /PID $oldModule.root_pid /T /F 2>&1 | Write-Output }
+  if (@(Get-ChildItem (Join-Path $data 'module-runtime-registry/records') -Filter '*.json').Count -ne $moduleFiles.Count) { throw 'Force-kill fixture unexpectedly lost original recovery files' }
   $oldGui = Join-Path $target ('app/releases/' + $beforeSelection.gui_id + '/Crabot.exe')
   # Fixture cleanup of the known baseline GUI after its Core has stopped. The
   # candidate must itself observe absence; no stop/migration receipt is forged.
@@ -167,7 +175,10 @@ try {
      $raw = & $command status --json 2>&1
      if ($LASTEXITCODE -eq 0) {
       $status = ($raw -join "`n") | ConvertFrom-Json
-      if ($status.running -eq $true -and $status.data_dir -eq $data) { $updated=$true; break }
+      if ($status.running -eq $true -and $status.data_dir -eq $data -and !(Test-Path (Join-Path $data 'desktop-maintenance.json'))) {
+       $readyModules = @($status.modules | Where-Object { $_.module_id -in @('admin-web','crabot-agent','memory-default') -and $_.status -eq 'running' })
+       if ($readyModules.Count -eq 3) { $updated=$true; break }
+      }
      }
     }
    }
