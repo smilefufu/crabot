@@ -98,7 +98,12 @@ async function collectOwned(record, dataDir) {
 }
 
 function processState(process) {
-  try { return identity.sameProcess(process, identity.inspectProcess(process.pid)) ? 'alive' : 'gone' }
+  try {
+    const actual = identity.inspectProcess(process.pid)
+    if (!actual || actual.started !== process.started) return 'gone'
+    // exec replaces an image, not the process generation or its ability to write data.
+    return actual.owner === process.owner ? 'alive' : 'unknown'
+  }
   catch (error) { if (error.code === 'CRABOT_PROCESS_IDENTITY') return 'unknown'; throw error }
 }
 function alive(process) { return processState(process) === 'alive' }

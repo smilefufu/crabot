@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-async function fixture(t, { rpcFails = false, stale = false, denied = false, lateChild = false } = {}) {
+async function fixture(t, { rpcFails = false, stale = false, denied = false, lateChild = false, execChanged = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'crabot-stop-failure-'))
   t.after(() => rm(root, { recursive: true, force: true }))
   const controller = { pid: 101, parent: 1, owner: 'fixture', started: '1', executable: '/node' }
@@ -15,7 +15,7 @@ async function fixture(t, { rpcFails = false, stale = false, denied = false, lat
   let cleared = false
   const signals = [], events = []
   const identity = {
-    sameProcess: (expected, actual) => !!actual && expected.started === actual.started && expected.pid === actual.pid,
+    sameProcess: (expected, actual) => !!actual && expected.started === actual.started && expected.pid === actual.pid && expected.executable === actual.executable && expected.owner === actual.owner,
     inspectProcess: pid => pid === process.pid ? { ...controller, pid } : active.get(pid) ?? null,
     listProcessIds: () => [...active.keys()],
     terminateKnownProcess: target => {
@@ -40,6 +40,7 @@ async function fixture(t, { rpcFails = false, stale = false, denied = false, lat
   const originalFetch = globalThis.fetch
   globalThis.fetch = async () => {
     events.push('rpc')
+    if (execChanged) active.set(mm.pid, { ...mm, executable: '/replacement-image' })
     if (lateChild) active.set(104, { ...mm, pid: 104, parent: mm.pid, started: '3' })
     if (rpcFails) throw new Error('fixture connection reset')
     active.clear()
@@ -93,4 +94,12 @@ test('a child started while the shutdown RPC fails is included in native termina
   await f.stop()
   assert.equal(f.active.size, 0)
   assert.ok(f.signals.includes(104))
+})
+
+
+test('exec of an owned child does not count as exit of its original process generation', async t => {
+  const f = await fixture(t, { rpcFails: true, execChanged: true })
+  await f.stop()
+  assert.equal(f.active.size, 0)
+  assert.ok(f.signals.includes(102))
 })

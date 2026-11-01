@@ -333,3 +333,12 @@ test('Windows native stop terminates its exact processes after a lost shutdown R
     assert.equal(readInstanceRuntime(f.data), null)
   } finally { globalThis.fetch = fetch }
 })
+
+
+test('a changed image in the same launch generation is not misreported as an exited controller', async t => {
+  const f = await fixture(t), file = join(f.data, 'instance-runtime.json')
+  writeFileSync(file, JSON.stringify({ ...f.record, controller: { ...f.record.controller, executable: '/unexpected-image' } }))
+  assert.throws(() => inspectInstance(f.data), { code: 'CRABOT_INSTANCE_UNVERIFIED' })
+  writeFileSync(file, JSON.stringify(f.record))
+  await stopInstance(f.data)
+})

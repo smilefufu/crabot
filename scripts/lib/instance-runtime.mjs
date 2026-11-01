@@ -94,6 +94,11 @@ export function inspectInstance(dataDir) {
   const controller = inspect(record.controller.pid)
   const mm = record.mm ? inspect(record.mm.pid) : null
   // PID reuse proves that the recorded process exited; the replacement is never ours.
+  for (const [expected, actual] of [[record.controller, controller], [record.mm, mm]]) {
+    if (expected && actual && expected.started === actual.started && !identity.sameProcess(expected, actual)) {
+      fail(`进程 PID ${expected.pid} 的身份已改变；未将仍存活的原进程报告为停止。`)
+    }
+  }
   const controllerAlive = identity.sameProcess(record.controller, controller)
   const mmAlive = identity.sameProcess(record.mm, mm)
   return { state: controllerAlive || mmAlive ? (record.mm ? 'running' : 'starting') : 'stopped', record }
