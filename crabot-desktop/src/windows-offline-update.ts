@@ -23,7 +23,9 @@ export async function applyWindowsOfflineUpdate(options: {
   const release = await verifyCoreRelease(source.coreRoot, { version: source.selection.version })
   if (release.inventory_sha256 !== source.selection.core_id) throw new Error('原版本程序已变化，未开始更新。')
   while (true) {
-    const observation = await identity.inspectProgramReferences({ roots: [source.guiRoot], files: [source.executable] })
+    // The old immutable GUI is retained, not overwritten or deleted. Check its
+    // running images; Restart Manager file-holder failures are not GUI lifetime.
+    const observation = await identity.inspectProgramReferences({ roots: [source.guiRoot], files: [] })
     if (!observation.complete || observation.incomplete || observation.unknown_pids?.length) throw new Error('旧版应用退出状态尚未核实，尚未转换数据。')
     if (inspectInstance(source.dataDir).state === 'stopped' && observation.processes.length === 0) break
     const answer = await dialog.showMessageBox({ type: 'info', title: '完成 Crabot 更新', message: '请先退出旧版 Crabot，再继续。',

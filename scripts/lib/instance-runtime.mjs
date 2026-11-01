@@ -87,12 +87,16 @@ export function inspectInstance(dataDir) {
   }
   const self = identity.inspectProcess(process.pid)
   if (self.owner !== record.controller.owner) fail('实例属于其他系统用户。')
-  const controller = identity.inspectProcess(record.controller.pid)
-  const mm = record.mm ? identity.inspectProcess(record.mm.pid) : null
-  if ((controller && !identity.sameProcess(record.controller, controller)) || (mm && !identity.sameProcess(record.mm, mm))) {
-    fail('PID 已被其他进程使用；未向该进程发送信号。')
+  const inspect = pid => {
+    try { return identity.inspectProcess(pid) }
+    catch (error) { throw Object.assign(new Error(`系统无法查询进程 PID ${pid}：${error.message}`), { code: error.code || 'CRABOT_PROCESS_IDENTITY' }) }
   }
-  return { state: controller || mm ? (record.mm ? 'running' : 'starting') : 'stopped', record }
+  const controller = inspect(record.controller.pid)
+  const mm = record.mm ? inspect(record.mm.pid) : null
+  // PID reuse proves that the recorded process exited; the replacement is never ours.
+  const controllerAlive = identity.sameProcess(record.controller, controller)
+  const mmAlive = identity.sameProcess(record.mm, mm)
+  return { state: controllerAlive || mmAlive ? (record.mm ? 'running' : 'starting') : 'stopped', record }
 }
 
 export { identity }

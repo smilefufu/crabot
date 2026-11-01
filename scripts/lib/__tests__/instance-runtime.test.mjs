@@ -74,15 +74,49 @@ test('verified controller and MM stop gracefully; a terminal waiting process hol
   await f.exited
 })
 
-test('a reused or forged start identity is refused without signalling the unrelated process', async t => {
+test('a reused controller PID is not adopted while its original MM is stopped', async t => {
   const f = await fixture(t)
   const file = join(f.data, 'instance-runtime.json')
   writeFileSync(file, JSON.stringify({ ...f.record, controller: { ...f.record.controller, started: 'different incarnation' } }))
-  await assert.rejects(stopInstance(f.data), { code: 'CRABOT_INSTANCE_UNVERIFIED' })
-  assert.equal(identity.sameProcess(f.record.controller, identity.inspectProcess(f.child.pid)), true)
-  assert.equal(existsSync(f.marker), false)
-  writeFileSync(file, JSON.stringify(f.record))
+  assert.equal(inspectInstance(f.data).state, 'running')
   await stopInstance(f.data)
+  assert.equal(readInstanceRuntime(f.data), null)
+  assert.equal(identity.sameProcess(f.record.mm, identity.inspectProcess(f.record.mm.pid)), false)
+})
+
+test('force-killed controller and MM with stale module records can stop repeatedly and restart', async t => {
+  const f = await fixture(t)
+  // Only this test's native launch identities are terminated.
+  identity.terminateKnownProcess(f.record.mm)
+  identity.terminateKnownProcess(f.record.controller)
+  await f.exited
+  const end = Date.now() + 5000
+  while (identity.sameProcess(f.record.mm, identity.inspectProcess(f.record.mm.pid)) && Date.now() < end) await pause(25)
+  mkdirSync(join(f.data, 'module-runtime-registry/records'), { recursive: true })
+  writeFileSync(join(f.data, 'module-runtime-registry/instance-id'), 'fixture')
+  writeFileSync(join(f.data, 'module-runtime-registry/records/departed.json'), JSON.stringify({ instance_id: 'fixture', root_pid: f.record.mm.pid, process_start_identity: 'departed' }))
+  await stopInstance(f.data)
+  await stopInstance(f.data)
+  assert.equal(inspectInstance(f.data).state, 'stopped')
+  assert.equal(readInstanceRuntime(f.data), null)
+  // The stale file is retained for normal Core recovery; it cannot veto OS exit evidence.
+  assert.equal(existsSync(join(f.data, 'module-runtime-registry/records/departed.json')), true)
+  const { createInstanceRuntime } = await import('../instance-runtime.mjs')
+  const next = createInstanceRuntime({ dataDir: f.data, root: f.root, mmPort: f.record.mm_port })
+  assert.notEqual(next.generation, f.record.generation)
+  clearInstanceRuntime(f.data, next.generation)
+})
+
+test('a recycled PID belongs to a different process and never blocks stopped status', async t => {
+  const f = await fixture(t)
+  await stopInstance(f.data)
+  const self = identity.inspectProcess(process.pid)
+  writeFileSync(join(f.data, 'instance-runtime.json'), JSON.stringify({ ...f.record,
+    controller: { ...self, started: 'previous incarnation' }, mm: null }))
+  assert.equal(inspectInstance(f.data).state, 'stopped')
+  await stopInstance(f.data)
+  assert.ok(identity.inspectProcess(process.pid))
+  assert.equal(readInstanceRuntime(f.data), null)
 })
 
 test('late cleanup cannot remove the replacement generation or its mm.pid', async t => {
@@ -111,7 +145,7 @@ test('a transient identity failure during stop waits for evidence instead of rep
   } finally { identity.inspectProcess = inspect }
 })
 
-test('status JSON uses the verified MM and discovered Admin port, and never repairs forged identity', async t => {
+test('status JSON uses the verified MM despite a reused controller PID and never rewrites records', async t => {
   const f = await fixture(t)
   const statusEntry = fileURLToPath(new URL('../../status.mjs', import.meta.url))
   async function status() {
@@ -133,8 +167,8 @@ test('status JSON uses the verified MM and discovered Admin port, and never repa
   const forged = JSON.stringify({ ...f.record, controller: { ...f.record.controller, started: 'wrong incarnation' } })
   writeFileSync(file, forged)
   const unverified = await status()
-  assert.equal(unverified.body.running, false)
-  assert.match(unverified.stderr, /Cannot verify instance identity/)
+  assert.equal(unverified.body.running, true)
+  assert.equal(unverified.stderr, '')
   assert.equal(readFileSync(file, 'utf8'), forged)
   writeFileSync(file, JSON.stringify(f.record))
   await stopInstance(f.data)
@@ -277,11 +311,25 @@ test('status preserves verified running state when the module RPC is unavailable
   assert.equal(unavailable.body.running, true)
   assert.equal(unavailable.body.modules, null); assert.equal(unavailable.body.endpoints.mm.healthy, false)
   assert.equal(readFileSync(recordFile, 'utf8'), original); assert.equal(existsSync(f.marker), false)
-  writeFileSync(recordFile, JSON.stringify({ ...f.record, controller: { ...f.record.controller, started: 'wrong incarnation' } }))
+  writeFileSync(recordFile, JSON.stringify({ ...f.record, controller: { ...f.record.controller, started: 'wrong incarnation' }, mm: { ...f.record.mm, started: 'wrong MM incarnation' } }))
   const forged = readFileSync(recordFile, 'utf8'), unknown = await status()
   assert.equal(unknown.body.running, false); assert.equal(unknown.body.modules, null)
-  assert.match(unknown.stderr, /Cannot verify instance identity/)
+  assert.equal(unknown.stderr, '')
   assert.equal(readFileSync(recordFile, 'utf8'), forged)
   writeFileSync(recordFile, original)
   await stopInstance(f.data)
+})
+
+
+test('Windows native stop terminates its exact processes after a lost shutdown RPC and the full grace window', { skip: process.platform !== 'win32', timeout: 90000 }, async t => {
+  const f = await fixture(t), fetch = globalThis.fetch
+  const started = Date.now()
+  try {
+    globalThis.fetch = async () => { throw new Error('fixture shutdown connection reset') }
+    await stopInstance(f.data)
+    assert.ok(Date.now() - started >= 70000)
+    assert.equal(identity.sameProcess(f.record.mm, identity.inspectProcess(f.record.mm.pid)), false)
+    assert.equal(identity.sameProcess(f.record.controller, identity.inspectProcess(f.record.controller.pid)), false)
+    assert.equal(readInstanceRuntime(f.data), null)
+  } finally { globalThis.fetch = fetch }
 })

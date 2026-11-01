@@ -34,7 +34,7 @@ export class DesktopController {
     await this.host.reconnect()
   }
   private report(error: unknown) {
-    const value = error as { code?: string; port?: number }
+    const value = error as { code?: string; port?: number; message?: string }
     const code = typeof value?.code === 'string' && /^[A-Z0-9_]{1,128}$/.test(value.code) ? value.code : 'DESKTOP_UNAVAILABLE'
     const migration = ['CRABOT_DESKTOP_TAKEOVER_REQUIRED', 'CRABOT_DATA_NOT_PRIVATE', 'CRABOT_LEGACY_INSTANCE'].includes(code)
     let message = '本机服务尚未就绪。可重新检查连接或查看基础诊断，按提示恢复。'
@@ -48,6 +48,7 @@ export class DesktopController {
     else if (code === 'CRABOT_BACKUP_SCOPE_UNVERIFIED') message = '迁移涉及无法确认备份覆盖的数据引用，已停止迁移。请保留现有数据并查看恢复选项。'
     else if (code === 'CRABOT_MIGRATION_INTERRUPTED') message = '上次数据迁移尚未完成，已停止自动重试。原数据、备份和维护记录已保留，请查看基础诊断并按恢复流程处理。'
     else if (['CRABOT_PREFLIGHT_BUSY', 'CRABOT_PREFLIGHT_INTERRUPTED', 'CRABOT_PREFLIGHT_TIMEOUT'].includes(code)) message = '上次启动检查尚未确认结束，检查记录已保留。稍后点击启动可重新核对；只有旧检查进程已结束才会继续，不会清空数据。'
+    else if (['CRABOT_STOP_INCOMPLETE', 'CRABOT_STOP_UNKNOWN', 'CRABOT_PROCESS_IDENTITY', 'CRABOT_PROCESS_SIGNAL'].includes(code)) message = typeof value.message === 'string' ? value.message.slice(0, 512) : '系统拒绝查询或终止本实例进程，请查看基础诊断中的系统错误。'
     else if (code === 'CRABOT_INSTANCE_STARTING') message = '服务仍在启动。请稍候重新检查状态，再停止服务。'
     else if (code === 'CRABOT_LOGIN_STARTUP_UPDATE') message = '登录启动设置无法核验，尚未停止服务或开始版本切换。请核对系统登录项；原设置和更新记录已保留。'
     else if (code === 'CRABOT_MAINTENANCE_PENDING') message = '版本更新尚未核验完成。请退出并重新打开 Crabot 检查恢复；仍未恢复时重新安装目标版本，保留现有数据。'

@@ -1,5 +1,7 @@
 param(
  [Parameter(Mandatory=$true)][string]$Installer,
+ [string]$UpgradeInstaller,
+ [string]$ExpectedVersion,
  [ValidateSet('complete','retry','space')][string]$Expected = 'complete'
 )
 $ErrorActionPreference = 'Stop'
@@ -28,7 +30,7 @@ try {
   try { $reserve.SetLength([long]($volume.SizeRemaining - $desiredFree)) } finally { $reserve.Dispose() }
  }
  Write-Output ("CRABOT_TEMP_VOLUME expected=$Expected free=" + (Get-Volume -DriveLetter $letter).SizeRemaining)
- & (Join-Path $PSScriptRoot 'smoke-windows-wrapper-ui.ps1') -Installer $Installer -TemporaryDirectory $temporary -Expected $Expected
+ & (Join-Path $PSScriptRoot 'smoke-windows-wrapper-ui.ps1') -Installer $Installer -TemporaryDirectory $temporary -Expected $Expected -UpgradeInstaller $UpgradeInstaller -ExpectedVersion $ExpectedVersion
 } finally {
  if (Test-Path $disk) {
   DiskPart @("select vdisk file=`"$disk`"", 'detach vdisk')

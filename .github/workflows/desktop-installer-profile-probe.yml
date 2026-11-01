@@ -12,6 +12,10 @@ on:
       artifact_name:
         type: string
         default: 'crabot-win32-x64-offline-test-a34d9e253fa9ea565e29c0a34f8c2b8ed960b7a7'
+      upgrade_from14:
+        description: Verify an actual desktop.14 installation upgrades through the new EXE and GUI
+        type: boolean
+        default: false
       ui_only:
         description: 'Verify the completed EXE interface without repeating source builds or legacy acceptance'
         type: boolean
@@ -57,6 +61,13 @@ jobs:
           run-id: ${{ inputs.source_run }}
           name: ${{ inputs.artifact_name }}
           path: .desktop-build/completed-exe
+      - uses: actions/download-artifact@v4
+        if: inputs.upgrade_from14 == true
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: '41277405704'
+          name: crabot-win32-x64-offline-test-aed22d452babae4048e16f2da02df51a2cd5c42b
+          path: .desktop-build/desktop14-baseline
       - name: Place the original completed EXE without rebuilding it
         if: inputs.directory_only != true
         run: |
@@ -69,6 +80,8 @@ jobs:
         if: inputs.directory_only != true && inputs.ui_only != true
         run: node .github/scripts/verify-legacy-user-takeover.mjs .desktop-build/manual/paired .desktop-build/manual/installer v2026.10.14.1 2>&1 | tee .desktop-build/exact-exe-legacy-gui.log
       - name: Real EXE Finish opens the GUI with 1.5 GiB free TEMP
+        env:
+          CRABOT_UPGRADE_FROM14: ${{ inputs.upgrade_from14 }}
         if: ${{ !cancelled() && inputs.directory_only != true && inputs.ui_only == true }}
         shell: pwsh
         run: |
@@ -76,7 +89,14 @@ jobs:
           if ($files.Count -ne 1) { throw 'Expected exactly one unchanged completed EXE' }
           $expected = (Get-Content .desktop-build/manual/installer/distribution/SHA256SUMS -Raw).Trim().Split(' ')[0]
           if ((Get-FileHash $files[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) { throw 'Completed EXE SHA mismatch' }
-          & .github/scripts/smoke-windows-wrapper-capacity.ps1 -Installer $files[0].FullName -Expected complete | Tee-Object .desktop-build/exact-exe-ui.log
+          if ($env:CRABOT_UPGRADE_FROM14 -eq 'true') {
+            $old = @(Get-ChildItem .desktop-build/desktop14-baseline -Recurse -Filter '*offline-candidate.exe')
+            if ($old.Count -ne 1 -or (Get-FileHash $old[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant() -ne '3c725b47a01d5c2c4211241c8c86b91c5829d60f4f5ed554ef21d1c8cf7a3d3a') { throw 'Pinned desktop.14 baseline mismatch' }
+            $version = $files[0].Name -replace '^Crabot-(.+)-win-x64-offline-candidate\.exe$', '$1'
+            & .github/scripts/smoke-windows-wrapper-capacity.ps1 -Installer $old[0].FullName -UpgradeInstaller $files[0].FullName -ExpectedVersion $version -Expected complete | Tee-Object .desktop-build/exact-exe-ui.log
+          } else {
+            & .github/scripts/smoke-windows-wrapper-capacity.ps1 -Installer $files[0].FullName -Expected complete | Tee-Object .desktop-build/exact-exe-ui.log
+          }
       - name: Retain exact package recheck evidence
         if: always()
         uses: actions/upload-artifact@v4

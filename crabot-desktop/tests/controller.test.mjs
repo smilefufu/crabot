@@ -482,3 +482,22 @@ test('a port conflict reports its actual port without exposing raw error text or
   assert.equal(state.phase, 'error'); assert.equal(state.code, 'CRABOT_PORT_BUSY')
   assert.match(state.message, /19000.*占用/); assert.equal(state.message.includes('private backend details'), false)
 })
+
+
+test('stop exposes a concrete native process failure instead of a generic unavailable message', async t => {
+  const controller = new DesktopController({ coreRoot: '/unused', dataRoot: '/unused', appVersion: 'fixture', platform: process.platform })
+  t.after(() => controller.close())
+  controller.current = async () => ({ state: 'running' })
+  controller.load = async file => {
+    if (file.endsWith('cli-lock.mjs')) return { acquireCliLock: async () => 'fixture', releaseCliLock: () => {} }
+    return { stopInstance: async () => { throw Object.assign(new Error('停止进程 PID 102 失败：Access is denied (Win32 5)'), { code: 'CRABOT_STOP_INCOMPLETE' }) } }
+  }
+  const state = await controller.stop()
+  assert.equal(state.phase, 'error')
+  assert.equal(state.code, 'CRABOT_STOP_INCOMPLETE')
+  assert.match(state.message, /PID 102.*Win32 5/)
+  controller.load = async file => file.endsWith('cli-lock.mjs')
+    ? { acquireCliLock: async () => 'fixture', releaseCliLock: () => {} } : { stopInstance: async () => {} }
+  controller.current = async () => ({ state: 'stopped' })
+  assert.equal((await controller.stop()).phase, 'stopped')
+})

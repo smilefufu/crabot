@@ -63,6 +63,7 @@ export function launchHostProcess(spec: HostProcessLaunchSpec): ChildProcess {
     env: spec.env ?? buildChildEnv(),
     stdio: spec.stdio ?? ['pipe', 'pipe', 'pipe'],
     detached: spec.detached ?? process.platform !== 'win32',
+    windowsHide: true,
   })
   child.on('error', () => {
     // runHostProcess / the owning background entity adds its own settlement handler.
@@ -73,7 +74,7 @@ export function launchHostProcess(spec: HostProcessLaunchSpec): ChildProcess {
 /** Terminate the whole controlled process tree. Calling this repeatedly is harmless. */
 export function terminateHostProcessTree(pid: number, graceMs = DEFAULT_KILL_GRACE_MS): void {
   if (process.platform === 'win32') {
-    execFile('taskkill', ['/F', '/T', '/PID', String(pid)], { env: buildChildEnv() }, () => {
+    execFile('taskkill', ['/F', '/T', '/PID', String(pid)], { env: buildChildEnv(), windowsHide: true }, () => {
       // A process can race us to exit; there is no further local recovery action.
     })
     return
@@ -127,7 +128,7 @@ function isDirectProcessAlive(pid: number): boolean {
 export async function terminateHostProcessTreeAndWait(pid: number, graceMs = DEFAULT_KILL_GRACE_MS): Promise<void> {
   if (process.platform === 'win32') {
     await new Promise<void>((resolve) => {
-      execFile('taskkill', ['/F', '/T', '/PID', String(pid)], { env: buildChildEnv() }, () => resolve())
+      execFile('taskkill', ['/F', '/T', '/PID', String(pid)], { env: buildChildEnv(), windowsHide: true }, () => resolve())
     })
     return
   }
@@ -150,7 +151,7 @@ export async function terminateHostProcessTreeAndWait(pid: number, graceMs = DEF
 async function terminateDirectProcessAndWait(pid: number, graceMs: number): Promise<void> {
   if (process.platform === 'win32') {
     await new Promise<void>((resolve) => {
-      execFile('taskkill', ['/F', '/T', '/PID', String(pid)], { env: buildChildEnv() }, () => resolve())
+      execFile('taskkill', ['/F', '/T', '/PID', String(pid)], { env: buildChildEnv(), windowsHide: true }, () => resolve())
     })
     return
   }

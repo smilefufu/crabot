@@ -86,8 +86,9 @@ async function quit(): Promise<boolean> {
       const answer = await dialog.showMessageBox({ type: 'question', title: '退出 Crabot', message: '退出将停止共享的 Crabot 服务。',
         detail: '正在进行的任务和其他客户端连接会受影响。关闭窗口可以继续后台运行。', buttons: ['取消', '停止服务并退出'], defaultId: 0, cancelId: 0 })
       if (answer.response !== 1) return false
-      if ((await controller!.stop()).phase !== 'stopped') {
-        await dialog.showMessageBox({ type: 'error', message: '未能确认服务已停止。', detail: '已保留运行记录，请检查诊断后重试。' })
+      const stopped = await controller!.stop()
+      if (stopped.phase !== 'stopped') {
+        await dialog.showMessageBox({ type: 'error', message: '停止服务失败。', detail: `${'message' in stopped && stopped.message || '请查看基础诊断。'}${'code' in stopped && stopped.code ? `\n错误码：${stopped.code}` : ''}` })
         return false
       }
     }

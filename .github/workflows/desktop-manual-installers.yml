@@ -199,6 +199,11 @@ jobs:
           pnpm --dir crabot-desktop install --frozen-lockfile
           (cd crabot-desktop && node -e "require('electron')")
           pnpm --dir crabot-desktop run build
+      - name: Shared process stop, force-kill recovery and hidden tools
+        run: |
+          node --test scripts/lib/__tests__/instance-runtime.test.mjs scripts/lib/__tests__/instance-stop-failures.test.mjs crabot-desktop/tests/controller.test.mjs crabot-desktop/tests/windows-offline-update.test.mjs
+          pnpm --dir crabot-agent exec vitest run tests/engine/host-process-console.test.ts tests/engine/host-process.test.ts tests/engine/host-process-maintenance.test.ts tests/schedule-script-runner.test.ts --maxWorkers=1 --minWorkers=1
+          node .github/scripts/probe-windows-background-tools.mjs
       - name: Windows native proxy and Slack configuration regression
         if: runner.os == 'Windows'
         run: |
@@ -246,7 +251,7 @@ jobs:
           node .github/scripts/smoke-development-coexistence.mjs --background-only 2>&1 | tee .desktop-build/development-source-boot.log
       - name: Build same-source offline GUI and Core installer
         run: |
-          node scripts/desktop/stage-core.mjs --out=.desktop-build/manual/core --version=0.1.0-desktop.15
+          node scripts/desktop/stage-core.mjs --out=.desktop-build/manual/core --version=0.1.0-desktop.16
           node .github/scripts/verify-release-payload.mjs "$GITHUB_WORKSPACE/.desktop-build/manual/core"
           node --input-type=module <<'NODE'
           import { createRequire } from 'node:module';

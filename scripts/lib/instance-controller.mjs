@@ -107,30 +107,47 @@ export async function stopInstance(dataDir, { timeoutMs = SUPERVISOR_FORCE_TIMEO
   const record = current.record
   const owned = await collectOwned(record, dataDir)
   log(`Stopping generation ${record.generation}...`)
-  if (process.platform === 'win32') await shutdownRpc(record)
+  if (process.platform === 'win32') {
+    try { await shutdownRpc(record) }
+    catch { log('Shutdown RPC unavailable; waiting for this generation before native termination.') }
+  }
   else if (alive(record.controller)) process.kill(record.controller.pid, 'SIGTERM')
   else if (record.mm && alive(record.mm)) process.kill(record.mm.pid, 'SIGTERM')
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline && owned.some(unsettled)) await sleep(pollMs)
   const remaining = owned.filter(alive)
+  const signalFailures = []
   if (remaining.length) {
     log('Graceful shutdown window elapsed; terminating only confirmed processes.')
     // Each target is rechecked immediately before signalling; no name/port/global tree fallback.
     for (const target of remaining.reverse()) {
       if (!alive(target)) continue
-      try { process.kill(target.pid, 'SIGKILL') } catch (error) { if (error.code !== 'ESRCH') throw error }
+      try { identity.terminateKnownProcess(target) }
+      catch (error) {
+        if (processState(target) !== 'gone') signalFailures.push({ target, message: error.message })
+      }
     }
     const forceDeadline = Date.now() + 5000
     while (Date.now() < forceDeadline && owned.some(unsettled)) await sleep(pollMs)
   }
-  if (owned.some(alive)) throw Object.assign(new Error('仍有确认归属的进程未退出；保留运行记录，请打开诊断。'), { code: 'CRABOT_STOP_INCOMPLETE' })
-  if (owned.some(unsettled)) throw Object.assign(new Error('进程身份仍未知；未向未知进程发信号，保留运行记录。'), { code: 'CRABOT_STOP_UNKNOWN' })
-  // MM removes module records only after full tree settlement. A dead root alone proves less.
-  try {
-    if ((await fs.readdir(join(dataDir, 'module-runtime-registry', 'records'))).some(file => file.endsWith('.json'))) {
-      throw Object.assign(new Error('MM 已退出，但仍有未收口的模块运行记录；停止结果未知，请执行定向恢复。'), { code: 'CRABOT_STOP_UNKNOWN' })
-    }
-  } catch (error) { if (error.code !== 'ENOENT') throw error }
+  const running = owned.filter(alive)
+  if (running.length) {
+    const reasons = running.map(item => {
+      const failure = signalFailures.find(failure => failure.target.pid === item.pid)
+      return `PID ${item.pid}${failure ? `：${failure.message}` : '：终止后仍未退出'}`
+    })
+    throw Object.assign(new Error(`停止进程失败（${reasons.join('; ')}）；运行记录已保留。`), { code: 'CRABOT_STOP_INCOMPLETE' })
+  }
+  const unknown = owned.filter(unsettled)
+  if (unknown.length) {
+    const reasons = unknown.map(item => {
+      try { identity.inspectProcess(item.pid); return `PID ${item.pid}` }
+      catch (error) { return `PID ${item.pid}：${error.message}` }
+    })
+    throw Object.assign(new Error(`系统无法查询进程退出状态（${reasons.join('; ')}）；运行记录已保留。`), { code: 'CRABOT_STOP_UNKNOWN' })
+  }
+  // Retained module files are recovery inputs, not evidence of a live process.
+  // Leave them intact for the MM's existing recovery on the next start.
   clearInstanceRuntime(dataDir, record.generation)
   log('Stopped.')
 }

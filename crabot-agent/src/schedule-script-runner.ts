@@ -22,7 +22,7 @@ const SCHEDULE_SCRIPT_LAUNCHER_SOURCE = [
   "const nonceArg = args.find((arg) => arg.startsWith(launcherArg + '='))",
   'const bash = args[args.length - 1]',
   'if (!nonceArg || !bash) process.exit(64)',
-  "const child = spawn(bash, ['--noprofile', '--norc', '-s'], { cwd: process.cwd(), stdio: ['pipe', 'pipe', 'pipe'] })",
+  "const child = spawn(bash, ['--noprofile', '--norc', '-s'], { cwd: process.cwd(), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })",
   'process.stdin.pipe(child.stdin)',
   'child.stdout.pipe(process.stdout)',
   'child.stderr.pipe(process.stderr)',
@@ -81,7 +81,7 @@ export interface ScheduleScriptRunnerDeps {
 
 function execText(file: string, args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
-    execFile(file, args, { encoding: 'utf8', env: buildChildEnv({ LC_ALL: 'C' }) }, (error, stdout) => {
+    execFile(file, args, { encoding: 'utf8', env: buildChildEnv({ LC_ALL: 'C' }), windowsHide: true }, (error, stdout) => {
       if (error) reject(error)
       else resolve(stdout)
     })
