@@ -182,6 +182,11 @@ async function boot() {
   const guiRoot = path.resolve(process.resourcesPath, '..')
   const windowsRoot = verifier?.guiInstallationRoot(guiRoot)
   const fixedWindows = app.isPackaged && process.platform === 'win32' && pin !== undefined && guiRoot === path.join(windowsRoot, 'program/gui')
+  const windowsRemoval = app.isPackaged && process.platform === 'win32' && pin !== undefined && existsSync(path.join(windowsRoot, '.desktop-removal.json'))
+    ? createRequire(import.meta.url)('./bootstrap/scripts/lib/desktop-removal-record.cjs').readDesktopRemoval(windowsRoot) : null
+  if (windowsRemoval && ['preparing', 'stopping'].includes(windowsRemoval.phase) && JSON.stringify(windowsRemoval.source_selection) + '\n' === pin) {
+    await bootUninstall(); return
+  }
   const windowsFirstUse = fixedWindows || app.isPackaged && process.platform === 'win32' && pin !== undefined
     && (existsSync(path.join(windowsRoot, '.desktop-removal.json')) || !existsSync(path.join(windowsRoot, 'current-release.json')) || readFileSync(path.join(windowsRoot, 'current-release.json'), 'utf8') !== pin)
   if (windowsFirstUse) {

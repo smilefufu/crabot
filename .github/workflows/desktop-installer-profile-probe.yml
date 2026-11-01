@@ -52,7 +52,7 @@ jobs:
           pnpm --dir crabot-desktop install --frozen-lockfile
           node .github/scripts/probe-windows-single-layer-installer.mjs 2>&1 | tee .desktop-build/directory-extraction-regression.log
           pnpm --dir crabot-desktop run build
-          node --test --test-concurrency=1 crabot-desktop/tests/startup-page.test.mjs crabot-desktop/tests/startup-page-real.test.mjs crabot-desktop/tests/paired-binding.test.mjs
+          node --test --test-concurrency=1 crabot-desktop/tests/windows-removal-entry.test.mjs crabot-desktop/tests/startup-page.test.mjs crabot-desktop/tests/startup-page-real.test.mjs crabot-desktop/tests/paired-binding.test.mjs
           pnpm install --frozen-lockfile
           pnpm --dir scripts/lib install --frozen-lockfile
           node --test --test-name-pattern='publish-source-remove-public' crabot-desktop/tests/removal-frame.test.mjs
