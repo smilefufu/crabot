@@ -49,6 +49,8 @@ jobs:
           node --test scripts/lib/__tests__/private-file-paths.test.mjs scripts/lib/__tests__/process-identity.test.mjs
           pnpm --dir crabot-desktop install --frozen-lockfile
           node .github/scripts/probe-windows-single-layer-installer.mjs 2>&1 | tee .desktop-build/directory-extraction-regression.log
+          pnpm --dir crabot-desktop run build
+          node --test crabot-desktop/tests/startup-page.test.mjs crabot-desktop/tests/startup-page-real.test.mjs
       - name: Prepare the finite test dependencies
         if: inputs.directory_only != true && inputs.ui_only != true
         run: |
