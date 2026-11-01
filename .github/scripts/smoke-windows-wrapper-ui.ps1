@@ -11,7 +11,7 @@ $Installer = (Resolve-Path $Installer).Path
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') { throw 'Disposable Windows CI only' }
 # A simulated user profile must inherit the real user's private temp ACL,
 # rather than the runner's shared workspace volume. The selected app root stays on D:.
-$osStartMenu = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'Microsoft/Windows/Start Menu/Programs/Crabot.lnk'
+$osStartMenu = Join-Path ([Environment]::GetFolderPath('Programs')) 'Crabot.lnk'
 $menuBefore = if(Test-Path -LiteralPath $osStartMenu){[IO.File]::ReadAllBytes($osStartMenu)}else{$null}
 if(Test-Path -LiteralPath $osStartMenu){Remove-Item -LiteralPath $osStartMenu}
 $homeRoot = Join-Path ([IO.Path]::GetTempPath()) ('wrapper-home-' + [guid]::NewGuid().ToString('N'))
@@ -147,7 +147,7 @@ try {
    }
    foreach ($oldModule in $oldModules) { & "$env:SystemRoot/System32/taskkill.exe" /PID $oldModule.root_pid /T /F 2>&1 | Write-Output }
    if (@(Get-ChildItem (Join-Path $data 'module-runtime-registry/records') -Filter '*.json').Count -ne $moduleFiles.Count) { throw 'Force-kill fixture unexpectedly lost original recovery files' }
-   $oldGui = Join-Path $target ('app/releases/' + $beforeSelection.gui_id + '/Crabot.exe')
+   $oldGui = [IO.Path]::GetFullPath((Join-Path $target ('app/releases/' + $beforeSelection.gui_id + '/Crabot.exe')))
    # Fixture cleanup of the known baseline GUI after its Core has stopped. The
    # candidate must itself observe absence; no stop/migration receipt is forged.
    foreach ($row in @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $oldGui })) {
@@ -157,12 +157,13 @@ try {
    # Match normal Quit: use the baseline's own stop coordinator before exiting its GUI.
    & $command stop 2>&1 | Write-Output
    if ($LASTEXITCODE -ne 0) { throw 'Original desktop.14 did not stop normally' }
-   $oldGui = Join-Path $target ('app/releases/' + $beforeSelection.gui_id + '/Crabot.exe')
+   $oldGui = [IO.Path]::GetFullPath((Join-Path $target ('app/releases/' + $beforeSelection.gui_id + '/Crabot.exe')))
    foreach ($row in @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $oldGui })) {
     & "$env:SystemRoot/System32/taskkill.exe" /PID $row.ProcessId /T /F 2>&1 | Write-Output
    }
    $baselineMenu = (New-Object -ComObject WScript.Shell).CreateShortcut($osStartMenu)
-   if ($baselineMenu.TargetPath -ne $oldGui) { throw 'Original actual OS Start menu does not target desktop.14' }
+   Write-Output ('CRABOT_BASELINE_MENU ' + (@{link=$osStartMenu; exists=(Test-Path -LiteralPath $osStartMenu); target=$baselineMenu.TargetPath; expected=$oldGui; simulated_profile_menu=(Join-Path $env:APPDATA 'Microsoft/Windows/Start Menu/Programs/Crabot.lnk')} | ConvertTo-Json -Compress))
+   if ($baselineMenu.TargetPath -ne $oldGui) { throw ('Original actual OS Start menu mismatch: expected=' + $oldGui + '; actual=' + $baselineMenu.TargetPath + '; link=' + $osStartMenu) }
   }
   Start-Sleep -Seconds 2
   $candidateArgs = if ($UpgradeLaunch -eq 'finish') { "/D=$target" } else { "/S /D=$target" }
@@ -196,7 +197,7 @@ try {
    }
    if (!$candidateFinished -or !$candidate.HasExited -or $candidate.ExitCode -ne 0) { throw 'Actual upgrade installer did not finish successfully' }
   } elseif (!$candidate.WaitForExit(600000) -or $candidate.ExitCode -ne 0) { throw 'Candidate program installation failed' }
-  $newGui = Join-Path $target 'program/gui/Crabot.exe'
+  $newGui = [IO.Path]::GetFullPath((Join-Path $target 'program/gui/Crabot.exe'))
   if (!(Test-Path -LiteralPath $newGui)) { throw 'Expected the fixed newly installed GUI' }
   if ($UpgradeLaunch -eq 'direct') {
    $candidateGui = Start-Process $newGui -PassThru
@@ -245,7 +246,7 @@ try {
   $current = Get-Content (Join-Path $target 'program/gui/resources/desktop-release.json') -Raw | ConvertFrom-Json
   $afterRuntime = Get-Content (Join-Path $data 'instance-runtime.json') -Raw | ConvertFrom-Json
   $afterInstallation = Get-Content (Join-Path $target 'desktop-installation.json') -Raw | ConvertFrom-Json
-  if ($afterRuntime.install_root -ne (Join-Path $target 'program/core')) { throw 'CLI still uses original Core' }
+  if ($afterRuntime.install_root -ne ([IO.Path]::GetFullPath((Join-Path $target 'program/core')))) { throw 'CLI still uses original Core' }
   if ($afterRuntime.instance_id -ne $beforeRuntime.instance_id -or $afterRuntime.generation -eq $beforeRuntime.generation) { throw 'Expected same data instance, new Core generation' }
   if ($afterInstallation.installation_id -ne $installed.installation_id) { throw 'Upgrade created a different installation' }
   if ([IO.File]::ReadAllText($sentinel) -ne 'preserve existing desktop data') { throw 'Original data changed' }
@@ -295,7 +296,7 @@ try {
       $state = ($raw -join "`n") | ConvertFrom-Json
       $runtime = Get-Content (Join-Path $data 'instance-runtime.json') -Raw | ConvertFrom-Json
       $readyModules = @($state.modules | Where-Object { $_.module_id -in @('admin-web','crabot-agent','memory-default') -and $_.status -eq 'running' })
-      if ($state.running -eq $true -and $state.data_dir -eq $data -and $readyModules.Count -eq 3 -and $runtime.install_root -eq (Join-Path $target 'program/core')) { $menuReopened=$true; break }
+      if ($state.running -eq $true -and $state.data_dir -eq $data -and $readyModules.Count -eq 3 -and $runtime.install_root -eq ([IO.Path]::GetFullPath((Join-Path $target 'program/core')))) { $menuReopened=$true; break }
      }
     }
     Start-Sleep -Milliseconds 750
