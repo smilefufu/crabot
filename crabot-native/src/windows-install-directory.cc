@@ -6,14 +6,17 @@
 #include <filesystem>
 #include <string>
 #include <vector>
+#include <cstdio>
 
 int wmain(int argc, wchar_t** argv) {
   HANDLE token = nullptr;
   LPWSTR sid = nullptr;
   PSECURITY_DESCRIPTOR descriptor = nullptr, existing = nullptr;
   int result = 1;
+  const char* stage = "arguments";
   try {
     if (argc != 2) throw 1;
+    stage = "resolve-path";
     std::vector<wchar_t> full(32768);
     DWORD length = GetFullPathNameW(argv[1], static_cast<DWORD>(full.size()), full.data(), nullptr);
     if (!length || length >= full.size()) throw 1;
@@ -21,6 +24,7 @@ int wmain(int argc, wchar_t** argv) {
     while (root.size() > 3 && root.back() == L'\\') root.pop_back();
     if (root.size() <= 3 || root[1] != L':' || root[2] != L'\\') throw 1;
     root = L"\\\\?\\" + root;
+    stage = "current-user";
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) throw 1;
     DWORD size = 0;
     GetTokenInformation(token, TokenUser, nullptr, 0, &size);
@@ -29,12 +33,15 @@ int wmain(int argc, wchar_t** argv) {
     if (!GetTokenInformation(token, TokenUser, user.data(), size, &size)) throw 1;
     PSID owner = reinterpret_cast<TOKEN_USER*>(user.data())->User.Sid;
     if (!ConvertSidToStringSidW(owner, &sid)) throw 1;
+    stage = "inspect-directory";
     DWORD attributes = GetFileAttributesW(root.c_str());
     if (attributes != INVALID_FILE_ATTRIBUTES) {
       if (!(attributes & FILE_ATTRIBUTE_DIRECTORY) || attributes & FILE_ATTRIBUTE_REPARSE_POINT) throw 1;
+      stage = "existing-owner";
       PSID before = nullptr;
       if (GetNamedSecurityInfoW(root.data(), SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION,
         &before, nullptr, nullptr, nullptr, &existing) != ERROR_SUCCESS || !EqualSid(owner, before)) throw 1;
+      stage = "list-existing";
       WIN32_FIND_DATAW entry{};
       HANDLE search = FindFirstFileW((root + L"\\*").c_str(), &entry);
       if (search == INVALID_HANDLE_VALUE) throw 1;
@@ -45,17 +52,26 @@ int wmain(int argc, wchar_t** argv) {
       FindClose(search);
       if (empty && ended != ERROR_NO_MORE_FILES) throw 1;
       if (!empty) result = 0; // GUI verifies the existing selected installation.
-      else if (!RemoveDirectoryW(root.c_str())) throw 1;
+      else { stage = "replace-empty"; if (!RemoveDirectoryW(root.c_str())) throw 1; }
     } else if (GetLastError() != ERROR_FILE_NOT_FOUND && GetLastError() != ERROR_PATH_NOT_FOUND) throw 1;
     if (result != 0) {
+      stage = "create-parents";
       std::filesystem::create_directories(std::filesystem::path(root).parent_path());
+      stage = "prepare-private-access";
       std::wstring acl = L"O:" + std::wstring(sid) + L"D:P(A;OICI;GA;;;" + sid + L")";
       if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(acl.c_str(), SDDL_REVISION_1, &descriptor, nullptr)) throw 1;
       SECURITY_ATTRIBUTES access{sizeof(access), descriptor, FALSE};
+      stage = "create-directory";
       if (!CreateDirectoryW(root.c_str(), &access)) throw 1;
       result = 0;
     }
-  } catch (...) { result = 1; }
+  } catch (const std::filesystem::filesystem_error& error) {
+    std::fprintf(stderr, "CRABOT_INSTALL_DIRECTORY stage=%s win32=%d\n", stage, error.code().value());
+    result = 1;
+  } catch (...) {
+    std::fprintf(stderr, "CRABOT_INSTALL_DIRECTORY stage=%s win32=%lu\n", stage, GetLastError());
+    result = 1;
+  }
   if (existing) LocalFree(existing);
   if (descriptor) LocalFree(descriptor);
   if (sid) LocalFree(sid);
