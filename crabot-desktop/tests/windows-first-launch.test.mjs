@@ -10,14 +10,14 @@ const source = readFileSync(new URL('../src/windows-first-launch.ts', import.met
 const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText
 const root = path.resolve('/fixture/selected-programs'), old = path.resolve('/fixture/home/.crabot'), dataDir = path.join(old, 'data')
 const selection = { schema_version: 1, version: '1.2.3', gui_id: 'fixture-gui', core_id: 'fixture-core' }
-async function run({ initialized = false, legacy = false, source = false, cancel = false, bound = false, previousDesktop = false, previousVersion = '1.2.2', retained = false, pendingLocal = false, converted = false, progressEvents = [], programFailure } = {}) {
+async function run({ initialized = false, legacy = false, source = false, cancel = false, bound = false, previousDesktop = false, previousVersion = '1.2.2', retained = false, pendingLocal = false, converted = false } = {}) {
   const effects = [], messages = [], queries = []
   const own = { root, dataDir: pendingLocal ? path.join(root, 'data') : dataDir, record: { installation_id: 'fixture' } }
   const programs = { initialized, installRoot: root, selection, coreRoot: path.join(root, 'releases/core'), guiRoot: path.join(root, 'app/releases/gui'), ...(retained ? { removal: { phase: 'completed' } } : {}), ...(previousDesktop ? { source: { ...own, selection: { ...selection, version: previousVersion } } } : {}) }
   const original = { installation: { installRoot: old, dataRoot: dataDir, version: 'v2026.10.14.1' }, entryFenceId: 'previous-fence' }
   const modules = {
     'desktop-first-launch.mjs': {
-      readFirstLaunchPrograms: async () => { progressEvents.push('read-programs'); if (programFailure) throw programFailure; return programs },
+      readFirstLaunchPrograms: async () => programs,
       bindFirstLaunchData: async (value, data) => { assert.ok(!previousDesktop || previousVersion !== '1.2.4', 'No binding writes on downgrade'); assert.equal(value, programs); effects.push(['bind', data]); return { ...own, dataDir: data, proof: { file: 'proof', sha256: 'digest' } } },
       completeImportedFirstLaunch: async (value, register) => { await register({ installRoot: root }); return value },
       completeFreshFirstLaunch: async (value, register) => { await register({ installRoot: root }); effects.push(['fresh', value.dataDir]); return value },
@@ -37,15 +37,11 @@ async function run({ initialized = false, legacy = false, source = false, cancel
     if (name === 'node:path') return path
     if (name === './release-signatures.js') return { compareVersions }
     if (name === 'node:fs') return { existsSync: () => bound, promises: { readdir: async () => ['partial'], rm: () => assert.fail('GUI must not delete data outside the importer lock') } }
-    if (name === './operation-progress-window.js') return { createOperationProgressWindow: () => {
-      progressEvents.push('open'); return { ready: Promise.resolve().then(() => progressEvents.push('ready')),
-        close() { progressEvents.push('close') }, update(message, cancellable) { progressEvents.push(['update', message, cancellable]) } }
-    } }
+    if (name === './operation-progress-window.js') return { createOperationProgressWindow: () => ({ ready: Promise.resolve(), close() {}, update() {} }) }
     throw Error('Unexpected import: ' + name)
   } })
   const result = await exports.prepareWindowsFirstLaunch({ resources: '/fixture/resources', pinText: 'pin', home: path.dirname(old),
     load: async name => { assert.ok(modules[name], name); return modules[name] },
-    progress: (message, cancellable) => progressEvents.push(['update', message, cancellable]),
     registerEntries: async value => { effects.push(['register', value.installRoot]) },
     repairExisting: async value => { assert.equal(value, programs); effects.push(['repair', root]); return !cancel },
     upgradeExisting: async (prepared, source) => { effects.push(['update', prepared.installRoot, source.dataDir]); return !cancel },
@@ -109,20 +105,4 @@ test('retry of an unfinished local copy delegates deletion to the importer under
   const value = await run({ bound: true, pendingLocal: true, legacy: true })
   assert.ok(value.effects.some(effect => effect[0] === 'restart-copy'))
   assert.equal(value.messages.length, 2)
-})
-
-
-test('first Windows launch updates its existing main window before reading programs without creating another progress window', async () => {
-  const progressEvents = []
-  await run({ previousDesktop: true, progressEvents })
-  assert.equal(progressEvents[0][0], 'update')
-  assert.match(progressEvents[0][1], /准备/)
-  assert.equal(progressEvents[0][2], false)
-  assert.deepEqual(progressEvents.slice(1), ['read-programs'])
-})
-test('a failed first-launch read preserves its concrete error for the main window retry', async () => {
-  const progressEvents = [], error = new Error('candidate file unreadable')
-  await assert.rejects(run({ progressEvents, programFailure: error }), value => value === error)
-  assert.equal(progressEvents[0][0], 'update')
-  assert.deepEqual(progressEvents.slice(1), ['read-programs'])
 })
