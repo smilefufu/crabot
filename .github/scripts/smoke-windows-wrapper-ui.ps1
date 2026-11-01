@@ -269,7 +269,41 @@ try {
    $status = ((& $command status --json 2>&1) -join "`n") | ConvertFrom-Json
    if ($status.running -ne $true -or $status.data_dir -ne $data) { throw 'Restart did not recover the same data instance' }
   }
-  @{actual_exe_upgrade=$true; repeated_stop_start_cycles=2; force_killed_original=($UpgradeLaunch -eq 'direct'); candidate_launch=$UpgradeLaunch; actual_os_start_menu=($UpgradeLaunch -ne 'direct'); from=$beforeSelection.version; to=$ExpectedVersion; actual_gui_version=$true; actual_new_core=$true; native_cli_same_data=$true; same_installation=$true; original_data_preserved=$true; start_menu_targets_new_gui=$true; no_new_visible_console=$true} | ConvertTo-Json -Compress | Write-Output
+  $menuReopened = $false
+  if ($UpgradeLaunch -eq 'finish') {
+   # Close only the fixture's known GUI after the candidate's own stop. Reopen
+   # through the actual OS link, without invoking an internal candidate EXE.
+   & $command stop 2>&1 | Write-Output
+   if ($LASTEXITCODE -ne 0) { throw 'Candidate did not stop before Start menu reopen' }
+   foreach ($row in @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $newGui })) {
+    $guiProcess = Get-Process -Id $row.ProcessId -ErrorAction SilentlyContinue
+    if ($guiProcess) { $guiProcess.Kill(); if (!$guiProcess.WaitForExit(5000)) { throw 'Fixture GUI did not exit before menu reopen' } }
+   }
+   $bootLog = Join-Path $data 'desktop-profile/bootstrap.log'
+   $readyBefore = @(Get-Content $bootLog | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.phase -eq 'app-ready' -and $_.app_version -eq $ExpectedVersion }).Count
+   Start-Process $osStartMenu
+   $limit = (Get-Date).AddMinutes(4)
+   while ((Get-Date) -lt $limit) {
+    foreach ($row in @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $newGui })) { [void]$owned.Add([uint32]$row.ProcessId) }
+    foreach ($window in [WrapperUI]::Windows()) {
+     if ([WrapperUI]::Console($window) -and [WrapperUI]::IsWindowVisible($window) -and !$originalConsoles.Contains($window)) { throw 'Start menu reopen displayed a new console' }
+    }
+    $readyNow = @(Get-Content $bootLog | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.phase -eq 'app-ready' -and $_.app_version -eq $ExpectedVersion }).Count
+    if ($readyNow -gt $readyBefore) {
+     $raw = & $command status --json 2>&1
+     if ($LASTEXITCODE -eq 0) {
+      $state = ($raw -join "`n") | ConvertFrom-Json
+      $runtime = Get-Content (Join-Path $data 'instance-runtime.json') -Raw | ConvertFrom-Json
+      $readyModules = @($state.modules | Where-Object { $_.module_id -in @('admin-web','crabot-agent','memory-default') -and $_.status -eq 'running' })
+      if ($state.running -eq $true -and $state.data_dir -eq $data -and $readyModules.Count -eq 3 -and $runtime.install_root -eq (Join-Path $target 'program/core')) { $menuReopened=$true; break }
+     }
+    }
+    Start-Sleep -Milliseconds 750
+   }
+   if (!$menuReopened) { throw 'Actual Start menu did not reopen the candidate GUI and Core after Finish' }
+   if ([IO.File]::ReadAllText($sentinel) -ne 'preserve existing desktop data' -or ($credentialHash -and (Get-FileHash $credential).Hash -ne $credentialHash)) { throw 'Start menu reopen changed original data or credentials' }
+  }
+  @{actual_exe_upgrade=$true; start_menu_reopened_after_finish=$menuReopened; repeated_stop_start_cycles=2; force_killed_original=($UpgradeLaunch -eq 'direct'); candidate_launch=$UpgradeLaunch; actual_os_start_menu=($UpgradeLaunch -ne 'direct'); from=$beforeSelection.version; to=$ExpectedVersion; actual_gui_version=$true; actual_new_core=$true; native_cli_same_data=$true; same_installation=$true; original_data_preserved=$true; start_menu_targets_new_gui=$true; no_new_visible_console=$true} | ConvertTo-Json -Compress | Write-Output
   return
  }
  @{actual_exe_ui=$true; next_pages=$clicked; retry_dialog=$false; second_installer=$false; selected_path_with_spaces=$true; installer_exit_zero=$true; finish_launched_gui=$true; gui_started_actual_core=$true; native_cli_same_data=$true; no_new_visible_console=$true} | ConvertTo-Json -Compress | Write-Output
