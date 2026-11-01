@@ -2,21 +2,14 @@
 
 ### 桌面化冻结范围：Windows固定程序位置已实现，第17版整体验收中
 
-- 用户实测第16版从安装完成启动仍报“旧版应用退出状态尚未核实”，开始菜单进入14。已定位安装后提交程序版本仍依赖首启全系统进程观察；该错误发生在数据转换前，原生失败细节被旧实现丢失。旧直接EXE验收绕开实际Finish/菜单，不能证明现场修复。
-- 已按用户逐项批准D1/R1–R4更新正式协议并在独立分支实现：Windows安装时一次解包到固定`program/gui`、`program/core`，以标准覆盖替换程序；实际文件被占用时提示退出，不扫描全局进程或强杀；保留原data/workspace及实例身份；数据准备进入正常主窗口，显示版本、具体错误与重试；完整程序核验集中安装边界，普通启动不反复哈希。撤回自定义整套程序备份/回滚方案；安装中断明确失败，由同一完整包补齐。未引入新程序选择器。
-- 定向编译与隔离回归通过；Windows原生41315394669及依赖分支41315725446通过实际文件占用/退出、中文空格/长路径、重复覆盖和缺失程序重装。初次原生41315184146捕获扩展路径混用斜杠Win32=123，已修正，失败证据保留。完整desktop.17生产41315397648仍在运行，来源dbd6c3aa；尚无已交付17包，不记整体验收完成。后续必须用该同一成品验证实际Finish再从OS开始菜单重开及正常启停。
-- Mac当前交付仍为自包含desktop.11，整App固定位置替换；本机源码部署未动。Ubuntu固定布局及其余冻结范围验收尚未完成；完整根因与逐项授权见[诊断记录](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/research/2026-11-01-desktop16-installation-root-causes.md)。
-- 2026-11-01在独立`fix/desktop-simple-import`构建并交付Windows desktop.14，来源aed22d45；最终EXE559338454字节、程序普通文件1855128966字节（不含data/workspace），SHA256 `3c725b47a01d5c2c4211241c8c86b91c5829d60f4f5ed554ef21d1c8cf7a3d3a`。位于Downloads/Crabot桌面验收包-20261101/Windows 11，官方归档/包内摘要/交付副本一致。
-- 同EXE真实界面41278349988成功：D盘不存在的空格目录、TEMP余1.5GiB，无Retry/第二安装器，安装退出0，Finish启动实际GUI/Core，原生CLI同data。完整构建41277405704的Windows导入回归、运行环境、源码冷启动、解包及v2026.10.14.1旧CLI接入步骤已通过；75MB副本导入保留来源/凭据/历史/workspace，原命令与新CLI正常，确认到健康/命令核验120秒目标通过。该run现已整组成功，包含源码GUI/release共存及最终同EXE实际安装。75MB/250文件确认到绑定2083ms（非纯复制）、到GUI/Core/新旧CLI核验7285ms；不代表海量小文件性能验收。
-- 本轮按已确认修订实现副本导入、复制后计数、持锁停服、已完成后不再复制/迁移、未知迁移保留、真实错误和日志位置。Windows原生回归复现复制后工作区权限属性遗漏后，以既有native创建器保留私有对象属性，未放宽读取检查；旧失败41276267118/41276978706/41277052576保留。[包与实施证据](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-30-windows-installation-feedback-fixes.md)。
-- 第12版不存在D:\Crabot误拒绝已由第13版修复：41267578010/41267714316复现create-parents/Win32=5，41269348309原生/NSIS和41269348044同EXE实际UI通过。第13版原生产run41268098768尾部测试夹具错误仍记失败；第14版不沿用旧成功作为自身验收。
-- 2026-11-01完成实际成品体积/依赖审计及两个subagent只读调查：[体积审计](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/research/2026-11-01-desktop-size-audit.md)、[Windows复制性能](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/research/2026-11-01-windows-data-import-performance.md)、[Windows代理缺口](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/research/2026-11-01-windows-system-proxy-gap.md)。体积候选未落为新包，不改冻结契约或用户数据。Windows固定代理最小修订已获用户确认，正式协议先行发布：只读当前用户HTTP/HTTPS地址，环境变量优先，排除列表/PAC/SOCKS不扩展。
-- 第15版反馈修复：文件复制最多8项并发并合并进度，内容/私有ACL/flush保持；真实Windows两轮10000×4KiB（25%私有）由31–39秒降至18.8–19.6秒，字节/mode/ACL/catalog/源不变通过。Windows固定代理已原生读取并实际CONNECT/fetch；保存后的多Shared副本缓存已同步，33项Shared回归通过。保留环境优先、内部直连和已确认PAC/SOCKS/系统排除列表边界。
-- Windows空白窗口/Slack配置阻断：官方CLI在解析参数前等待终端能力响应；普通隐藏控制台与NO_COLOR均未解决。现用Windows内置私有伪终端支持该工具，标准输入保持EOF、输出保留管道，Job负责拥有和收口完整进程树；Core/模块/身份查询/supervisor隐藏窗口。环境白名单补回PowerShell两个模块上下文字段，不传模型密钥。Slack错误只返回固定描述并区分失败阶段。
-- 第15版来源2cc1a412，EXE559436379字节，SHA256 `ba13ba7dd6c7e7501f81adaf619187a6a258805bda863a672bcabb6b7889ed95`，程序1855397628字节（不含data/workspace），Downloads同目录已交付；官方归档/包内/副本摘要一致。原生专项41287954611的Slack43项、实际子进程交接/清理、不可见PowerShell、EOF、父进程丢失收树及官方CLI实际PowerShell hooks/渠道名通过。完整生产run41287962446的installer与源码作业成功：代理/原位置停止更新、离线运行环境、v2026.10.14.1旧CLI接入、源码GUI与release两Core独立启停及完整删程序后的保留数据恢复通过。独立同EXE实际界面41289284281整组成功，D盘根不存在目录/TEMP余1.5GiB/Finish/GUI-Core-CLI/无新控制台通过。真实Slack账号创建和收发仍待用户验收；以前失败保留。
-- ARM Mac仍为已交付desktop.11（DMG537516782字节，程序1372029537字节），没有重打或替换本机源码。体积裁剪、各历史包/失败与完整组件证据见上述实施记录；可选旧程序清理WIP没有混入本分支。
-- 继续原冻结范围，未增加需求：已有GUI中断更新、保留数据修复/卸载简化、重复安装、其它平台及其余发行回归尚未全部验收；项目workspace、在线Admin迁移、受管环境与system批量管理保持既定边界。Windows结果来自Server2025 CI，Win11普通账号/真实业务仍待用户复验；缺失旧macOS/Ubuntu桌面资源按用户决定暂跳过。完整测好后按可独立构建/验证的依赖边界拆PR；产品main未推送。
-- 本机源码部署/data、Docker及Spotlight未动，没有在本机启动验收App/Core。下载阶段磁盘仍约198GiB空闲；仅清理本轮已验证且已交付的临时副本。
+- 用户实测16版退出14后点安装完成仍报“旧版应用退出状态尚未核实”，菜单进入14。根因是程序版本提交仍依赖首启全系统进程观察，该错误发生在数据转换前；原生底层原因被旧实现丢失。旧直接EXE验收绕开Finish/菜单，不证明现场修复。[根因及逐项授权](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/research/2026-11-01-desktop16-installation-root-causes.md)。
+- 已按D1/R1–R4授权更新协议并实现：安装器一次解包、标准覆盖固定`program/gui`和`program/core`，程序安装成功即更新入口；文件确实占用时提示退出，不扫描全局进程或强杀。正常主窗口显示版本、数据准备、具体错误和重试；保留复制取消、转换阶段不可取消。普通启动不再重复全量哈希；data/workspace及实例身份保留。中断明确失败，同一完整包补齐，不承诺自制旧程序回滚。
+- Windows原生41315394669及运行时依赖分支41315725446通过实际占用/退出、中文空格/长路径、重复覆盖、缺失程序重装；首次41315184146捕获扩展路径斜杠Win32=123，已修正，失败保留。53项控制器回归通过：新增GUI显式停止可以清理同一安装绑定的旧模块，启动仍要求旧实例退出，其它根仍拒绝；不改变原停止器的进程身份和信号规则。
+- 中间17候选dbd6c3aa的41315397648完成成品解包/v2026.10.14.1副本导入和源码GUI/release独立启停检查；旧CLI75MB样本从确认到复制阶段结束5313ms、后续实际GUI/Core/CLI核验通过。因复查补回主窗口取消入口及旧模块停止兼容而撤回，整组记取消，未交付。新源码编译、26项首启/主入口/取消回归、2项固定安装布局及独立bootstrap回归通过；完整新成品和实际Finish/菜单/正常启停尚未通过验收，不能记完成。
+- 41316879770/41317433794的真实入口复验在14版基线菜单前置失败，未安装目标17。诊断确认OS菜单不存在；测试人为覆盖USERPROFILE/APPDATA使程序入口落入模拟profile，已改用干净托管Windows真实账号、保留实际菜单读回/重开断言。仍须在最终同一成品包重验，不用内部EXE替代。
+- 最近已交付Windows16（来源888b9a68，EXE559437303字节）实测失败；Downloads/Crabot桌面验收包-20261101/Windows 11中的旧包不能作为修复版。Mac仍为已交付desktop.11（DMG537516782字节、程序1372029537字节），固定自包含App；没有更新本机源码部署。历次交付、失败和同EXE证据保留于[实施记录](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-30-windows-installation-feedback-fixes.md)。
+- 已有15/16修正继续随分支：复制最多8项并发，Windows10000×4KiB样本从31–39秒降至18.8–19.6秒；Windows固定系统HTTP/HTTPS代理读取及实际CONNECT通过，保留环境变量优先和既定边界。Slack官方CLI采用私有伪终端、工具进程树受控收口，PowerShell隐藏，43项CLI/官方hooks原生回归通过。真实Slack账号创建/收发仍需在可用新包验收，不将网络模式提示当根因。
+- 安装体积审计及候选详见[体积审计](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/research/2026-11-01-desktop-size-audit.md)，尚未实现500MB目标。Ubuntu固定布局、其它平台及其余冻结范围尚未全验收；缺少macOS旧版/Ubuntu真桌面资源按用户决定暂跳过，Win11普通账号业务验收仍待用户。完整测好后按依赖拆可review PR，不直接推产品main。本机源码/data、Docker、Spotlight未动；没有本机启动验收App/Core。
 
 ### 主控常驻职责与指南生命周期：实现完成，PR 验证中
 
