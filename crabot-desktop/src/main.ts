@@ -178,6 +178,7 @@ async function boot() {
   }
   bootstrapStage('installation-pin-read')
   let windowsInstallation, dataLocationError: unknown
+  let preparationAbort: AbortController | undefined
   const guiRoot = path.resolve(process.resourcesPath, '..')
   const windowsRoot = verifier?.guiInstallationRoot(guiRoot)
   const fixedWindows = app.isPackaged && process.platform === 'win32' && pin !== undefined && guiRoot === path.join(windowsRoot, 'program/gui')
@@ -201,7 +202,7 @@ async function boot() {
       app.setAppUserModelId('com.crabot.desktop')
       mainSession = session.fromPartition('persist:crabot-desktop')
       window = createMainWindow(mainSession)
-      startupPage = await showStartupPage(window, app.getVersion())
+      startupPage = await showStartupPage(window, app.getVersion(), () => preparationAbort?.abort())
       if (!process.argv.includes('--background')) show()
     }
     if (dataLocationError) {
@@ -213,10 +214,11 @@ async function boot() {
     const { registerInstallationEntries } = await import('./installation-entries.js')
     while (true) {
       preparingData = true
+      preparationAbort = new AbortController()
       try {
         windowsInstallation = await prepareWindowsFirstLaunch({
-          resources: process.resourcesPath, pinText: pin!, home: homedir(), dialog,
-          progress: message => { void startupPage?.update(message).catch(() => {}) },
+          resources: process.resourcesPath, pinText: pin!, home: homedir(), dialog, signal: preparationAbort.signal,
+          progress: (message, cancellable) => { void startupPage?.update(message, '', false, cancellable).catch(() => {}) },
           load: (name, verifiedCore) => import(verifiedCore ? pathToFileURL(path.join(verifiedCore, 'scripts/lib', name)).href : new URL('./bootstrap/scripts/lib/' + name, import.meta.url).href),
           registerEntries: prepared => registerInstallationEntries(prepared, { home: homedir(), platform: process.platform, env: process.env, shell }),
           repairExisting: async programs => {
@@ -234,7 +236,7 @@ async function boot() {
         bootstrapStage('data-preparation-failed', { detail: error instanceof Error ? error.message : String(error) })
         show()
         if (!await startupPage.retry(error, path.join(app.getPath('userData'), 'bootstrap.log'))) { quitting = true; app.quit(); return }
-      } finally { preparingData = false }
+      } finally { preparingData = false; preparationAbort = undefined }
     }
     if (!windowsInstallation) { quitting = true; app.quit(); return }
     app.releaseSingleInstanceLock()

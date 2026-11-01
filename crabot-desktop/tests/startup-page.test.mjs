@@ -5,7 +5,7 @@ import { showStartupPage } from '../dist/startup-page.js'
 
 function fixture() {
   let url, handler
-  const nodes = Object.fromEntries(['status', 'detail', 'actions', 'progress'].map(id => [id, { style: {} }]))
+  const nodes = Object.fromEntries(['status', 'detail', 'actions', 'progress', 'cancel'].map(id => [id, { style: {} }]))
   const window = { isDestroyed: () => false,
     async loadURL(value) { url = value },
     webContents: { on(_event, value) { handler = value }, removeListener() { handler = undefined }, getURL: () => url,
@@ -34,5 +34,18 @@ test('unrelated navigation cannot authorize retry and the explicit Exit action r
   await Promise.resolve()
   f.click('unrecognized'); f.click('exit')
   assert.equal(await pending, false)
+  page.close()
+})
+
+test('the normal startup window retains cancellation only during cancellable data preparation', async () => {
+  const f = fixture(); let cancelled = 0
+  const page = await showStartupPage(f.window, '0.1.0-desktop.17', () => { cancelled++ })
+  f.click('cancel'); assert.equal(cancelled, 0)
+  await page.update('复制数据', '', false, true)
+  assert.equal(f.nodes.cancel.hidden, false)
+  f.click('cancel'); assert.equal(cancelled, 1)
+  await page.update('迁移数据', '', false, false)
+  assert.equal(f.nodes.cancel.hidden, true)
+  f.click('cancel'); assert.equal(cancelled, 1)
   page.close()
 })
