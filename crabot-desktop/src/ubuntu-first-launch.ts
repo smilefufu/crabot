@@ -16,6 +16,10 @@ export async function prepareUbuntuAppData(options: {
   const { readInstalledCoreRelease } = await load('core-release.mjs')
   await readInstalledCoreRelease(coreRoot, { version: options.version })
   const previous = binding.readUbuntuAppBinding({ home, env })
+  const finishLegacy = async (sourceRoot: string) => {
+    const { forwardImportedUnixCommand } = await load('unix-legacy-cli.mjs')
+    await forwardImportedUnixCommand({ sourceRoot, coreRoot, home })
+  }
   let dataDir: string
   if (previous) dataDir = binding.requireUbuntuAppBinding({ coreRoot, home, env }).data_dir
   else {
@@ -36,7 +40,10 @@ export async function prepareUbuntuAppData(options: {
     dataDir = existsSync(dataDir) ? management.requireExistingDataRoot(dataDir) : management.ensurePrivateDataRoot(dataDir)
   }
   await options.onDataSelected(dataDir)
-  if (previous && management.readDesktopManagement(dataDir)) return dataDir
+  if (previous && management.readDesktopManagement(dataDir)) {
+    if (previous.source_root) await finishLegacy(previous.source_root)
+    return dataDir
+  }
   const { discoverDesktopDataSource, importDesktopData } = await load('desktop-data-import.mjs')
   const { discoverUserSourceDeployment } = await load('source-installation.mjs')
   const sourceRoot = previous?.source_root ?? path.join(home, '.crabot')
@@ -44,7 +51,7 @@ export async function prepareUbuntuAppData(options: {
   let importing = !!previous?.source_root
   if (source && !previous) {
     const answer = await dialog.showMessageBox({ type: 'question', title: '接入已有 Crabot', message: '沿用已有聊天、项目和设置？',
-      detail: `原版本：${source.version}\n来源：${source.dataRoot}\n目标：${dataDir}\n会正常停止原服务、复制data并只做必要转换，原目录和外部workspace保留。`,
+      detail: `原版本：${source.version}\n来源：${source.dataRoot}\n目标：${dataDir}\n会正常停止原服务、复制data并只做必要转换；完成后将已核实的原用户命令指向新版。原目录和外部workspace保留。`,
       buttons: ['接入已有数据', '使用独立数据', '取消'], defaultId: 0, cancelId: 2 })
     if (answer.response === 2) return null
     importing = answer.response === 0
@@ -66,6 +73,7 @@ export async function prepareUbuntuAppData(options: {
         const amount = value.files === undefined ? '' : `，${value.files} 个文件，${((value.bytes ?? 0) / 1024 / 1024).toFixed(1)} MB`
         options.progress?.(`${value.phase}${amount}${value.message ? '：' + value.message : ''}`, value.phase !== '迁移数据')
       } })
+    await finishLegacy(sourceRoot)
     return dataDir
   }
   const { acquireExistingCliLock, releaseCliLock } = await load('cli-lock.mjs')

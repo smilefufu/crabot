@@ -278,7 +278,7 @@ async function boot() {
       try {
         const selected = await prepareUbuntuAppData({ coreRoot, home: homedir(), version: app.getVersion(), dialog,
           signal: preparationAbort.signal,
-          load: name => name === 'desktop-data-import.mjs' ? loadCore('scripts/lib/' + name) : import(new URL('./bootstrap/scripts/lib/' + name, import.meta.url).href),
+          load: name => ['desktop-data-import.mjs', 'unix-legacy-cli.mjs'].includes(name) ? loadCore('scripts/lib/' + name) : import(new URL('./bootstrap/scripts/lib/' + name, import.meta.url).href),
           onDataSelected: async directory => {
             if (window) return
             configureProfile(directory)
