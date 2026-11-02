@@ -15,7 +15,31 @@ export async function prepareProject(root: string, name = 'Crabot'): Promise<str
   const quote = (value: string) => process.platform === 'win32'
     ? "'" + value.replaceAll("'", "''") + "'"
     : "'" + value.replaceAll("'", "'\\''") + "'"
-  const command = `${process.platform === 'win32' ? '& ' : ''}${quote(process.execPath)} ${quote(path.join(project, 'hook.mjs'))}`
+  const command = process.platform === 'win32'
+    // PowerShell's native-command operator can open Windows Terminal even inside
+    // the CLI's private PTY. Explicitly keep this inner Node process windowless.
+    ? String.raw`& {
+  $ErrorActionPreference='Stop';
+  $start=New-Object System.Diagnostics.ProcessStartInfo;
+  $start.FileName=${quote(process.execPath)};
+  $start.UseShellExecute=$false;
+  $start.CreateNoWindow=$true;
+  $start.RedirectStandardOutput=$true;
+  $start.RedirectStandardError=$true;
+  $nativeArgs=@(${quote(path.join(project, 'hook.mjs'))})+$args;
+  $start.Arguments=($nativeArgs|ForEach-Object { '"'+(($_ -replace '(\\*)"','$1$1\"') -replace '(\\+)$','$1$1')+'"' }) -join ' ';
+  $child=[System.Diagnostics.Process]::Start($start);
+  try {
+    $stdout=$child.StandardOutput.ReadToEndAsync();
+    $stderr=$child.StandardError.ReadToEndAsync();
+    $child.WaitForExit();
+    [Console]::Out.Write($stdout.Result);
+    [Console]::Error.Write($stderr.Result);
+    $exitCode=$child.ExitCode
+  } finally { $child.Dispose() };
+  exit $exitCode
+}`.replace(/\r?\n\s*/g, ' ')
+    : `${quote(process.execPath)} ${quote(path.join(project, 'hook.mjs'))}`
   const hooks = { runtime: 'node', hooks: { 'get-hooks': `${command} config` }, config: { 'sdk-managed-connection-enabled': true } }
   await fs.writeFile(path.join(project, '.slack', 'hooks.json'), JSON.stringify(hooks), { mode: 0o600, flag: 'wx' })
   const manifest = { ...SLACK_MANIFEST, display_information: { ...SLACK_MANIFEST.display_information, name },
