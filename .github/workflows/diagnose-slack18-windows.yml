@@ -52,5 +52,6 @@ jobs:
             .desktop-build/slack18-diagnosis/summary.json
             .desktop-build/slack18-diagnosis/report.json
             .desktop-build/slack18-diagnosis/window-events.tsv
+            .desktop-build/slack18-diagnosis/process-starts.tsv
           if-no-files-found: warn
           retention-days: 7

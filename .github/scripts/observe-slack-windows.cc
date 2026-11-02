@@ -4,9 +4,12 @@
 #include <fstream>
 #include <string>
 #include <vector>
+#include <set>
 
 static std::wofstream output;
 static std::wstring root;
+static std::wofstream processes;
+static std::set<DWORD> seen;
 static std::wstring Read(const wchar_t* file) {
   std::wifstream input(root + L"\\" + file);
   std::wstring line; std::getline(input, line); return line;
@@ -26,6 +29,17 @@ static std::wstring Image(DWORD pid) {
   if (process) { QueryFullProcessImageNameW(process, 0, image, &size); CloseHandle(process); }
   return image;
 }
+static void ObserveProcesses() {
+  HANDLE snapshot=CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0);
+  if(snapshot==INVALID_HANDLE_VALUE)return;
+  PROCESSENTRY32W entry{};entry.dwSize=sizeof(entry);
+  if(Process32FirstW(snapshot,&entry))do{
+    bool selected=false;
+    for(const wchar_t* name:{L"node.exe",L"powershell.exe",L"slack.exe",L"crabot-hidden-console.exe",L"WindowsTerminal.exe",L"OpenConsole.exe",L"conhost.exe"}) if(!_wcsicmp(entry.szExeFile,name))selected=true;
+    if(selected&&seen.insert(entry.th32ProcessID).second)processes<<Read(L"phase")<<L'\t'<<GetTickCount64()<<L'\t'<<entry.th32ProcessID<<L'\t'<<entry.th32ParentProcessID<<L'\t'<<entry.szExeFile<<std::endl;
+  }while(Process32NextW(snapshot,&entry));
+  CloseHandle(snapshot);
+}
 static void CALLBACK Event(HWINEVENTHOOK, DWORD event, HWND window, LONG object, LONG child, DWORD, DWORD time) {
   if (!window || object != OBJID_WINDOW || child != CHILDID_SELF || GetAncestor(window, GA_ROOT) != window) return;
   DWORD pid = 0; GetWindowThreadProcessId(window, &pid);
@@ -42,13 +56,14 @@ int wmain(int argc, wchar_t** argv) {
     WaitForSingleObject(process.hProcess, 10000); CloseHandle(process.hThread); CloseHandle(process.hProcess); return 0;
   }
   if (argc != 2) return 2;
-  root = argv[1]; output.open(root + L"\\window-events.tsv");
+  root = argv[1]; output.open(root + L"\\window-events.tsv");processes.open(root+L"\\process-starts.tsv");
   HWINEVENTHOOK hook = SetWinEventHook(EVENT_OBJECT_CREATE, EVENT_OBJECT_HIDE, nullptr, Event, 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
   if (!hook) return 3;
   std::ofstream(root + L"\\observer-ready").put('1');
-  SetTimer(nullptr, 1, 50, nullptr);
+  SetTimer(nullptr, 1, 20, nullptr);
   MSG message{};
   while (GetMessageW(&message, nullptr, 0, 0) > 0) {
+    if(message.message==WM_TIMER)ObserveProcesses();
     if (GetFileAttributesW((root + L"\\observer-stop").c_str()) != INVALID_FILE_ATTRIBUTES) break;
     TranslateMessage(&message); DispatchMessageW(&message);
   }

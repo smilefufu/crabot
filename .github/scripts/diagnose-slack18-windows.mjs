@@ -61,7 +61,7 @@ try {
   }
   // Paired diagnostic experiment only: replace generated fixture hooks, never product sources.
   const literal = text => "'" + text.replaceAll("'", "''") + "'"
-  const noWindow = (file, mode) => `$s=New-Object System.Diagnostics.ProcessStartInfo;$s.FileName=${literal(process.execPath)};$s.Arguments=${literal('"' + file + '" ' + mode)};$s.UseShellExecute=$false;$s.CreateNoWindow=$true;$s.RedirectStandardOutput=$true;$s.RedirectStandardError=$true;$p=[System.Diagnostics.Process]::Start($s);$o=$p.StandardOutput.ReadToEndAsync();$e=$p.StandardError.ReadToEndAsync();$p.WaitForExit();[Console]::Out.Write($o.Result);[Console]::Error.Write($e.Result);exit $p.ExitCode`
+  const noWindow = (file, mode) => `& { $s=New-Object System.Diagnostics.ProcessStartInfo;$s.FileName=${literal(process.execPath)};$s.Arguments=${literal('"' + file + '" ' + mode)};$s.UseShellExecute=$false;$s.CreateNoWindow=$true;$s.RedirectStandardOutput=$true;$s.RedirectStandardError=$true;$p=[System.Diagnostics.Process]::Start($s);$o=$p.StandardOutput.ReadToEndAsync();$e=$p.StandardError.ReadToEndAsync();$p.WaitForExit();[Console]::Out.Write($o.Result);[Console]::Error.Write($e.Result);exit $p.ExitCode }`
   const wrappedConfig = path.join(project, 'diagnostic-get-hooks.cjs')
   await fs.writeFile(wrappedConfig, 'console.log(' + JSON.stringify(JSON.stringify({runtime:'node',hooks:{'get-manifest':noWindow(path.join(project,'hook.mjs'),'manifest')},config:{'sdk-managed-connection-enabled':true}})) + ')')
   await fs.writeFile(path.join(project,'.slack/hooks.json'),JSON.stringify({runtime:'node',hooks:{'get-hooks':noWindow(wrappedConfig,'')},config:{'sdk-managed-connection-enabled':true}}))
