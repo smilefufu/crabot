@@ -23,9 +23,9 @@ async function command(file, args, options = {}) { return (await exec(file,args,
 const cli = (...args) => command(core + '/.product-runtime/node/bin/node',[core + '/cli.mjs',...args],{env,timeout:90000})
 async function install(version) {
   const file = path.join(base,'deb-output','crabot-research-' + version + '.deb')
-  const output = await command('/usr/bin/sudo',['-n','/usr/bin/dpkg','-i',file])
+  const output = await command('/usr/bin/sudo',['-n','/usr/bin/apt-get','install','-y',file])
   const actual = (await command('/usr/bin/dpkg-query',['-W','-f=${Version}','crabot-research'])).trim()
-  assert.equal(actual, version)
+  assert.equal(actual, version.replace('-', '~'))
   report.checks.push({name:'standard_dpkg_install_' + version,version:actual,bytes:(await fs.stat(file)).size,output})
 }
 async function launch(label) {

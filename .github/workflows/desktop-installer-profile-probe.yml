@@ -23,7 +23,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libgtk-3-0t64 libnss3 libxss1 libasound2t64 libgbm1 xvfb xauth dbus-x11
+          sudo apt-get install -y --no-install-recommends libgtk-3-0t64 libnss3 libxss1 libasound2t64 libgbm1 xvfb xauth dbus-x11 zstd
           mkdir -p .desktop-build/original .desktop-build/appimage-research/tools
           sha256sum .desktop-build/ubuntu-native-candidate.tar.gz > .desktop-build/appimage-research/source-archive.sha256
           tar -xzf .desktop-build/ubuntu-native-candidate.tar.gz -C .desktop-build/original
@@ -32,7 +32,13 @@ jobs:
         run: |
           node .github/research-appimage/package.mjs --layout-only
           node .github/research-deb/package.mjs
-      - name: Actual dpkg initial install, GUI crash, reopen, overwrite upgrade and removal
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-research-packages
+          path: .desktop-build/appimage-research/deb-output/*.deb
+          compression-level: 0
+          retention-days: 1
+      - name: Actual apt initial install, GUI crash, reopen, overwrite upgrade and removal
         timeout-minutes: 15
         run: |
           ulimit -c 0
