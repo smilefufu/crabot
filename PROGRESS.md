@@ -1,5 +1,10 @@
 # Crabot 项目进度
 
+### Ubuntu 标准 DEB：实施与原生验收中，未交付
+
+- 按逐项确认改用标准 DEB、系统固定程序目录和包管理器覆盖；新 GUI 数据默认遵循 XDG，首启可改，已有绑定不丢。正式协议和短 Spec 已更新；Windows、Mac、独立 CLI/system 不在本轮改动范围。
+- 已接入外部数据定位、正常主窗口准备/重试、明确确认旧数据导入、固定 CLI/菜单及 Debian 配置文件保留机制。首轮本地回归通过，完整同源码 DEB 和 Ubuntu 原生安装、运行中拒绝覆盖、重开、停止后重装与卸载留数据仍在验证；Ubuntu26/GNOME、旧程序清理询问及历史入口收尾未完成，不计已解决。不发正式版，不自行合并 PR。
+
 ### Slack 频道远端历史：实现完成，PR 验证中
 
 - 依据已确认 [Spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-11-02-slack-remote-history-design.md)，群 get_history 查询平台主聊天，包含入群前及未 @Bot 的消息；after/before 在 Slack Channel 内转为 start/end。查询不回填缓存或重新执行旧消息，DM／单条详情仍为缓存，完整 thread 不在本次范围内。
