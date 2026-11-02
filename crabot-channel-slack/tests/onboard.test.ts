@@ -72,23 +72,25 @@ describe('local Slack onboarding contract', () => {
     await onboarder.dispose()
   })
 
-  it('waits for an in-flight begin to release its resources during dispose', async () => {
-    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-slack-begin-test-')); roots.push(dataDir)
-    let started!: () => void
-    const preparing = new Promise<void>(resolve => { started = resolve })
-    const launch = vi.fn()
-    const onboarder = new SlackOnboarder({ dataDir, startCli: launch, ensureCli: async (_dir, signal) => {
-      started()
-      await new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Error('fixture cancelled')), { once: true }))
-      return 'never-executed'
-    } })
-    const begin = onboarder.begin()
-    void begin.catch(() => {})
-    await preparing
-    await onboarder.dispose()
-    await expect(begin).rejects.toThrow('准备失败')
-    expect(launch).not.toHaveBeenCalled()
-  })
+  it('waits for in-flight begins and concurrent cancellation cleanup during dispose', async () => {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-slack-begin-test-')); roots.push(dataDir)
+      let started!: () => void
+      const preparing = new Promise<void>(resolve => { started = resolve })
+      const launch = vi.fn()
+      const onboarder = new SlackOnboarder({ dataDir, startCli: launch, ensureCli: async (_dir, signal) => {
+        started()
+        await new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Error('fixture cancelled')), { once: true }))
+        return 'never-executed'
+      } })
+      const begin = onboarder.begin()
+      void begin.catch(() => {})
+      await preparing
+      await onboarder.dispose()
+      await expect(begin).rejects.toThrow('准备失败')
+      expect(launch).not.toHaveBeenCalled()
+    }
+  }, 15000)
 
   it('starts a fresh App after failed verification without retaining or reusing creation intent', async () => {
     const { onboarder, verify, dataDir, commands, preexistingApps } = await setup()

@@ -226,7 +226,7 @@ export class SlackOnboarder implements Onboarder {
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error }
   }
   private async cleanSession(root: string) {
-    await fs.rm(root, { recursive: true, force: true })
+    await fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
   }
   private async fail(session: Session, cause?: unknown): Promise<void> {
     session.ticket = undefined
