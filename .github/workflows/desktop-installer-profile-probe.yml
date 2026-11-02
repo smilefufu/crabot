@@ -58,7 +58,7 @@ jobs:
           github-token: ${{ github.token }}
           run-id: ${{ inputs.source_run }}
           name: ${{ inputs.artifact_name }}
-          path: .desktop-build/deb
+          path: .desktop-build
       - name: Native system display and ordinary package dependencies
         run: |
           sudo apt-get update
@@ -71,14 +71,14 @@ jobs:
           pnpm --dir crabot-desktop install --frozen-lockfile
           pnpm --dir crabot-desktop run build
           ulimit -c 0
-          dbus-run-session -- xvfb-run -a node .github/scripts/verify-ubuntu-deb.mjs .desktop-build/deb/distribution
+          dbus-run-session -- xvfb-run -a node .github/scripts/verify-ubuntu-deb.mjs .desktop-build/deb-upgrade/distribution --baseline=.desktop-build/deb/distribution
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: ubuntu-deb-acceptance-${{ matrix.os }}-${{ github.run_id }}
           path: |
-            .desktop-build/deb/acceptance.json
-            .desktop-build/deb/acceptance-*.log
+            .desktop-build/deb-upgrade/acceptance.json
+            .desktop-build/deb-upgrade/acceptance-*.log
             .desktop-build/development-coexistence.log
             .desktop-build/development-*.log
           if-no-files-found: warn

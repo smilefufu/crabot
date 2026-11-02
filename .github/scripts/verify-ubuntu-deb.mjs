@@ -1,6 +1,6 @@
 // Real final-package acceptance in an expendable Ubuntu GitHub VM.
 import assert from 'node:assert/strict'
-import { promises as fs } from 'node:fs'
+import { promises as fs, createReadStream } from 'node:fs'
 import path from 'node:path'
 import { spawn, execFile } from 'node:child_process'
 import { promisify } from 'node:util'
@@ -14,15 +14,26 @@ const home = path.join(base, 'test-home'), data = home + '/share/crabot/data'
 await fs.mkdir(home, { recursive: true, mode: 0o700 })
 const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: home + '/config', XDG_DATA_HOME: home + '/share', XDG_CACHE_HOME: home + '/cache' }
 for (const key of ['DATA_DIR', 'CRABOT_HOME', 'CRABOT_DEV', 'CRABOT_PORT_OFFSET', 'NODE_OPTIONS', 'NODE_PATH', 'ELECTRON_RUN_AS_NODE']) delete env[key]
-const artifact = JSON.parse(await fs.readFile(path.join(distribution, 'installers.json'), 'utf8'))
-const file = path.join(distribution, artifact.files.find(v => v.file.endsWith('.deb')).file)
-assert.equal(createHash('sha256').update(await fs.readFile(file)).digest('hex'), artifact.files.find(v => v.file.endsWith('.deb')).sha256)
+async function readArtifact(directory) {
+  const artifact = JSON.parse(await fs.readFile(path.join(directory, 'installers.json'), 'utf8'))
+  const item = artifact.files.find(v => v.file.endsWith('.deb'))
+  assert.equal(path.basename(item.file), item.file)
+  const file = path.join(directory, item.file), hash = createHash('sha256')
+  for await (const bytes of createReadStream(file)) hash.update(bytes)
+  assert.equal(hash.digest('hex'), item.sha256)
+  return { artifact, file }
+}
+const { artifact, file } = await readArtifact(distribution)
+const baselinePath = process.argv.find(value => value.startsWith('--baseline='))?.slice('--baseline='.length)
+const baseline = baselinePath ? await readArtifact(path.resolve(baselinePath)) : { artifact, file }
+if (baselinePath) assert.notEqual(baseline.artifact.version, artifact.version, 'upgrade acceptance requires two distinct GUI/Core versions')
 const report = { harness_source: process.env.GITHUB_SHA, version: artifact.version,
+  initial_version: baseline.artifact.version, upgrade_fixture: baselinePath ? 'same source, two version stamps; not a released cross-version data migration' : null,
   system: (await fs.readFile('/etc/os-release', 'utf8')).trim(), environment: 'Native GitHub VM, Xvfb; GNOME/Wayland human acceptance not represented', checks: [] }
 const children = [], pause = ms => new Promise(resolve => setTimeout(resolve, ms))
 const command = async (file, args, options = {}) => (await exec(file, args, { timeout: 180000, maxBuffer: 2000000, ...options })).stdout
 const cli = (...args) => command('/usr/bin/crabot', args, { env, timeout: 90000 })
-const install = () => command('/usr/bin/sudo', ['-n', '/usr/bin/apt-get', 'install', '--reinstall', '-y', file])
+const install = (selected = file) => command('/usr/bin/sudo', ['-n', '/usr/bin/apt-get', 'install', '--reinstall', '-y', selected])
 async function healthyModules() {
   const deadline = Date.now() + 120000
   let failure
@@ -45,7 +56,7 @@ async function healthyModules() {
 async function closeGui(gui) {
   if (gui.exitCode === null && gui.signalCode === null) { gui.kill('SIGKILL'); await Promise.race([once(gui, 'close'), pause(5000)]) }
 }
-async function launch(label, chooseDefault = false) {
+async function launch(label, chooseDefault = false, expectedVersion = artifact.version) {
   const child = spawn(entry, [], { env, stdio: ['ignore', 'pipe', 'pipe'] }); children.push(child)
   let output = '', selected = !chooseDefault
   const consume = bytes => { output = (output + bytes).slice(-100000) }
@@ -62,23 +73,26 @@ async function launch(label, chooseDefault = false) {
   }
   await fs.writeFile(path.join(base, 'acceptance-' + label + '.log'), output)
   assert.ok(output.split('\n').some(line => { try { const v = JSON.parse(line); return v.component === 'desktop' && v.phase === 'ready' } catch { return false } }), label + ': ' + output.slice(-5000))
-  report.checks.push({ name: label, ready: true, modules: await healthyModules() })
+  const state = output.split('\n').map(line => { try { return JSON.parse(line) } catch { return {} } }).find(v => v.component === 'desktop' && v.phase === 'ready')
+  assert.equal(state.app_version, expectedVersion)
+  assert.equal((await cli('--version')).trim(), expectedVersion)
+  report.checks.push({ name: label, ready: true, app_version: state.app_version, cli_version: expectedVersion, modules: await healthyModules() })
   return child
 }
 try {
   const restriction = (await fs.readFile('/proc/sys/kernel/apparmor_restrict_unprivileged_userns', 'utf8')).trim()
   assert.equal(restriction, '1')
-  await install()
+  await install(baseline.file)
   const conffiles = await command('/usr/bin/dpkg-query', ['-W', '-f=${Conffiles}', 'crabot-desktop'])
   assert.match(conffiles, /\/etc\/apparmor.d\/crabot-desktop/)
   assert.equal((await fs.stat(entry)).uid, 0)
   const corePackage = JSON.parse(await fs.readFile(core + '/package.json', 'utf8'))
-  assert.equal(corePackage.version, artifact.version)
-  report.package_source = JSON.parse(await fs.readFile(core + '/core-release.json', 'utf8')).commit
+  assert.equal(corePackage.version, baseline.artifact.version)
+  report.initial_package_source = JSON.parse(await fs.readFile(core + '/core-release.json', 'utf8')).commit
   const menu = await fs.readFile('/usr/share/applications/crabot.desktop', 'utf8')
   assert.match(menu, /Exec=.*\/opt\/Crabot\/crabot-desktop/)
   report.checks.push({ name: 'standard_install_fixed_program_and_conffile', menu, conffiles })
-  let gui = await launch('first_default_location', true)
+  let gui = await launch('first_default_location', true, baseline.artifact.version)
   const sandbox = JSON.parse(await command('/usr/bin/sudo', ['-n', '/usr/bin/python3', path.resolve('.github/scripts/ubuntu-renderer-sandbox.py'), String(gui.pid), String(process.getuid())]))
   report.checks.push({ name: 'actual_gui_renderer_kernel_sandbox', ...sandbox })
   const binding = JSON.parse(await fs.readFile(home + '/config/crabot/desktop-binding.json', 'utf8'))
@@ -101,17 +115,20 @@ try {
   assert.ok(refused); assert.equal(gui.exitCode, null); assert.equal(JSON.parse(await cli('status', '--json')).running, true)
   const before = JSON.parse(await fs.readFile(data + '/instance-runtime.json', 'utf8'))
   const secret = randomBytes(32); await fs.writeFile(data + '/acceptance-sentinel', secret, { mode: 0o600 })
+  const credentials = await fs.readFile(data + '/admin/credentials.json')
   await closeGui(gui); await pause(1500)
   assert.equal(JSON.parse(await cli('status', '--json')).running, true)
   assert.equal(JSON.parse(await fs.readFile(data + '/instance-runtime.json', 'utf8')).mm.pid, before.mm.pid)
-  gui = await launch('reopen_same_data_and_core')
+  gui = await launch('reopen_same_data_and_core', false, baseline.artifact.version)
   await cli('stop'); assert.equal(JSON.parse(await cli('status', '--json')).running, false); await closeGui(gui)
   const profile = '/etc/apparmor.d/crabot-desktop'
   await command('/usr/bin/sudo', ['-n', '/bin/sh', '-c', 'echo "# administrator-preserved-acceptance" >> /etc/apparmor.d/crabot-desktop'])
   await install()
   assert.match(await fs.readFile(profile, 'utf8'), /administrator-preserved-acceptance/)
   gui = await launch('stopped_fixed_overwrite_preserves_binding')
+  report.package_source = JSON.parse(await fs.readFile(core + '/core-release.json', 'utf8')).commit
   assert.deepEqual(await fs.readFile(data + '/acceptance-sentinel'), secret)
+  assert.deepEqual(await fs.readFile(data + '/admin/credentials.json'), credentials)
   assert.deepEqual(JSON.parse(await fs.readFile(home + '/config/crabot/desktop-binding.json', 'utf8')), binding)
   await cli('stop'); await closeGui(gui)
   await command('/usr/bin/sudo', ['-n', '/usr/bin/dpkg', '--remove', 'crabot-desktop'])
@@ -120,6 +137,7 @@ try {
   assert.doesNotMatch(loaded, /^crabot-desktop-(?:gui|chromium|headless) /m)
   await install(); gui = await launch('reinstall_existing_binding'); await cli('stop'); await closeGui(gui)
   assert.deepEqual(await fs.readFile(data + '/acceptance-sentinel'), secret)
+  assert.deepEqual(await fs.readFile(data + '/admin/credentials.json'), credentials)
   assert.equal((await fs.readFile('/proc/sys/kernel/apparmor_restrict_unprivileged_userns', 'utf8')).trim(), restriction)
   report.checks.push({ name: 'stop_overwrite_remove_reinstall_preserves_data_and_admin_configuration', passed: true })
 } catch (error) { report.failure = { message: error.message, code: error.code, stdout: error.stdout, stderr: error.stderr }; process.exitCode = 1 }

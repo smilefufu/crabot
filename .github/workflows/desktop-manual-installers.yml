@@ -81,6 +81,14 @@ jobs:
         run: |
           ulimit -c 0
           dbus-run-session -- xvfb-run -a node .github/scripts/verify-ubuntu-deb.mjs .desktop-build/deb/distribution
+      - name: Build and verify a second version stamp for actual fixed-path upgrade
+        run: |
+          node --input-type=module -e 'import{rm}from"node:fs/promises";for(const file of [".desktop-build/deb/core",".desktop-build/deb/gui"])await rm(file,{recursive:true,force:true})'
+          node scripts/desktop/stage-core.mjs --out=.desktop-build/deb-upgrade/core --version=0.1.0-desktop.22
+          node scripts/desktop/package-application.mjs --candidate=true --core=.desktop-build/deb-upgrade/core --out=.desktop-build/deb-upgrade/gui
+          node scripts/desktop/package-installers.mjs --candidate=true --project=.desktop-build/deb-upgrade/gui --out=.desktop-build/deb-upgrade/distribution
+          ulimit -c 0
+          dbus-run-session -- xvfb-run -a node .github/scripts/verify-ubuntu-deb.mjs .desktop-build/deb-upgrade/distribution --baseline=.desktop-build/deb/distribution
       - name: Retain candidate and actual evidence; never publish a release
         if: always()
         uses: actions/upload-artifact@v4
@@ -91,6 +99,10 @@ jobs:
             .desktop-build/deb/distribution/installers.json
             .desktop-build/deb/acceptance.json
             .desktop-build/deb/acceptance-*.log
+            .desktop-build/deb-upgrade/distribution/*candidate.deb
+            .desktop-build/deb-upgrade/distribution/installers.json
+            .desktop-build/deb-upgrade/acceptance.json
+            .desktop-build/deb-upgrade/acceptance-*.log
           if-no-files-found: warn
           compression-level: 0
           retention-days: 7
