@@ -1,19 +1,12 @@
 # Crabot 项目进度
 
-### 桌面化冻结范围：Windows18已交付可测，整套feature尚未收口
+### 桌面初版：Windows19验收通过，按用户许可合入main；暂不发版
 
-- 11月2日按用户明确要求删除 intent 全套机制：无创建意图文件、历史扫描/阻断/自动复用或替代标记。失败/取消收口自有CLI后删除整个临时会话，旧记录不参与新创建；Admin现有完成回执继续负责实例幂等和权限，模块重启后的清理确认不再要求第二份回执。已发布[短设计记录](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-11-02-slack-onboarding-remove-intent-design.md)及协议修订。旧实现9项先失败，修正后Mac Slack48项通过（5项平台跳过）、Admin鉴权/回执/认主36项通过，Slack构建通过；Windows41385037328的52项及官方hooks已通过。Review发现旧清理Promise失败后即使进程已退出仍阻断begin，已先复现再局部修正为等待结束后交既有recoverSession核实实际进程；最新Windows回归和安装包待验证。远端App自动删除规则未改，不宣称外部API原子回滚。
-
-- Windows Slack首次失败根因已原生复现：v18的PowerShell原生`& node hook.mjs`退出0却无配置stdout/无handoff；官方CLI加载出的GetManifest/Start为空，run在App创建前因缺Start拒绝。旧local manifest检查会读文件兜底，不能证明hook成功。用户报告与Windows41382634165/41382784172的v18精确源码对照一致；不是旧目录造成首次失败，也不能归因于代理/权限。
-- 局部修正95de0a0f/8ac6ae1e：内层Node显式CreateNoWindow、双管道异步读取并保留参数/退出码/原Job收口。相同原生环境修正后9项配置/假Token真实handoff/禁止manifest文件兜底检查通过；新检查同时保留v18失败基线，最后整组CI进行中。旧41373721121/41373842089的47项回归与真实handoff停止通过；新的窗口观察已禁止manifest兜底。Windows19准备构建，仅更新该修正；真实Slack远端创建尚未验收。
-- 首份3509字节诊断ZIP漏判“退出0但无结果”，已补4项定向回归及原生9项对照；无需用户再次运行它。最终41382964495确认原版空配置/无handoff/依赖文件兜底，修正后9项通过且实际hook无终端SHOW。诊断仅TEMP空配置/假Token，不操作真实App或现有onboarding。此前提出的“人工确认后解除历史拦截”方案已被用户替换为上面的彻底移除要求，未实现该额外UI。
-
-- 16版安装后仍打开14的已证实设计缺陷：程序版本及入口依赖首启全系统进程观察，失败便留在旧入口；旧直接EXE测试绕开Finish/菜单，不能证明修复。[根因与逐项授权](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/research/2026-11-01-desktop16-installation-root-causes.md)。按D1/R1–R4改为安装器一次解包、标准覆盖固定GUI/Core并更新入口，真实占用提示退出；data/workspace不动。正常主窗口承载数据准备/具体错误/重试，复制可取消、转换不可取消，普通启动不再全量哈希。
-- Windows18来源ab583685，EXE559579058字节，SHA256`d573f0a1ddaaed485f32e5990d08a001b56cd1a441b78daff6e57c1d1bb81ee2`，已代下载并读回至`Downloads/Crabot桌面验收包-20261101/Windows 11`。同EXE新装/Finish作业124909672695验证实际GUI/Core/CLI与data；14→18真实Finish及OS菜单重开41326332215、强杀旧实例后升级41327158021均通过，两条升级分别验证原身份/data/凭据、新GUI/Core及两轮启停，无新可见控制台。全部来自Windows Server CI，Win11普通账号及真实Slack业务仍待用户。
-- 完整Windows GUI 41323705172成功（81通过/10平台跳过）；补测发现原GUI恢复未完卸载误入首启加载缺失Core，4c0b6508仅纠正现有入口分支，原生41323263382的20项入口/渲染和5项受保护GUI恢复入口场景（OS登记接口隔离）通过，无新状态/清理策略。生产41323332667的构建/旧CLI副本/源码GUI共存/保留数据修复作业成功；同run独立源码一项5秒测试预算失败保留，测试预算修正后41324095618整组通过，产品时限未改。41325102840/41325105959的14基线就绪前置失败亦保留，底层原因未捕获，不伪装18产品回归或诊断修改已解决它。
-- 既有修正随包：数据复制最多8并发；Windows系统固定HTTP/HTTPS代理及实际CONNECT；Slack官方CLI私有伪终端/受控退出及隐藏父进程组件检查；实际内层脚本闪窗仍有上述缺陷。精确进程启停回归通过。75MB旧CLI样本确认到实际GUI/Core/新旧CLI核验7117ms，不等于海量小文件速度或真实Slack账号验收。
-- 本版程序常规文件1855497860字节，不含用户数据和已有14–16程序残留；首次转固定位置整体占用可更大。旧残留清理询问、完整卸载简化、Mac R3/R4、Ubuntu固定布局及其它冻结安装路径仍未完成，500MB目标未实现。详见[路径清单](https://github.com/smilefufu/crabot-docs/blob/main/guides/installation-upgrade-paths.md)、[实施证据](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-30-windows-installation-feedback-fixes.md)与[体积审计](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/research/2026-11-01-desktop-size-audit.md)。Mac仍11；本机源码服务/data、Docker、Spotlight未动，未启动本机验收App/Core。
-- 最新origin/main已包含在本分支，无待解主线冲突，产品main未推送。现有分支依赖仅整理，完整测好后再拆可review PR，不提前创建或自行merge。缺少旧Mac/Ubuntu真桌面资源按用户决定暂跳过，当前不宣称正式发布。
+- 11月2日用户反馈本版明显改善，明确许可合并推送；随后要求暂不发版。本次不创建发行标签或GitHub Release，不改本机源码部署、服务或真实数据。
+- Windows19验收包来源`4b73d69e`，产品树与分支合并提交`25e98b51`一致。完整[Windows验收41385827811](https://github.com/smilefufu/crabot/actions/runs/41385827811)通过：源码冷启动、离线包/旧CLI v2026.10.14.1数据接入、真实EXE安装与Finish启动；三项独立可选诊断作业未运行，不计通过。EXE 559578880字节，SHA256 `7db9bd813cc4fa93e5ccfd801c686ecddebed401aa1d45b339c908a64ca0720d`。Windows Server CI不代替所有Win11真实业务验收。
+- 已交付：安装器一次解包并标准覆盖固定GUI/Core及入口，数据准备移到GUI；数据复制最多8并发；Windows固定HTTP/HTTPS系统代理；精确自有进程启停。Slack内层PowerShell调用Node退出0却丢stdout/handoff的首次失败及闪窗已原生复现并修正，严格hook/窗口观察通过；真实远端Slack创建不以本地夹具代验。
+- 按用户要求删除`intent.json`全部读写、历史扫描/阻断/复用；失败/取消收口自有CLI后清理整个临时会话，现有Admin完成回执继续负责实例幂等与授权。旧清理Promise失败不再永久阻断后续begin，Windows并发清理增加有界重试。PR #229最终review批准；Windows53项和官方CLI本地hooks通过，Mac Slack48项通过/5项平台跳过、Admin鉴权/回执/认主36项通过。远端App不自动删除，不宣称外部API原子回滚。
+- 未完成范围保持可见：旧残留清理询问、完整卸载简化、Mac R3/R4、Ubuntu固定布局及其它冻结安装路径；旧Mac/Ubuntu真桌面资源按用户决定暂跳过。Mac仍为11版测试包。常规程序文件1855497860字节（不含用户数据和旧残留），500MB目标未实现。详见[安装路径清单](https://github.com/smilefufu/crabot-docs/blob/main/guides/installation-upgrade-paths.md)、[实施证据](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-30-windows-installation-feedback-fixes.md)与[体积审计](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/research/2026-11-01-desktop-size-audit.md)。
 
 ### 主控常驻职责与指南生命周期：实现完成，PR 验证中
 
