@@ -5,6 +5,7 @@ import { messageFeatures, messageText } from './event-mapper.js'
 import { ConfigStore } from './config.js'
 import { Store, paginate } from './store.js'
 import { SlackClient } from './slack-client.js'
+import { normalizeHistoryTimeRange, queryChannelHistory, type GetHistoryParams } from './history.js'
 import { displayName, type ChannelMessage, type HistoryMessage, type MessageContent, type PaginationParams,
   type Session, type SlackApi, type SlackConversation, type SlackEnvelope, type SlackResult, type SlackUser } from './types.js'
 
@@ -55,7 +56,11 @@ export class SlackChannel extends ModuleBase {
       this.store.remove(p.session_id)
       return { deleted: true }
     }))
-    this.registerMethod<{ session_id: string; time_range?: { start?: string; end?: string }; keyword?: string; limit?: number; pagination?: PaginationParams }, unknown>('get_history', p => paginate(this.store.history(p.session_id, this.settings.value.cache, p.time_range, p.keyword), p.pagination, p.limit))
+    this.registerMethod<GetHistoryParams, unknown>('get_history', p => {
+      const session = this.store.session(p.session_id)
+      if (session.type === 'group') return queryChannelHistory(this.api, session.platform_session_id, this.identity.user_id, p)
+      return paginate(this.store.history(p.session_id, this.settings.value.cache, normalizeHistoryTimeRange(p.time_range), p.keyword), p.pagination, p.limit)
+    })
     this.registerMethod<{ session_id: string; platform_message_id: string }, unknown>('get_message', p => {
       this.store.session(p.session_id)
       const message = this.store.messages(p.session_id, this.settings.value.cache).find(m => m.platform_message_id === p.platform_message_id)
