@@ -272,6 +272,7 @@ async function boot() {
     if (!claimInstance()) return
     await app.whenReady()
     const { prepareUbuntuAppData } = await import('./ubuntu-first-launch.js')
+    let profileRoot: string | undefined
     while (true) {
       preparingData = true
       preparationAbort = new AbortController()
@@ -280,9 +281,13 @@ async function boot() {
           signal: preparationAbort.signal,
           load: name => ['desktop-data-import.mjs', 'unix-legacy-cli.mjs'].includes(name) ? loadCore('scripts/lib/' + name) : import(new URL('./bootstrap/scripts/lib/' + name, import.meta.url).href),
           onDataSelected: async directory => {
-            if (window) return
+            if (window && profileRoot === directory) return
+            startupPage?.close(); startupPage = undefined
+            window?.destroy(); window = undefined
             configureProfile(directory)
-            mainSession = session.fromPartition('persist:crabot-desktop')
+            // A partition name is cached even when app paths change after a failed choice.
+            mainSession = session.fromPath(path.join(directory, 'desktop-profile/Partitions/crabot-desktop'))
+            profileRoot = directory
             window = createMainWindow(mainSession)
             startupPage = await showStartupPage(window, app.getVersion(), () => preparationAbort?.abort())
             if (!process.argv.includes('--background')) show()

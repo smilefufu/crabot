@@ -17,7 +17,6 @@ await fs.copyFile('/bin/sleep', path.join(app, 'crabot-desktop'))
 await fs.copyFile('/bin/true', path.join(core, 'bin/crabot'))
 const files = {
   '.scrapling-runtime-test/browsers/chromium-123/chrome-linux64/chrome': {},
-  '.scrapling-runtime-test/browsers/chromium_headless_shell-123/chrome-headless-shell-linux64/headless_shell': {},
 }
 for (const file of Object.keys(files)) { await fs.mkdir(path.dirname(path.join(core, file)), { recursive: true }); await fs.copyFile('/bin/true', path.join(core, file)) }
 await fs.writeFile(path.join(core, 'product-runtime.json'), JSON.stringify({ files }))

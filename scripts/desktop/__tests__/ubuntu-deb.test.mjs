@@ -17,6 +17,13 @@ test('DEB grants user namespaces to the exact GUI and two packaged browsers, wit
   assert.throws(() => ubuntuDebPolicy({ files: {} }))
   assert.throws(() => ubuntuDebPolicy({ files: Object.fromEntries(Object.entries(files).map(([k,v]) => ['../' + k,v])) }))
 })
+
+test('the current no-shell runtime grants only the actual shared Chromium, without inventing a headless-shell path', () => {
+  const policy = ubuntuDebPolicy({ files: { '.scrapling-runtime-current/browsers/chromium-1243/chrome-linux64/chrome': {} } })
+  assert.equal((policy.match(/userns,/g) ?? []).length, 2)
+  assert.match(policy, /profile crabot-desktop-chromium /)
+  assert.doesNotMatch(policy, /headless_shell|profile crabot-desktop-headless/)
+})
 test('preinst uses Debian exact executable status and never signals or reads user data', () => {
   assert.match(ubuntuDebRunningGuard, /start-stop-daemon --status --exec/)
   assert.doesNotMatch(ubuntuDebRunningGuard, /--stop|--signal|kill|mm\.pid|DATA_DIR|current-release/)

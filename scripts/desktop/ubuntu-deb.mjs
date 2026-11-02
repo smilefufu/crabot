@@ -7,8 +7,9 @@ import { execFileSync } from 'node:child_process'
 export function ubuntuDebPolicy(runtime) {
   const browsers = Object.keys(runtime.files ?? {}).filter(name =>
     /\/browsers\/(?:chromium-\d+\/chrome-linux(?:64)?\/chrome|chromium_headless_shell-\d+\/chrome-headless-shell-linux(?:64)?\/headless_shell)$/.test(name))
-  if (browsers.length !== 2 || browsers.some(name => !/^[a-zA-Z0-9_.\/-]+$/.test(name) || name.split('/').includes('..'))) {
-    throw new Error('Expected the two exact bundled Chromium executables')
+  if (browsers.filter(name => !name.includes('chromium_headless_shell-')).length !== 1 || browsers.length > 2
+    || browsers.some(name => !/^[a-zA-Z0-9_.\/-]+$/.test(name) || name.split('/').includes('..'))) {
+    throw new Error('Expected the actual shared Chromium and at most one optional headless-shell executable')
   }
   return 'abi <abi/4.0>,\ninclude <tunables/global>\n\n' + [
     ['gui', '/opt/Crabot/crabot-desktop'],
