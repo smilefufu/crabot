@@ -39,7 +39,7 @@ jobs:
           if errorlevel 1 exit /b %errorlevel%
           cl /nologo /MT /EHsc /O2 /std:c++17 .github\scripts\observe-slack-windows.cc /link User32.lib /OUT:.desktop-build\observe-slack-windows.exe
           "@ | Set-Content -Encoding ascii .desktop-build/compile-observer.cmd
-          cmd /d /c .desktop-build/compile-observer.cmd
+          cmd /d /c .desktop-build\compile-observer.cmd
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Continuous window events with visible and hidden controls
         shell: pwsh
