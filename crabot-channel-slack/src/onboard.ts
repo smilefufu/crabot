@@ -98,7 +98,7 @@ export class SlackOnboarder implements Onboarder {
     for (const entry of await fs.readdir(base, { withFileTypes: true })) {
       const old = this.sessions.get(entry.name)
       if (!entry.isDirectory() || (old && !['error', 'cancelled', 'completed'].includes(old.phase)) || !/^[0-9a-f-]{36}$/.test(entry.name)) continue
-      await old?.task
+      await old?.task?.catch(() => {}) // recoverSession below checks actual processes after any prior cleanup failure.
       await recoverSession(path.join(base, entry.name))
       await this.cleanSession(path.join(base, entry.name))
       this.sessions.delete(entry.name)

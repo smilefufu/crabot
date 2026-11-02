@@ -222,6 +222,17 @@ describe('local Slack onboarding contract', () => {
     expect((await terminal(onboarder, begin.session_id))?.type).toBe('error')
     await expect(onboarder.dispose()).rejects.toThrow('清理未确认完成')
   })
+  it('does not let a rejected old cleanup task block a new begin after no owned process remains', async () => {
+    const { onboarder, dataDir } = await setup({ stopFails: true })
+    const first = await onboarder.begin({ instance_name: 'slack-stopped' })
+    await onboarder.submit(first.session_id, { challenge_code: 'fixture' })
+    expect((await terminal(onboarder, first.session_id))?.type).toBe('error')
+    onboarder.cancel(first.session_id)
+    const second = await onboarder.begin({ instance_name: 'slack-stopped' })
+    expect(second.session_id).not.toBe(first.session_id)
+    await expect(fs.access(path.join(dataDir, 'slack-onboarding', first.session_id))).rejects.toThrow()
+    await onboarder.dispose()
+  })
   it('fixed manifest preserves scopes and messages without a competing socket', () => {
     expect(SLACK_MANIFEST.oauth_config.scopes.bot).toHaveLength(9)
     expect(SLACK_MANIFEST.settings).toMatchObject({ token_rotation_enabled: false, socket_mode_enabled: true })

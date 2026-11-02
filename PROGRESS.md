@@ -2,7 +2,7 @@
 
 ### 桌面化冻结范围：Windows18已交付可测，整套feature尚未收口
 
-- 11月2日按用户明确要求删除 intent 全套机制：无创建意图文件、历史扫描/阻断/自动复用或替代标记。失败/取消收口自有CLI后删除整个临时会话，旧记录不参与新创建；Admin现有完成回执继续负责实例幂等和权限，模块重启后的清理确认不再要求第二份回执。已发布[短设计记录](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-11-02-slack-onboarding-remove-intent-design.md)及协议修订。旧实现9项先失败，修正后Mac Slack47项通过（5项平台跳过）、Admin鉴权/回执/认主36项通过，Slack构建通过；Windows原生及含此改动的安装包待验证。远端App自动删除规则未改，不宣称外部API原子回滚。
+- 11月2日按用户明确要求删除 intent 全套机制：无创建意图文件、历史扫描/阻断/自动复用或替代标记。失败/取消收口自有CLI后删除整个临时会话，旧记录不参与新创建；Admin现有完成回执继续负责实例幂等和权限，模块重启后的清理确认不再要求第二份回执。已发布[短设计记录](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-11-02-slack-onboarding-remove-intent-design.md)及协议修订。旧实现9项先失败，修正后Mac Slack48项通过（5项平台跳过）、Admin鉴权/回执/认主36项通过，Slack构建通过；Windows41385037328的52项及官方hooks已通过。Review发现旧清理Promise失败后即使进程已退出仍阻断begin，已先复现再局部修正为等待结束后交既有recoverSession核实实际进程；最新Windows回归和安装包待验证。远端App自动删除规则未改，不宣称外部API原子回滚。
 
 - Windows Slack首次失败根因已原生复现：v18的PowerShell原生`& node hook.mjs`退出0却无配置stdout/无handoff；官方CLI加载出的GetManifest/Start为空，run在App创建前因缺Start拒绝。旧local manifest检查会读文件兜底，不能证明hook成功。用户报告与Windows41382634165/41382784172的v18精确源码对照一致；不是旧目录造成首次失败，也不能归因于代理/权限。
 - 局部修正95de0a0f/8ac6ae1e：内层Node显式CreateNoWindow、双管道异步读取并保留参数/退出码/原Job收口。相同原生环境修正后9项配置/假Token真实handoff/禁止manifest文件兜底检查通过；新检查同时保留v18失败基线，最后整组CI进行中。旧41373721121/41373842089的47项回归与真实handoff停止通过；新的窗口观察已禁止manifest兜底。Windows19准备构建，仅更新该修正；真实Slack远端创建尚未验收。
