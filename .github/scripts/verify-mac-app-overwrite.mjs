@@ -89,4 +89,5 @@ finally {
   try { if (core && node) await stop() } catch (error) { report.cleanup_error = error.message }
   await fs.mkdir('.desktop-build', { recursive: true }); await fs.writeFile('.desktop-build/mac-overwrite-report.json', JSON.stringify(report, null, 2) + '\n'); await fs.writeFile('.desktop-build/mac-overwrite.log', output)
   if (report.passed && !report.cleanup_error) await fs.rm(temporary, { recursive: true, force: true })
+  console.log('CRABOT_MAC_APP_OVERWRITE ' + JSON.stringify(report))
 }

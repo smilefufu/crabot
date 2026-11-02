@@ -155,4 +155,5 @@ jobs:
         with:
           name: mac-overwrite-${{ github.sha }}
           path: .desktop-build/mac-overwrite*
-          if-no-files-found: warn
+          include-hidden-files: true
+          if-no-files-found: error
