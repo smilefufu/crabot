@@ -1,150 +1,12 @@
-name: Desktop installer initialization probe
+name: Isolated AppImage feasibility research
 on:
   workflow_dispatch:
-    inputs:
-      legacy_version:
-        description: Published CLI version used for the real data-admission check
-        type: choice
-        options: [v2026.10.14.1, v2026.10.15.1]
-        default: v2026.10.14.1
-      linux_installation:
-        description: Verify the completed native Ubuntu installer independently
-        type: boolean
-        default: false
-      linux_probe_from_checkout:
-        description: Component regression using the checkout browser probe with the pinned original installer and Core
-        type: boolean
-        default: false
-      mac_upgrade:
-        description: Verify delivered Mac11 App overwritten by the completed Mac19 App
-        type: boolean
-        default: false
-      directory_only:
-        description: 'Run only native installation-directory regressions without a package download'
-        type: boolean
-        default: false
-      source_run:
-        type: string
-        default: '41170496475'
-      artifact_name:
-        type: string
-        default: 'crabot-win32-x64-offline-test-a34d9e253fa9ea565e29c0a34f8c2b8ed960b7a7'
-      upgrade_from14:
-        description: Verify an actual desktop.14 installation upgrades through the new EXE and GUI
-        type: boolean
-        default: false
-      upgrade_launch:
-        description: Actual candidate entry after stopping desktop.14
-        type: choice
-        options: [direct, finish, menu]
-        default: direct
-      ui_only:
-        description: 'Verify the completed EXE interface without repeating source builds or legacy acceptance'
-        type: boolean
-        default: false
 permissions:
   contents: read
   actions: read
 jobs:
-  recheck:
-    if: inputs.mac_upgrade != true && inputs.linux_installation != true
-    runs-on: windows-latest
-    timeout-minutes: 40
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22.22.3'
-      - name: Native installation directory regression
-        if: inputs.directory_only == true
-        run: |
-          node scripts/build-native.mjs
-          node .github/scripts/probe-windows-install-directory.mjs 2>&1 | tee .desktop-build/directory-regression.log
-          node --test scripts/lib/__tests__/private-file-paths.test.mjs scripts/lib/__tests__/process-identity.test.mjs
-          pnpm --dir crabot-client install --frozen-lockfile
-          pnpm --dir crabot-client run build
-          pnpm --dir crabot-desktop install --frozen-lockfile
-          node .github/scripts/probe-windows-single-layer-installer.mjs 2>&1 | tee .desktop-build/directory-extraction-regression.log
-          pnpm --dir crabot-desktop run build
-          node --test --test-concurrency=1 crabot-desktop/tests/windows-removal-entry.test.mjs crabot-desktop/tests/startup-page.test.mjs crabot-desktop/tests/startup-page-real.test.mjs crabot-desktop/tests/paired-binding.test.mjs
-          pnpm install --frozen-lockfile
-          pnpm --dir scripts/lib install --frozen-lockfile
-          node --test --test-name-pattern='publish-source-remove-public' crabot-desktop/tests/removal-frame.test.mjs
-      - name: Prepare the finite test dependencies
-        if: inputs.directory_only != true && inputs.ui_only != true
-        run: |
-          node scripts/build-native.mjs
-          pnpm --dir crabot-client install --frozen-lockfile
-          pnpm --dir crabot-client run build
-          pnpm install --frozen-lockfile
-          pnpm --dir scripts/lib install --frozen-lockfile
-          pnpm --dir crabot-desktop install --frozen-lockfile
-          pnpm --dir crabot-desktop run build
-      - uses: actions/download-artifact@v4
-        if: inputs.directory_only != true
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          run-id: ${{ inputs.source_run }}
-          name: ${{ inputs.artifact_name }}
-          path: .desktop-build/completed-exe
-      - uses: actions/download-artifact@v4
-        if: inputs.upgrade_from14 == true
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          run-id: '41277405704'
-          name: crabot-win32-x64-offline-test-aed22d452babae4048e16f2da02df51a2cd5c42b
-          path: .desktop-build/desktop14-baseline
-      - name: Place the original completed EXE without rebuilding it
-        if: inputs.directory_only != true
-        run: |
-          mkdir -p .desktop-build/manual/installer/distribution
-          find .desktop-build/completed-exe -type f \( -name '*offline-candidate.exe' -o -name SHA256SUMS \) -exec cp {} .desktop-build/manual/installer/distribution/ \;
-      - name: Exact EXE extraction with the original and sufficient output budgets
-        if: inputs.directory_only != true && inputs.ui_only != true
-        run: node .github/scripts/recheck-windows-single-layer.mjs 2>&1 | tee .desktop-build/exact-exe-recheck.log
-      - name: Published CLI data confirmation in the unchanged packaged GUI
-        if: inputs.directory_only != true && inputs.ui_only != true
-        env:
-          CRABOT_CI_LEGACY_VERSION: ${{ inputs.legacy_version }}
-        run: node .github/scripts/verify-legacy-user-takeover.mjs .desktop-build/manual/paired .desktop-build/manual/installer "$CRABOT_CI_LEGACY_VERSION" 2>&1 | tee .desktop-build/exact-exe-legacy-gui.log
-      - name: Real EXE Finish opens the GUI with 1.5 GiB free TEMP
-        env:
-          CRABOT_UPGRADE_FROM14: ${{ inputs.upgrade_from14 }}
-          CRABOT_UPGRADE_LAUNCH: ${{ inputs.upgrade_launch }}
-        if: ${{ !cancelled() && inputs.directory_only != true && inputs.ui_only == true }}
-        shell: pwsh
-        run: |
-          $files = @(Get-ChildItem .desktop-build/manual/installer/distribution -Filter '*offline-candidate.exe')
-          if ($files.Count -ne 1) { throw 'Expected exactly one unchanged completed EXE' }
-          $expected = (Get-Content .desktop-build/manual/installer/distribution/SHA256SUMS -Raw).Trim().Split(' ')[0]
-          if ((Get-FileHash $files[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) { throw 'Completed EXE SHA mismatch' }
-          if ($env:CRABOT_UPGRADE_FROM14 -eq 'true') {
-            $old = @(Get-ChildItem .desktop-build/desktop14-baseline -Recurse -Filter '*offline-candidate.exe')
-            if ($old.Count -ne 1 -or (Get-FileHash $old[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant() -ne '3c725b47a01d5c2c4211241c8c86b91c5829d60f4f5ed554ef21d1c8cf7a3d3a') { throw 'Pinned desktop.14 baseline mismatch' }
-            $version = $files[0].Name -replace '^Crabot-(.+)-win-x64-offline-candidate\.exe$', '$1'
-            & .github/scripts/smoke-windows-wrapper-capacity.ps1 -Installer $old[0].FullName -UpgradeInstaller $files[0].FullName -ExpectedVersion $version -UpgradeLaunch $env:CRABOT_UPGRADE_LAUNCH -Expected complete | Tee-Object .desktop-build/exact-exe-ui.log
-          } else {
-            & .github/scripts/smoke-windows-wrapper-capacity.ps1 -Installer $files[0].FullName -Expected complete | Tee-Object .desktop-build/exact-exe-ui.log
-          }
-      - name: Retain exact package recheck evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: exact-windows-exe-recheck-${{ github.sha }}
-          path: |
-            .desktop-build/*.log
-            .desktop-build/*.json
-          include-hidden-files: true
-          if-no-files-found: warn
-          retention-days: 7
-
-  mac-overwrite:
-    if: inputs.mac_upgrade == true
-    runs-on: macos-15
+  appimage:
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -153,97 +15,37 @@ jobs:
           node-version: '22.22.3'
       - uses: actions/download-artifact@v4
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          run-id: '41199706942'
-          name: crabot-darwin-arm64-offline-test-f87e4d4667ee6d95bd7051e91739ccabf3f1928f
-          path: .desktop-build/mac-old
-      - uses: actions/download-artifact@v4
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          run-id: ${{ inputs.source_run }}
-          name: ${{ inputs.artifact_name }}
-          path: .desktop-build/mac-new
-      - name: Replace the actual old App and reopen its original data
-        run: node .github/scripts/verify-mac-app-overwrite.mjs .desktop-build/mac-old .desktop-build/mac-new
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: mac-overwrite-${{ github.sha }}
-          path: .desktop-build/mac-overwrite*
-          include-hidden-files: true
-          if-no-files-found: error
-
-  linux-installation:
-    if: inputs.linux_installation == true
-    runs-on: ubuntu-24.04
-    timeout-minutes: 35
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22.22.3'
-      - name: Resolve exact installer source from its GitHub run
-        id: source
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SOURCE_RUN: ${{ inputs.source_run }}
-        run: |
-          [[ "$SOURCE_RUN" =~ ^[0-9]+$ ]]
-          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN" --jq '"commit=" + .head_sha' >> "$GITHUB_OUTPUT"
-      - uses: actions/download-artifact@v4
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          run-id: ${{ inputs.source_run }}
+          github-token: ${{ github.token }}
+          run-id: '41405225245'
           name: ubuntu-native-installation-candidate
           path: .desktop-build
-      - name: Prepare isolated desktop test libraries
+      - name: Prepare disposable research tools and original immutable payload
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libgtk-4-1 libjson-glib-1.0-0 libgtk-3-0t64 libnss3 libxss1 libasound2t64 libgbm1 xvfb xauth dbus-x11
-          mkdir -p .desktop-build/ubuntu-installation
-          tar -xzf .desktop-build/ubuntu-native-candidate.tar.gz -C .desktop-build/ubuntu-installation
-      - name: Use the exact corrected source probe with the original verified installer and Core
-        if: inputs.linux_probe_from_checkout == true
-        run: |
-          cp crabot-desktop/native/ubuntu/browser-probe.py .desktop-build/ubuntu-installation/ubuntu-native/browser-probe.py
-          sha256sum crabot-desktop/native/ubuntu/browser-probe.py .desktop-build/ubuntu-installation/ubuntu-native/browser-probe.py
-      - name: Exercise actual user backend, test authorization, GUI and MCP sandbox
-        env:
-          CRABOT_CI_INSTALLER_COMMIT: ${{ steps.source.outputs.commit }}
-        timeout-minutes: 14
-        run: |
-          ulimit -c 0
-          dbus-run-session -- xvfb-run -a node .github/scripts/accept-ubuntu-offline-installer.mjs .desktop-build/ubuntu-installation
-      - name: Both published CLI data sources with the corrected original installer probe
-        if: inputs.linux_probe_from_checkout == true
-        timeout-minutes: 20
-        run: |
-          pnpm install --frozen-lockfile --ignore-scripts
-          mkdir -p crabot-native/build/Release
-          cp .desktop-build/ubuntu-installation/ubuntu-native/offline/core/crabot-native/build/Release/crabot-native.node crabot-native/build/Release/
-          mkdir -p '.desktop-build/安装 候选/paired' '.desktop-build/安装 候选/installer'
-          cp -a .desktop-build/ubuntu-installation/ubuntu-native '.desktop-build/安装 候选/installer/ubuntu-native'
-          cp -a .desktop-build/ubuntu-installation/ubuntu-native/offline '.desktop-build/安装 候选/paired/offline'
-          dbus-run-session -- xvfb-run -a node .github/scripts/verify-legacy-user-takeover.mjs '.desktop-build/安装 候选/paired' '.desktop-build/安装 候选/installer'
-      - name: Read-only original browser probe versus shared Node diagnosis
-        if: failure() && inputs.linux_probe_from_checkout != true
-        run: node .github/scripts/diagnose-ubuntu-browser-node.mjs .desktop-build/ubuntu-installation
-      - name: Counterfactual full installation with only shared browser Node configured
-        if: failure() && inputs.linux_probe_from_checkout != true
-        timeout-minutes: 14
-        env:
-          CRABOT_CI_INSTALLER_COMMIT: ${{ steps.source.outputs.commit }}
-          CRABOT_CI_TEST_SHARED_BROWSER_NODE: '1'
+          sudo apt-get install -y --no-install-recommends squashfs-tools libgtk-3-0t64 libnss3 libxss1 libasound2t64 libgbm1 xvfb xauth dbus-x11
+          mkdir -p .desktop-build/original .desktop-build/appimage-research/tools
+          sha256sum .desktop-build/ubuntu-native-candidate.tar.gz > .desktop-build/appimage-research/source-archive.sha256
+          tar -xzf .desktop-build/ubuntu-native-candidate.tar.gz -C .desktop-build/original
+          npm install --prefix .desktop-build/appimage-research/tools --ignore-scripts --no-audit --no-fund @electron/asar@3.4.1
+          gh api repos/AppImage/type2-runtime/releases/assets/657374641 -H 'Accept: application/octet-stream' > .desktop-build/appimage-research/runtime-x86_64
+          echo '617aa77314d57c8b8e4fae9c3f0b35af7b30d5529cb69e98f64f92510ed98a46  .desktop-build/appimage-research/runtime-x86_64' | sha256sum -c -
+      - name: Build a test-only AppImage without changing product startup code
+        run: node .github/research-appimage/package.mjs
+      - name: Actual AppImage launch, sandbox, browser, Core lifetime and relocation
+        timeout-minutes: 15
         run: |
           ulimit -c 0
-          dbus-run-session -- xvfb-run -a node .github/scripts/accept-ubuntu-offline-installer.mjs .desktop-build/ubuntu-installation
+          dbus-run-session -- xvfb-run -a node .github/research-appimage/verify.mjs
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: ubuntu-installation-report
+          name: appimage-feasibility-report
           path: |
-            .desktop-build/ubuntu-installation-report.json
-            .desktop-build/legacy-user-*
-          include-hidden-files: true
+            .desktop-build/appimage-research/report.json
+            .desktop-build/appimage-research/packaging.json
+            .desktop-build/appimage-research/source-archive.sha256
           if-no-files-found: warn
+          retention-days: 3
