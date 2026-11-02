@@ -48,7 +48,7 @@ spec = importlib.util.spec_from_file_location('crabot_research_scrapling', runti
 server = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(server)
 managed = server.paired_linux_core()
-if managed:
+if managed or '--managed-guard' in sys.argv:
     server.enable_managed_browser_sandbox()
 def observed(method):
     @functools.wraps(method)

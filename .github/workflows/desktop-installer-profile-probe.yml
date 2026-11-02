@@ -1,11 +1,11 @@
-name: Isolated AppImage feasibility research
+name: Isolated standard DEB feasibility research
 on:
   workflow_dispatch:
 permissions:
   contents: read
   actions: read
 jobs:
-  appimage:
+  deb:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -19,33 +19,30 @@ jobs:
           run-id: '41405225245'
           name: ubuntu-native-installation-candidate
           path: .desktop-build
-      - name: Prepare disposable research tools and original immutable payload
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Prepare disposable test tools and pinned source payload
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends squashfs-tools libgtk-3-0t64 libnss3 libxss1 libasound2t64 libgbm1 xvfb xauth dbus-x11
+          sudo apt-get install -y --no-install-recommends libgtk-3-0t64 libnss3 libxss1 libasound2t64 libgbm1 xvfb xauth dbus-x11
           mkdir -p .desktop-build/original .desktop-build/appimage-research/tools
           sha256sum .desktop-build/ubuntu-native-candidate.tar.gz > .desktop-build/appimage-research/source-archive.sha256
           tar -xzf .desktop-build/ubuntu-native-candidate.tar.gz -C .desktop-build/original
-          npm install --prefix .desktop-build/appimage-research/tools --ignore-scripts --no-audit --no-fund @electron/asar@3.4.1
-          gh api repos/AppImage/type2-runtime/releases/assets/657374641 -H 'Accept: application/octet-stream' > .desktop-build/appimage-research/runtime-x86_64
-          echo '617aa77314d57c8b8e4fae9c3f0b35af7b30d5529cb69e98f64f92510ed98a46  .desktop-build/appimage-research/runtime-x86_64' | sha256sum -c -
-      - name: Build a test-only AppImage without changing product startup code
-        run: node .github/research-appimage/package.mjs
-      - name: Actual AppImage launch, sandbox, browser, Core lifetime and relocation
+          npm install --prefix .desktop-build/appimage-research/tools --ignore-scripts --no-audit --no-fund @electron/asar@3.4.1 electron-builder@26.15.3
+      - name: Build two ordinary electron-builder DEB test packages
+        run: |
+          node .github/research-appimage/package.mjs --layout-only
+          node .github/research-deb/package.mjs
+      - name: Actual dpkg initial install, GUI crash, reopen, overwrite upgrade and removal
         timeout-minutes: 15
         run: |
           ulimit -c 0
-          dbus-run-session -- xvfb-run -a node .github/research-appimage/verify.mjs
+          dbus-run-session -- xvfb-run -a node .github/research-deb/verify.mjs
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: appimage-feasibility-report
+          name: deb-feasibility-report
           path: |
-            .desktop-build/appimage-research/report.json
-            .desktop-build/appimage-research/packaging.json
+            .desktop-build/appimage-research/deb-report.json
             .desktop-build/appimage-research/source-archive.sha256
           if-no-files-found: warn
           retention-days: 3

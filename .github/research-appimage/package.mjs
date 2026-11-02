@@ -29,6 +29,7 @@ await fs.cp(path.join(payload, 'core'), path.join(appdir, 'resources/core'), { r
 await fs.writeFile(path.join(appdir, 'resources/core/desktop-host.json'), JSON.stringify({ schema_version: 1, platform: 'linux', arch: 'x64' }) + '\n')
 await fs.writeFile(path.join(appdir, 'crabot.desktop'), '[Desktop Entry]\nType=Application\nName=Crabot Research\nExec=crabot-desktop\nIcon=crabot\nCategories=Utility;\n')
 await fs.copyFile('crabot-desktop/assets/app.png', path.join(appdir, 'crabot.png'))
+if (process.argv.includes('--layout-only')) process.exit(0)
 await fs.writeFile(path.join(appdir, 'AppRun'), `#!/bin/sh
 set -eu
 printf 'CRABOT_RESEARCH_MOUNT=%s\\n' "$APPDIR"
