@@ -117,6 +117,8 @@ jobs:
       - name: Install dependencies (with devDeps for build)
         shell: bash
         run: |
+          pnpm --dir crabot-client install --frozen-lockfile
+          pnpm --dir crabot-client run build
           pnpm install
 
           # crabot-shared 必须先 install + build，其他模块通过 file: 引用它。
@@ -175,7 +177,8 @@ jobs:
 
           # build 已完成，dist 产物保留。重装去 devDeps（typescript / vitest / tsx 等）。
           # native 模块 (better-sqlite3) 用 prebuild 二进制，不需现场编译。
-          # crabot-shared 必须先 prune：其他模块 file: 引用，install 时基于其当时状态做快照。
+          # file: 消费者在 install 时做快照，先准备本地 SDK 和 Shared。
+          (cd crabot-client && rm -rf node_modules && pnpm install "${prod_flags[@]}")
           (cd crabot-shared && rm -rf node_modules && pnpm install "${prod_flags[@]}")
 
           # 其他模块和 root 并行 prune
@@ -246,7 +249,7 @@ jobs:
                 scripts "/tmp/${DIRNAME}/"
 
           # TS 模块：src/ 是源码，构建产物在 dist/，可排除 src/
-          for mod in crabot-shared crabot-core crabot-agent \
+          for mod in crabot-client crabot-shared crabot-core crabot-agent \
                      crabot-channel-telegram crabot-channel-wechat crabot-channel-feishu crabot-channel-dingtalk crabot-channel-slack crabot-channel-voice \
                      crabot-mcp-tools; do
             if [ -d "$mod" ]; then
@@ -329,7 +332,7 @@ jobs:
             Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 
           # TS 模块：src/ 是源码，构建产物在 dist/，可排除 src/
-          $tsModules = @('crabot-shared','crabot-admin','crabot-core','crabot-agent',
+          $tsModules = @('crabot-client','crabot-shared','crabot-admin','crabot-core','crabot-agent',
                          'crabot-channel-telegram','crabot-channel-wechat','crabot-channel-feishu','crabot-channel-dingtalk','crabot-channel-slack','crabot-channel-voice',
                          'crabot-mcp-tools')
           foreach ($mod in $tsModules) {

@@ -45,6 +45,9 @@ const skillPayload = [
 const required = [
   'cli.mjs',
   'package.json',
+  'crabot-client/package.json',
+  'crabot-client/dist/index.js',
+  'crabot-client/dist/contracts/index.js',
   'install.sh',
   'LICENSE',
   'scripts/start.mjs',

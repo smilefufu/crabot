@@ -108,12 +108,12 @@ function projectLabels(objectives: WorkboardObjective[]): Map<string, string> {
   const parts = new Map(roots.map((root) => [root, root.replace(/[\\/]+$/, '').split(/[\\/]/).filter(Boolean)]))
   const leafCounts = new Map<string, number>()
   for (const [root, segments] of parts) {
-    const leaf = segments.at(-1) || root
+    const leaf = segments.slice(-1)[0] || root
     leafCounts.set(leaf, (leafCounts.get(leaf) ?? 0) + 1)
   }
   return new Map(roots.map((root) => {
     const segments = parts.get(root) ?? []
-    const leaf = segments.at(-1) || root
+    const leaf = segments.slice(-1)[0] || root
     return [root, leafCounts.get(leaf) === 1 ? leaf : segments.slice(-2).join('/') || root]
   }))
 }

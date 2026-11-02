@@ -126,6 +126,7 @@ test('real OS handshake issues a short human session; Admin restart and generati
   const [ready] = await once(f.mm, 'message'); assert.equal(ready.type, 'ready'); f.updateServer(ready.pid)
   assert.equal(await f.validate(result.session), false)
   child.send('renew'); const [renewed] = await once(child, 'message')
+  assert.equal(renewed.session?.type, 'session', JSON.stringify({ error: renewed.error, has_session: !!renewed.session }))
   assert.equal(await f.validate(renewed.session), true)
   const file = join(f.data, 'instance-runtime.json'), previous = JSON.parse(readFileSync(file, 'utf8'))
   writeFileSync(file, JSON.stringify({ ...previous, generation: randomUUID() }))
@@ -146,11 +147,11 @@ test('same executable with an untrusted entry, reused nonce, wrong generation an
   const replay = await f.client('nonce-reuse')
   assert.equal(replay.result.first, 'session'); assert.equal(replay.result.second, 'DESKTOP_REPLAY'); replay.child.kill()
   const wrong = await f.client('wrong-generation')
-  assert.equal(wrong.result.result.code, 'DESKTOP_STALE_INSTANCE'); wrong.child.kill()
+  assert.equal(wrong.result.result?.code, 'DESKTOP_STALE_INSTANCE', JSON.stringify({ error: wrong.result.error, closed: wrong.result.closed })); wrong.child.kill()
   const oversize = await f.client('oversize')
   assert.equal(oversize.result.closed, true); oversize.child.kill()
   const valid = await f.client()
-  assert.equal(valid.result.session.type, 'session')
+  assert.equal(valid.result.session?.type, 'session', JSON.stringify({ error: valid.result.error, has_session: !!valid.result.session }))
 })
 
 test('an idle authenticated transport expires within the five-second handshake window', { timeout: 12_000 }, async t => {
@@ -173,4 +174,15 @@ test('source client verifies the actual MM standalone Node rather than its own E
   const f = await fixture(t), { result } = await f.client(undefined, true, false, true)
   assert.equal(result.session?.type, 'session', JSON.stringify(result))
   assert.equal(await f.validate(result.session), true)
+})
+
+test('Windows repeated native handshakes retain every final response', { skip: process.platform !== 'win32', timeout: 90_000 }, async t => {
+  const f = await fixture(t), { child, result } = await f.client()
+  assert.equal(result.session?.type, 'session', JSON.stringify({ error: result.error, has_session: !!result.session }))
+  for (let attempt = 1; attempt <= 20; attempt++) {
+    child.send('renew')
+    const [renewed] = await once(child, 'message')
+    assert.equal(renewed.session?.type, 'session', JSON.stringify({ attempt, error: renewed.error, has_session: !!renewed.session }))
+    assert.equal(await f.validate(renewed.session), true)
+  }
 })

@@ -75,7 +75,7 @@ export function VoiceContacts({ channelId, state, onChanged }: { channelId: stri
     {state?.unconfirmed_contacts.map(contact => <div className="voice-service-row" key={contact.platform_user_id}><span>{contact.display_name} · 旧记录尚未核验，原身份和绑定保留</span><Button disabled={busy || !state.connected || !state.foreground || !!state.pending_enrollment} onClick={() => void run(() => manage({ action: 'enroll', platform_user_id: contact.platform_user_id }))}>重新登记确认</Button></div>)}
     {contacts.map(contact => {
       const registration = state?.registrations.find(r => r.platform_user_id === contact.platform_user_id && r.status !== 'revoked')
-      const revoked = state?.registrations.filter(r => r.platform_user_id === contact.platform_user_id && r.status === 'revoked').at(-1)
+      const revoked = state?.registrations.filter(r => r.platform_user_id === contact.platform_user_id && r.status === 'revoked').slice(-1)[0]
       const friend = friends.find(f => f.id === contact.friend_id)
       return <div className="voice-service-row" key={contact.platform_user_id}><span><strong>{contact.display_name}</strong> · {contact.friend_id ? `已绑定 ${friend?.display_name ?? contact.friend_id}` : '未绑定好友（群内按陌生人）'}<br /><small>{registration?.status === 'active' ? '声纹可用' : registration?.status === 'pending' ? '等待手机现场登记' : revoked && !revoked.terminal_cleared ? '声纹已撤销，终端清除待完成' : '未登记声纹'}</small></span><div className="voice-actions">
         <Button disabled={busy || !state?.connected || !state.foreground || !!state.pending_enrollment} onClick={() => void run(() => manage({ action: 'enroll', platform_user_id: contact.platform_user_id }))}>{registration?.status === 'active' ? '重新录制' : '登记声纹'}</Button>
