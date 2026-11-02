@@ -30,7 +30,7 @@ for (const version of ['0.1.0-desktop.1', '0.1.0-desktop.2']) {
   const { writeCoreRelease } = await import('../../scripts/lib/core-release.mjs')
   await writeCoreRelease(core, { ...release, version })
   await fs.writeFile(path.join(project, 'package.json'), JSON.stringify({ name: 'crabot-research', version,
-    productName: 'CrabotResearch', description: 'Isolated Crabot DEB research', author: 'Crabot Team', license: 'MIT' }))
+    productName: 'CrabotResearch', description: 'Isolated Crabot DEB research', author: { name: 'Crabot Research', email: 'research@example.invalid' }, homepage: 'https://github.com/smilefufu/crabot', license: 'MIT' }))
   await build({ projectDir: project, prepackaged: app, publish: 'never', targets: Platform.LINUX.createTarget('deb', Arch.x64), config: {
     appId: 'com.crabot.research', productName: 'CrabotResearch', electronVersion: '44.9.0', npmRebuild: false, publish: null,
     directories: { app: project, output }, linux: { executableName: 'crabot-desktop', icon: path.resolve('crabot-desktop/assets/app.png'), category: 'Utility' },
