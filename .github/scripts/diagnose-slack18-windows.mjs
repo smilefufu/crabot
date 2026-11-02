@@ -45,6 +45,11 @@ try {
     return { executable }
   })
   const project = await prepareProject(path.join(root, 'data'), 'slack-on-win')
+  // Require actual GetHooks/GetManifest execution; a readable manifest.json can
+  // otherwise conceal SDK initialization failure through the CLI's fallback.
+  await fs.rename(path.join(project, 'manifest.json'), path.join(project, 'diagnostic-manifest.json'))
+  const hookFile = path.join(project, 'hook.mjs')
+  await fs.writeFile(hookFile, (await fs.readFile(hookFile, 'utf8')).replace("'./manifest.json'", "'./diagnostic-manifest.json'"))
   await privateDirectory(path.join(root, 'data/cli'))
   for (let index = 0; index < 3; index++) for (const [name, args] of [
     ['official-version', ['--version']],
