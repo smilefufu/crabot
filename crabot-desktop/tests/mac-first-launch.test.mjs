@@ -48,12 +48,12 @@ test('default first launch creates only external data and reopen uses the same d
   assert.equal(binding.readMacAppBinding({ home: f.home }).app_path, f.appPath)
   assert.deepEqual(f.selected, [selected, selected])
 })
-test('failure to present the selected profile leaves admission uncommitted and can retry the same data', mac, async t => {
+test('failure to present the selected profile preserves its existing data choice for retry', mac, async t => {
   const f = fixture(t), present = f.options.onDataSelected
   f.options.onDataSelected = async () => { throw new Error('profile unavailable') }
   await assert.rejects(exports.prepareMacAppData(f.options), /profile unavailable/)
-  assert.equal(existsSync(binding.bindingFile(f.home)), false)
-  assert.equal(existsSync(join(f.home, 'Library/Application Support/Crabot/data/desktop-managed.json')), false)
+  assert.equal(binding.readMacAppBinding({ home: f.home }).data_dir, join(f.home, 'Library/Application Support/Crabot/data'))
+  assert.equal(existsSync(join(f.home, 'Library/Application Support/Crabot/data/desktop-managed.json')), true)
   f.options.onDataSelected = present
   const selected = await exports.prepareMacAppData(f.options)
   assert.equal(selected, join(f.home, 'Library/Application Support/Crabot/data'))

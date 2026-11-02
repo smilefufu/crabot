@@ -77,10 +77,10 @@ export async function prepareMacAppData(options: {
       selected = existsSync(selected) ? management.requireExistingDataRoot(selected) : management.ensurePrivateDataRoot(selected)
     }
   }
-  await options.onDataSelected?.(selected)
   if (legacy) {
     if (!options.adoptLegacy) throw new Error('已有数据接入入口未准备完成。')
     binding.writeMacAppBinding({ appPath, dataDir: selected, home })
+    await options.onDataSelected?.(selected)
     await options.adoptLegacy(legacy.installation.installRoot, selected)
     return selected
   }
@@ -92,6 +92,7 @@ export async function prepareMacAppData(options: {
     if (current.state === 'legacy' || current.record && current.record.install_root !== realpathSync(coreRoot)) throw Object.assign(new Error('所选数据仍属于另一部署，请先用原命令停止并选择独立数据位置。'), { code: 'CRABOT_DESKTOP_TAKEOVER_REQUIRED' })
     management.initializeDesktopManagement(selected)
     binding.writeMacAppBinding({ appPath, dataDir: selected, home })
+    await options.onDataSelected?.(selected)
   } finally { releaseCliLock(lock) }
   return selected
 }
