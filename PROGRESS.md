@@ -1,10 +1,10 @@
 # Crabot 项目进度
 
-### Ubuntu AppImage：可行性验证完成，未切换正式方案
+### Ubuntu 包格式调查：推荐标准 DEB，正式方案尚未切换
 
-- 用户倾向AppImage，要求先验证GUI、内置浏览器、后台Core、移动/替换与数据保留。[隔离实测41434615154](https://github.com/smilefufu/crabot/actions/runs/41434615154)复用已核验Linux载荷`b4cc1a76`及固定摘要的官方type2 runtime；只调整实验包布局，不修改产品源码、main、发行或真实服务。相关后台启动、身份判断、Scrapling代码已与当前修正分支逐文件比对一致。
-- Ubuntu24默认限制下直接运行被沙箱拒绝；外层AppImage确切文件许可可继承到GUI/Core，随后GUI启动、认证、内置CLI同实例以及GUI渲染器内核沙箱通过。显式沙箱Chromium抓取通过；原单体布局Scrapling抓取虽成功，但其受管沙箱守卫未启用，实际renderer缺少seccomp及独立user namespace，不能判通过。
-- 已复现：GUI被结束后MM仍存活、health仍返回200，但AppImage挂载消失、Node/CLI返回ENOENT；同文件重开、同路径同版替换、移动后重开均因临时Core路径变化报`CRABOT_DESKTOP_TAKEOVER_REQUIRED`。测试数据及模拟密钥保留。正式改造尚未获逐项许可；本次为Ubuntu24/Xvfb组件实测，不替代26.04、GNOME/Wayland、真人授权或跨版本升级验收。
+- [DEB 隔离实测 41440435484](https://github.com/smilefufu/crabot/actions/runs/41440435484) 使用 electron-builder 26.15.3 标准 DEB、apt/dpkg 默认安装/升级/卸载脚本与固定实体目录；在 Ubuntu24/Xvfb 保持 userns 限制开启时，普通GUI认证就绪、GUI强制退出后同一MM及CLI继续工作、重开、正常停止、覆盖两个版本与卸载保留外部模拟数据均通过。GUI内核沙箱通过；测试版本为相同源码分别标记 `.1/.2`，不是已发行版本之间的数据迁移验收。原始载荷固定为 run41405225245 / `b4cc1a76`。
+- 内置 Chromium 显式沙箱抓取通过；原单体布局 Scrapling 的守卫未启用，抓取成功仍缺少seccomp/独立user namespace，不能算产品通过。研究进程显式调用现有守卫后，实际 Scrapling 抓取及4个renderer沙箱均通过，证明标准DEB可承载既有能力；正式接线尚未修改。报告未覆盖Ubuntu26.04、真实GNOME/Wayland交互、默认数据位置或旧CLI导入。系统安装授权、固定程序目录及外部用户数据布局仍须逐项获许可后再改正式协议/实现。
+- [AppImage 隔离实测 41434615154](https://github.com/smilefufu/crabot/actions/runs/41434615154)：默认限制下需额外许可；GUI退出后挂载消失，MM虽活且health=200，Node/CLI已ENOENT；同文件重开、同路径同版替换、移动后均因临时路径变化报 `CRABOT_DESKTOP_TAKEOVER_REQUIRED`。需要额外挂载生命周期和稳定身份适配，按“标准流程、少加特殊逻辑”要求不推荐继续。研究脚本/样包均未合入产品、未发布，真实服务及数据未动。
 
 ### 桌面初版：Windows19验收通过，按用户许可合入main；暂不发版
 
