@@ -11,6 +11,10 @@ on:
         description: Verify the completed native Ubuntu installer independently
         type: boolean
         default: false
+      linux_probe_from_checkout:
+        description: Component regression using the checkout browser probe with the pinned original installer and Core
+        type: boolean
+        default: false
       mac_upgrade:
         description: Verify delivered Mac11 App overwritten by the completed Mac19 App
         type: boolean
@@ -172,9 +176,10 @@ jobs:
   linux-installation:
     if: inputs.linux_installation == true
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '22.22.3'
@@ -198,6 +203,11 @@ jobs:
           sudo apt-get install -y --no-install-recommends libgtk-4-1 libjson-glib-1.0-0 libgtk-3-0t64 libnss3 libxss1 libasound2t64 libgbm1 xvfb xauth dbus-x11
           mkdir -p .desktop-build/ubuntu-installation
           tar -xzf .desktop-build/ubuntu-native-candidate.tar.gz -C .desktop-build/ubuntu-installation
+      - name: Use the exact corrected source probe with the original verified installer and Core
+        if: inputs.linux_probe_from_checkout == true
+        run: |
+          cp crabot-desktop/native/ubuntu/browser-probe.py .desktop-build/ubuntu-installation/ubuntu-native/browser-probe.py
+          sha256sum crabot-desktop/native/ubuntu/browser-probe.py .desktop-build/ubuntu-installation/ubuntu-native/browser-probe.py
       - name: Exercise actual user backend, test authorization, GUI and MCP sandbox
         env:
           CRABOT_CI_INSTALLER_COMMIT: ${{ steps.source.outputs.commit }}
@@ -205,11 +215,22 @@ jobs:
         run: |
           ulimit -c 0
           dbus-run-session -- xvfb-run -a node .github/scripts/accept-ubuntu-offline-installer.mjs .desktop-build/ubuntu-installation
+      - name: Both published CLI data sources with the corrected original installer probe
+        if: inputs.linux_probe_from_checkout == true
+        timeout-minutes: 20
+        run: |
+          pnpm install --frozen-lockfile --ignore-scripts
+          mkdir -p crabot-native/build/Release
+          cp .desktop-build/ubuntu-installation/ubuntu-native/offline/core/crabot-native/build/Release/crabot-native.node crabot-native/build/Release/
+          mkdir -p '.desktop-build/安装 候选/paired' '.desktop-build/安装 候选/installer'
+          cp -a .desktop-build/ubuntu-installation/ubuntu-native '.desktop-build/安装 候选/installer/ubuntu-native'
+          cp -a .desktop-build/ubuntu-installation/ubuntu-native/offline '.desktop-build/安装 候选/paired/offline'
+          dbus-run-session -- xvfb-run -a node .github/scripts/verify-legacy-user-takeover.mjs '.desktop-build/安装 候选/paired' '.desktop-build/安装 候选/installer'
       - name: Read-only original browser probe versus shared Node diagnosis
-        if: failure()
+        if: failure() && inputs.linux_probe_from_checkout != true
         run: node .github/scripts/diagnose-ubuntu-browser-node.mjs .desktop-build/ubuntu-installation
       - name: Counterfactual full installation with only shared browser Node configured
-        if: failure()
+        if: failure() && inputs.linux_probe_from_checkout != true
         timeout-minutes: 14
         env:
           CRABOT_CI_INSTALLER_COMMIT: ${{ steps.source.outputs.commit }}
@@ -221,6 +242,8 @@ jobs:
         if: always()
         with:
           name: ubuntu-installation-report
-          path: .desktop-build/ubuntu-installation-report.json
+          path: |
+            .desktop-build/ubuntu-installation-report.json
+            .desktop-build/legacy-user-*
           include-hidden-files: true
           if-no-files-found: warn

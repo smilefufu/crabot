@@ -33,7 +33,7 @@ def download_linux_resource(url, archive, checksum, certificates):
                     output.write(chunk)
                     digest.update(chunk)
         except urllib.error.HTTPError as error:
-            if error.code not in (502, 503) or attempt or deadline - time.monotonic() <= 1:
+            if error.code not in (502, 503, 504) or attempt or deadline - time.monotonic() <= 1:
                 raise
             error.close()
             print(f"Scrapling native resource: HTTP {error.code}; retrying once", flush=True)

@@ -276,12 +276,11 @@ async function boot() {
     startupPage = await showStartupPage(window, app.getVersion(), () => preparationAbort?.abort())
     if (!process.argv.includes('--background')) show()
     const { prepareMacAppData } = await import('./mac-first-launch.js')
-    let selected: string | null
     while (true) {
       preparingData = true
       preparationAbort = new AbortController()
       try {
-        selected = await prepareMacAppData({ appPath: path.resolve(path.dirname(process.execPath), '../..'), coreRoot,
+        const selected = await prepareMacAppData({ appPath: path.resolve(path.dirname(process.execPath), '../..'), coreRoot,
           home: homedir(), dialog, version: app.getVersion(),
           load: name => import(new URL('./bootstrap/scripts/lib/' + name, import.meta.url).href),
           discoverLegacy: async root => {
@@ -301,6 +300,12 @@ async function boot() {
               progress: (message, cancellable) => { void startupPage!.update(message, '', false, cancellable).catch(() => {}) },
             })
           } })
+        if (!selected) { quitting = true; app.quit(); return }
+        dataRoot = selected
+        const binding = (await loadCore('scripts/lib/mac-app-binding.cjs')).default
+        binding.applyMacAppEnvironment(coreRoot)
+        verifyBinding = () => { binding.applyMacAppEnvironment(coreRoot) }
+        configureProfile(dataRoot)
         break
       } catch (error) {
         preparingData = false
@@ -309,12 +314,6 @@ async function boot() {
         if (!await startupPage.retry(error, path.join(app.getPath('userData'), 'bootstrap.log'))) { quitting = true; app.quit(); return }
       } finally { preparingData = false; preparationAbort = undefined }
     }
-    if (!selected) { quitting = true; app.quit(); return }
-    dataRoot = selected
-    const binding = (await loadCore('scripts/lib/mac-app-binding.cjs')).default
-    binding.applyMacAppEnvironment(coreRoot)
-    verifyBinding = () => { binding.applyMacAppEnvironment(coreRoot) }
-    configureProfile(dataRoot)
   }
   try {
     const { resolveCliDataDir } = await loadCore('scripts/lib/instance.mjs')
