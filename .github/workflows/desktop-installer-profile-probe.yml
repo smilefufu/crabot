@@ -78,6 +78,7 @@ jobs:
       - name: Independent source GUI and Core coexistence with the accepted DEB
         run: |
           UV_PYTHON=3.12 node scripts/dev.mjs build
+          node --test scripts/lib/__tests__/desktop-entry.test.mjs
           pnpm --dir crabot-desktop install --frozen-lockfile
           pnpm --dir crabot-desktop run build
           ulimit -c 0

@@ -29,7 +29,19 @@ function loadDesktopEntry(root) {
 function verifyDesktopEntry(peer, policy) {
   if (!policy || !peer || peer.owner !== identity.inspectProcess(process.pid).owner
     || !sameFile(peer.executable, policy.executable)) return false
-  const args = identity.inspectProcessArguments(peer.pid)
+  let args = identity.inspectProcessArguments(peer.pid)
+  // Linux Electron rewrites argv as one process title, with switches before the source entry.
+  if (process.platform === 'linux' && args.length === 1) {
+    const title = args[0], executable = policy.executable
+    if (title !== executable && !title.startsWith(executable + ' ')) return false
+    let switches = title.slice(executable.length)
+    if (policy.development) {
+      const suffix = ' ' + policy.entry
+      if (!switches.endsWith(suffix)) return false
+      switches = switches.slice(0, -suffix.length)
+    }
+    args = [executable, ...(policy.development ? [policy.entry] : []), ...(switches ? switches.slice(1).split(' ') : [])]
+  }
   let tail = args.slice(1)
   if (policy.development) {
     if (!tail.length || !sameFile(tail[0], policy.entry)) return false

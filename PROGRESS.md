@@ -1,10 +1,10 @@
 # Crabot 项目进度
 
-### Ubuntu 标准 DEB：安装升级通过，共存修正待单项许可
+### Ubuntu 标准 DEB：安装升级已验，共存身份兼容修正验证中
 
 - 按逐项确认改用标准 DEB、系统固定程序目录和包管理器覆盖；新 GUI 数据默认遵循 XDG，首启可改，已有绑定不丢。正式协议和短 Spec 已更新；Windows、Mac、独立 CLI/system 不在本轮改动范围。
 - 最终同源码包[41462779503](https://github.com/smilefufu/crabot/actions/runs/41462779503)重试通过，来源94e1bb45；22版DEB下载911591156字节，安装占用未据此推算。[41468648124](https://github.com/smilefufu/crabot/actions/runs/41468648124)的Ubuntu24/26初装、已发布CLI14/15程序及合成数据经普通GUI接入、21→22固定目录覆盖三个独立步骤均通过；GUI/CLI/Core版本、原数据/密码/用户依赖/workspace文件、原用户CLI入口和管理员配置保持，真实GUI/MCP浏览器内核沙箱、运行中拒绝覆盖且不停止、GUI强退Core继续、卸载重装均通过。21→22为同源码版本号夹具，不冒充历史GUI数据迁移。
-- 整体共存仍未通过：Ubuntu26源码GUI的OS参数被Electron合为一行，真实用户/程序正确，但现校验误拒绝源码入口，已取得确切peer/argv证据。只读诊断已补；[14行单项短稿](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-11-02-linux-electron-process-title-auth-design.md)待用户许可，尚未改身份校验。GNOME真人、旧GTK GUI/自启动入口迁移、成功后旧程序清理询问仍未完成；[PR233](https://github.com/smilefufu/crabot/pull/233)保持草稿，不发正式版、不自行合并。验证口径和包SHA见[Ubuntu验收记录](https://github.com/smilefufu/crabot-docs/blob/main/guides/desktop-ubuntu-acceptance.md)。
+- Ubuntu24/26源码GUI共存的旧失败已确认：Electron将OS参数合为一行，真实用户/程序正确，旧校验误拒绝。用户11月3日单项批准[14行短稿](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-11-02-linux-electron-process-title-auth-design.md)，现仅按完整受信程序/源码路径和原两个开关兼容这一格式；用户、PID代际复验及原握手不变。一行未知开关的漏查也已在同一边界修正。先复现2项失败，修后5项定向回归及Desktop构建通过；实际共存和包含修正的新包仍待原生验证，不把旧包通过当作本次通过。GNOME真人、旧GTK GUI/自启动入口迁移、成功后旧程序清理询问仍未完成；[PR233](https://github.com/smilefufu/crabot/pull/233)保持草稿，不发正式版、不自行合并。验证口径和包SHA见[Ubuntu验收记录](https://github.com/smilefufu/crabot-docs/blob/main/guides/desktop-ubuntu-acceptance.md)。
 
 ### Slack 频道远端历史：实现完成，PR 验证中
 

@@ -64,7 +64,7 @@ jobs:
           pnpm --dir crabot-desktop run build
       - name: Data and packaging boundaries before expensive assembly
         run: |
-          node --test scripts/lib/__tests__/ubuntu-app-binding.test.mjs scripts/lib/__tests__/unix-legacy-cli.test.mjs scripts/lib/__tests__/core-release.test.mjs scripts/desktop/__tests__/ubuntu-deb.test.mjs crabot-desktop/tests/ubuntu-first-launch.test.mjs scripts/lib/__tests__/desktop-data-import.test.mjs
+          node --test scripts/lib/__tests__/desktop-entry.test.mjs scripts/lib/__tests__/ubuntu-app-binding.test.mjs scripts/lib/__tests__/unix-legacy-cli.test.mjs scripts/lib/__tests__/core-release.test.mjs scripts/desktop/__tests__/ubuntu-deb.test.mjs crabot-desktop/tests/ubuntu-first-launch.test.mjs scripts/lib/__tests__/desktop-data-import.test.mjs
           node .github/scripts/ubuntu-electron-test-sandbox.mjs
           xvfb-run -a node --test crabot-desktop/tests/ubuntu-profile.test.mjs
       - name: Prepare locked offline runtime
