@@ -34,6 +34,6 @@ for (const version of ['0.1.0-desktop.1', '0.1.0-desktop.2']) {
   await build({ projectDir: project, prepackaged: app, publish: 'never', targets: Platform.LINUX.createTarget('deb', Arch.x64), config: {
     appId: 'com.crabot.research', productName: 'CrabotResearch', electronVersion: '44.9.0', npmRebuild: false, publish: null,
     directories: { app: project, output }, linux: { executableName: 'crabot-desktop', icon: path.resolve('crabot-desktop/assets/app.png'), category: 'Utility' },
-    deb: { packageName: 'crabot-research', appArmorProfile: policy, artifactName: 'crabot-research-' + version + '.deb' },
+    deb: { compression: 'gz', packageName: 'crabot-research', appArmorProfile: policy, artifactName: 'crabot-research-' + version + '.deb' },
   } })
 }
