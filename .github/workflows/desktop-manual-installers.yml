@@ -60,6 +60,7 @@ jobs:
           done
           pnpm --dir crabot-admin/web install --frozen-lockfile
           pnpm --dir crabot-desktop install --frozen-lockfile
+          (cd crabot-desktop && node -e "require('electron')")
           pnpm --dir crabot-desktop run build
       - name: Data and packaging boundaries before expensive assembly
         run: node --test scripts/lib/__tests__/ubuntu-app-binding.test.mjs scripts/lib/__tests__/unix-legacy-cli.test.mjs scripts/lib/__tests__/core-release.test.mjs scripts/desktop/__tests__/ubuntu-deb.test.mjs crabot-desktop/tests/ubuntu-first-launch.test.mjs scripts/lib/__tests__/desktop-data-import.test.mjs
