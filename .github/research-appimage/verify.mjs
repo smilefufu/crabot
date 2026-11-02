@@ -27,10 +27,14 @@ async function processInfo(pid) {
     const fields = text.slice(text.lastIndexOf(')') + 2).trim().split(/\s+/)
     const status = await fs.readFile(root + '/status', 'utf8')
     const args = (await fs.readFile(root + '/cmdline', 'utf8')).split('\0').filter(Boolean)
+    const tids = await fs.readdir(root + '/task')
+    const descendants = (await Promise.all(tids.map(tid => fs.readFile(root + '/task/' + tid + '/children', 'utf8').catch(error => {
+      if (error.code === 'ENOENT') return ''; throw error
+    })))).join(' ')
     return { pid, started: fields[19], owner: /^Uid:\s+(\d+)/m.exec(status)?.[1], args,
-      executable: await fs.readlink(root + '/exe'), no_new_privs: /^NoNewPrivs:\s+1$/m.test(status),
+      executable: await fs.readlink(root + '/exe').catch(error => { if (error.code === 'EACCES') return null; throw error }), no_new_privs: /^NoNewPrivs:\s+1$/m.test(status),
       seccomp: /^Seccomp:\s+2$/m.test(status), map: (await fs.readFile(root + '/uid_map', 'utf8')).trim(),
-      children: (await fs.readFile(root + '/task/' + pid + '/children', 'utf8')).trim().split(/\s+/).filter(Boolean).map(Number) }
+      children: [...new Set(descendants.trim().split(/\s+/).filter(Boolean).map(Number))] }
   } catch (error) { if (['ENOENT', 'ESRCH'].includes(error.code)) return null; throw error }
 }
 async function tree(pid, seen = new Set()) {
@@ -125,8 +129,9 @@ try {
   const record = JSON.parse(await fs.readFile(path.join(data, 'instance-runtime.json'), 'utf8'))
   for (const member of Object.values(record).filter(v => v && typeof v === 'object' && Number.isSafeInteger(v.pid))) captured.push(...await tree(member.pid))
   await fs.writeFile(path.join(data, 'appimage-research-sentinel.txt'), 'preserve this synthetic data\n')
-  const credentials = path.join(data, 'admin/credentials.json')
-  const credentialHash = await exists(credentials) ? createHash('sha256').update(await fs.readFile(credentials)).digest('hex') : null
+  const credentials = path.join(data, 'appimage-research-secret.txt')
+  await fs.writeFile(credentials, randomBytes(32), { mode: 0o600 })
+  const credentialHash = createHash('sha256').update(await fs.readFile(credentials)).digest('hex')
   report.checks.push({ name: 'bundled_cli_same_instance', running: status.running, data_dir: status.data_dir })
   const token = randomBytes(32).toString('hex'), network = [], browserProcesses = []
   let browserPid
@@ -172,15 +177,23 @@ try {
     if (current?.started === member.started && current.owner === String(process.getuid())) try { process.kill(member.pid, 'SIGTERM') } catch {}
   }
   await pause(3000)
+  async function retryImage(file, name) {
+    gui = launch(file, data, true)
+    assert.equal(await waitFor(gui, () => Boolean(gui.mount)), true)
+    await authorize(gui.mount); gui.child.stdin.write('continue\n')
+    await waitFor(gui, () => gui.phases.some(v => ['ready', 'error', 'migration_required'].includes(v.phase)), 60000)
+    report.checks.push({ name, same_version_not_upgrade: true, mount_changed: firstMount !== gui.mount,
+      ready: gui.phases.some(v => v.phase === 'ready'), phases: gui.phases, output: gui.output.slice(-8000),
+      sentinel_retained: await fs.readFile(path.join(data, 'appimage-research-sentinel.txt'), 'utf8') === 'preserve this synthetic data\n',
+      synthetic_secret_retained: createHash('sha256').update(await fs.readFile(credentials)).digest('hex') === credentialHash })
+    await terminate(gui)
+  }
+  await retryImage(image, 'same_image_ordinary_reopen')
+  await fs.rename(image, image + '.saved')
+  await fs.copyFile(image + '.saved', image)
+  await retryImage(image, 'same_path_same_version_image_replacement')
   const moved = path.join(base, 'Moved Crabot.AppImage'); await fs.rename(image, moved)
-  gui = launch(moved, data, true)
-  assert.equal(await waitFor(gui, () => Boolean(gui.mount)), true)
-  await authorize(gui.mount); gui.child.stdin.write('continue\n')
-  await waitFor(gui, () => gui.phases.some(v => ['ready', 'error', 'migration_required'].includes(v.phase)), 60000)
-  report.checks.push({ name: 'moved_appimage_same_data', same_version_not_upgrade: true, mount_changed: firstMount !== gui.mount,
-    ready: gui.phases.some(v => v.phase === 'ready'), phases: gui.phases, output: gui.output.slice(-8000),
-    sentinel_retained: await fs.readFile(path.join(data, 'appimage-research-sentinel.txt'), 'utf8') === 'preserve this synthetic data\n',
-    credentials_retained: credentialHash && createHash('sha256').update(await fs.readFile(credentials)).digest('hex') === credentialHash })
+  await retryImage(moved, 'moved_appimage_same_data')
 } catch (error) { report.failure = { message: error.message, code: error.code } }
 finally {
   if (server) { server.closeAllConnections(); await new Promise(done => server.close(done)) }
