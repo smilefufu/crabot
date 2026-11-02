@@ -2,6 +2,10 @@ name: Desktop installer initialization probe
 on:
   workflow_dispatch:
     inputs:
+      linux_installation:
+        description: Verify the completed native Ubuntu installer independently
+        type: boolean
+        default: false
       mac_upgrade:
         description: Verify delivered Mac11 App overwritten by the completed Mac19 App
         type: boolean
@@ -34,7 +38,7 @@ permissions:
   actions: read
 jobs:
   recheck:
-    if: inputs.mac_upgrade != true
+    if: inputs.mac_upgrade != true && inputs.linux_installation != true
     runs-on: windows-latest
     timeout-minutes: 40
     defaults:
@@ -157,3 +161,37 @@ jobs:
           path: .desktop-build/mac-overwrite*
           include-hidden-files: true
           if-no-files-found: error
+
+  linux-installation:
+    if: inputs.linux_installation == true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ inputs.source_run }}
+          name: ubuntu-native-installation-candidate
+          path: .desktop-build
+      - name: Prepare isolated desktop test libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgtk-4-1 libjson-glib-1.0-0 libgtk-3-0t64 libnss3 libxss1 libasound2t64 libgbm1 xvfb xauth dbus-x11
+          mkdir -p .desktop-build/ubuntu-installation
+          tar -xzf .desktop-build/ubuntu-native-candidate.tar.gz -C .desktop-build/ubuntu-installation
+      - name: Exercise actual user backend, test authorization, GUI and MCP sandbox
+        timeout-minutes: 14
+        run: |
+          ulimit -c 0
+          dbus-run-session -- xvfb-run -a node .github/scripts/accept-ubuntu-offline-installer.mjs .desktop-build/ubuntu-installation
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ubuntu-installation-report
+          path: .desktop-build/ubuntu-installation-report.json
+          include-hidden-files: true
+          if-no-files-found: warn
