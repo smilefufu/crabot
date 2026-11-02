@@ -1,0 +1,56 @@
+name: Diagnose unchanged desktop18 Slack Windows
+on:
+  workflow_dispatch:
+  push:
+    branches: ['diagnose/slack18-windows']
+permissions:
+  contents: read
+jobs:
+  observe:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Confirm product sources unchanged from delivered18
+        shell: bash
+        run: |
+          git fetch --depth=1 origin ab5836850e74216bc8a1ab8015a907a9dade5ee2
+          git diff --exit-code ab5836850e74216bc8a1ab8015a907a9dade5ee2 -- crabot-channel-slack/src crabot-native/src/hidden-console-launcher.cc scripts/build-native.mjs
+      - name: Build only unchanged Slack dependencies and hidden launcher
+        shell: pwsh
+        run: |
+          pnpm --dir crabot-client install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-client run build
+          pnpm --dir crabot-shared install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-shared run build
+          pnpm --dir crabot-channel-slack install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-channel-slack run build
+          New-Item -ItemType Directory -Force .desktop-build, crabot-native/build/Release | Out-Null
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          @"
+          @echo off
+          call "$vs\Common7\Tools\VsDevCmd.bat" -arch=x64 >nul
+          if errorlevel 1 exit /b %errorlevel%
+          cl /nologo /MT /EHsc /O2 /std:c++17 crabot-native\src\hidden-console-launcher.cc /link /OUT:crabot-native\build\Release\crabot-hidden-console.exe
+          if errorlevel 1 exit /b %errorlevel%
+          cl /nologo /MT /EHsc /O2 /std:c++17 .github\scripts\observe-slack-windows.cc /link User32.lib /OUT:.desktop-build\observe-slack-windows.exe
+          "@ | Set-Content -Encoding ascii .desktop-build/compile-observer.cmd
+          cmd /d /c .desktop-build/compile-observer.cmd
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Continuous window events with visible and hidden controls
+        shell: pwsh
+        run: node .github/scripts/diagnose-slack18-windows.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: slack18-window-diagnosis-${{ github.sha }}
+          path: |
+            .desktop-build/slack18-diagnosis/summary.json
+            .desktop-build/slack18-diagnosis/report.json
+            .desktop-build/slack18-diagnosis/window-events.tsv
+          if-no-files-found: warn
+          retention-days: 7
