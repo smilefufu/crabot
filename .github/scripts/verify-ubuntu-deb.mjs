@@ -147,15 +147,6 @@ try {
   const seedPassword = 'import{pathToFileURL}from"node:url";const m=await import(pathToFileURL(process.argv[1]));await m.createCredentialsIfAbsent(process.argv[2],await m.newCredentialsFromPassword("isolated-deb-acceptance",{is_temp:false,changed_via:"start"}))'
   await command(core + '/.product-runtime/node/bin/node', ['--input-type=module', '-e', seedPassword, core + '/crabot-admin/dist/credentials.js', data + '/admin'])
   const credentials = await fs.readFile(data + '/admin/credentials.json')
-  if (process.env.CRABOT_CI_DEVELOPMENT_COEXISTENCE === '1') {
-    const { prepareCiElectronSandbox } = await import('./ubuntu-electron-test-sandbox.mjs')
-    const { createRequire } = await import('node:module')
-    await prepareCiElectronSandbox(createRequire(path.resolve('crabot-desktop/package.json'))('electron'))
-    const { inspectInstance } = await import('../../scripts/lib/instance-runtime.mjs')
-    const { verifyDevelopmentCoexistence } = await import('./smoke-development-coexistence.mjs')
-    await verifyDevelopmentCoexistence({ inspectRelease: async () => inspectInstance(data), releaseCli: cli })
-    report.checks.push({ name: 'actual_source_gui_and_release_data_generation_and_stop_isolation', passed: true })
-  }
   const browser = await command(core + '/.product-runtime/node/bin/node', [path.resolve('.github/scripts/smoke-scrapling.mjs'), core, '--offline', '--kernel-check'], { env, timeout: 240000 })
   await fs.writeFile(path.join(evidence, 'acceptance-browser.log'), browser)
   report.checks.push({ name: 'actual_production_mcp_browser_and_kernel_sandbox', output: browser })

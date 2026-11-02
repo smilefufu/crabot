@@ -72,15 +72,16 @@ jobs:
           for version in v2026.10.14.1 v2026.10.15.1; do
             dbus-run-session -- xvfb-run -a node .github/scripts/verify-ubuntu-deb.mjs .desktop-build/deb/distribution --legacy="$version"
           done
-      - name: Actual fixed-path upgrade and independent source coexistence
-        env:
-          CRABOT_CI_DEVELOPMENT_COEXISTENCE: '1'
+      - name: Actual fixed-path version21 to version22 upgrade
+        run: |
+          dbus-run-session -- xvfb-run -a node .github/scripts/verify-ubuntu-deb.mjs .desktop-build/deb-upgrade/distribution --baseline=.desktop-build/deb/distribution
+      - name: Independent source GUI and Core coexistence with the accepted DEB
         run: |
           UV_PYTHON=3.12 node scripts/dev.mjs build
           pnpm --dir crabot-desktop install --frozen-lockfile
           pnpm --dir crabot-desktop run build
           ulimit -c 0
-          dbus-run-session -- xvfb-run -a node .github/scripts/verify-ubuntu-deb.mjs .desktop-build/deb-upgrade/distribution --baseline=.desktop-build/deb/distribution
+          dbus-run-session -- xvfb-run -a node .github/scripts/verify-ubuntu-deb-coexistence.mjs .desktop-build/deb-upgrade/distribution
       - uses: actions/upload-artifact@v4
         if: always()
         with:

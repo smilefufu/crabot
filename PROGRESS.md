@@ -3,7 +3,7 @@
 ### Ubuntu 标准 DEB：实施与原生验收中，未交付
 
 - 按逐项确认改用标准 DEB、系统固定程序目录和包管理器覆盖；新 GUI 数据默认遵循 XDG，首启可改，已有绑定不丢。正式协议和短 Spec 已更新；Windows、Mac、独立 CLI/system 不在本轮改动范围。
-- 已接入外部数据定位、正常主窗口准备/重试、明确确认旧数据导入、固定 CLI/菜单及 Debian 配置文件保留机制。首轮本地回归通过，完整同源码 DEB 和 Ubuntu 原生安装、运行中拒绝覆盖、重开、停止后重装与卸载留数据仍在验证；Ubuntu26/GNOME、旧程序清理询问及历史入口收尾未完成，不计已解决。不发正式版，不自行合并 PR。
+- 已接入外部数据定位、正常主窗口准备/重试、明确确认旧数据导入、固定 CLI/菜单及 Debian 配置文件保留机制。定向回归55项通过、1项Linux专属另验；[41463839693](https://github.com/smilefufu/crabot/actions/runs/41463839693)的Ubuntu24/26独立基线包步骤均通过：真实初装/XDG默认数据、GUI/CLI和必要模块、GUI/生产MCP浏览器内核沙箱、运行中拒绝重装且不停止、GUI强退Core继续、同版覆盖、卸载重装保留合成数据/密码/管理员配置。整次作业未通过：Ubuntu24源码下载HTTP503，Ubuntu26源码Core正常但源码GUI报DESKTOP_UNAUTHORIZED，具体身份原因待查；双版本升级未执行到。基线包不含后续CLI预检延迟原生加载修正，最终修正版[41462779503](https://github.com/smilefufu/crabot/actions/runs/41462779503)依赖下载HTTP503后重试构建中。GNOME真人、旧CLI14/15实际接入及旧程序清理询问未完成，不计已解决；[PR233](https://github.com/smilefufu/crabot/pull/233)保持草稿，不发正式版，不自行合并。
 
 ### Slack 频道远端历史：实现完成，PR 验证中
 

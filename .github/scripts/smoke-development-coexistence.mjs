@@ -113,7 +113,14 @@ export async function verifyDevelopmentCoexistence({ inspectRelease, releaseCli 
     const waitForSourceGui = async (phase, after = 0) => {
       const deadline = Date.now() + 180_000
       while (phases.indexOf(phase, after) === -1) {
-        if (launchError || gui.exitCode !== null || gui.signalCode !== null || Date.now() >= deadline) throw new Error('Source GUI did not reach ' + phase + '\n' + output)
+        if (launchError || gui.exitCode !== null || gui.signalCode !== null || Date.now() >= deadline) {
+          try {
+            const require = createRequire(path.join(root, 'package.json')), identity = require('./scripts/lib/process-identity.cjs'), entry = require('./scripts/lib/desktop-entry.cjs')
+            const peer = identity.inspectProcess(gui.pid), policy = entry.loadDesktopEntry(root)
+            console.log('CRABOT_DEVELOPMENT_ENTRY_DIAGNOSTIC ' + JSON.stringify({ peer, policy, args: identity.inspectProcessArguments(gui.pid), verified: entry.verifyDesktopEntry(peer, policy) }))
+          } catch (error) { console.log('CRABOT_DEVELOPMENT_ENTRY_DIAGNOSTIC ' + JSON.stringify({ unavailable: error.message })) }
+          throw new Error('Source GUI did not reach ' + phase + '\n' + output)
+        }
         await new Promise(done => setTimeout(done, 100))
       }
       return phases.indexOf(phase, after) + 1
