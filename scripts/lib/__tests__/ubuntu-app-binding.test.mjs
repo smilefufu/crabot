@@ -57,6 +57,14 @@ test('a damaged DEB marker cannot silently fall back to old CLI data',t=>{
   assert.throws(()=>binding.ubuntuAppForCore(f.coreRoot),{code:'CRABOT_UBUNTU_APP_BINDING'})
 })
 
+test('a dangling package marker and oversized host metadata fail before data binding',t=>{
+  const f=fixture(t),marker=join(f.coreRoot,'../package-type');rmSync(marker);symlinkSync(join(f.root,'missing'),marker)
+  assert.throws(()=>binding.ubuntuAppForCore(f.coreRoot),{code:'CRABOT_UBUNTU_APP_BINDING'})
+  rmSync(marker);writeFileSync(marker,'deb\n');writeFileSync(join(f.coreRoot,'desktop-host.json'),' '.repeat(4097))
+  assert.throws(()=>binding.ubuntuAppForCore(f.coreRoot),{code:'CRABOT_UBUNTU_APP_BINDING'})
+  assert.equal(existsSync(binding.bindingFile(f)),false)
+})
+
 test('invalid directory names cannot publish a binding that is unreadable on the next launch',t=>{
   const f=fixture(t),dataDir=join(f.root,'line\nbreak');mkdirSync(dataDir,{mode:0o700})
   assert.throws(()=>binding.writeUbuntuAppBinding({...f,dataDir}),{code:'CRABOT_UBUNTU_APP_BINDING'})

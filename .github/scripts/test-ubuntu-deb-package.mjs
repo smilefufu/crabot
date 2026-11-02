@@ -9,7 +9,9 @@ import { prepareUbuntuDeb } from '../../scripts/desktop/ubuntu-deb.mjs'
 assert.equal(process.env.GITHUB_ACTIONS, 'true'); assert.equal(process.env.RUNNER_ENVIRONMENT, 'github-hosted')
 assert.equal(process.platform, 'linux'); assert.ok(process.getuid() > 0)
 const root = path.resolve('.desktop-build/deb-hooks'), app = path.join(root, 'app'), core = path.join(app, 'resources/core')
-await assert.rejects(fs.stat('/opt/Crabot'), { code: 'ENOENT' })
+for (const file of ['/opt/Crabot', '/usr/bin/crabot', '/etc/apparmor.d/crabot-desktop']) {
+  await assert.rejects(fs.lstat(file), { code: 'ENOENT' })
+}
 await fs.mkdir(path.join(core, 'bin'), { recursive: true })
 await fs.copyFile('/bin/sleep', path.join(app, 'crabot-desktop'))
 await fs.copyFile('/bin/true', path.join(core, 'bin/crabot'))

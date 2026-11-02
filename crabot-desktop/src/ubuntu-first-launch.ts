@@ -16,9 +16,10 @@ export async function prepareUbuntuAppData(options: {
   const { readInstalledCoreRelease } = await load('core-release.mjs')
   await readInstalledCoreRelease(coreRoot, { version: options.version })
   const previous = binding.readUbuntuAppBinding({ home, env })
-  const finishLegacy = async (sourceRoot: string) => {
+  const finishLegacy = async (sourceRoot: string, dataDir: string) => {
     const { forwardImportedUnixCommand } = await load('unix-legacy-cli.mjs')
     await forwardImportedUnixCommand({ sourceRoot, coreRoot, home })
+    binding.writeUbuntuAppBinding({ coreRoot, dataDir, home, env })
   }
   let dataDir: string
   if (previous) dataDir = binding.requireUbuntuAppBinding({ coreRoot, home, env }).data_dir
@@ -41,7 +42,7 @@ export async function prepareUbuntuAppData(options: {
   }
   await options.onDataSelected(dataDir)
   if (previous && management.readDesktopManagement(dataDir)) {
-    if (previous.source_root) await finishLegacy(previous.source_root)
+    if (previous.source_root) await finishLegacy(previous.source_root, dataDir)
     return dataDir
   }
   const { discoverDesktopDataSource, importDesktopData } = await load('desktop-data-import.mjs')
@@ -73,7 +74,7 @@ export async function prepareUbuntuAppData(options: {
         const amount = value.files === undefined ? '' : `，${value.files} 个文件，${((value.bytes ?? 0) / 1024 / 1024).toFixed(1)} MB`
         options.progress?.(`${value.phase}${amount}${value.message ? '：' + value.message : ''}`, value.phase !== '迁移数据')
       } })
-    await finishLegacy(sourceRoot)
+    await finishLegacy(sourceRoot, dataDir)
     return dataDir
   }
   const { acquireExistingCliLock, releaseCliLock } = await load('cli-lock.mjs')

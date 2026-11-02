@@ -1,7 +1,7 @@
 import test, { describe } from 'node:test'
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync, realpathSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync, realpathSync, symlinkSync, readlinkSync, unlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import vm from 'node:vm'
@@ -48,6 +48,7 @@ test('custom chooser preserves unknown data and rejects initialization as a fres
 test('legacy data requires explicit consent and conversion finishes before ordinary startup',async t=>{
   const f=fixture(t,[0,0]),oldRoot=join(f.home,'.crabot'),oldData=join(oldRoot,'data');mkdirSync(oldData,{recursive:true})
   writeFileSync(join(oldData,'history'),'retain');writeFileSync(join(oldRoot,'VERSION'),'v2026.10.14.1');writeFileSync(join(oldRoot,'cli.mjs'),'// old release')
+  const prefix=join(f.home,'.local/bin'),entry=join(prefix,'crabot');mkdirSync(prefix,{recursive:true,mode:0o700});symlinkSync(join(oldRoot,'cli.mjs'),entry)
   const normalLoad=f.options.load;let imported=0
   f.options.load=async name=> name==='desktop-data-import.mjs'?{
     ...(await normalLoad(name)), importDesktopData:async ({source,target})=>{
@@ -55,8 +56,12 @@ test('legacy data requires explicit consent and conversion finishes before ordin
       writeFileSync(join(target,'desktop-managed.json'),JSON.stringify({schema_version:1,install_kind:'desktop',admin_listen_host:'127.0.0.1'}))
     }}:normalLoad(name)
   const data=await exports.prepareUbuntuAppData(f.options);assert.notEqual(data,oldData);assert.equal(imported,1)
+  assert.equal(binding.readUbuntuAppBinding({home:f.home,env:{}}).source_root,undefined,'completed admission must not retain a pending source')
+  assert.equal(readlinkSync(entry),join(f.coreRoot,'bin/crabot'))
   assert.equal(readFileSync(join(oldData,'history'),'utf8'),'retain')
+  unlinkSync(entry);symlinkSync(join(oldRoot,'cli.mjs'),entry) // A later human edit is not another import.
   await exports.prepareUbuntuAppData(f.options);assert.equal(imported,1)
+  assert.equal(readlinkSync(entry),join(oldRoot,'cli.mjs'))
 })
 test('declining legacy import uses independent data without stopping or modifying source',async t=>{
   const f=fixture(t,[0,1]),oldRoot=join(f.home,'.crabot'),oldData=join(oldRoot,'data');mkdirSync(oldData,{recursive:true});writeFileSync(join(oldData,'history'),'keep')
