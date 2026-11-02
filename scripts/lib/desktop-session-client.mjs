@@ -55,7 +55,11 @@ export async function openDesktopSession(dataRoot) {
     const challenge = DesktopChallengeSchema.parse(raw)
     if (challenge.instance_id !== record.instance_id || challenge.generation !== record.generation) fail('DESKTOP_STALE_INSTANCE')
     const deadline = Date.parse(challenge.expires_at)
-    if (deadline <= Date.now() || deadline > Date.now() + 5000) fail('DESKTOP_CHALLENGE_EXPIRED')
+    const before = Date.now(), after = Date.now()
+    if (deadline <= before || deadline > after + 5000) {
+      console.error('CHALLENGE_CLOCK_DIAG ' + JSON.stringify({ deadline, before, after, remaining_ms: deadline - after }))
+      fail('DESKTOP_CHALLENGE_EXPIRED')
+    }
     frames.write({ type: 'open_session', protocol_version: 1, instance_id: record.instance_id, generation: record.generation,
       challenge: challenge.challenge, client_nonce: randomBytes(32).toString('base64url') })
     const response = await frames.read(), error = DesktopSessionErrorSchema.safeParse(response)
