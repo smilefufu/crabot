@@ -3,7 +3,7 @@
 ### 桌面初版：Windows19验收通过，按用户许可合入main；暂不发版
 
 - 11月2日用户反馈本版明显改善，明确许可合并推送；随后要求暂不发版。本次不创建发行标签或GitHub Release，不改本机源码部署、服务或真实数据。
-- 终验发现的问题已进入修复：Ubuntu浏览器探针显式选择共享Node；旧数据接入保留白名单内具体沙箱原因；Mac按已批准R3/R4在正常主窗口呈现进度/取消/重试，已安装App接入完整程序扫描降为0，同时拒绝必要CLI入口损坏。Mac接入5场景、维护/恢复76项、安装16项、Core完整性12项及构建下载8项定向回归通过，完整原生新包仍在复验。构建下载504仅补入原一次/120秒重试预算，不换源或放宽摘要。Ubuntu固定目录的系统沙箱规则命名单项选择待用户确认；不将组件回归冒充完整新包验收，不发版。
+- 终验发现的问题已进入修复：Ubuntu浏览器探针显式选择共享Node；旧数据接入保留白名单内具体沙箱原因；Mac按已批准R3/R4在正常主窗口呈现进度/取消/重试，已安装App接入完整程序扫描降为0，同时拒绝必要CLI入口损坏。Mac接入5场景、维护/恢复76项、安装16项、Core完整性12项及构建下载8项定向回归通过，同一原安装器/Core仅替换修正探针的[Ubuntu原生组件复验](https://github.com/smilefufu/crabot/actions/runs/41423659959)中，初装及CLI14/15接入、目标GUI/Core/CLI和原数据/密码均通过，已确认旧接入失败同因；这不替代完整原生新包，后者仍在复验。构建下载504仅补入原一次/120秒重试预算，不换源或放宽摘要。Ubuntu固定目录的系统沙箱规则命名单项选择待用户确认；不将组件回归冒充完整新包验收，不发版。
 - Windows19验收包来源`4b73d69e`，产品树与分支合并提交`25e98b51`一致。完整[Windows验收41385827811](https://github.com/smilefufu/crabot/actions/runs/41385827811)通过：源码冷启动、离线包/旧CLI v2026.10.14.1数据接入、真实EXE安装与Finish启动；三项独立可选诊断作业未运行，不计通过。EXE 559578880字节，SHA256 `7db9bd813cc4fa93e5ccfd801c686ecddebed401aa1d45b339c908a64ca0720d`。Windows Server CI不代替所有Win11真实业务验收。
 - 已交付：安装器一次解包并标准覆盖固定GUI/Core及入口，数据准备移到GUI；数据复制最多8并发；Windows固定HTTP/HTTPS系统代理；精确自有进程启停。Slack内层PowerShell调用Node退出0却丢stdout/handoff的首次失败及闪窗已原生复现并修正，严格hook/窗口观察通过；真实远端Slack创建不以本地夹具代验。
 - 按用户要求删除`intent.json`全部读写、历史扫描/阻断/复用；失败/取消收口自有CLI后清理整个临时会话，现有Admin完成回执继续负责实例幂等与授权。旧清理Promise失败不再永久阻断后续begin，Windows并发清理增加有界重试。PR #229最终review批准；Windows53项和官方CLI本地hooks通过，Mac Slack48项通过/5项平台跳过、Admin鉴权/回执/认主36项通过。远端App不自动删除，不宣称外部API原子回滚。
@@ -11,7 +11,7 @@
 - 11月2日补做全平台终验，结论仍为**未全通过**。只在隔离CI分支补充测试/诊断，不改产品、部署或发布。[四平台GUI/首次设置窗口](https://github.com/smilefufu/crabot/actions/runs/41405754459)通过；这不等于所有首次授权对话框均已真人操作。
 - Windows真实EXE初装、CLI14/15接入、旧GUI14覆盖19、Finish自动启动和原开始菜单重新打开、数据/密码保留及重复启停通过：[完整初装](https://github.com/smilefufu/crabot/actions/runs/41405060431)、[GUI14升级](https://github.com/smilefufu/crabot/actions/runs/41406539869)、[CLI15接入](https://github.com/smilefufu/crabot/actions/runs/41413007095)。Mac ARM普通App及CLI14/15接入通过，[真实已交付App11同位置覆盖19](https://github.com/smilefufu/crabot/actions/runs/41408359061)通过；[Intel](https://github.com/smilefufu/crabot/actions/runs/41408992500)同样通过，但普通App版本覆盖用同源19→测试版本夹具，不能冒充历史已交付Intel App升级。Mac原生接入确认对话框未实点；Intel新App就绪约31～33秒，未作性能验收。Mac R3/R4仍未完成：独立接入窗口和普通启动全量校验仍存在。
 - 新dev流程的源码GUI/Core与release GUI/Core在Windows、Mac ARM/Intel、Linux均实际并行运行，数据/端口隔离、分别停止和重启通过；Linux证据在[41405225245已完成的共存步骤](https://github.com/smilefufu/crabot/actions/runs/41405225245)日志中，该整次作业后因旧CLI接入失败取消，不能记整次成功。新dev使用29000/13000，release使用19000/3000；既有源码生产部署不会自动搬端口。未验证并行真实模型任务。
-- Ubuntu原始原生安装器初装失败`CRABOT_INSTALL_BROWSER_SANDBOX`：浏览器探针未指定共享Node，寻找已在瘦身时删除的Playwright私有Node。相同不可变包的原探针失败、共享Node驱动成功，且[仅给探针补环境路径的完整安装反事实检查](https://github.com/smilefufu/crabot/actions/runs/41412234314)通过；原始产品仍失败，不能算修复。旧CLI14→GUI另失败`CRABOT_MAINTENANCE_PENDING`，schema4停在verifying，未启动MM；具体底层原因尚未证实，CLI15及后续升级未通过。Ubuntu仍使用app/releases、releases及current-release.json，未落实固定目录覆盖。GNOME Wayland/图形polkit、完整卸载与真实Win11用户环境不以CI代验。
+- Ubuntu原始原生安装器初装失败`CRABOT_INSTALL_BROWSER_SANDBOX`：浏览器探针未指定共享Node，寻找已在瘦身时删除的Playwright私有Node。相同不可变包的原探针失败、共享Node驱动成功，且[仅给探针补环境路径的完整安装反事实检查](https://github.com/smilefufu/crabot/actions/runs/41412234314)通过；原始产品仍失败，不能算修复。旧CLI14→GUI另失败`CRABOT_MAINTENANCE_PENDING`，schema4停在verifying，未启动MM；当时具体原因未明；本轮仅替换修正探针后CLI14/15均完成接入，确认同因，完整新包仍待复验。Ubuntu仍使用app/releases、releases及current-release.json，未落实固定目录覆盖。GNOME Wayland/图形polkit、完整卸载与真实Win11用户环境不以CI代验。
 
 ### 主控常驻职责与指南生命周期：实现完成，PR 验证中
 
