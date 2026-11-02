@@ -2,9 +2,11 @@
 
 ### 桌面化冻结范围：Windows18已交付可测，整套feature尚未收口
 
+- 11月2日按用户明确要求删除 intent 全套机制：无创建意图文件、历史扫描/阻断/自动复用或替代标记。失败/取消收口自有CLI后删除整个临时会话，旧记录不参与新创建；Admin现有完成回执继续负责实例幂等和权限，模块重启后的清理确认不再要求第二份回执。已发布[短设计记录](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-11-02-slack-onboarding-remove-intent-design.md)及协议修订。旧实现9项先失败，修正后Mac Slack48项通过（5项平台跳过）、Admin鉴权/回执/认主36项通过，Slack构建通过；Windows41385037328的52项及官方hooks已通过。Review发现旧清理Promise失败后即使进程已退出仍阻断begin，已先复现再局部修正为等待结束后交既有recoverSession核实实际进程；最新Windows回归和安装包待验证。远端App自动删除规则未改，不宣称外部API原子回滚。
+
 - Windows Slack首次失败根因已原生复现：v18的PowerShell原生`& node hook.mjs`退出0却无配置stdout/无handoff；官方CLI加载出的GetManifest/Start为空，run在App创建前因缺Start拒绝。旧local manifest检查会读文件兜底，不能证明hook成功。用户报告与Windows41382634165/41382784172的v18精确源码对照一致；不是旧目录造成首次失败，也不能归因于代理/权限。
 - 局部修正95de0a0f/8ac6ae1e：内层Node显式CreateNoWindow、双管道异步读取并保留参数/退出码/原Job收口。相同原生环境修正后9项配置/假Token真实handoff/禁止manifest文件兜底检查通过；新检查同时保留v18失败基线，最后整组CI进行中。旧41373721121/41373842089的47项回归与真实handoff停止通过；新的窗口观察已禁止manifest兜底。Windows19准备构建，仅更新该修正；真实Slack远端创建尚未验收。
-- 首份3509字节诊断ZIP漏判“退出0但无结果”，现已补4项定向回归及9项原生对照；无需用户再次运行它。诊断只读现有工具，在TEMP空配置和假Token中执行，不操作真实App或现有onboarding。v18失败保留creating且缺App ID会阻断同名重试，此为独立恢复问题；“人类核对后台无App后明确确认再重试”已逐项提出，尚待许可，未自动清理或重建。
+- 首份3509字节诊断ZIP漏判“退出0但无结果”，已补4项定向回归及原生9项对照；无需用户再次运行它。最终41382964495确认原版空配置/无handoff/依赖文件兜底，修正后9项通过且实际hook无终端SHOW。诊断仅TEMP空配置/假Token，不操作真实App或现有onboarding。此前提出的“人工确认后解除历史拦截”方案已被用户替换为上面的彻底移除要求，未实现该额外UI。
 
 - 16版安装后仍打开14的已证实设计缺陷：程序版本及入口依赖首启全系统进程观察，失败便留在旧入口；旧直接EXE测试绕开Finish/菜单，不能证明修复。[根因与逐项授权](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/research/2026-11-01-desktop16-installation-root-causes.md)。按D1/R1–R4改为安装器一次解包、标准覆盖固定GUI/Core并更新入口，真实占用提示退出；data/workspace不动。正常主窗口承载数据准备/具体错误/重试，复制可取消、转换不可取消，普通启动不再全量哈希。
 - Windows18来源ab583685，EXE559579058字节，SHA256`d573f0a1ddaaed485f32e5990d08a001b56cd1a441b78daff6e57c1d1bb81ee2`，已代下载并读回至`Downloads/Crabot桌面验收包-20261101/Windows 11`。同EXE新装/Finish作业124909672695验证实际GUI/Core/CLI与data；14→18真实Finish及OS菜单重开41326332215、强杀旧实例后升级41327158021均通过，两条升级分别验证原身份/data/凭据、新GUI/Core及两轮启停，无新可见控制台。全部来自Windows Server CI，Win11普通账号及真实Slack业务仍待用户。
