@@ -104,7 +104,9 @@ jobs:
         run: node .github/scripts/recheck-windows-single-layer.mjs 2>&1 | tee .desktop-build/exact-exe-recheck.log
       - name: Published CLI data confirmation in the unchanged packaged GUI
         if: inputs.directory_only != true && inputs.ui_only != true
-        run: node .github/scripts/verify-legacy-user-takeover.mjs .desktop-build/manual/paired .desktop-build/manual/installer '${{ inputs.legacy_version }}' 2>&1 | tee .desktop-build/exact-exe-legacy-gui.log
+        env:
+          CRABOT_CI_LEGACY_VERSION: ${{ inputs.legacy_version }}
+        run: node .github/scripts/verify-legacy-user-takeover.mjs .desktop-build/manual/paired .desktop-build/manual/installer "$CRABOT_CI_LEGACY_VERSION" 2>&1 | tee .desktop-build/exact-exe-legacy-gui.log
       - name: Real EXE Finish opens the GUI with 1.5 GiB free TEMP
         env:
           CRABOT_UPGRADE_FROM14: ${{ inputs.upgrade_from14 }}
