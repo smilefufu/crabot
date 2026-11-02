@@ -67,6 +67,11 @@ jobs:
         run: |
           ulimit -c 0
           dbus-run-session -- xvfb-run -a node .github/scripts/verify-ubuntu-deb.mjs .desktop-build/deb/distribution
+      - name: Published CLI14 and CLI15 data through the ordinary DEB GUI
+        run: |
+          for version in v2026.10.14.1 v2026.10.15.1; do
+            dbus-run-session -- xvfb-run -a node .github/scripts/verify-ubuntu-deb.mjs .desktop-build/deb/distribution --legacy="$version"
+          done
       - name: Actual fixed-path upgrade and independent source coexistence
         env:
           CRABOT_CI_DEVELOPMENT_COEXISTENCE: '1'
@@ -76,11 +81,6 @@ jobs:
           pnpm --dir crabot-desktop run build
           ulimit -c 0
           dbus-run-session -- xvfb-run -a node .github/scripts/verify-ubuntu-deb.mjs .desktop-build/deb-upgrade/distribution --baseline=.desktop-build/deb/distribution
-      - name: Published CLI14 and CLI15 data through the ordinary DEB GUI
-        run: |
-          for version in v2026.10.14.1 v2026.10.15.1; do
-            dbus-run-session -- xvfb-run -a node .github/scripts/verify-ubuntu-deb.mjs .desktop-build/deb-upgrade/distribution --legacy="$version"
-          done
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -89,8 +89,8 @@ jobs:
             .desktop-build/deb-upgrade/acceptance.json
             .desktop-build/deb/acceptance.json
             .desktop-build/deb/acceptance-*.log
-            .desktop-build/deb-upgrade/legacy-*/acceptance.json
-            .desktop-build/deb-upgrade/legacy-*/acceptance-*.log
+            .desktop-build/deb/legacy-*/acceptance.json
+            .desktop-build/deb/legacy-*/acceptance-*.log
             .desktop-build/deb-upgrade/acceptance-*.log
             .desktop-build/development-coexistence.log
             .desktop-build/development-*.log

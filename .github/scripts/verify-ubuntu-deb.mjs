@@ -55,7 +55,7 @@ async function prepareLegacyFixture() {
   const entries = await fs.readdir(extracted); assert.equal(entries.length, 1)
   const source = home + '/.crabot', oldData = source + '/data'
   await fs.rename(path.join(extracted, entries[0]), source); await fs.unlink(archive); await fs.rmdir(extracted)
-  await fs.writeFile(source + '/VERSION', legacyVersion + '\n'); await fs.mkdir(oldData, { mode: 0o700 })
+  await fs.writeFile(source + '/VERSION', legacyVersion + '\n'); await fs.mkdir(oldData, { recursive: true, mode: 0o700 })
   for (const module of ['admin', 'agent', 'memory']) {
     await fs.mkdir(oldData + '/' + module, { mode: 0o700 })
     const marker = source + '/crabot-' + module + '/schema_version'
