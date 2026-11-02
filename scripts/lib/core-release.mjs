@@ -84,27 +84,50 @@ export async function writeCoreRelease(directory, release) {
   return { files: Object.keys(index.files).length, bytes: Object.values(index.files).reduce((total, file) => total + (file.size ?? 0), 0) }
 }
 
-export async function verifyCoreRelease(directory, { version, platform = process.platform, arch = process.arch } = {}) {
+async function readCoreMetadata(directory, { version, platform = process.platform, arch = process.arch } = {}) {
   try {
     const root = await fs.realpath(directory)
-    for (const name of ['core-release.json', 'core-files.json']) {
+    for (const name of ['core-release.json', 'package.json', 'product-runtime.json']) {
       const stat = await fs.lstat(path.join(root, name))
-      if (!stat.isFile() || stat.size > (name === 'core-release.json' ? 65_536 : 64 * 1024 * 1024)) fail()
+      if (!stat.isFile() || stat.size > (name === 'product-runtime.json' ? 64 * 1024 * 1024 : 65_536)) fail()
     }
     const metadata = JSON.parse(await fs.readFile(path.join(root, 'core-release.json'), 'utf8'))
     if (metadata.schema_version !== 1 || !/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(metadata.version)
       || (version && metadata.version !== version) || metadata.platform !== platform || metadata.arch !== arch
       || !/^[a-f0-9]{40}$/.test(metadata.commit) || typeof metadata.source_dirty !== 'boolean'
       || !/^[a-f0-9]{64}$/.test(metadata.inventory_sha256)) fail()
+    const packageJson = JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf8'))
+    const runtime = JSON.parse(await fs.readFile(path.join(root, 'product-runtime.json'), 'utf8'))
+    if (packageJson.version !== metadata.version || runtime.version !== metadata.version) fail()
+    return metadata
+  } catch { fail() }
+}
+
+// Installed, trusted program only. Installation/update owns the complete inventory check.
+export async function readInstalledCoreRelease(directory, options = {}) {
+  try {
+    const root = await fs.realpath(directory), metadata = await readCoreMetadata(root, options)
+    const index = path.join(root, 'core-files.json'), stat = await fs.lstat(index)
+    if (!stat.isFile() || stat.size > 64 * 1024 * 1024) fail()
+    const text = await fs.readFile(index, 'utf8')
+    if (digest(text) !== metadata.inventory_sha256) fail()
+    const entry = JSON.parse(text).files?.['cli.mjs'], cli = path.join(root, 'cli.mjs'), executable = await fs.lstat(cli)
+    if (entry?.type !== 'file' || !executable.isFile() || executable.size !== entry.size || await hashFile(cli) !== entry.sha256) fail()
+    return metadata
+  } catch { fail() }
+}
+
+export async function verifyCoreRelease(directory, options = {}) {
+  try {
+    const root = await fs.realpath(directory), metadata = await readCoreMetadata(root, options)
+    const stat = await fs.lstat(path.join(root, 'core-files.json'))
+    if (!stat.isFile() || stat.size > 64 * 1024 * 1024) fail()
     const text = await fs.readFile(path.join(root, 'core-files.json'), 'utf8')
     if (digest(text) !== metadata.inventory_sha256) fail()
     const expected = JSON.parse(text)
     if (expected.schema_version !== 1 || !expected.files || typeof expected.files !== 'object' || Array.isArray(expected.files)) fail()
     const actual = await inventory(root, expected.files)
     if (JSON.stringify(expected) !== JSON.stringify(actual)) fail()
-    const packageJson = JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf8'))
-    const runtime = JSON.parse(await fs.readFile(path.join(root, 'product-runtime.json'), 'utf8'))
-    if (packageJson.version !== metadata.version || runtime.version !== metadata.version) fail()
     return metadata
   } catch { fail() }
 }

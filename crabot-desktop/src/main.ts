@@ -271,24 +271,44 @@ async function boot() {
     configureProfile(path.join(app.getPath('appData'), 'Crabot/bootstrap'))
     if (!claimInstance()) return
     await app.whenReady()
+    mainSession = session.fromPartition('persist:crabot-desktop')
+    window = createMainWindow(mainSession)
+    startupPage = await showStartupPage(window, app.getVersion(), () => preparationAbort?.abort())
+    if (!process.argv.includes('--background')) show()
     const { prepareMacAppData } = await import('./mac-first-launch.js')
-    const selected = await prepareMacAppData({ appPath: path.resolve(path.dirname(process.execPath), '../..'), coreRoot,
-      home: homedir(), dialog, version: app.getVersion(),
-      load: name => import(new URL('./bootstrap/scripts/lib/' + name, import.meta.url).href),
-      discoverLegacy: async root => {
-        const { discoverUserSourceDeployment } = await loadCore('scripts/lib/source-installation.mjs')
-        if (root === path.join(homedir(), '.crabot') && discoverUserSourceDeployment()) return null
-        const { discoverLegacyDesktopTakeover } = await loadCore('scripts/lib/legacy-desktop-discovery.mjs')
-        const legacy = await discoverLegacyDesktopTakeover({ root, source: {} })
-        if (!legacy && existsSync(path.join(root, 'data')) && !existsSync(path.join(root, 'desktop-installation.json'))) {
-          throw Object.assign(new Error('此处有数据，但尚未核实对应的受支持旧发行程序。'), { code: 'CRABOT_LEGACY_UNSUPPORTED' })
-        }
-        return legacy
-      },
-      adoptLegacy: async (root, dataDir) => {
-        const { runMacLegacyHandoff } = await import('./mac-legacy-handoff.js')
-        await runMacLegacyHandoff(coreRoot, root, dataDir, app.getVersion())
-      } })
+    let selected: string | null
+    while (true) {
+      preparingData = true
+      preparationAbort = new AbortController()
+      try {
+        selected = await prepareMacAppData({ appPath: path.resolve(path.dirname(process.execPath), '../..'), coreRoot,
+          home: homedir(), dialog, version: app.getVersion(),
+          load: name => import(new URL('./bootstrap/scripts/lib/' + name, import.meta.url).href),
+          discoverLegacy: async root => {
+            const { discoverUserSourceDeployment } = await loadCore('scripts/lib/source-installation.mjs')
+            if (root === path.join(homedir(), '.crabot') && discoverUserSourceDeployment()) return null
+            const { discoverLegacyDesktopTakeover } = await loadCore('scripts/lib/legacy-desktop-discovery.mjs')
+            const legacy = await discoverLegacyDesktopTakeover({ root, source: {} })
+            if (!legacy && existsSync(path.join(root, 'data')) && !existsSync(path.join(root, 'desktop-installation.json'))) {
+              throw Object.assign(new Error('此处有数据，但尚未核实对应的受支持旧发行程序。'), { code: 'CRABOT_LEGACY_UNSUPPORTED' })
+            }
+            return legacy
+          },
+          adoptLegacy: async (root, dataDir) => {
+            const { runMacLegacyHandoff } = await import('./mac-legacy-handoff.js')
+            await runMacLegacyHandoff(coreRoot, root, dataDir, app.getVersion(), {
+              signal: preparationAbort!.signal,
+              progress: (message, cancellable) => { void startupPage!.update(message, '', false, cancellable).catch(() => {}) },
+            })
+          } })
+        break
+      } catch (error) {
+        preparingData = false
+        bootstrapStage('data-preparation-failed', { detail: error instanceof Error ? error.message : String(error) })
+        show()
+        if (!await startupPage.retry(error, path.join(app.getPath('userData'), 'bootstrap.log'))) { quitting = true; app.quit(); return }
+      } finally { preparingData = false; preparationAbort = undefined }
+    }
     if (!selected) { quitting = true; app.quit(); return }
     dataRoot = selected
     const binding = (await loadCore('scripts/lib/mac-app-binding.cjs')).default

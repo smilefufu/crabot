@@ -20,7 +20,7 @@ function fixture(t, { response = 0, readOnly = false, chosen } = {}) {
     showMessageBox: async value => { messages.push(value); return { response } },
     showOpenDialog: async value => { directories.push(value); return chosen ? { canceled: false, filePaths: [chosen] } : { canceled: true, filePaths: [] } },
   }, load: async name => {
-    if (name === 'core-release.mjs') return { verifyCoreRelease: async (root, options) => { stages.push('verified'); assert.equal(root, coreRoot); assert.equal(options.version, '0.1.0') } }
+    if (name === 'core-release.mjs') return { readInstalledCoreRelease: async (root, options) => { stages.push('version-checked'); assert.equal(root, coreRoot); assert.equal(options.version, '0.1.0') } }
     if (name === 'process-identity.cjs' && readOnly) return { default: { inspectInstallFilesystem: () => ({ supported: false }) } }
     return import(new URL('../../scripts/lib/' + name, import.meta.url))
   } }

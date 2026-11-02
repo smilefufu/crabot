@@ -18,8 +18,8 @@ export async function prepareMacAppData(options: {
       detail: '当前App位于只读镜像或不支持的位置。尚未初始化业务数据。', buttons: ['知道了'] })
     return null
   }
-  const { verifyCoreRelease } = await load('core-release.mjs')
-  await verifyCoreRelease(coreRoot, { version })
+  const { readInstalledCoreRelease } = await load('core-release.mjs')
+  await readInstalledCoreRelease(coreRoot, { version })
   const previous = binding.readMacAppBinding({ home })
   let selected: string
   let legacy: { installation: { installRoot: string; dataRoot: string; version: string } } | null = null
