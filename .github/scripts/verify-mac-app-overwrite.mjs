@@ -9,7 +9,7 @@ import { once } from 'node:events'
 import { pathToFileURL } from 'node:url'
 assert.equal(process.env.GITHUB_ACTIONS, 'true'); assert.equal(process.platform, 'darwin')
 assert.ok([4, 6].includes(process.argv.length))
-const expectedFrom = process.argv[4] ?? '0.1.0-desktop.11', expectedTo = process.argv[5] ?? '0.1.0-desktop.19'
+const expectedFrom = process.argv[4] ?? '0.1.0-desktop.11', expectedTo = process.argv[5] ?? '0.1.0-desktop.20'
 const execute = promisify(execFile), temporary = await fs.mkdtemp(path.join(process.env.RUNNER_TEMP, 'mac-overwrite-'))
 const home = path.join(temporary, 'home'), app = path.join(temporary, 'Crabot.app'), data = path.join(home, 'data')
 await fs.mkdir(home, { mode: 0o700 })

@@ -251,7 +251,7 @@ jobs:
           node .github/scripts/smoke-development-coexistence.mjs --background-only 2>&1 | tee .desktop-build/development-source-boot.log
       - name: Build same-source offline GUI and Core installer
         run: |
-          node scripts/desktop/stage-core.mjs --out=.desktop-build/manual/core --version=0.1.0-desktop.19
+          node scripts/desktop/stage-core.mjs --out=.desktop-build/manual/core --version=0.1.0-desktop.20
           node .github/scripts/verify-release-payload.mjs "$GITHUB_WORKSPACE/.desktop-build/manual/core"
           node --input-type=module <<'NODE'
           import { createRequire } from 'node:module';
@@ -354,7 +354,7 @@ jobs:
             apps.push(path.resolve(project, path.dirname(location.executable), '../..'))
           }
           await fs.rm('.desktop-build/manual/mac-future-core', { recursive: true })
-          execFileSync(process.execPath, ['.github/scripts/verify-mac-app-overwrite.mjs', ...apps, '0.1.0-desktop.19', '0.1.1-desktop-fixture.1'], { stdio: 'inherit' })
+          execFileSync(process.execPath, ['.github/scripts/verify-mac-app-overwrite.mjs', ...apps, '0.1.0-desktop.20', '0.1.1-desktop-fixture.1'], { stdio: 'inherit' })
           NODE
       - name: Real source GUI and release coexistence
         env:
