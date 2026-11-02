@@ -1,10 +1,11 @@
 # Crabot 项目进度
 
-### Ubuntu 标准 DEB：安装升级已验，共存身份兼容修正验证中
+### Ubuntu 标准 DEB：原生安装、升级及源码GUI共存通过，仍为草稿
 
-- 按逐项确认改用标准 DEB、系统固定程序目录和包管理器覆盖；新 GUI 数据默认遵循 XDG，首启可改，已有绑定不丢。正式协议和短 Spec 已更新；Windows、Mac、独立 CLI/system 不在本轮改动范围。
-- 最终同源码包[41462779503](https://github.com/smilefufu/crabot/actions/runs/41462779503)重试通过，来源94e1bb45；22版DEB下载911591156字节，安装占用未据此推算。[41468648124](https://github.com/smilefufu/crabot/actions/runs/41468648124)的Ubuntu24/26初装、已发布CLI14/15程序及合成数据经普通GUI接入、21→22固定目录覆盖三个独立步骤均通过；GUI/CLI/Core版本、原数据/密码/用户依赖/workspace文件、原用户CLI入口和管理员配置保持，真实GUI/MCP浏览器内核沙箱、运行中拒绝覆盖且不停止、GUI强退Core继续、卸载重装均通过。21→22为同源码版本号夹具，不冒充历史GUI数据迁移。
-- Ubuntu24/26源码GUI共存的旧失败已确认：Electron将OS参数合为一行，真实用户/程序正确，旧校验误拒绝。用户11月3日单项批准[14行短稿](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-11-02-linux-electron-process-title-auth-design.md)，现仅按完整受信程序/源码路径和原两个开关兼容这一格式；用户、PID代际复验及原握手不变。一行未知开关的漏查也已在同一边界修正。先复现2项失败，修后5项定向回归及Desktop构建通过；实际共存和包含修正的新包仍待原生验证，不把旧包通过当作本次通过。GNOME真人、旧GTK GUI/自启动入口迁移、成功后旧程序清理询问仍未完成；[PR233](https://github.com/smilefufu/crabot/pull/233)保持草稿，不发正式版、不自行合并。验证口径和包SHA见[Ubuntu验收记录](https://github.com/smilefufu/crabot-docs/blob/main/guides/desktop-ubuntu-acceptance.md)。
+- 按逐项许可使用标准DEB、系统固定程序目录和包管理器覆盖；新GUI默认XDG用户数据位置，首启可改，保留已有绑定。Windows、Mac、独立CLI/system不在本轮行为变更范围。
+- 最新产品源码`a75d472d`；[41530704610](https://github.com/smilefufu/crabot/actions/runs/41530704610)构建及Ubuntu24实际包验收通过，60项边界回归与1项真实Electron profile测试通过。22版DEB下载911471650字节，SHA256 `ee8274fabf5cadb0b04a8529a7a7605891db016ee4fab586c1b6261796cf2f18`；不据此推算安装占用。
+- 用户11月3日单项批准Linux Electron一行参数兼容：仅锚定完整受信程序/源码目录及原两个开关，保留OS用户、真实程序、PID代际复验和原握手。先复现2项失败，修后本地5项定向回归及Desktop构建通过。[41530698596](https://github.com/smilefufu/crabot/actions/runs/41530698596)两系统原包＋新源码GUI共存通过；包含修正的同一新包[41532885769](https://github.com/smilefufu/crabot/actions/runs/41532885769)在Ubuntu24/26均通过初装/内核沙箱、已发布CLI14/15加合成数据经普通GUI接入及旧密码实际登录、21→22固定覆盖、真实源码GUI认证和双方独立启停。21→22为同源码版本号夹具，不冒充历史GUI数据迁移或真实业务数据验收。
+- Ubuntu24终验首次在独立Scrapling截图处30秒超时，原提交/产物/断言重跑一次后通过；失败保留，截图超时根因未定位，记独立follow-up。GNOME/Wayland真人、旧GTK GUI及自启动入口迁移、成功后旧程序清理询问仍未完成；[PR233](https://github.com/smilefufu/crabot/pull/233)保持草稿，不发正式版、不自行合并。证据及边界见[Ubuntu验收记录](https://github.com/smilefufu/crabot-docs/blob/main/guides/desktop-ubuntu-acceptance.md)。
 
 ### Slack 频道远端历史：实现完成，PR 验证中
 
