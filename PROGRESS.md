@@ -2,10 +2,12 @@
 
 ### 桌面化冻结范围：Windows18已交付可测，整套feature尚未收口
 
+- 11月2日Windows Slack现场仍失败，不能视为业务验收通过：`slack-on-win`历史`creating`记录缺App ID；用用户提供记录回放现有代码，重试只执行授权、不执行`slack run`，返回与截图相同的通用错误。首次创建失败的具体错误被原流程清理，尚不能归因为代理或权限。只做诊断，产品未改。Windows事件诊断41370401129/41370780817已捕获原版配置命令打开Windows Terminal；41371027865采样关联官方CLI→PowerShell→Node→新控制台宿主，生成测试脚本改用显式无窗口内层启动后3次正确返回manifest且无可见终端。该对照不等于真实Slack授权/创建通过；需先向用户说明恢复行为及候选修法，再获许可实施。
+
 - 16版安装后仍打开14的已证实设计缺陷：程序版本及入口依赖首启全系统进程观察，失败便留在旧入口；旧直接EXE测试绕开Finish/菜单，不能证明修复。[根因与逐项授权](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/research/2026-11-01-desktop16-installation-root-causes.md)。按D1/R1–R4改为安装器一次解包、标准覆盖固定GUI/Core并更新入口，真实占用提示退出；data/workspace不动。正常主窗口承载数据准备/具体错误/重试，复制可取消、转换不可取消，普通启动不再全量哈希。
 - Windows18来源ab583685，EXE559579058字节，SHA256`d573f0a1ddaaed485f32e5990d08a001b56cd1a441b78daff6e57c1d1bb81ee2`，已代下载并读回至`Downloads/Crabot桌面验收包-20261101/Windows 11`。同EXE新装/Finish作业124909672695验证实际GUI/Core/CLI与data；14→18真实Finish及OS菜单重开41326332215、强杀旧实例后升级41327158021均通过，两条升级分别验证原身份/data/凭据、新GUI/Core及两轮启停，无新可见控制台。全部来自Windows Server CI，Win11普通账号及真实Slack业务仍待用户。
 - 完整Windows GUI 41323705172成功（81通过/10平台跳过）；补测发现原GUI恢复未完卸载误入首启加载缺失Core，4c0b6508仅纠正现有入口分支，原生41323263382的20项入口/渲染和5项受保护GUI恢复入口场景（OS登记接口隔离）通过，无新状态/清理策略。生产41323332667的构建/旧CLI副本/源码GUI共存/保留数据修复作业成功；同run独立源码一项5秒测试预算失败保留，测试预算修正后41324095618整组通过，产品时限未改。41325102840/41325105959的14基线就绪前置失败亦保留，底层原因未捕获，不伪装18产品回归或诊断修改已解决它。
-- 既有修正随包：数据复制最多8并发；Windows系统固定HTTP/HTTPS代理及实际CONNECT；Slack官方CLI私有伪终端/受控退出和隐藏PowerShell；精确进程启停回归通过。75MB旧CLI样本确认到实际GUI/Core/新旧CLI核验7117ms，不等于海量小文件速度或真实Slack账号验收。
+- 既有修正随包：数据复制最多8并发；Windows系统固定HTTP/HTTPS代理及实际CONNECT；Slack官方CLI私有伪终端/受控退出及隐藏父进程组件检查；实际内层脚本闪窗仍有上述缺陷。精确进程启停回归通过。75MB旧CLI样本确认到实际GUI/Core/新旧CLI核验7117ms，不等于海量小文件速度或真实Slack账号验收。
 - 本版程序常规文件1855497860字节，不含用户数据和已有14–16程序残留；首次转固定位置整体占用可更大。旧残留清理询问、完整卸载简化、Mac R3/R4、Ubuntu固定布局及其它冻结安装路径仍未完成，500MB目标未实现。详见[路径清单](https://github.com/smilefufu/crabot-docs/blob/main/guides/installation-upgrade-paths.md)、[实施证据](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-30-windows-installation-feedback-fixes.md)与[体积审计](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/research/2026-11-01-desktop-size-audit.md)。Mac仍11；本机源码服务/data、Docker、Spotlight未动，未启动本机验收App/Core。
 - 最新origin/main已包含在本分支，无待解主线冲突，产品main未推送。现有分支依赖仅整理，完整测好后再拆可review PR，不提前创建或自行merge。缺少旧Mac/Ubuntu真桌面资源按用户决定暂跳过，当前不宣称正式发布。
 
