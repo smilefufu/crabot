@@ -1,4 +1,4 @@
-import test from 'node:test'
+import test, { describe } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, chmodSync, realpathSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -12,6 +12,7 @@ function fixture(t) {
   t.after(()=>rmSync(root,{recursive:true,force:true}))
   return {root,home,coreRoot,dataDir,env:{}}
 }
+describe('Ubuntu data binding', { skip: process.platform === 'win32' }, () => {
 test('DEB data binding survives program replacement without a version selector',t=>{
   const f=fixture(t);writeFileSync(join(f.dataDir,'history'),'keep')
   binding.writeUbuntuAppBinding(f)
@@ -56,10 +57,17 @@ test('a damaged DEB marker cannot silently fall back to old CLI data',t=>{
   assert.throws(()=>binding.ubuntuAppForCore(f.coreRoot),{code:'CRABOT_UBUNTU_APP_BINDING'})
 })
 
+test('invalid directory names cannot publish a binding that is unreadable on the next launch',t=>{
+  const f=fixture(t),dataDir=join(f.root,'line\nbreak');mkdirSync(dataDir,{mode:0o700})
+  assert.throws(()=>binding.writeUbuntuAppBinding({...f,dataDir}),{code:'CRABOT_UBUNTU_APP_BINDING'})
+  assert.equal(existsSync(binding.bindingFile(f)),false)
+})
+
 test('Linux CLI uses exactly the GUI data binding and refuses conflicting dev environment', {skip:process.platform!=='linux'},t=>{
   const f=fixture(t);binding.writeUbuntuAppBinding(f)
   writeFileSync(join(f.dataDir,'desktop-managed.json'),JSON.stringify({schema_version:1,install_kind:'desktop',admin_listen_host:'127.0.0.1'}))
   const env={};binding.applyUbuntuAppEnvironment(f.coreRoot,{home:f.home,env})
   assert.equal(env.DATA_DIR,f.dataDir);assert.equal(env.CRABOT_HOME,f.coreRoot)
   assert.throws(()=>binding.applyUbuntuAppEnvironment(f.coreRoot,{home:f.home,env:{CRABOT_DEV:'true'}}),{code:'CRABOT_UBUNTU_APP_BINDING'})
+})
 })

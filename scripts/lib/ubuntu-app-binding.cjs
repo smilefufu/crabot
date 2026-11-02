@@ -10,10 +10,12 @@ const bindingFile = ({ home = homedir(), env = process.env } = {}) => path.join(
 const defaultDataDir = ({ home = homedir(), env = process.env } = {}) => path.join(xdg(env, 'XDG_DATA_HOME', path.join(home, '.local/share')), 'crabot/data')
 function ubuntuAppForCore(coreRoot) {
   const resources = path.resolve(coreRoot, '..'), type = path.join(resources, 'package-type')
-  if (!fs.existsSync(type)) return null
-  const stat = fs.lstatSync(type)
+  let stat
+  try { stat = fs.lstatSync(type) } catch (error) { if (error.code === 'ENOENT') return null; throw error }
   if (!stat.isFile() || stat.size > 64 || fs.readFileSync(type, 'utf8').trim() !== 'deb') fail('桌面安装类型损坏，请重新安装完整包。')
-  const host = JSON.parse(fs.readFileSync(path.join(coreRoot, 'desktop-host.json'), 'utf8'))
+  const hostFile = path.join(coreRoot, 'desktop-host.json'), hostStat = fs.lstatSync(hostFile)
+  if (!hostStat.isFile() || hostStat.size > 4096) fail('DEB内置核心位置不兼容，请重新安装完整包。')
+  const host = JSON.parse(fs.readFileSync(hostFile, 'utf8'))
   if (host.schema_version !== 1 || host.platform !== 'linux' || host.arch !== 'x64'
     || Object.keys(host).sort().join(',') !== 'arch,platform,schema_version'
     || path.basename(coreRoot) !== 'core' || path.basename(resources) !== 'resources') fail('DEB内置核心位置不兼容，请重新安装完整包。')
@@ -43,6 +45,7 @@ function writeUbuntuAppBinding({ coreRoot, dataDir, sourceRoot, ...options }) {
   const program = ubuntuAppForCore(coreRoot)
   if (!program) fail('当前核心不属于DEB桌面安装。')
   coreRoot = fs.realpathSync(coreRoot); dataDir = management.requireExistingDataRoot(dataDir)
+  if (/[\r\n\0]/.test(coreRoot + dataDir + (sourceRoot ?? ''))) fail('数据位置不能包含换行或空字符，未保存绑定。')
   const relative = path.relative(program, dataDir)
   if (!relative || relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative)) fail('请选择系统程序目录之外的数据位置。')
   const file = bindingFile(options), parent = path.dirname(file)

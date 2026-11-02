@@ -1,4 +1,4 @@
-import test from 'node:test'
+import test, { describe } from 'node:test'
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync, realpathSync } from 'node:fs'
@@ -24,6 +24,7 @@ function fixture(t,responses=[0]) {
     onDataSelected:async()=>events.push('main-window'),progress:()=>events.push('progress')}
   return {root,home,coreRoot,options,messages,events}
 }
+describe('Ubuntu first launch', { skip: process.platform === 'win32' }, () => {
 test('fresh DEB has external data, no old CLI adoption and no repeat prompt on reopen',async t=>{
   const f=fixture(t),data=await exports.prepareUbuntuAppData(f.options)
   assert.equal(data,join(f.home,'.local/share/crabot/data'))
@@ -71,4 +72,5 @@ test('choosing the old data as its own import target publishes no binding and ch
   await assert.rejects(exports.prepareUbuntuAppData(f.options),/不能重叠/)
   assert.equal(existsSync(binding.bindingFile({home:f.home,env:{}})),false)
   assert.equal(readFileSync(join(oldData,'history'),'utf8'),'keep')
+})
 })

@@ -43,6 +43,7 @@ class PrivateBrowserPathsTest(unittest.TestCase):
 
 
 class ManagedSandboxPolicyTest(unittest.TestCase):
+    @unittest.skipUnless(hasattr(os, 'getuid'), 'Unix package identity')
     def test_deb_identity_enables_guard_only_for_root_owned_fixed_package(self):
         import json
         from types import SimpleNamespace

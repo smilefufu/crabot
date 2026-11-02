@@ -32,6 +32,15 @@ for executable in /opt/Crabot/crabot-desktop /opt/Crabot/resources/core/.product
 done
 `
 
+// Use electron-builder's standard unload operation, leaving the conffile to dpkg.
+export const ubuntuDebUnloadPolicy = `
+if [ "\${1:-}" = remove ] && [ -f /etc/apparmor.d/crabot-desktop ]; then
+  if /usr/sbin/apparmor_status --enabled >/dev/null 2>&1 && ! /usr/bin/ischroot; then
+    /usr/sbin/apparmor_parser --remove /etc/apparmor.d/crabot-desktop || echo 'Crabot AppArmor profile unload failed; configuration retained.' >&2
+  fi
+fi
+`
+
 export async function prepareUbuntuDeb({ core, resources, directory }) {
   if (process.platform !== 'linux' || process.arch !== 'x64') throw new Error('Ubuntu DEB must be built on Linux x64')
   await fs.mkdir(directory)
@@ -50,7 +59,7 @@ export async function prepareUbuntuDeb({ core, resources, directory }) {
   await fs.writeFile(afterRemove, '#!/bin/sh\nset -e\n' + await fs.readFile(path.join(debian, 'crabot-desktop.postrm.debhelper'), 'utf8'))
   const preinst = path.join(directory, 'preinst'), prerm = path.join(directory, 'prerm')
   await fs.writeFile(preinst, ubuntuDebRunningGuard)
-  await fs.writeFile(prerm, ubuntuDebRunningGuard)
+  await fs.writeFile(prerm, ubuntuDebRunningGuard + ubuntuDebUnloadPolicy)
   // Package-owned fixed CLI/menu links; dpkg removes them on uninstall.
   const guiLink = path.join(directory, 'crabot-desktop-link'), cliLink = path.join(directory, 'crabot-link')
   await fs.symlink('/opt/Crabot/crabot-desktop', guiLink)

@@ -116,6 +116,8 @@ try {
   await cli('stop'); await closeGui(gui)
   await command('/usr/bin/sudo', ['-n', '/usr/bin/dpkg', '--remove', 'crabot-desktop'])
   await assert.rejects(fs.stat(entry), { code: 'ENOENT' }); assert.deepEqual(await fs.readFile(data + '/acceptance-sentinel'), secret)
+  const loaded = await command('/usr/bin/sudo', ['-n', '/bin/cat', '/sys/kernel/security/apparmor/profiles'])
+  assert.doesNotMatch(loaded, /^crabot-desktop-(?:gui|chromium|headless) /m)
   await install(); gui = await launch('reinstall_existing_binding'); await cli('stop'); await closeGui(gui)
   assert.deepEqual(await fs.readFile(data + '/acceptance-sentinel'), secret)
   assert.equal((await fs.readFile('/proc/sys/kernel/apparmor_restrict_unprivileged_userns', 'utf8')).trim(), restriction)

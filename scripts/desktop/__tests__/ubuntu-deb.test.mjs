@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { ubuntuDebPolicy, ubuntuDebRunningGuard } from '../ubuntu-deb.mjs'
+import { ubuntuDebPolicy, ubuntuDebRunningGuard, ubuntuDebUnloadPolicy } from '../ubuntu-deb.mjs'
 
 const files = {
   '.scrapling-runtime-test/browsers/chromium-123/chrome-linux64/chrome': {},
@@ -20,4 +20,10 @@ test('DEB grants user namespaces to the exact GUI and two packaged browsers, wit
 test('preinst uses Debian exact executable status and never signals or reads user data', () => {
   assert.match(ubuntuDebRunningGuard, /start-stop-daemon --status --exec/)
   assert.doesNotMatch(ubuntuDebRunningGuard, /--stop|--signal|kill|mm\.pid|DATA_DIR|current-release/)
+})
+
+test('removal unloads only the package policy; dpkg retains administrator configuration', () => {
+  assert.match(ubuntuDebUnloadPolicy, /\$\{1:-\}.*= remove/)
+  assert.match(ubuntuDebUnloadPolicy, /apparmor_parser --remove \/etc\/apparmor.d\/crabot-desktop/)
+  assert.doesNotMatch(ubuntuDebUnloadPolicy, /rm -|sysctl|restart|userData/)
 })
