@@ -1,8 +1,8 @@
-name: Diagnose unchanged desktop18 Slack Windows
+name: Verify Windows Slack hooks and terminal events
 on:
   workflow_dispatch:
   push:
-    branches: ['diagnose/slack18-windows']
+    branches: ['diagnose/slack18-windows', 'fix/slack-windows-hooks']
 permissions:
   contents: read
 jobs:
@@ -15,11 +15,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22.22.3'
-      - name: Confirm product sources unchanged from delivered18
+      - name: Confirm only the scoped hook launcher differs from delivered18
         shell: bash
         run: |
           git fetch --depth=1 origin ab5836850e74216bc8a1ab8015a907a9dade5ee2
-          git diff --exit-code ab5836850e74216bc8a1ab8015a907a9dade5ee2 -- crabot-channel-slack/src crabot-native/src/hidden-console-launcher.cc scripts/build-native.mjs
+          git diff --exit-code ab5836850e74216bc8a1ab8015a907a9dade5ee2 -- crabot-channel-slack/src ':(exclude)crabot-channel-slack/src/cli-project.ts' crabot-native/src/hidden-console-launcher.cc scripts/build-native.mjs
       - name: Build only unchanged Slack dependencies and hidden launcher
         shell: pwsh
         run: |
@@ -43,7 +43,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Continuous window events with visible and hidden controls
         shell: pwsh
-        run: node .github/scripts/diagnose-slack18-windows.mjs
+        run: |
+          pnpm --dir crabot-channel-slack test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node .github/scripts/smoke-slack-onboarding.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node .github/scripts/diagnose-slack18-windows.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node .github/scripts/check-slack-hook-window-report.mjs
       - uses: actions/upload-artifact@v4
         if: always()
         with:
