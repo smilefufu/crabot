@@ -15,8 +15,9 @@ try {
   assert.equal(report.local_only, true)
   assert.equal(report.preparation_error, undefined)
   assert.equal(report.cleanup_error, undefined)
-  assert.equal(report.checks.length, 4)
+  assert.equal(report.checks.length, 5)
   for (const check of report.checks) assert.equal(check.code, 0, JSON.stringify(check))
   assert.equal(JSON.parse(report.checks[1].output).display_information.name, 'slack-on-win')
-  console.log('Installed-tool local diagnostic: all four local checks returned successfully without Slack login or App creation.')
+  assert.ok(report.checks.find(item => item.name === 'powershell_start_with_synthetic_credentials').output.includes('SYNTHETIC_HANDOFF_OK'))
+  console.log('Installed-tool local diagnostic: five local checks returned successfully without Slack login or App creation.')
 } finally { await fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }) }
