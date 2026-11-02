@@ -60,6 +60,9 @@ try {
   core = path.join(app, 'Contents/Resources/core'); node = path.join(core, '.product-runtime/node/bin/node')
   const management = (await load('desktop-management.cjs')).default, binding = (await load('mac-app-binding.cjs')).default
   management.ensurePrivateDataRoot(data); management.initializeDesktopManagement(data); binding.writeMacAppBinding({ appPath: app, dataDir: data, home })
+  const { newCredentialsFromPassword } = await import(pathToFileURL(path.join(core, 'crabot-admin/dist/credentials.js')).href)
+  await fs.mkdir(path.join(data, 'admin'), { recursive: true, mode: 0o700 })
+  await fs.writeFile(path.join(data, 'admin/credentials.json'), JSON.stringify(await newCredentialsFromPassword('fixture-existing-password', { is_temp: false, changed_via: 'start' })), { mode: 0o600 })
   report.source_ready_ms = await launch()
   const before = JSON.parse((await cli('status', '--json')).stdout), runtimeBefore = JSON.parse(await fs.readFile(path.join(data, 'instance-runtime.json'), 'utf8'))
   report.from = JSON.parse(await fs.readFile(path.join(core, 'core-release.json'), 'utf8')).version; assert.equal(report.from, '0.1.0-desktop.11')
