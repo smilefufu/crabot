@@ -98,6 +98,11 @@ try {
   const binding = JSON.parse(await fs.readFile(home + '/config/crabot/desktop-binding.json', 'utf8'))
   assert.equal(binding.data_dir, data); assert.equal(binding.core_root, core)
   const status = JSON.parse(await cli('status', '--json')); assert.equal(status.running, true)
+  // Fresh native desktop access does not require a browser password. Add one only
+  // in this synthetic test account, so upgrade retention checks a real credential.
+  const seedPassword = 'import{pathToFileURL}from"node:url";const m=await import(pathToFileURL(process.argv[1]));await m.createCredentialsIfAbsent(process.argv[2],await m.newCredentialsFromPassword("isolated-deb-acceptance",{is_temp:false,changed_via:"start"}))'
+  await command(core + '/.product-runtime/node/bin/node', ['--input-type=module', '-e', seedPassword, core + '/crabot-admin/dist/credentials.js', data + '/admin'])
+  const credentials = await fs.readFile(data + '/admin/credentials.json')
   if (process.env.CRABOT_CI_DEVELOPMENT_COEXISTENCE === '1') {
     const { prepareCiElectronSandbox } = await import('./ubuntu-electron-test-sandbox.mjs')
     const { createRequire } = await import('node:module')
@@ -115,7 +120,6 @@ try {
   assert.ok(refused); assert.equal(gui.exitCode, null); assert.equal(JSON.parse(await cli('status', '--json')).running, true)
   const before = JSON.parse(await fs.readFile(data + '/instance-runtime.json', 'utf8'))
   const secret = randomBytes(32); await fs.writeFile(data + '/acceptance-sentinel', secret, { mode: 0o600 })
-  const credentials = await fs.readFile(data + '/admin/credentials.json')
   await closeGui(gui); await pause(1500)
   assert.equal(JSON.parse(await cli('status', '--json')).running, true)
   assert.equal(JSON.parse(await fs.readFile(data + '/instance-runtime.json', 'utf8')).mm.pid, before.mm.pid)
