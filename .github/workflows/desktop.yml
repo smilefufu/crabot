@@ -377,11 +377,21 @@ jobs:
         run: |
           node scripts/desktop/package-installers.mjs --candidate=true "--project=.desktop-build/安装 候选/gui" --out=.desktop-build/platform-installers 2>&1 | tee .desktop-build/installers.log
           node .github/scripts/verify-installer-candidates.mjs .desktop-build/platform-installers 2>&1 | tee .desktop-build/installer-verification.log
+      - name: Prepare isolated source dependencies for release coexistence
+        if: steps.scope.outputs.full_runtime == 'true'
+        run: |
+          node --input-type=module -e 'import{resolve}from"node:path";import{prepareMemoryDependencies}from"./scripts/lib/memory-deps.mjs";await prepareMemoryDependencies(resolve("crabot-memory"),{dev:true,relocatable:false,uv:"uv",logger:console})'
+          pnpm run build:cli
+          pnpm --dir crabot-admin/web run build
       - name: Boot actual packaged app with native session and CLI on Linux
+        env:
+          CRABOT_CI_DEVELOPMENT_COEXISTENCE: '1'
         timeout-minutes: 10
         if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
         run: xvfb-run -a node .github/scripts/smoke-packaged-desktop.mjs ".desktop-build/安装 候选/gui" 2>&1 | tee .desktop-build/packaged-boot.log
       - name: Boot actual packaged app with native session and CLI on macOS and Windows
+        env:
+          CRABOT_CI_DEVELOPMENT_COEXISTENCE: '1'
         timeout-minutes: 10
         if: runner.os != 'Linux' && steps.scope.outputs.full_runtime == 'true'
         run: node .github/scripts/smoke-packaged-desktop.mjs ".desktop-build/安装 候选/gui" 2>&1 | tee .desktop-build/packaged-boot.log
