@@ -37,7 +37,10 @@ const exec = promisify(execFile)
 const firstWindow = await exec(path.join(bundle, 'crabot-installer'), ['--smoke-test'], { env, timeout: 30_000, maxBuffer: 65536 })
 assert.match(firstWindow.stdout, /CRABOT_NATIVE_INSTALLER_WINDOW_READY/)
 const node = path.join(bundle, 'offline/core/.product-runtime/node/bin/node')
-const child = spawn(node, [path.join(bundle, 'backend/dist/ubuntu-installer-backend.js'), installRoot], { env, stdio: ['pipe', 'pipe', 'pipe'] })
+const sharedNodeCounterfactual = process.env.CRABOT_CI_TEST_SHARED_BROWSER_NODE === '1'
+const preload = sharedNodeCounterfactual ? ['--import', path.resolve('.github/scripts/ubuntu-shared-browser-node-preload.mjs')] : []
+const child = spawn(node, [...preload, path.join(bundle, 'backend/dist/ubuntu-installer-backend.js'), installRoot], {
+  env: sharedNodeCounterfactual ? { ...env, CRABOT_CI_BROWSER_NODE_DIAGNOSIS: '1' } : env, stdio: ['pipe', 'pipe', 'pipe'] })
 let error, complete = false, authorizations = 0, operations = Promise.resolve(), stderr = ''
 child.stdin.on('error', value => { error ??= value })
 child.stderr.on('data', bytes => { stderr = (stderr + bytes.toString('utf8')).slice(-8192) })
@@ -65,6 +68,7 @@ finally { clearTimeout(cancel); output.close() }
 if (error) throw error
 assert.equal(code, 0, 'Backend exited without completion: ' + stderr)
 assert.equal(complete, true); assert.equal(authorizations, 1)
+if (sharedNodeCounterfactual) assert.ok(stderr.includes('CRABOT_CI_SHARED_BROWSER_NODE_OVERRIDE'))
 assert.equal(frames.filter(type => type === 'complete').length, 1); assert.equal(frames.at(-1), 'complete')
 assert.equal(await fs.readFile(setting, 'utf8'), before)
 const require = createRequire(path.join(bundle, 'backend/package.json'))
@@ -97,7 +101,7 @@ try {
   await fs.unlink(pendingFile)
 }
 for (const file of ['mm.pid', 'agent', 'admin']) await assert.rejects(fs.access(path.join(installation.dataDir, file)), { code: 'ENOENT' })
-const report = { source: native.commit, actual_native_first_window: true, actual_fresh_installation: true, test_authorizations: authorizations,
+const report = { source: native.commit, shared_node_counterfactual: sharedNodeCounterfactual, actual_native_first_window: true, actual_fresh_installation: true, test_authorizations: authorizations,
   actual_gui_browser_sandbox_and_network: true, actual_bundled_mcp_fetch: true, global_restriction_unchanged: true,
   unique_pair_and_user_entries: true, retained_pair_native_inspection: true, changed_prepared_proof_rejected: true, business_mm_started: false, graphical_polkit: false, gnome_wayland: false, product_uninstall: false }
 await fs.writeFile('.desktop-build/ubuntu-installation-report.json', JSON.stringify(report, null, 2) + '\n')

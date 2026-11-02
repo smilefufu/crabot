@@ -201,6 +201,15 @@ jobs:
       - name: Read-only original browser probe versus shared Node diagnosis
         if: failure()
         run: node .github/scripts/diagnose-ubuntu-browser-node.mjs .desktop-build/ubuntu-installation
+      - name: Counterfactual full installation with only shared browser Node configured
+        if: failure()
+        timeout-minutes: 14
+        env:
+          CRABOT_CI_INSTALLER_COMMIT: ${{ steps.source.outputs.commit }}
+          CRABOT_CI_TEST_SHARED_BROWSER_NODE: '1'
+        run: |
+          ulimit -c 0
+          dbus-run-session -- xvfb-run -a node .github/scripts/accept-ubuntu-offline-installer.mjs .desktop-build/ubuntu-installation
       - uses: actions/upload-artifact@v4
         if: always()
         with:
