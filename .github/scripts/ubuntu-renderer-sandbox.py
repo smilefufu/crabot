@@ -44,5 +44,11 @@ for pid in sorted(owned):
         renderers.append(result)
     except (FileNotFoundError, ProcessLookupError):
         continue
+if not renderers:
+    print(json.dumps({'root': root, 'observed_tree': [
+        {'pid': pid, 'parent': processes[pid][0], 'uid': processes[pid][1], 'args': processes[pid][2]}
+        for pid in sorted(owned)], 'renderer_candidates': [
+        {'pid': pid, 'parent': parent, 'uid': uid, 'args': args}
+        for pid, (parent, uid, args, _) in processes.items() if any('type=renderer' in arg for arg in args)]}), file=sys.stderr)
 assert renderers, 'No live renderer observed; this is not sandbox acceptance'
 print(json.dumps({'root': root, 'renderers': renderers}))
