@@ -131,7 +131,7 @@ export const ApplicationQueueModal: React.FC<ApplicationQueueModalProps> = ({
 
         <dl className="dlg-queue-detail__meta">
           <div>
-            <dt>来源渠道</dt>
+            <dt>来源聊天方式</dt>
             <dd className="mono">{selectedApplication.channel_id}</dd>
           </div>
           <div>

@@ -334,7 +334,7 @@ export const SkillList: React.FC = () => {
   return (
     <MainLayout>
       <header className="page-header">
-        <h1 className="page-header__title">Skills</h1>
+        <h1 className="page-header__title">技能</h1>
         <div className="page-header__actions">
           <Button variant="secondary" onClick={handleRescan}>重新扫描</Button>
           <Button variant="primary" onClick={openCreate}>添加 Skill</Button>

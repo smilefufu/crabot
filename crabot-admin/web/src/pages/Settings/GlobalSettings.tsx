@@ -145,7 +145,7 @@ export const GlobalSettings: React.FC = () => {
                 <div className="browser-settings__option-body">
                   <div className="browser-settings__option-title">独立 Profile</div>
                   <div className="browser-settings__option-hint">
-                    Crabot 专属浏览器配置，不影响日常使用的 Chrome
+                    CRABOT 专属浏览器配置，不影响日常使用的 Chrome
                   </div>
                 </div>
               </label>
@@ -168,7 +168,7 @@ export const GlobalSettings: React.FC = () => {
 
               {browser.profile_mode === 'user' && (
                 <div className="browser-settings__warning" role="alert">
-                  ⚠️ 启用复用模式后，Crabot 启动浏览器时会关闭当前正在运行的 Chrome。未保存的标签页和表单数据将丢失。
+                  ⚠️ 启用复用模式后，CRABOT 启动浏览器时会关闭当前正在运行的 Chrome。未保存的标签页和表单数据将丢失。
                 </div>
               )}
             </fieldset>

@@ -12,7 +12,7 @@ import './BackupExportPage.css'
 
 const CATEGORY_LABELS: Record<string, string> = {
   config: '配置（模型/Agent/模板/MCP）',
-  channels: '渠道与朋友（含权限）',
+  channels: '聊天方式与朋友（含权限）',
   skills: '技能',
   memory: '长期记忆',
   tasks: '任务与日程',
@@ -71,7 +71,7 @@ export const BackupExportPage: React.FC = () => {
           <div className="bx-head-mark">📦</div>
           <div>
             <h1 className="bx-title">导出备份</h1>
-            <p className="bx-subtitle">选择要导出的类别，打包为可在另一台 Crabot 上导入的归档文件（.tar.gz）。</p>
+            <p className="bx-subtitle">选择要导出的类别，打包为可在另一台 CRABOT 上导入的归档文件（.tar.gz）。</p>
           </div>
         </header>
 

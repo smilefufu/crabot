@@ -33,7 +33,7 @@ describe('Channel 停止状态展示', () => {
     await view()
     await act(async () => fireEvent.click(screen.getByRole('button', { name: '停止' })))
     expect(channelService.stopInstance).toHaveBeenCalledWith('飞书客服')
-    expect(toast.success).not.toHaveBeenCalledWith('Channel 已停止')
+    expect(toast.success).not.toHaveBeenCalledWith('聊天方式已停止')
     status = 'stopped'
     await act(async () => { await vi.advanceTimersByTimeAsync(3000) })
     expect(screen.getByRole('button', { name: '删除' })).toBeEnabled()
@@ -50,7 +50,7 @@ describe('Channel 停止状态展示', () => {
     vi.mocked(channelService.stopInstance).mockResolvedValue({ status: result })
     await view()
     await act(async () => fireEvent.click(screen.getByRole('button', { name: '停止' })))
-    expect(toast.success).not.toHaveBeenCalledWith('Channel 已停止')
+    expect(toast.success).not.toHaveBeenCalledWith('聊天方式已停止')
     expect(toast.error).toHaveBeenCalled()
   })
 
@@ -58,6 +58,6 @@ describe('Channel 停止状态展示', () => {
     vi.mocked(channelService.stopInstance).mockResolvedValue({ status: 'stopped' })
     await view()
     await act(async () => fireEvent.click(screen.getByRole('button', { name: '停止' })))
-    expect(toast.success).toHaveBeenCalledWith('Channel 已停止')
+    expect(toast.success).toHaveBeenCalledWith('聊天方式已停止')
   })
 })

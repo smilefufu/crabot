@@ -28,6 +28,7 @@ import type {
 } from './types.js'
 import type { OnConflict } from './backup/import/import-types.js'
 import { findPresetVendor } from './vendor-registry.js'
+import { fillModelCapabilities, preserveModelSettings } from './model-capabilities.js'
 import type { ConfigDomain, CoreAgentConfigMutationContext } from './core-agent-config-revision-store.js'
 
 export type ProviderConfigMutationRunner = (
@@ -186,8 +187,8 @@ function buildChatProbeRequest(
 
 /**
  * vendor.vision_id_prefixes 后处理：响应不暴露 vision 字段，但 vendor 声明了
- * 某些命名族（如 claude- / gpt-）必然支持视觉时，把 supports_vision 强制置 true。
- * 已经被解析为 true 的模型保留 true，不下调（避免抹掉真实信号）。
+ * 某些命名族（如 claude- / gpt-）支持视觉时，把缺失的 supports_vision 补为 true。
+ * 仅补齐未提供的字段；显式 true / false 均保留。
  *
  * 注意保持 immutability（项目编码约定），返回新对象数组。
  */
@@ -197,7 +198,7 @@ function applyVendorVisionHints(
 ): ModelInfo[] {
   if (!visionPrefixes || visionPrefixes.length === 0) return models
   return models.map(m => {
-    if (m.supports_vision) return m
+    if (m.supports_vision !== undefined) return m
     const hit = visionPrefixes.some(prefix => m.model_id.startsWith(prefix))
     return hit ? { ...m, supports_vision: true } : m
   })
@@ -216,14 +217,14 @@ function parseCodexModels(raw: unknown[]): ModelInfo[] {
     if (item.visibility !== 'list') continue
     if (item.supported_in_api === false) continue
 
-    const modalities = Array.isArray(item.input_modalities) ? (item.input_modalities as unknown[]) : []
-    const supportsVision = modalities.includes('image')
+    const modalities = Array.isArray(item.input_modalities) ? (item.input_modalities as unknown[]) : undefined
+    const supportsVision = modalities?.includes('image')
 
     models.push({
       model_id: slug,
       display_name: (typeof item.display_name === 'string' && item.display_name) || slug,
       type: 'llm',
-      supports_vision: supportsVision,
+      ...(supportsVision !== undefined ? { supports_vision: supportsVision } : {}),
       ...(typeof item.context_window === 'number' && { context_window: item.context_window }),
     })
   }
@@ -276,12 +277,15 @@ export function parseOpenAIModels(raw: unknown[]): ModelInfo[] {
     const type: ModelType = classifyModelType(modelId)
 
     const capabilities = item.capabilities as { vision?: boolean } | undefined
-    const modalities = Array.isArray(item.input) ? (item.input as unknown[]) : []
+    const architecture = item.architecture as { input_modalities?: unknown } | undefined
+    const input = item.input ?? item.input_modalities ?? architecture?.input_modalities
+    const modalities = Array.isArray(input) ? input : undefined
     // 仅 llm 认视觉；image 模型的 input=image 是"生图输入"不是"看图"，不置 supports_vision。
     // supports_image_in：kimi coding 端点 /v1/models 的字段（非 OpenAI 标准），同为布尔。
-    const supportsVision =
-      type === 'llm' &&
-      (capabilities?.vision === true || modalities.includes('image') || item.supports_image_in === true)
+    const supportsVision = type !== 'llm' ? false
+      : typeof capabilities?.vision === 'boolean' ? capabilities.vision
+      : typeof item.supports_image_in === 'boolean' ? item.supports_image_in
+      : modalities ? modalities.includes('image') : undefined
     const contextWindow =
       (typeof item.context_window === 'number' ? item.context_window : undefined) ??
       (typeof item.context_length === 'number' ? item.context_length : undefined) ??
@@ -294,7 +298,7 @@ export function parseOpenAIModels(raw: unknown[]): ModelInfo[] {
         (typeof item.name === 'string' && item.name) ||
         modelId,
       type,
-      supports_vision: supportsVision,
+      ...(supportsVision !== undefined ? { supports_vision: supportsVision } : {}),
       ...(contextWindow !== undefined && { context_window: contextWindow }),
     })
   }
@@ -376,7 +380,7 @@ export class ModelProviderManager {
       api_key: params.api_key,
       preset_vendor: params.preset_vendor,
       ...(params.auth_type && { auth_type: params.auth_type }),
-      models: params.models,
+      models: params.models.map(model => fillModelCapabilities(model, params)),
       status: 'active',
       created_at: now,
       updated_at: now,
@@ -393,11 +397,12 @@ export class ModelProviderManager {
   }
 
   getProvider(id: string): ModelProvider | undefined {
-    return this.providers.get(id)
+    const provider = this.providers.get(id)
+    return provider && { ...provider, models: provider.models.map(model => fillModelCapabilities(model, provider)) }
   }
 
   listProviders(): ModelProvider[] {
-    return Array.from(this.providers.values())
+    return Array.from(this.providers.keys(), id => this.getProvider(id)!)
   }
 
   async updateProvider(id: string, params: UpdateModelProviderParams): Promise<ModelProvider> {
@@ -822,14 +827,7 @@ export class ModelProviderManager {
     const authToken = await this.ensureFreshAuthToken(provider)
     let freshModels: ModelInfo[]
     if (provider.format === 'gemini') {
-      freshModels = (await fetchGeminiModels(provider, authToken)).map(model => {
-        const previous = provider.models.find(item => item.model_id === model.model_id)
-        return { ...model,
-          ...(previous?.context_window !== undefined ? { context_window: previous.context_window } : {}),
-          ...(previous?.max_tokens !== undefined ? { max_tokens: previous.max_tokens } : {}),
-          ...(previous?.supports_vision !== undefined ? { supports_vision: previous.supports_vision } : {}),
-        }
-      })
+      freshModels = await fetchGeminiModels(provider, authToken)
     } else {
       if (provider.type !== 'preset' || !provider.preset_vendor) throw new Error('Only preset providers support model refresh')
       const vendor = findPresetVendor(provider.preset_vendor)
@@ -843,7 +841,7 @@ export class ModelProviderManager {
     const added = freshModels.filter(m => !oldIds.has(m.model_id)).map(m => m.model_id)
     const removed = provider.models.filter(m => !newIds.has(m.model_id)).map(m => m.model_id)
 
-    const mergedModels = freshModels
+    const mergedModels = preserveModelSettings(freshModels, provider.models)
 
     const updated = { ...provider, models: mergedModels, updated_at: generateTimestamp() }
     // 厂商模型列表与本地一致时语义快照不变：允许 runtime noop，否则最常见的
@@ -947,10 +945,17 @@ export class ModelProviderManager {
         return [...vendor.default_models]
       }
 
-      return applyVendorVisionHints(parsed, vendor.vision_id_prefixes)
+      const models = applyVendorVisionHints(parsed, vendor.vision_id_prefixes)
+        .map(model => fillModelCapabilities(model, vendor))
+      if (models.length === 0) throw new Error('供应商未返回可用模型，已有目录已保留')
+      return models
     } catch (error) {
       console.error(`Failed to fetch models from ${vendor.name}:`, error)
-      return vendor.default_models ? [...vendor.default_models] : []
+      if (vendor.default_models) return [...vendor.default_models]
+      if (error instanceof Error && /HTTP\s+(401|403)\b/.test(error.message)) {
+        throw new Error('供应商凭据无效或没有访问权限，已有配置已保留。请检查 API Key 或账号授权。')
+      }
+      throw new Error('无法读取供应商模型目录，已有配置已保留')
     }
   }
 
@@ -1003,7 +1008,8 @@ export class ModelProviderManager {
       throw new Error(`Provider not found: ${providerId}`)
     }
 
-    const model = provider.models.find((m) => m.model_id === modelId)
+    const savedModel = provider.models.find((m) => m.model_id === modelId)
+    const model = savedModel && fillModelCapabilities(savedModel, provider)
     if (!model) {
       throw new Error(`Model not found: ${modelId} in provider ${providerId}`)
     }

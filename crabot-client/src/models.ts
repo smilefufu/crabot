@@ -7,7 +7,8 @@ const Ref = z.object({ provider_id: z.string(), model_id: z.string() })
 const Config = z.object({ default_llm_provider_id: z.string().optional(), default_llm_model_id: z.string().optional() })
 const GlobalResult = z.object({ config: Config })
 const ProviderChoices = z.object({ items: z.array(z.object({ id: z.string(), name: z.string(), status: z.enum(['active', 'inactive', 'error']),
-  models: z.array(z.object({ model_id: z.string(), display_name: z.string(), type: z.enum(['llm', 'image']) })) })) })
+  models: z.array(z.object({ model_id: z.string(), display_name: z.string(), type: z.enum(['llm', 'image']),
+    supports_vision: z.boolean().optional(), context_window: z.number().optional() })) })) })
 const AgentConfig = z.object({ config: z.object({ models: z.object({ powerful: Ref.optional() }) }).nullable() })
 export type ModelChoiceProvider = z.infer<typeof ProviderChoices>['items'][number]
 

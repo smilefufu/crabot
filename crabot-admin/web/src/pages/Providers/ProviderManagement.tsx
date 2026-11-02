@@ -16,6 +16,9 @@ import { ProviderDrawerCreate } from './ProviderDrawerCreate'
 import { ProviderTestBadge, type ProviderTestState } from './ProviderTestBadge'
 import { useToast } from '../../contexts/ToastContext'
 import type { GlobalModelConfig, ModelProvider, ProviderStatus } from '../../types'
+import { VendorLogo } from '../../components/Common/VendorLogo'
+import { ModelCapabilities } from '../../components/Common/ModelCapabilities'
+import { Link } from 'react-router-dom'
 
 type DrawerMode = 'closed' | 'detail' | 'edit' | 'create'
 
@@ -23,9 +26,9 @@ type DrawerMode = 'closed' | 'detail' | 'edit' | 'create'
 type OnboardingStage = 'no_provider' | 'no_global' | 'ready'
 
 const STEPS: ReadonlyArray<{ id: OnboardingStage; label: string; sub: string }> = [
-  { id: 'no_provider', label: '接入供应商', sub: '配置 OpenAI / Anthropic / 自托管端点' },
-  { id: 'no_global',   label: '设默认模型', sub: '指定全局默认 LLM，未单独配置的模块都会用它' },
-  { id: 'ready',       label: '可投入使用',  sub: 'Agent / Memory / 其他模块按需调用' },
+  { id: 'no_provider', label: '接入模型供应商', sub: '选择已有账号或服务' },
+  { id: 'no_global', label: '选择默认模型', sub: '能力和上下文自动填写' },
+  { id: 'ready', label: '开始聊天', sub: '收到真实回复后确认可用' },
 ]
 
 export const ProviderManagement: React.FC = () => {
@@ -34,6 +37,9 @@ export const ProviderManagement: React.FC = () => {
   const [providers, setProviders] = useState<ModelProvider[]>([])
   const [globalConfig, setGlobalConfig] = useState<GlobalModelConfig>({})
   const [loading, setLoading] = useState(true)
+  const [providerReadError, setProviderReadError] = useState(false)
+  const [configReadError, setConfigReadError] = useState(false)
+  const [configLoaded, setConfigLoaded] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState<'all' | ProviderStatus>('all')
   const [globalExpanded, setGlobalExpanded] = useState(false)
@@ -51,8 +57,11 @@ export const ProviderManagement: React.FC = () => {
     try {
       const cfg = await providerService.getGlobalConfig()
       setGlobalConfig(cfg)
+      setConfigReadError(false)
     } catch {
-      // 静默失败：进入页面时即使 global config 拉不到，也不阻塞 provider 列表展示
+      setConfigReadError(true)
+    } finally {
+      setConfigLoaded(true)
     }
   }, [])
 
@@ -61,7 +70,9 @@ export const ProviderManagement: React.FC = () => {
       setLoading(true)
       const response = await providerService.listProviders()
       setProviders(response.items)
+      setProviderReadError(false)
     } catch (err) {
+      setProviderReadError(true)
       toast.error(err instanceof Error ? err.message : '加载失败')
     } finally {
       setLoading(false)
@@ -194,7 +205,8 @@ export const ProviderManagement: React.FC = () => {
     setDrawerMode('create')
   }
 
-  if (loading && providers.length === 0) return <MainLayout><Loading /></MainLayout>
+  if (!configLoaded || (loading && providers.length === 0)) return <MainLayout><Loading /></MainLayout>
+  if (providerReadError || configReadError) return <MainLayout><h1>模型服务</h1><p role="alert">暂时无法读取模型配置，已有配置保持保留。</p><Button onClick={() => { void loadProviders(); void refreshGlobalConfig() }}>重新检查</Button></MainLayout>
 
   return (
     <MainLayout>
@@ -202,17 +214,15 @@ export const ProviderManagement: React.FC = () => {
         <div className="provider-list-area">
           <header className="provider-page-header">
             <div className="provider-page-title-row">
-              <h1 className="provider-page-title">模型配置</h1>
-              <span className="provider-page-eyebrow">model.providers</span>
+              <h1 className="provider-page-title">模型服务</h1>
             </div>
             <p className="provider-page-lede">
-              这里集中管理所有 LLM 供应商。Agent / Memory / 其他模块本身不存 API key，
-              只引用此处配置；改动会按"模块默认 → 全局默认"顺序解析。
+              供应商提供模型服务，默认模型决定 CRABOT 平时用哪个模型。
             </p>
           </header>
 
           {/* 步骤导航：永远渲染，告知用户当前在第几步 */}
-          <Stepper currentIndex={stageIndex} />
+          {stage !== 'ready' && <Stepper currentIndex={stageIndex} />}
 
           {/* 阶段 A：尚无供应商 — 大幅引导，不渲染全局模型卡 */}
           {stage === 'no_provider' && (
@@ -224,8 +234,8 @@ export const ProviderManagement: React.FC = () => {
             <ProviderCallout
               variant="attention"
               mark="[02]"
-              title="下一步：选定全局默认 LLM"
-              sub="未单独配置的模块（Memory / Agent 等）会自动使用全局默认。点击此条展开设置。"
+              title="下一步：选择默认模型"
+              sub="先选一个平时使用的模型，就可以开始聊天。"
               collapsedHint="+"
               expanded={globalExpanded}
               onToggle={() => setGlobalExpanded(v => !v)}
@@ -238,10 +248,10 @@ export const ProviderManagement: React.FC = () => {
           {stage === 'ready' && (
             <ProviderCallout
               variant="ready"
-              mark="[03]"
+              mark=""
               title={
                 <>
-                  全局默认 LLM
+                  默认模型
                   <span className="provider-callout-value">
                     {selectedGlobalProvider
                       ? `${selectedGlobalProvider.name} · ${globalConfig.default_llm_model_id ?? ''}`
@@ -249,14 +259,16 @@ export const ProviderManagement: React.FC = () => {
                   </span>
                 </>
               }
-              sub="未单独配置的模块都会用此模型。点击展开可以更换。"
-              collapsedHint="编辑"
+              sub="日常使用的默认模型。点击展开可以更换，单独配置的模型分工仍会保留。"
+              collapsedHint="更换模型"
               expanded={globalExpanded}
               onToggle={() => setGlobalExpanded(v => !v)}
               providers={providers}
               onChanged={handleGlobalConfigChanged}
             />
           )}
+
+          {stage === 'ready' && <><ModelCapabilities model={selectedGlobalProvider?.models.find(model => model.model_id === globalConfig.default_llm_model_id) ?? {}} /><Link to="/chat">去和 CRABOT 聊天 →</Link></>}
 
           {/* providers 列表 — 阶段 A 不显示（用户还没创建过任何 provider） */}
           {stage !== 'no_provider' && (
@@ -302,16 +314,17 @@ export const ProviderManagement: React.FC = () => {
                       >
                         <div className="provider-card-header">
                           <div className="provider-card-name">
+                            <VendorLogo vendorId={provider.preset_vendor} name={provider.name} />
                             <span>{provider.name}</span>
                             <span className="provider-card-type">{provider.type}</span>
                             <StatusBadge status={provider.status}>
-                              {provider.status === 'active' ? '正常' : provider.status === 'inactive' ? '未激活' : '错误'}
+                              {provider.status === 'active' ? '已保存配置' : provider.status === 'inactive' ? '未启用' : '错误'}
                             </StatusBadge>
-                            {isDefault && <span className="provider-card-default-tag">默认 LLM</span>}
+                            {isDefault && <span className="provider-card-default-tag">默认模型</span>}
                           </div>
                           <div className="provider-card-actions">
                             <span className="provider-card-models">
-                              {provider.models.length} model{provider.models.length === 1 ? '' : 's'}
+                              {provider.models.length} 个模型
                             </span>
                             <ProviderTestBadge
                               result={testResult}
@@ -411,10 +424,7 @@ const NoProviderHero: React.FC<{ onCreate: () => void }> = ({ onCreate }) => {
     <section className="provider-hero">
       <div className="provider-hero-mark">[01]</div>
       <h2 className="provider-hero-title">接入第一个模型供应商</h2>
-      <p className="provider-hero-lede">
-        Crabot 不内置任何 LLM 凭据。你需要把自己的 OpenAI / Anthropic / Gemini API key
-        （或自托管端点）配进来，模块才能调用模型。
-      </p>
+      <p className="provider-hero-lede">选择你已经在用的供应商、账号或本地模型服务，接入后就能与 CRABOT 聊天、一起做事。</p>
       <ul className="provider-hero-bullets">
         <li>
           <span className="provider-hero-bullet-h">从厂商导入</span>
@@ -453,7 +463,7 @@ const ProviderCallout: React.FC<ProviderCalloutProps> = ({
   return (
     <section className={`provider-callout provider-callout-${variant} ${expanded ? 'is-expanded' : ''}`}>
       <button type="button" className="provider-callout-summary" onClick={onToggle}>
-        <span className="provider-callout-mark">{mark}</span>
+        {mark && <span className="provider-callout-mark">{mark}</span>}
         <div className="provider-callout-text">
           <span className="provider-callout-title">{title}</span>
           <span className="provider-callout-sub">{sub}</span>
