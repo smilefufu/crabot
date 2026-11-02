@@ -22,6 +22,8 @@ jobs:
         os: [ubuntu-24.04, macos-15, macos-15-intel, windows-2022]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -33,8 +35,12 @@ jobs:
         run: |
           pnpm --dir crabot-client install --frozen-lockfile --ignore-scripts
           pnpm --dir crabot-client run build
+          pnpm --dir crabot-shared install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-shared run build
           pnpm install --frozen-lockfile --ignore-scripts
           node scripts/build-native.mjs
+          pnpm --dir crabot-desktop install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-desktop run build
       - name: Verify real archive bytes, fresh preparation and retained-data program boundaries
         run: >-
           node --test --test-concurrency=1

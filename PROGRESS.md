@@ -6,13 +6,14 @@
 - 已接入 CRABOT 大写品牌、已确认像素 Logo、本地供应商图标；隐藏百炼 Coding Plan 新增预设，保留存量解析。首次配置复用现有引用保存与聊天链路，模型能力按已核实接入和精确型号补缺，保留已保存能力与输出预算，无持久化迁移。
 - Web 全量 479 项、模型配置相关后端（含 HTTP）86 项、Client 模型 5 项通过，Admin / Web / Desktop 构建通过。真实前端在 Web 与桌面宿主模拟下完成接入、保存默认模型及发送首条消息，覆盖五种宽度与明暗主题；模型响应使用夹具，真实模型调用、原生桌面安装和生产部署尚未验证。已完成本次 diff 自审，按设计型任务提交 PR。
 
-### Ubuntu 标准 DEB：原生安装、升级及源码GUI共存通过，仍为草稿
+### Ubuntu 标准 DEB：原生安装、升级及源码GUI共存通过，收尾与审查中
 
 - 按用户要求，Ubuntu开发分支合入main上的界面优化`f9113364`（#234）；保留CRABOT品牌与Ubuntu包管理器负责命令/卸载的原行为。Web全量481项、Client全量38项及真实Electron/首模型/源码会话/Ubuntu首启复查18项通过；Admin/Desktop编译及Vite资源打包通过。Web类型检查7项、Admin全量剩余2项失败均已在独立main副本复现；桌面直接全量运行497项通过、52项跳过，5处构建准备缺失已复查通过；2个发布载荷专用入口需打包Python，未以其专用runner验收。原DEB仍对应下述候选源码，尚未重新打包含新界面的安装包。
+- 最新CI暴露三处检查接线缺失：旧dev.sh函数测试、未构建Core身份对照产物、未准备Desktop依赖/构建。按现有Node入口和依赖顺序补齐，未改产品行为；本地相关208项通过、11项平台条件跳过，远端完整检查待复核。
 - 按逐项许可使用标准DEB、系统固定程序目录和包管理器覆盖；新GUI默认XDG用户数据位置，首启可改，保留已有绑定。Windows、Mac、独立CLI/system不在本轮行为变更范围。
 - 已验收候选源码`a75d472d`；[41530704610](https://github.com/smilefufu/crabot/actions/runs/41530704610)构建及Ubuntu24实际包验收通过，60项边界回归与1项真实Electron profile测试通过。22版DEB下载911471650字节，SHA256 `ee8274fabf5cadb0b04a8529a7a7605891db016ee4fab586c1b6261796cf2f18`；不据此推算安装占用。
 - 用户11月3日单项批准Linux Electron一行参数兼容：仅锚定完整受信程序/源码目录及原两个开关，保留OS用户、真实程序、PID代际复验和原握手。先复现2项失败，修后本地5项定向回归及Desktop构建通过。[41530698596](https://github.com/smilefufu/crabot/actions/runs/41530698596)两系统原包＋新源码GUI共存通过；包含修正的同一新包[41532885769](https://github.com/smilefufu/crabot/actions/runs/41532885769)在Ubuntu24/26均通过初装/内核沙箱、已发布CLI14/15加合成数据经普通GUI接入及旧密码实际登录、21→22固定覆盖、真实源码GUI认证和双方独立启停。21→22为同源码版本号夹具，不冒充历史GUI数据迁移或真实业务数据验收。
-- Ubuntu24终验首次在独立Scrapling截图处30秒超时，原提交/产物/断言重跑一次后通过；失败保留，截图超时根因未定位，记独立follow-up。GNOME/Wayland真人、旧GTK GUI及自启动入口迁移、成功后旧程序清理询问仍未完成；[PR233](https://github.com/smilefufu/crabot/pull/233)保持草稿，不发正式版、不自行合并。证据及边界见[Ubuntu验收记录](https://github.com/smilefufu/crabot-docs/blob/main/guides/desktop-ubuntu-acceptance.md)。
+- Ubuntu24终验首次在独立Scrapling截图处30秒超时，原提交/产物/断言重跑一次后通过；失败保留，截图超时根因未定位，记独立follow-up。GNOME/Wayland真人、旧GTK GUI及自启动入口迁移、成功后旧程序清理询问仍未完成；[PR233](https://github.com/smilefufu/crabot/pull/233)已进入正式审查；仍有收尾未完成，不发正式版、不自行合并。证据及边界见[Ubuntu验收记录](https://github.com/smilefufu/crabot-docs/blob/main/guides/desktop-ubuntu-acceptance.md)。
 
 ### Slack 频道远端历史：实现完成，PR 验证中
 
