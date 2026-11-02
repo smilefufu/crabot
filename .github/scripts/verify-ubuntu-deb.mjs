@@ -6,6 +6,7 @@ import { spawn, execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { once } from 'node:events'
 import { createHash, randomBytes } from 'node:crypto'
+import { probeMmModules } from '../../scripts/lib/mm-probe.mjs'
 assert.equal(process.env.GITHUB_ACTIONS, 'true'); assert.equal(process.platform, 'linux'); assert.ok(process.getuid() > 0)
 const exec = promisify(execFile), distribution = path.resolve(process.argv[2])
 const base = path.dirname(distribution), root = '/opt/Crabot', core = root + '/resources/core', entry = root + '/crabot-desktop'
@@ -22,6 +23,25 @@ const children = [], pause = ms => new Promise(resolve => setTimeout(resolve, ms
 const command = async (file, args, options = {}) => (await exec(file, args, { timeout: 180000, maxBuffer: 2000000, ...options })).stdout
 const cli = (...args) => command('/usr/bin/crabot', args, { env, timeout: 90000 })
 const install = () => command('/usr/bin/sudo', ['-n', '/usr/bin/apt-get', 'install', '--reinstall', '-y', file])
+async function healthyModules() {
+  const deadline = Date.now() + 120000
+  let failure
+  while (Date.now() < deadline) {
+    try {
+      const modules = await probeMmModules(19000), result = []
+      for (const id of ['admin-web', 'crabot-agent', 'memory-default']) {
+        const module = modules?.find(item => item.module_id === id)
+        assert.equal(module?.status, 'running', id + ' has not registered')
+        const response = await fetch(`http://127.0.0.1:${module.port}/health`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(5000) })
+        const value = await response.json()
+        assert.ok(response.ok && value.success && ['healthy', 'degraded'].includes(value.data.status), id + ' is not ready')
+        result.push({ module: id, health: value.data.status })
+      }
+      return result
+    } catch (error) { failure = error; await pause(500) }
+  }
+  throw failure
+}
 async function closeGui(gui) {
   if (gui.exitCode === null && gui.signalCode === null) { gui.kill('SIGKILL'); await Promise.race([once(gui, 'close'), pause(5000)]) }
 }
@@ -42,7 +62,7 @@ async function launch(label, chooseDefault = false) {
   }
   await fs.writeFile(path.join(base, 'acceptance-' + label + '.log'), output)
   assert.ok(output.split('\n').some(line => { try { const v = JSON.parse(line); return v.component === 'desktop' && v.phase === 'ready' } catch { return false } }), label + ': ' + output.slice(-5000))
-  report.checks.push({ name: label, ready: true })
+  report.checks.push({ name: label, ready: true, modules: await healthyModules() })
   return child
 }
 try {
@@ -64,6 +84,15 @@ try {
   const binding = JSON.parse(await fs.readFile(home + '/config/crabot/desktop-binding.json', 'utf8'))
   assert.equal(binding.data_dir, data); assert.equal(binding.core_root, core)
   const status = JSON.parse(await cli('status', '--json')); assert.equal(status.running, true)
+  if (process.env.CRABOT_CI_DEVELOPMENT_COEXISTENCE === '1') {
+    const { prepareCiElectronSandbox } = await import('./ubuntu-electron-test-sandbox.mjs')
+    const { createRequire } = await import('node:module')
+    await prepareCiElectronSandbox(createRequire(path.resolve('crabot-desktop/package.json'))('electron'))
+    const { inspectInstance } = await import('../../scripts/lib/instance-runtime.mjs')
+    const { verifyDevelopmentCoexistence } = await import('./smoke-development-coexistence.mjs')
+    await verifyDevelopmentCoexistence({ inspectRelease: async () => inspectInstance(data), releaseCli: cli })
+    report.checks.push({ name: 'actual_source_gui_and_release_data_generation_and_stop_isolation', passed: true })
+  }
   const browser = await command(core + '/.product-runtime/node/bin/node', [path.resolve('.github/scripts/smoke-scrapling.mjs'), core, '--offline', '--kernel-check'], { env, timeout: 240000 })
   await fs.writeFile(path.join(base, 'acceptance-browser.log'), browser)
   report.checks.push({ name: 'actual_production_mcp_browser_and_kernel_sandbox', output: browser })
