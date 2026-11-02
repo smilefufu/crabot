@@ -31,8 +31,12 @@ for pid in sorted(owned):
     parent, uid, args, status = processes[pid]
     try:
         current = Path(f'/proc/{pid}/attr/current').read_text().strip()
-        result['profiles'].append({'pid': pid, 'profile': current})
-        if '--type=renderer' not in args:
+        result['profiles'].append({'pid': pid, 'profile': current,
+            'comm': Path(f'/proc/{pid}/comm').read_text().strip(),
+            'no_new_privs': any(line.split() == ['NoNewPrivs:', '1'] for line in status.splitlines()),
+            'seccomp': any(line.split() == ['Seccomp:', '2'] for line in status.splitlines()),
+            'distinct_user_namespace': Path(f'/proc/{pid}/uid_map').read_text().strip() != host_map})
+        if not any('--type=renderer' in arg for arg in args):
             continue
         mapping = Path(f'/proc/{pid}/uid_map').read_text().strip()
         result['renderers'].append({'pid': pid,

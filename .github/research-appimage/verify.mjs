@@ -172,7 +172,10 @@ try {
   browser.stdout.on('data', b => { browserOutput = (browserOutput + b).slice(-32000) }); browser.stderr.on('data', b => { browserOutput = (browserOutput + b).slice(-32000) })
   const timer = setTimeout(() => browser.kill('SIGTERM'), 150000)
   const [browserCode] = await once(browser, 'close'); clearTimeout(timer)
-  report.checks.push({ name: 'browser_and_upstream_mcp_component', code: browserCode, network, observations: browserProcesses, output: browserOutput })
+  const browserKernel = browserOutput.split('\n').filter(line => line.startsWith('CRABOT_RESEARCH_BROWSER_KERNEL='))
+    .map(line => JSON.parse(line.slice('CRABOT_RESEARCH_BROWSER_KERNEL='.length)))
+  report.checks.push({ name: 'browser_and_upstream_mcp_component', code: browserCode, network, observations: browserProcesses,
+    cdp_kernel: browserKernel, output: browserOutput })
   server.closeAllConnections(); await new Promise(done => server.close(done)); server = undefined
   const main = (await tree(gui.child.pid)).find(p => p.executable === path.join(firstMount, 'crabot-desktop') && !p.args.some(a => a.startsWith('--type=')))
   assert.ok(main)
