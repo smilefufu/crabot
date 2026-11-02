@@ -2,6 +2,10 @@ name: Desktop installer initialization probe
 on:
   workflow_dispatch:
     inputs:
+      mac_upgrade:
+        description: Verify delivered Mac11 App overwritten by the completed Mac19 App
+        type: boolean
+        default: false
       directory_only:
         description: 'Run only native installation-directory regressions without a package download'
         type: boolean
@@ -30,6 +34,7 @@ permissions:
   actions: read
 jobs:
   recheck:
+    if: inputs.mac_upgrade != true
     runs-on: windows-latest
     timeout-minutes: 40
     defaults:
@@ -121,3 +126,33 @@ jobs:
           include-hidden-files: true
           if-no-files-found: warn
           retention-days: 7
+
+  mac-overwrite:
+    if: inputs.mac_upgrade == true
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: '41199706942'
+          name: crabot-darwin-arm64-offline-test-f87e4d4667ee6d95bd7051e91739ccabf3f1928f
+          path: .desktop-build/mac-old
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ inputs.source_run }}
+          name: ${{ inputs.artifact_name }}
+          path: .desktop-build/mac-new
+      - name: Replace the actual old App and reopen its original data
+        run: node .github/scripts/verify-mac-app-overwrite.mjs .desktop-build/mac-old .desktop-build/mac-new
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mac-overwrite-${{ github.sha }}
+          path: .desktop-build/mac-overwrite*
+          if-no-files-found: warn
