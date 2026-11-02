@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto'
 import { setTimeout as delay } from 'node:timers/promises'
 import { WebClient, LogLevel } from '@slack/web-api'
 import { validateInstanceId, type ProxyConfig, type Onboarder, type OnboarderBeginResult, type OnboarderEvent, type OnboarderFinishResult } from 'crabot-shared'
-import { ensureCli, privateDirectory, recoverSession, startCli, writePrivate, type CliJob } from './cli-tools.js'
+import { ensureCli, privateDirectory, recoverSession, startCli, type CliJob } from './cli-tools.js'
 import { prepareProject } from './cli-project.js'
 export class OnboardingError extends Error {
   constructor(readonly code: string, readonly status: number, message: string) { super(message) }
@@ -15,7 +15,7 @@ interface Session {
   id: string; root: string; project: string; executable: string; ticket?: string
   expires: number; phase: 'waiting' | 'processing' | 'ready' | 'error' | 'cancelled' | 'completed'
   abort: AbortController; job?: CliJob; task?: Promise<void>; result?: OnboarderFinishResult
-  error?: { code: string; message: string }; app_id?: string; requested_name?: string; proxy?: ProxyConfig
+  error?: { code: string; message: string }; app_id?: string; proxy?: ProxyConfig
   step?: 'authorization' | 'app' | 'verification'; failure?: string
 }
 interface Options {
@@ -98,14 +98,15 @@ export class SlackOnboarder implements Onboarder {
     for (const entry of await fs.readdir(base, { withFileTypes: true })) {
       const old = this.sessions.get(entry.name)
       if (!entry.isDirectory() || (old && !['error', 'cancelled', 'completed'].includes(old.phase)) || !/^[0-9a-f-]{36}$/.test(entry.name)) continue
+      await old?.task
       await recoverSession(path.join(base, entry.name))
-      await this.cleanSecrets(path.join(base, entry.name))
+      await this.cleanSession(path.join(base, entry.name))
       this.sessions.delete(entry.name)
     }
     const id = randomUUID(), root = path.join(base, id)
     await privateDirectory(root)
     await privateDirectory(path.join(root, 'cli'))
-    const session: Session = { id, root, project: '', executable: '', expires: Date.now() + 300000, phase: 'processing', abort: new AbortController(), requested_name: typeof name === 'string' ? name : undefined, proxy }
+    const session: Session = { id, root, project: '', executable: '', expires: Date.now() + 300000, phase: 'processing', abort: new AbortController(), proxy }
     if (this.disposed) throw new Error('Slack 授权服务已停止')
     this.sessions.set(id, session)
     const timeout = setTimeout(() => session.abort.abort(), 300000)
@@ -158,10 +159,6 @@ export class SlackOnboarder implements Onboarder {
       if (values.length !== 1 || !/^T[A-Z0-9]+$/.test(values[0].team_id) || !/^U[A-Z0-9]+$/.test(values[0].user_id)) throw new Error('Invalid CLI identity')
       const identity = values[0]
       session.step = 'app'
-      const previous = await this.previousApp(session, identity)
-      if (previous) await writePrivate(path.join(session.project, '.slack', 'apps.dev.json'), { [identity.team_id]: { app_id: previous, team_id: identity.team_id, user_id: identity.user_id, IsDev: true } })
-      session.app_id = previous
-      await this.recordIntent(session, identity, 'creating')
       const run = this.launch(session, ['run', '--team', identity.team_id, '--app', 'local'])
       let exited = false
       void run.result.finally(() => { exited = true }).catch(() => {})
@@ -185,7 +182,6 @@ export class SlackOnboarder implements Onboarder {
       const appId = apps[identity.team_id]?.app_id
       if (!appId || !/^A[A-Z0-9]+$/.test(appId)) throw new Error('CLI App identity missing')
       session.app_id = appId
-      await this.recordIntent(session, identity, 'configured')
       session.step = 'verification'
       const displayName = await (this.options.verify ?? verifyCredentials)(credentials, identity, appId, session.abort.signal)
       session.abort.signal.throwIfAborted()
@@ -206,54 +202,31 @@ export class SlackOnboarder implements Onboarder {
     }
   }
   async finish(id: string, params?: Record<string, unknown>): Promise<OnboarderFinishResult> {
+    // Only Admin supplies this acknowledgement after checking its durable creation receipt.
     if (typeof params?.created_instance_id === 'string' && !this.sessions.has(id)) {
       if (!/^[a-f0-9-]{36}$/.test(id)) throw new OnboardingError('session_not_found', 404, '授权会话不存在')
       const root = path.join(this.dataDir, 'slack-onboarding', id)
-      const intent = JSON.parse(await fs.readFile(path.join(root, 'intent.json'), 'utf8'))
-      if (!intent.app_id || (intent.instance_id && intent.instance_id !== params.created_instance_id)) throw new Error('授权完成记录不一致')
-      await this.cleanSecrets(root)
-      await writePrivate(path.join(root, 'intent.json'), { ...intent, stage: 'completed', instance_id: params.created_instance_id })
+      await recoverSession(root)
+      await this.cleanSession(root)
       return { env: {} }
     }
     const session = this.getSession(id)
     if (!session.result || !['ready', 'completed'].includes(session.phase)) throw new OnboardingError('session_completed', 409, '授权尚未成功')
-    // Only Admin supplies this internal acknowledgement after durable instance creation.
     if (typeof params?.created_instance_id === 'string') {
-      const intent = JSON.parse(await fs.readFile(path.join(session.root, 'intent.json'), 'utf8'))
-      await writePrivate(path.join(session.root, 'intent.json'), { ...intent, app_id: session.app_id, instance_id: params.created_instance_id, stage: 'completed' })
-      await this.cleanSecrets(session.root)
+      await this.cleanSession(session.root)
       session.phase = 'completed'
     }
     return session.result
-  }
-  private async recordIntent(session: Session, identity: Identity, stage: string) {
-    await writePrivate(path.join(session.root, 'intent.json'), { session_id: session.id, requested_name: session.requested_name, team_id: identity.team_id, user_id: identity.user_id, app_id: session.app_id, stage })
   }
   private async captureApp(session: Session, identity: Identity) {
     try {
       const apps = JSON.parse(await fs.readFile(path.join(session.project, '.slack', 'apps.dev.json'), 'utf8'))
       const app = apps[identity.team_id]?.app_id
-      if (/^A[A-Z0-9]+$/.test(app ?? '') && app !== session.app_id) { session.app_id = app; await this.recordIntent(session, identity, 'creating') }
+      if (/^A[A-Z0-9]+$/.test(app ?? '') && app !== session.app_id) session.app_id = app
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error }
   }
-  private async previousApp(session: Session, identity: Identity): Promise<string | undefined> {
-    if (!session.requested_name) return undefined
-    const nameKey = session.requested_name.normalize('NFC').toLowerCase()
-    let found: string | undefined
-    const base = path.dirname(session.root)
-    for (const entry of await fs.readdir(base, { withFileTypes: true })) {
-      if (!entry.isDirectory() || entry.name === session.id || !/^[a-f0-9-]{36}$/.test(entry.name)) continue
-      let intent
-      try { intent = JSON.parse(await fs.readFile(path.join(base, entry.name, 'intent.json'), 'utf8')) } catch { continue }
-      if (intent.stage === 'completed' || (typeof intent.requested_name !== 'string' || intent.requested_name.normalize('NFC').toLowerCase() !== nameKey) || intent.team_id !== identity.team_id || intent.user_id !== identity.user_id) continue
-      if (!/^A[A-Z0-9]+$/.test(intent.app_id ?? '')) throw new Error('Previous remote creation outcome unknown; confirm in Slack first')
-      if (found && found !== intent.app_id) throw new Error('More than one previous App; confirm in Slack first')
-      found = intent.app_id
-    }
-    return found
-  }
-  private async cleanSecrets(root: string) {
-    for (const name of ['cli', 'handoff.json', 'project', 'hook-state.json']) await fs.rm(path.join(root, name), { recursive: true, force: true })
+  private async cleanSession(root: string) {
+    await fs.rm(root, { recursive: true, force: true })
   }
   private async fail(session: Session, cause?: unknown): Promise<void> {
     session.ticket = undefined
@@ -264,7 +237,7 @@ export class SlackOnboarder implements Onboarder {
     session.phase = 'error'
     try { await session.job?.stop() } catch { throw new Error('Slack 授权进程清理未确认完成') }
     session.job = undefined
-    await this.cleanSecrets(session.root)
+    await this.cleanSession(session.root)
   }
   cancel(id: string): void {
     const session = this.sessions.get(id)

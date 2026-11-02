@@ -90,7 +90,7 @@ describe('local Slack onboarding contract', () => {
     expect(launch).not.toHaveBeenCalled()
   })
 
-  it('reuses only a recorded App from the same workspace/user/name after a failed verification', async () => {
+  it('starts a fresh App after failed verification without retaining or reusing creation intent', async () => {
     const { onboarder, verify, dataDir, commands, preexistingApps } = await setup()
     verify.mockRejectedValueOnce(new Error('fixture platform verification failed'))
     const first = await onboarder.begin({ instance_name: 'slack-reuse' })
@@ -101,20 +101,31 @@ describe('local Slack onboarding contract', () => {
     expect((await terminal(onboarder, second.session_id))?.type).toBe('success')
     const registry = JSON.parse(await fs.readFile(path.join(dataDir, 'slack-onboarding', second.session_id, 'project/.slack/apps.dev.json'), 'utf8'))
     expect(registry.TTEST.app_id).toBe('ATEST')
-    expect(preexistingApps).toEqual([undefined, 'ATEST'])
+    expect(preexistingApps).toEqual([undefined, undefined])
+    await expect(fs.access(path.join(dataDir, 'slack-onboarding', first.session_id))).rejects.toThrow()
     expect(commands.filter(args => args[0] === 'run')).toHaveLength(2)
     await onboarder.dispose()
   })
-  it('does not retry remote creation when a previous creation outcome is unknown', async () => {
-    const { onboarder, dataDir, commands } = await setup()
+  it.each([
+    { stage: 'creating' },
+    { stage: 'creating', app_id: 'AOLD' },
+    { stage: 'configured', app_id: 'AOLD' },
+    'invalid legacy JSON',
+  ])('does not read or use legacy intent when starting a new authorization: %j', async intent => {
+    const { onboarder, dataDir, commands, preexistingApps } = await setup()
     const old = path.join(dataDir, 'slack-onboarding', '33333333-3333-4333-8333-333333333333')
     await fs.mkdir(old, { recursive: true })
-    await fs.writeFile(path.join(old, 'intent.json'), JSON.stringify({ requested_name: 'slack-unknown', team_id: 'TTEST', user_id: 'UTEST', stage: 'creating' }))
-    const begin = await onboarder.begin({ instance_name: 'slack-unknown' })
-    await onboarder.submit(begin.session_id, { challenge_code: 'fixture' })
-    expect((await terminal(onboarder, begin.session_id))?.type).toBe('error')
-    expect(commands.some(args => args[0] === 'run')).toBe(false)
-    await onboarder.dispose()
+    await fs.writeFile(path.join(old, 'intent.json'), typeof intent === 'string' ? intent : JSON.stringify({ requested_name: 'slack-unknown', team_id: 'TTEST', user_id: 'UTEST', ...intent }))
+    const reads = vi.spyOn(fs, 'readFile')
+    try {
+      const begin = await onboarder.begin({ instance_name: 'slack-unknown' })
+      await onboarder.submit(begin.session_id, { challenge_code: 'fixture' })
+      expect((await terminal(onboarder, begin.session_id))?.type).toBe('success')
+      expect(commands.filter(args => args[0] === 'run')).toHaveLength(1)
+      expect(preexistingApps).toEqual([undefined])
+      expect(reads.mock.calls.some(([file]) => path.basename(String(file)) === 'intent.json')).toBe(false)
+      await expect(fs.access(path.join(dataDir, 'slack-onboarding', begin.session_id, 'intent.json'))).rejects.toThrow()
+    } finally { reads.mockRestore(); await onboarder.dispose() }
   })
 
   it('hands off only after stopping CLI, retains a retryable result and clears developer credentials after durable creation', async () => {
@@ -135,7 +146,8 @@ describe('local Slack onboarding contract', () => {
     await onboarder.finish(begin.session_id, { created_instance_id: 'slack-test' })
     const root = path.join(dataDir, 'slack-onboarding', begin.session_id)
     for (const item of ['cli', 'handoff.json', 'project']) await expect(fs.access(path.join(root, item))).rejects.toThrow()
-    expect(JSON.parse(await fs.readFile(path.join(root, 'intent.json'), 'utf8'))).toMatchObject({ app_id: 'ATEST', instance_id: 'slack-test', stage: 'completed' })
+    await expect(fs.access(root)).rejects.toThrow()
+    expect(await onboarder.finish(begin.session_id)).toEqual(result)
     await onboarder.dispose()
   })
   it('rejects invalid/unknown/expired and duplicate terminal input without creating another App', async () => {
@@ -155,7 +167,30 @@ describe('local Slack onboarding contract', () => {
     expect(event?.type).toBe('error'); expect(JSON.stringify(event)).not.toContain('xoxb-')
     expect(stopped.length).toBeGreaterThan(0)
     await onboarder.dispose()
-    await expect(fs.access(path.join(dataDir, 'slack-onboarding', begin.session_id, 'cli'))).rejects.toThrow()
+    await expect(fs.access(path.join(dataDir, 'slack-onboarding', begin.session_id))).rejects.toThrow()
+  })
+  it('cleans a cancelled session completely before another same-name begin', async () => {
+    const { onboarder, dataDir, preexistingApps } = await setup()
+    const first = await onboarder.begin({ instance_name: 'slack-cancelled' })
+    onboarder.cancel(first.session_id)
+    const second = await onboarder.begin({ instance_name: 'slack-cancelled' })
+    await expect(fs.access(path.join(dataDir, 'slack-onboarding', first.session_id))).rejects.toThrow()
+    await onboarder.submit(second.session_id, { challenge_code: 'fixture' })
+    expect((await terminal(onboarder, second.session_id))?.type).toBe('success')
+    expect(preexistingApps).toEqual([undefined])
+    await onboarder.dispose()
+  })
+  it('accepts the trusted Admin cleanup acknowledgement after restart without a second completion record', async () => {
+    const { onboarder, dataDir } = await setup()
+    const id = '44444444-4444-4444-8444-444444444444'
+    const root = path.join(dataDir, 'slack-onboarding', id)
+    await fs.mkdir(path.join(root, 'cli'), { recursive: true })
+    await fs.writeFile(path.join(root, 'cli/credentials.json'), 'synthetic local developer credentials')
+    await expect(onboarder.finish(id, { created_instance_id: 'slack-test' })).resolves.toEqual({ env: {} })
+    await expect(fs.access(root)).rejects.toThrow()
+    await expect(onboarder.finish(id, { created_instance_id: 'slack-test' })).resolves.toEqual({ env: {} })
+    await expect(onboarder.finish('../outside', { created_instance_id: 'slack-test' })).rejects.toMatchObject({ code: 'session_not_found' })
+    await onboarder.dispose()
   })
   it('reports a failed local App hook without exposing CLI output or credentials', async () => {
     const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-slack-hook-error-')); roots.push(dataDir)
