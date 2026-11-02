@@ -7,6 +7,10 @@
 - 已交付：安装器一次解包并标准覆盖固定GUI/Core及入口，数据准备移到GUI；数据复制最多8并发；Windows固定HTTP/HTTPS系统代理；精确自有进程启停。Slack内层PowerShell调用Node退出0却丢stdout/handoff的首次失败及闪窗已原生复现并修正，严格hook/窗口观察通过；真实远端Slack创建不以本地夹具代验。
 - 按用户要求删除`intent.json`全部读写、历史扫描/阻断/复用；失败/取消收口自有CLI后清理整个临时会话，现有Admin完成回执继续负责实例幂等与授权。旧清理Promise失败不再永久阻断后续begin，Windows并发清理增加有界重试。PR #229最终review批准；Windows53项和官方CLI本地hooks通过，Mac Slack48项通过/5项平台跳过、Admin鉴权/回执/认主36项通过。远端App不自动删除，不宣称外部API原子回滚。
 - 未完成范围保持可见：旧残留清理询问、完整卸载简化、Mac R3/R4、Ubuntu固定布局及其它冻结安装路径；旧Mac/Ubuntu真桌面资源按用户决定暂跳过。Mac仍为11版测试包。常规程序文件1855497860字节（不含用户数据和旧残留），500MB目标未实现。详见[安装路径清单](https://github.com/smilefufu/crabot-docs/blob/main/guides/installation-upgrade-paths.md)、[实施证据](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-30-windows-installation-feedback-fixes.md)与[体积审计](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/research/2026-11-01-desktop-size-audit.md)。
+- 11月2日补做全平台终验，结论仍为**未全通过**。只在隔离CI分支补充测试/诊断，不改产品、部署或发布。[四平台GUI/首次设置窗口](https://github.com/smilefufu/crabot/actions/runs/41405754459)通过；这不等于所有首次授权对话框均已真人操作。
+- Windows真实EXE初装、CLI14/15接入、旧GUI14覆盖19、Finish自动启动和原开始菜单重新打开、数据/密码保留及重复启停通过：[完整初装](https://github.com/smilefufu/crabot/actions/runs/41405060431)、[GUI14升级](https://github.com/smilefufu/crabot/actions/runs/41406539869)、[CLI15接入](https://github.com/smilefufu/crabot/actions/runs/41413007095)。Mac ARM普通App及CLI14/15接入通过，[真实已交付App11同位置覆盖19](https://github.com/smilefufu/crabot/actions/runs/41408359061)通过；[Intel](https://github.com/smilefufu/crabot/actions/runs/41408992500)同样通过，但普通App版本覆盖用同源19→测试版本夹具，不能冒充历史已交付Intel App升级。Mac原生接入确认对话框未实点；Intel新App就绪约31～33秒，未作性能验收。Mac R3/R4仍未完成：独立接入窗口和普通启动全量校验仍存在。
+- 新dev流程的源码GUI/Core与release GUI/Core在Windows、Mac ARM/Intel、Linux均实际并行运行，数据/端口隔离、分别停止和重启通过；Linux证据在[41405225245已完成的共存步骤](https://github.com/smilefufu/crabot/actions/runs/41405225245)日志中，该整次作业后因旧CLI接入失败取消，不能记整次成功。新dev使用29000/13000，release使用19000/3000；既有源码生产部署不会自动搬端口。未验证并行真实模型任务。
+- Ubuntu原始原生安装器初装失败`CRABOT_INSTALL_BROWSER_SANDBOX`：浏览器探针未指定共享Node，寻找已在瘦身时删除的Playwright私有Node。相同不可变包的原探针失败、共享Node驱动成功，且[仅给探针补环境路径的完整安装反事实检查](https://github.com/smilefufu/crabot/actions/runs/41412234314)通过；原始产品仍失败，不能算修复。旧CLI14→GUI另失败`CRABOT_MAINTENANCE_PENDING`，schema4停在verifying，未启动MM；具体底层原因尚未证实，CLI15及后续升级未通过。Ubuntu仍使用app/releases、releases及current-release.json，未落实固定目录覆盖。GNOME Wayland/图形polkit、完整卸载与真实Win11用户环境不以CI代验。
 
 ### 主控常驻职责与指南生命周期：实现完成，PR 验证中
 
@@ -83,6 +87,8 @@
 - 上一轮追加提示词候选未合入产品或部署，仅保留隔离分支/证据；上一轮仅交付评测器修复及结论更正。原交接明确要求读规则，相关重读不全算执行器加码；归因四格不完整、每场景各一次，不能宣称稳定因果或线上收益。
 
 ### 语音：wire9已部署，按优先级收口验收
+
+- 2026-11-02按已确认自然轮次设计完成[安卓暂停持续处理与实际控制器隔离接线](https://github.com/smilefufu/crabot-voice-android/blob/main/docs/verification/2026-11-02-pause-speech-confirmation.md)，安卓main `9ba14c8`。旧实现暂停后失去近端判断已先复现；改为真实硬件时间/消费游标映射播放历史与未播尾部，暂停/饥饿持续APM，时间戳缺失有界等待。既有WebRTC默认VAD候选＋原Silero确认，身份/上传保留原采音；控制器确认后只取消旧语音消费并建新turn，不取消Worker，等待/播报采音不上传。89项JVM（30轮插话及原60轮待机）、9组27150块产品Kotlin/JNI公开重放与独立APM逐样本一致、两组纯回声零确认及两类APK构建通过。默认产品入口仍wire9，不选择未过关端点；中文EOT固定失败保留，硬件时钟/漂移、实际AEC/短词、声纹兼容、wire10联合及真人体验尚未验收。未改阈值/超时/提示词/spec/协议、本机部署或手机，未连接ADB或安排用户重测；[实施计划](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-27-natural-voice-turn-taking-implementation.md)已同步。
 
 - Android 0.8.1/code18 已保留数据升级并直推 main（4d11bef）：恢复原“一次开启、多轮待机”，修复接话到期重复开麦及通知跨过接话期限后退出待机两条路径；旧实现两项回归失败，修复后30项JVM、4项隔离控制器及1项方向检查通过。首页/分组设置/既有FuFu记录已真机核对；安装与测试阶段即时密文摘要一致，正常重连的目录同步仍按原逻辑重加密。真人连续唤醒/接话验收待补，声纹规则和后台部署不变；[验证记录](https://github.com/smilefufu/crabot-voice-android/blob/main/docs/verification/2026-10-24-persistent-standby-and-home.md)。
 - 用户已确认后端/安卓配套设计及一处提示词文字；正式 Voice v0.9.0/wire9 先行发布。不增加通用 SSML 或新模型配置，普通 voice_reply 按需完整回答，宿主自动断句、单个 TTS 请求加一个预取，按实际播放游标保持最多一秒在途音频。
