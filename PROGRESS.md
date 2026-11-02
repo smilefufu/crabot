@@ -1,5 +1,10 @@
 # Crabot 项目进度
 
+### Slack 频道远端历史：实现完成，PR 验证中
+
+- 依据已确认 [Spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-11-02-slack-remote-history-design.md)，群 get_history 查询平台主聊天，包含入群前及未 @Bot 的消息；after/before 在 Slack Channel 内转为 start/end。查询不回填缓存或重新执行旧消息，DM／单条详情仍为缓存，完整 thread 不在本次范围内。
+- 正式协议和[实施计划](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-11-02-slack-remote-history-implementation.md)已更新；公开／私有频道缺失先复现为 2 项失败，修复后 Slack 全模块 88 项通过、5 项因平台条件跳过，相关 Agent 工具 19 项通过；Slack 构建、Agent 类型检查通过。已验证 Agent→Channel 日期转换、完整性错误及无缓存／事件副作用。本机未配置 Slack 实例，尚未部署或完成真实 Windows Slack 验收。
+
 ### 桌面初版：Windows19验收通过，按用户许可合入main；暂不发版
 
 - 11月2日用户反馈本版明显改善，明确许可合并推送；随后要求暂不发版。本次不创建发行标签或GitHub Release，不改本机源码部署、服务或真实数据。

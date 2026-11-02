@@ -1,4 +1,14 @@
 import { describe, expect, it, vi } from 'vitest'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { SlackChannel } from '../../../crabot-channel-slack/src/slack-channel.js'
+
+// Agent CI installs Agent/shared only. Inject the platform API below without loading Slack's SDKs.
+vi.mock('../../../crabot-channel-slack/src/slack-client.js', () => ({
+  SlackClient: vi.fn(),
+  platformError: () => { throw new Error('unexpected Slack platform error in integration fixture') },
+}))
 
 import { buildWorkerMessagingTools } from '../../src/mcp/crab-messaging.js'
 
@@ -111,5 +121,37 @@ describe('crab-messaging get_history 协议映射', () => {
         timestamp: '2026-09-07T02:00:00.000Z',
       }],
     })
+  })
+})
+
+describe('Slack Agent → Channel 历史查询', () => {
+  it('在 Channel 内转换日期参数并返回入群前远端消息，保持会话和入站事件不变', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'slack-agent-history-'))
+    try {
+      const api = { connected: true, start: vi.fn(), stop: vi.fn(), call: vi.fn(async () => ({
+        ok: true, messages: [{ type: 'message', user: 'U1', ts: '100.001001', text: 'pre-join target' }], has_more: false,
+      })) }
+      const channel = new SlackChannel({ module_id: 'slack-history', port: 0, data_dir: dir,
+        env: { SLACK_BOT_TOKEN: 'xoxb-test', SLACK_APP_TOKEN: 'xapp-test' } }, api as never)
+      const store = (channel as any).store
+      const session = store.upsert({ id: 'CPRIVATE', is_member: true }, 'private').session
+      const original = JSON.stringify(session), events = vi.fn()
+      ;(channel as any).rpcClient.publishEvent = events
+      const call = vi.fn(async (_port, method, params) => {
+        if (method === 'resolve_friend') return { friend: null }
+        return (channel as any).methodHandlers.get(method)(params)
+      })
+      const tool = getHistoryTool(call)
+      const result = await tool.handler({ channel_id: 'slack-history', session_id: session.id, keyword: 'TARGET',
+        after: '1970-01-01T00:01:40.001Z', before: '1970-01-01T00:01:40.002Z', limit: 20 })
+      expect(JSON.parse(result.content[0].text).messages).toEqual([{
+        platform_message_id: '100.001001', sender_name: 'U1', content: 'pre-join target', content_type: 'text', timestamp: '1970-01-01T00:01:40.001Z',
+      }])
+      expect(api.call).toHaveBeenCalledWith('conversations.history', expect.objectContaining({ channel: 'CPRIVATE', oldest: '100.001000', latest: '100.002000' }))
+      expect(JSON.stringify(store.session(session.id))).toBe(original)
+      expect(events).not.toHaveBeenCalled()
+      expect(fs.readdirSync(path.join(dir, 'messages'))).toEqual([])
+      expect(tool.description).toContain('主聊天')
+    } finally { fs.rmSync(dir, { recursive: true, force: true }) }
   })
 })

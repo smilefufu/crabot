@@ -1202,7 +1202,7 @@ crabot 系统给你的所有信号——system prompt、supplement 注入、tool
     // ================================================================
     {
       name: 'get_history',
-      description: '查看指定 Channel 上某个 Session 的历史消息。',
+      description: '查看指定 Channel 上某个 Session 的历史消息。Slack 群查询平台当前可读的主聊天，包含入群前及未 @Bot 的消息，不含完整 thread；Slack 私聊历史仍为本地交互缓存。失败或范围无法完成时返回错误，不能据此断言没有历史。',
       schema: GET_HISTORY_SCHEMA,
       handler: async (args) => {
         const channel_id = args.channel_id as string
@@ -1296,7 +1296,7 @@ crabot 系统给你的所有信号——system prompt、supplement 注入、tool
     // ================================================================
     {
       name: 'get_message',
-      description: '按消息 ID 查询单条消息详情。当消息内容不完整时可用此工具查看完整内容。',
+      description: '按消息 ID 查询单条消息详情。当消息内容不完整时可用此工具查看完整内容。Slack 只查本地交互缓存，远端历史返回的消息 ID 不保证可在此重读；未缓存不代表 Slack 消息不存在。',
       schema: GET_MESSAGE_SCHEMA,
       handler: async (args) => {
         const channel_id = args.channel_id as string

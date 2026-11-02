@@ -42,7 +42,7 @@ describe('Slack ordinary conversation routing', () => {
     expect(incoming[1].session.type).toBe('group')
     expect(incoming[1].features.thread_id).toBe('100.001')
     expect(incoming[1].sender).toEqual({ platform_user_id: 'U1', platform_display_name: 'Alice' })
-    expect((await s.rpc('get_history', { session_id: incoming[1].session.session_id })).items).toHaveLength(1)
+    expect(await s.rpc('get_message', { session_id: incoming[1].session.session_id, platform_message_id: incoming[1].platform_message_id })).toMatchObject({ features: { thread_id: '100.001' } })
   })
   it('hot reloads false, keeps it through restart, masks tokens, validates atomically', async () => {
     const s = setup()

@@ -36,8 +36,13 @@ export interface SlackUser {
 }
 export interface SlackResult {
   ok?: boolean; team_id?: string; user_id?: string; bot_id?: string; ts?: string
+  error?: string; needed?: string; messages?: SlackHistoryMessage[]; has_more?: boolean; is_limited?: boolean
   bot?: { app_id?: string }; channel?: SlackConversation; channels?: SlackConversation[]
   user?: SlackUser; members?: Array<SlackUser | string>; response_metadata?: { next_cursor?: string }
+}
+export interface SlackHistoryMessage {
+  type?: string; user?: string; bot_id?: string; subtype?: string; text?: string; ts?: string; thread_ts?: string; hidden?: boolean
+  username?: string; bot_profile?: { name?: string }; files?: Array<{ name?: string; title?: string }>
 }
 export interface SlackEnvelope {
   team_id?: string; api_app_id?: string; event_id?: string
