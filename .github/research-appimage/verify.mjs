@@ -80,12 +80,7 @@ async function terminate(gui) {
   }
   gui.child.stdin.destroy()
 }
-async function authorize(mount) {
-  assert.ok(mount.startsWith('/tmp/.mount_') || mount.startsWith('/tmp/appimage_'), 'Unexpected official runtime mount: ' + mount)
-  const runtime = JSON.parse(await fs.readFile(path.join(mount, 'resources/core/product-runtime.json'), 'utf8'))
-  const paths = [path.join(mount, 'crabot-desktop'), ...Object.keys(runtime.files)
-    .filter(name => /\/browsers\/(?:chromium-[0-9]+\/chrome-linux(?:64)?\/chrome|chromium_headless_shell-[0-9]+\/chrome-headless-shell-linux(?:64)?\/headless_shell)$/.test(name))
-    .map(name => path.join(mount, 'resources/core', name))]
+async function registerPaths(paths) {
   for (const executable of paths) {
     assert.ok(!/["\\\r\n\0]/.test(executable)); assert.ok((await fs.stat(executable)).isFile())
     const name = 'crabot-appimage-research-' + createHash('sha256').update(executable).digest('hex').slice(0, 20)
@@ -99,6 +94,17 @@ async function authorize(mount) {
     policyText.push(policy)
   }
 }
+async function authorize(mount) {
+  assert.ok(mount.startsWith('/tmp/.mount_') || mount.startsWith('/tmp/appimage_'), 'Unexpected official runtime mount: ' + mount)
+  const runtime = JSON.parse(await fs.readFile(path.join(mount, 'resources/core/product-runtime.json'), 'utf8'))
+  await registerPaths([path.join(mount, 'crabot-desktop'), ...Object.keys(runtime.files)
+    .filter(name => /\/browsers\/(?:chromium-[0-9]+\/chrome-linux(?:64)?\/chrome|chromium_headless_shell-[0-9]+\/chrome-headless-shell-linux(?:64)?\/headless_shell)$/.test(name))
+    .map(name => path.join(mount, 'resources/core', name))])
+}
+async function kernel(pid) {
+  return JSON.parse((await exec('/usr/bin/sudo', ['-n', '/usr/bin/python3', path.resolve('.github/research-appimage/kernel.py'), String(pid), String(process.getuid())],
+    { timeout: 10000, maxBuffer: 1000000 })).stdout)
+}
 const data = path.join(base, 'data')
 await fs.mkdir(data, { recursive: true, mode: 0o700 }); await fs.mkdir(path.join(base, 'home'), { mode: 0o700 })
 const noAuth = launch(image, path.join(base, 'baseline-data'))
@@ -108,6 +114,22 @@ report.checks.push({ name: 'ordinary_unchanged_system_launch', ready: noAuth.pha
 await terminate(noAuth)
 let gui, captured = [], server
 try {
+  await registerPaths([image])
+  const outer = launch(image, path.join(base, 'outer-policy-data'))
+  await waitFor(outer, () => outer.phases.some(v => ['ready', 'error', 'migration_required'].includes(v.phase)), 90000)
+  const outerReady = outer.phases.some(v => v.phase === 'ready')
+  const outerRecord = outerReady ? JSON.parse(await fs.readFile(path.join(base, 'outer-policy-data/instance-runtime.json'), 'utf8')) : null
+  report.checks.push({ name: 'outer_appimage_path_permission_inheritance', ready: outerReady,
+    phases: outer.phases, kernel: outerReady ? await kernel(outer.child.pid) : undefined,
+    core_kernel: outerRecord ? await kernel(outerRecord.controller.pid) : undefined, output: outer.output.slice(-8000) })
+  if (outerReady) {
+    const outerCore = path.join(outer.mount, 'resources/core')
+    await exec(path.join(outerCore, '.product-runtime/node/bin/node'), [path.join(outerCore, 'cli.mjs'), 'stop'], { env: outer.env, timeout: 90000 })
+  }
+  await terminate(outer)
+  const outerPolicy = policyText.pop()
+  const unloader = spawn('/usr/bin/sudo', ['-n', '/usr/sbin/apparmor_parser', '-R'], { stdio: ['pipe', 'ignore', 'ignore'] })
+  unloader.stdin.end(outerPolicy); await once(unloader, 'close')
   gui = launch(image, data, true)
   if (!await waitFor(gui, () => Boolean(gui.mount))) throw new Error('AppImage runtime could not mount: ' + gui.output)
   const firstMount = gui.mount
@@ -117,10 +139,7 @@ try {
   report.checks.push({ name: 'exact_path_authorized_gui', ready: ready && gui.phases.some(v => v.phase === 'ready'),
     phases: gui.phases, output: gui.output.slice(-12000), test_only_system_authorization: true })
   if (!gui.phases.some(v => v.phase === 'ready')) throw new Error('Research GUI was not ready')
-  const actual = (await tree(gui.child.pid)).filter(p => p.args.includes('--type=renderer'))
-  const hostMap = (await fs.readFile('/proc/self/uid_map', 'utf8')).trim()
-  report.checks.push({ name: 'gui_renderer_kernel_sandbox', renderers: actual.map(p => ({ pid: p.pid, no_new_privs: p.no_new_privs, seccomp: p.seccomp,
-    distinct_user_namespace: p.map !== hostMap, disabled: p.args.some(a => a === '--no-sandbox') })) })
+  report.checks.push({ name: 'gui_renderer_kernel_sandbox', observation: await kernel(gui.child.pid) })
   const core = path.join(firstMount, 'resources/core')
   const cli = async (...args) => (await exec(path.join(core, '.product-runtime/node/bin/node'), [path.join(core, 'cli.mjs'), ...args],
     { env: gui.env, timeout: 90000, maxBuffer: 2000000 })).stdout
@@ -139,9 +158,7 @@ try {
     const role = req.url?.split('/').at(-1)
     if (!req.url?.startsWith('/' + token + '/') || !['chromium', 'scrapling'].includes(role)) { res.writeHead(404).end(); return }
     if (req.method === 'POST') {
-      const processes = await tree(browserPid)
-      browserProcesses.push({ role, renderers: processes.filter(p => p.args.includes('--type=renderer')).map(p => ({ pid: p.pid,
-        no_new_privs: p.no_new_privs, seccomp: p.seccomp, distinct_user_namespace: p.map !== hostMap, disabled: p.args.includes('--no-sandbox') })) })
+      browserProcesses.push({ role, observation: await kernel(browserPid) })
       network.push(role); res.end('verified'); return
     }
     res.setHeader('Content-Type', 'text/html')
