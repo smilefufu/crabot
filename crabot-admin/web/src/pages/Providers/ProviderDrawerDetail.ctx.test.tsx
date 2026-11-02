@@ -37,7 +37,7 @@ function makeProvider(models: ModelProvider['models']): ModelProvider {
 }
 
 function renderDrawer(provider: ModelProvider) {
-  return render(
+  const result = render(
     <ProviderDrawerDetail
       provider={provider}
       onEdit={vi.fn()}
@@ -45,13 +45,16 @@ function renderDrawer(provider: ModelProvider) {
       onRefresh={vi.fn()}
     />,
   )
+  fireEvent.click(screen.getByRole('button', { name: '高级：能力来源与手动更正' }))
+  return result
 }
 
 describe('context helpers', () => {
   it('formatContext：M/K 分档，不再出现 1000K', () => {
     expect(formatContext(1_000_000)).toBe('1M')
     expect(formatContext(2_000_000)).toBe('2M')
-    expect(formatContext(1_572_864)).toBe('1.6M')
+    expect(formatContext(1_572_864)).toBe('1.573M')
+    expect(formatContext(1_050_000)).toBe('1.05M')
     expect(formatContext(128_000)).toBe('128K')
     expect(formatContext(500)).toBe('500')
   })

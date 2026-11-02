@@ -464,7 +464,7 @@ export const ScheduleList: React.FC = () => {
     setTriggering(s.id)
     try {
       await scheduleService.triggerNow(s.id)
-      toast.success('已触发，Crabot 正在处理')
+      toast.success('已触发，CRABOT 正在处理')
       await loadSchedules()
     } catch (err) {
       toast.error(err instanceof Error ? err.message : '触发失败')

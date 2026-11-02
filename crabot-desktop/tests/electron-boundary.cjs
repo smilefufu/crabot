@@ -253,7 +253,7 @@ async function main() {
     }
     throw new Error('React fixture condition ' + id + ' timed out')
   }
-  await waitFor('document.body.textContent.includes("让 Crabot 准备好为你工作") && document.body.textContent.includes("添加模型服务")')
+  await waitFor('document.body.textContent.includes("给伙伴接入一个模型服务") && document.body.textContent.includes("添加模型服务")')
   const evidence = path.join(__dirname, '../../.desktop-build'); await fs.mkdir(evidence, { recursive: true })
   async function captureFixturePage(name) {
     console.log('CRABOT_ELECTRON_CAPTURE ' + name + ' starting')
@@ -283,7 +283,9 @@ async function main() {
   assert.equal(await trusted.webContents.executeJavaScript('document.querySelector("textarea").value'), '断线后保留的中文草稿')
   assert.equal(await trusted.webContents.executeJavaScript('localStorage.getItem("crabot_admin_token")'), null)
   await captureFixturePage('chat')
-  await trusted.webContents.executeJavaScript(`document.querySelector('a[href="/desktop/diagnostics"]').click()`)
+  await trusted.webContents.executeJavaScript(`document.querySelector('a[href="/settings"]').click()`)
+  await waitFor('!!document.querySelector(\'a[href="/desktop/diagnostics"]\')')
+  await trusted.webContents.executeJavaScript(`document.querySelector('.partner-advanced summary').click(); document.querySelector('a[href="/desktop/diagnostics"]').click()`)
   await waitFor('document.body.textContent.includes("报告时间")')
   await trusted.webContents.executeJavaScript('Array.from(document.querySelectorAll("button")).find(button=>button.textContent==="导出基础诊断").click()')
   await waitFor('document.body.textContent.includes("本次没有保存文件")')

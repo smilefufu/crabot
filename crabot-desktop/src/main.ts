@@ -60,7 +60,7 @@ function uninstallInstallation(installRoot: string): Promise<void> {
     } catch (error) {
       const code = (error as { code?: unknown })?.code
       bootstrapStage('uninstall-unconfirmed', { code: typeof code === 'string' && /^[A-Z0-9_]{1,128}$/.test(code) ? code : 'CRABOT_DESKTOP_REMOVAL' })
-      await dialog.showMessageBox({ type: 'error', title: '卸载尚未完成', message: 'Crabot 尚未卸载完成，用户数据已保留。',
+      await dialog.showMessageBox({ type: 'error', title: '卸载尚未完成', message: 'CRABOT 尚未卸载完成，用户数据已保留。',
         detail: '请核对当前维护进度后重试；如果原程序已不完整，请用同版或更高版离线安装器继续。', buttons: ['知道了'] })
     }
   })().finally(() => { pendingUninstall = undefined })
@@ -88,7 +88,7 @@ async function quit(): Promise<boolean> {
   pendingQuit = (async () => {
     const state = controller?.host.snapshot()
     if (state && state.phase !== 'stopped' && state.phase !== 'migration_required') {
-      const answer = await dialog.showMessageBox({ type: 'question', title: '退出 Crabot', message: '退出将停止共享的 Crabot 服务。',
+      const answer = await dialog.showMessageBox({ type: 'question', title: '退出 CRABOT', message: '退出将停止共享的 CRABOT 服务。',
         detail: '正在进行的任务和其他客户端连接会受影响。关闭窗口可以继续后台运行。', buttons: ['取消', '停止服务并退出'], defaultId: 0, cancelId: 0 })
       if (answer.response !== 1) return false
       const stopped = await controller!.stop()
@@ -141,7 +141,7 @@ function claimInstance() {
 }
 
 function createMainWindow(privateSession: Electron.Session) {
-  const result = new BrowserWindow({ width: 1180, height: 800, minWidth: 800, minHeight: 560, show: false, title: 'Crabot',
+  const result = new BrowserWindow({ width: 1180, height: 800, minWidth: 800, minHeight: 560, show: false, title: 'CRABOT',
     backgroundColor: '#202127', autoHideMenuBar: process.platform !== 'darwin',
     webPreferences: { session: privateSession, preload: path.join(directory, 'preload.cjs'), nodeIntegration: false,
       contextIsolation: true, sandbox: true, webSecurity: true, webviewTag: false, allowRunningInsecureContent: false } })
@@ -321,7 +321,7 @@ async function boot() {
     loginStartupRecovered: state => {
       if (state) { startupState = state; updateMenus() }
       else void dialog.showMessageBox({ type: 'warning', message: '登录启动设置尚未恢复。',
-        detail: '服务仍按正常流程恢复。请在系统登录项中核对 Crabot，也可从应用菜单重新设置。更新记录和业务数据已保留。', buttons: ['知道了'] }).catch(() => {})
+        detail: '服务仍按正常流程恢复。请在系统登录项中核对 CRABOT，也可从应用菜单重新设置。更新记录和业务数据已保留。', buttons: ['知道了'] }).catch(() => {})
     } })
   let driver = null, configurationError = false
   const beginUpdateExit = () => { quitting = true; return () => { quitting = false } }
@@ -383,7 +383,7 @@ async function boot() {
   controller.host.subscribe(state => {
     console.info(JSON.stringify({ component: 'desktop', phase: state.phase, at: new Date().toISOString(), ...('code' in state && state.code ? { code: state.code } : {}) }))
     if (!window?.isDestroyed() && window?.webContents.mainFrame && isTrustedFrame(window.webContents.mainFrame, window.webContents)) window.webContents.send('desktop:state', state)
-    tray?.setToolTip(`Crabot · ${state.phase === 'ready' ? '运行中' : state.phase === 'stopped' ? '已停止' : '正在检查'}`)
+    tray?.setToolTip(`CRABOT · ${state.phase === 'ready' ? '运行中' : state.phase === 'stopped' ? '已停止' : '正在检查'}`)
     if (tray) updateMenus()
   })
   const openLink = (url: string) => { if (artifacts!.open(url)) return; const allowed = externalUrl(url); if (allowed) void shell.openExternal(allowed) }
@@ -398,12 +398,12 @@ async function boot() {
   const trayImage = nativeImage.createFromBuffer(await readFile(path.join(directory, 'assets/tray.png')))
   if (trayImage.isEmpty()) throw new Error('Desktop tray asset is invalid')
   tray = new Tray(trayImage.resize({ width: 20, height: 20 }))
-  tray.setToolTip('Crabot')
+  tray.setToolTip('CRABOT')
   async function changeStartup(enabled: boolean) {
     try {
       startupState = await startup.set(enabled)
       if (startupState.approvalRequired) {
-        const answer = await dialog.showMessageBox({ type: 'info', message: '登录启动还需要系统允许。', detail: '请在系统设置的“通用 → 登录项”中允许 Crabot。', buttons: ['知道了', '打开系统设置'] })
+        const answer = await dialog.showMessageBox({ type: 'info', message: '登录启动还需要系统允许。', detail: '请在系统设置的“通用 → 登录项”中允许 CRABOT。', buttons: ['知道了', '打开系统设置'] })
         if (answer.response === 1) await shell.openExternal('x-apple.systempreferences:com.apple.LoginItems-Settings.extension')
       }
     } catch (error) { await dialog.showMessageBox({ type: 'error', message: '登录启动设置未完成。', detail: error instanceof Error ? error.message : '请检查系统登录项后重试。' }) }
@@ -432,18 +432,18 @@ async function boot() {
   function updateMenus() {
     const cliItem = () => ({ label: installingCli ? '正在安装 crabot 命令…' : '安装 crabot 命令…',
       enabled: app.isPackaged && !installingCli && controller?.host.snapshot().phase !== 'migration_required', click: () => { void installCli() } })
-    const uninstallItems = () => process.platform === 'darwin' && !installation ? [] : [{ label: pendingUninstall ? '正在卸载 Crabot…' : '卸载 Crabot…',
+    const uninstallItems = () => process.platform === 'darwin' && !installation ? [] : [{ label: pendingUninstall ? '正在卸载 CRABOT…' : '卸载 CRABOT…',
       enabled: !!requestUninstall && !pendingUninstall && !quitting, click: () => { void requestUninstall?.() } }]
     const startupItem = () => ({ label: '登录后在后台启动' + (startupState.approvalRequired ? '（待系统允许）' : ''), type: 'checkbox' as const,
       checked: startupState.enabled || startupState.approvalRequired, enabled: startupState.supported && controller?.host.snapshot().phase !== 'migration_required',
       click: (item: Electron.MenuItem) => { void changeStartup(item.checked) } })
-    tray?.setContextMenu(Menu.buildFromTemplate([{ label: '打开 Crabot', click: show }, { type: 'separator' },
+    tray?.setContextMenu(Menu.buildFromTemplate([{ label: '打开 CRABOT', click: show }, { type: 'separator' },
       { label: '启动服务', click: () => { void controller!.start() } }, { label: '停止服务', click: () => { void controller!.stop() } },
-      { type: 'separator' }, startupItem(), cliItem(), ...uninstallItems(), { label: '检查更新…', click: () => { void updates!.open() } }, { label: '退出 Crabot', click: () => { void quit() } }]))
+      { type: 'separator' }, startupItem(), cliItem(), ...uninstallItems(), { label: '检查更新…', click: () => { void updates!.open() } }, { label: '退出 CRABOT', click: () => { void quit() } }]))
     Menu.setApplicationMenu(Menu.buildFromTemplate([
-      { label: 'Crabot', submenu: [{ label: '打开 Crabot', click: show }, startupItem(),
+      { label: 'CRABOT', submenu: [{ label: '打开 CRABOT', click: show }, startupItem(),
         cliItem(), ...uninstallItems(),
-        { label: '检查更新…', click: () => { void updates!.open() } }, { type: 'separator' }, { label: '退出 Crabot', accelerator: 'CommandOrControl+Q', click: () => { void quit() } }] },
+        { label: '检查更新…', click: () => { void updates!.open() } }, { type: 'separator' }, { label: '退出 CRABOT', accelerator: 'CommandOrControl+Q', click: () => { void quit() } }] },
       { label: '文件', submenu: [{ label: '保存当前附件…', accelerator: 'CommandOrControl+S', enabled: artifacts?.hasFocused(), click: () => { artifacts?.saveFocused() } }] },
       { role: 'editMenu' }, { role: 'viewMenu' }, { role: 'windowMenu' },
     ]))
@@ -483,11 +483,11 @@ void boot().catch(async error => {
   const code = typeof error?.code === 'string' && /^[A-Z0-9_]{1,128}$/.test(error.code) ? error.code : 'DESKTOP_BOOT_FAILED'
   bootstrapStage('failed', { code, detail: error instanceof Error ? error.message : String(error) })
   await app.whenReady()
-  let message = 'Crabot 启动失败。'
+  let message = 'CRABOT 启动失败。'
   console.error(error)
   if (['CRABOT_MAC_APP_BINDING', 'CRABOT_MAC_ADMISSION', 'CRABOT_DATA_MISSING', 'CRABOT_DESKTOP_TAKEOVER_REQUIRED'].includes(error?.code)) message = error.message
-  if (['CRABOT_DESKTOP_REMOVAL', 'CRABOT_DESKTOP_REMOVAL_PENDING'].includes(error?.code)) message = 'Crabot 卸载尚未完成。请继续卸载，或使用同版/更高版离线安装器修复。用户数据已保留。'
-  else if (['CRABOT_DESKTOP_INSTALLATION', 'CRABOT_CORE_INTEGRITY'].includes(error?.code)) message = 'Crabot 安装位置、内置文件或版本对未通过校验，请使用同版或更高版安装包修复。已有数据保留。'
+  if (['CRABOT_DESKTOP_REMOVAL', 'CRABOT_DESKTOP_REMOVAL_PENDING'].includes(error?.code)) message = 'CRABOT 卸载尚未完成。请继续卸载，或使用同版/更高版离线安装器修复。用户数据已保留。'
+  else if (['CRABOT_DESKTOP_INSTALLATION', 'CRABOT_CORE_INTEGRITY'].includes(error?.code)) message = 'CRABOT 安装位置、内置文件或版本对未通过校验，请使用同版或更高版安装包修复。已有数据保留。'
   if (error instanceof Error && message !== error.message) message += `\n${error.message}`
   message += `\n日志：${path.join(app.getPath('userData'), 'bootstrap.log')}`
   await dialog.showMessageBox({ type: 'error', message })

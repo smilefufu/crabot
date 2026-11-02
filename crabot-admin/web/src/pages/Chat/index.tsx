@@ -527,7 +527,7 @@ export const Chat: React.FC = () => {
   const composeWithQuote = (text: string): string => {
     if (!quote) return text
     const quoted = quote.text.split('\n').map((l) => `> ${l}`).join('\n')
-    return `> 引用${quote.role === 'user' ? '我' : ' Crabot'}的消息：\n${quoted}\n\n${text}`
+    return `> 引用${quote.role === 'user' ? '我' : ' CRABOT'}的消息：\n${quoted}\n\n${text}`
   }
 
   // 连接状态指示器
@@ -654,7 +654,7 @@ export const Chat: React.FC = () => {
                 color: 'var(--text-secondary)',
               }}
             >
-              开始与 AI 助手对话吧！
+              你好，我是 CRABOT。发条消息，开始和你的 AI 伙伴相处吧。
             </div>
           ) : (
             <>
@@ -785,7 +785,7 @@ export const Chat: React.FC = () => {
             }}
           >
             <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              引用{quote.role === 'user' ? '我' : ' Crabot'}：{quote.text.slice(0, 80)}
+              引用{quote.role === 'user' ? '我' : ' CRABOT'}：{quote.text.slice(0, 80)}
             </span>
             <button
               onClick={() => setQuote(null)}

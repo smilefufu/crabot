@@ -64,7 +64,7 @@ export const SubagentList: React.FC = () => {
       <Card>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
           <div>
-            <h2 style={{ margin: 0 }}>Subagent 管理</h2>
+            <h2 style={{ margin: 0 }}>专长助手</h2>
             <div style={{ color: 'var(--text-muted)', fontSize: 13, marginTop: 4 }}>
               管理可被 main agent 委派的 subagent；内置项可编辑可禁用但不可删除
             </div>

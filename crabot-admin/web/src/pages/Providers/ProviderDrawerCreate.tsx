@@ -6,6 +6,7 @@ import { Select } from '../../components/Common/Select'
 import { useToast } from '../../contexts/ToastContext'
 import type { PresetVendor, ModelInfo, ApiFormat } from '../../types'
 import { isDesktop } from '../../services/desktop-host'
+import { VendorLogo } from '../../components/Common/VendorLogo'
 
 interface ProviderDrawerCreateProps {
   onCreated: (providerId: string) => void
@@ -38,6 +39,7 @@ export const ProviderDrawerCreate: React.FC<ProviderDrawerCreateProps> = ({
   const [submittingManual, setSubmittingManual] = useState(false)
   const pollRef = useRef<{ interval?: ReturnType<typeof setInterval>; timeout?: ReturnType<typeof setTimeout> }>({})
   const finalizingRef = useRef(false)
+  const mounted = useRef(false)
 
   // auth.json 导入相关状态
   const [authJsonOpen, setAuthJsonOpen] = useState(false)
@@ -45,9 +47,13 @@ export const ProviderDrawerCreate: React.FC<ProviderDrawerCreateProps> = ({
   const [authJsonFileName, setAuthJsonFileName] = useState('')
   const [authJsonImporting, setAuthJsonImporting] = useState(false)
 
-  useEffect(() => () => {
-    if (pollRef.current.interval) clearInterval(pollRef.current.interval)
-    if (pollRef.current.timeout) clearTimeout(pollRef.current.timeout)
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+      if (pollRef.current.interval) clearInterval(pollRef.current.interval)
+      if (pollRef.current.timeout) clearTimeout(pollRef.current.timeout)
+    }
   }, [])
 
   // manual mode
@@ -73,7 +79,9 @@ export const ProviderDrawerCreate: React.FC<ProviderDrawerCreateProps> = ({
   }
 
   useEffect(() => {
-    providerService.listPresetVendors().then(r => setVendors(r.items)).catch(() => {})
+    providerService.listPresetVendors().then(r => setVendors(r.items.filter(v => v.id !== 'dashscope-coding'))).catch(() => {
+      toast.error('无法读取供应商目录，请关闭后重新打开。')
+    })
   }, [])
 
   const currentVendor = vendors.find(v => v.id === selectedVendor)
@@ -86,13 +94,14 @@ export const ProviderDrawerCreate: React.FC<ProviderDrawerCreateProps> = ({
   }
 
   const finalizeOAuthSuccess = async (email: string) => {
-    if (finalizingRef.current) return
+    if (!mounted.current || finalizingRef.current) return
     finalizingRef.current = true
     setOauthStatus('success')
     setOauthEmail(email)
     setSaving(true)
     try {
       const result = await providerService.importFromVendor(selectedVendor, 'oauth-pending')
+      if (!mounted.current) return
       toast.success('ChatGPT 登录成功')
       const providerId =
         (result as { id?: string; provider?: { id: string } }).provider?.id ??
@@ -108,6 +117,7 @@ export const ProviderDrawerCreate: React.FC<ProviderDrawerCreateProps> = ({
     try {
       finalizingRef.current = false
       const { auth_url } = await providerService.startOAuthLogin()
+      if (!mounted.current) return
       setAuthUrl(auth_url)
       setManualCallback('')
       setOauthStatus('pending')
@@ -208,14 +218,15 @@ export const ProviderDrawerCreate: React.FC<ProviderDrawerCreateProps> = ({
     if (!selectedVendor) return
     if (isOAuthVendor) return // OAuth 通过按钮处理
 
-    if (!apiKey) return
+    if (!apiKey && selectedVendor !== 'ollama') return
 
     const vendor = vendors.find(v => v.id === selectedVendor)
     const ep = vendor?.allows_custom_endpoint ? customEndpoint.trim() || undefined : undefined
 
     try {
       setSaving(true)
-      const result = await providerService.importFromVendor(selectedVendor, apiKey, ep)
+      const result = await providerService.importFromVendor(selectedVendor, apiKey || 'ollama', ep)
+      if (!mounted.current) return
       toast.success('导入成功')
       const typed = result as { id?: string; provider?: { id: string } }
       onCreated(typed.provider?.id ?? typed.id ?? '')
@@ -255,6 +266,7 @@ export const ProviderDrawerCreate: React.FC<ProviderDrawerCreateProps> = ({
     setSaving(true)
     try {
       const validateResult = await providerService.validateDraftProvider(draft)
+      if (!mounted.current) return
       if (!validateResult.success) {
         setValidation({
           status: 'error',
@@ -267,6 +279,7 @@ export const ProviderDrawerCreate: React.FC<ProviderDrawerCreateProps> = ({
       setValidation({ status: 'success', latency_ms: validateResult.latency_ms })
 
       const result = await providerService.createProvider(draft)
+      if (!mounted.current) return
       toast.success('创建成功')
       onCreated(result.id)
     } catch (err) {
@@ -311,30 +324,22 @@ export const ProviderDrawerCreate: React.FC<ProviderDrawerCreateProps> = ({
 
       {mode === 'preset' ? (
         <form onSubmit={handlePresetSubmit}>
-          <Select
-            label="选择厂商"
-            options={[
-              { value: '', label: '请选择...' },
-              ...[...vendors]
-                .sort((a, b) => Number(!!b.recommended) - Number(!!a.recommended))
-                .map(v => ({
-                  value: v.id,
-                  label: v.recommended ? `⭐ ${v.name}` : v.name,
-                })),
-            ]}
-            value={selectedVendor}
-            onChange={e => {
-              const vid = e.target.value
-              setSelectedVendor(vid)
-              const v = vendors.find(vd => vd.id === vid)
-              setCustomEndpoint(v?.endpoint ?? '')
-            }}
-          />
+          {!selectedVendor ? <div className="vendor-choice-grid" aria-label="选择模型供应商">
+            {[...vendors].sort((a, b) => Number(!!b.recommended) - Number(!!a.recommended)).map(vendor => <button
+              key={vendor.id} type="button" className="vendor-choice" aria-pressed="false"
+              onClick={() => { setSelectedVendor(vendor.id); setCustomEndpoint(vendor.endpoint); setApiKey(''); setOauthStatus('idle'); clearPoll() }}>
+              <VendorLogo vendorId={vendor.id} name={vendor.name} /><span>{vendor.name}<small>{vendor.auth_type === 'oauth' ? '账号登录' : vendor.id === 'ollama' ? '本地服务' : 'API Key'}</small></span>
+            </button>)}
+          </div> : <div className="vendor-choice">
+            <VendorLogo vendorId={currentVendor?.id} name={currentVendor?.name ?? '模型服务'} />
+            <span>{currentVendor?.name}</span>
+            <Button type="button" variant="secondary" disabled={saving || oauthStatus === 'pending'} onClick={() => setSelectedVendor('')}>重新选择供应商</Button>
+          </div>}
 
           {currentVendor?.recommended && (
             <div className="provider-recommended-badge" role="note">
               <span className="provider-recommended-badge-star">★</span>
-              <span className="provider-recommended-badge-text">推荐厂商 · 模型覆盖广、稳定可用</span>
+              <span className="provider-recommended-badge-text">推荐供应商</span>
             </div>
           )}
 
@@ -359,7 +364,7 @@ export const ProviderDrawerCreate: React.FC<ProviderDrawerCreateProps> = ({
             />
           )}
 
-          {isOAuthVendor ? (
+          {selectedVendor && (isOAuthVendor ? (
             <>
               {!isLoopbackAccess && oauthStatus === 'idle' && (
                 <div style={{
@@ -417,7 +422,7 @@ export const ProviderDrawerCreate: React.FC<ProviderDrawerCreateProps> = ({
                         如果你已经在本机用 Codex CLI 登录过，可以直接导入 <code>~/.codex/auth.json</code>，无需再扫码。
                         <br />
                         <strong style={{ color: 'var(--warning, #d4a017)' }}>注意：</strong>
-                        Codex CLI 与 Crabot 同时使用同一份 auth.json 时，任一方刷新 token 都会让另一方失效。
+                        Codex CLI 与 CRABOT 同时使用同一份 auth.json 时，任一方刷新 token 都会让另一方失效。
                       </div>
 
                       <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
@@ -538,18 +543,18 @@ export const ProviderDrawerCreate: React.FC<ProviderDrawerCreateProps> = ({
             <>
               <Input
                 type="password"
-                label="API Key"
+                label={selectedVendor === 'ollama' ? 'API Key（本地服务通常可留空）' : 'API Key'}
                 placeholder="输入 API Key"
                 value={apiKey}
                 onChange={e => setApiKey(e.target.value)}
               />
 
-              <Button type="submit" variant="primary" disabled={saving || !selectedVendor || !apiKey}
+              <Button type="submit" variant="primary" disabled={saving || (!apiKey && selectedVendor !== 'ollama')}
                 style={{ width: '100%', marginTop: '0.5rem' }}>
                 {saving ? '导入中...' : '导入'}
               </Button>
             </>
-          )}
+          ))}
         </form>
       ) : (
         <form onSubmit={handleManualSubmit}>

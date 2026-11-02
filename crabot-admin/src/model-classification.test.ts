@@ -22,6 +22,15 @@ describe('isNonChatModel', () => {
 })
 
 describe('parseOpenAIModels', () => {
+  it('keeps missing vision metadata unknown and respects an explicit false', () => {
+    const [unknown, text, visual] = parseOpenAIModels([
+      { id: 'unknown-model' }, { id: 'text-model', capabilities: { vision: false } },
+      { id: 'visual-model', architecture: { input_modalities: ['text', 'image'] } },
+    ])
+    expect(unknown).not.toHaveProperty('supports_vision')
+    expect(text.supports_vision).toBe(false)
+    expect(visual.supports_vision).toBe(true)
+  })
   it.each([
     [{ context_window: 128000 }, 128000],
     [{ context_length: 262144 }, 262144],

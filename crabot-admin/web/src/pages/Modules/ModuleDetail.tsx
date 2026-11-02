@@ -46,7 +46,7 @@ export function ModuleDetail() {
     return (
       <MainLayout>
         <div style={{ marginBottom: '2rem' }}>
-          <h1 style={{ fontSize: '2rem', fontWeight: 700 }}>Crabot Core Agent</h1>
+          <h1 style={{ fontSize: '2rem', fontWeight: 700 }}>CRABOT Core Agent</h1>
           <span className="badge badge-primary">内置</span>
         </div>
         <Card title="唯一 live Agent">

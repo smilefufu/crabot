@@ -19,7 +19,7 @@ export function DesktopDiagnosticsPanel() {
     finally { if (sequence === request.current) setBusy(false) }
   }, [bridge])
   useEffect(() => { void refresh(); return () => { request.current++ } }, [refresh])
-  if (!bridge) return <p>请在本机 Crabot 应用中打开诊断。</p>
+  if (!bridge) return <p>请在本机 CRABOT 应用中打开诊断。</p>
   const exportReport = async () => {
     if (!report) return
     setBusy(true); setNotice('')

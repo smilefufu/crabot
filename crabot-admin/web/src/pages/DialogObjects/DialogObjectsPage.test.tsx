@@ -405,7 +405,7 @@ describe('DialogObjectsPage', () => {
   it('renders domain navigation and the application queue badge from service data', async () => {
     render(<DialogObjectsPage />)
 
-    expect(await screen.findByRole('heading', { name: '对话对象管理' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: '联系人与群聊' })).toBeInTheDocument()
     expect(screen.getByRole('tab', { name: /好友/ })).toBeInTheDocument()
     expect(screen.getByRole('tab', { name: /私聊池/ })).toBeInTheDocument()
     expect(screen.getByRole('tab', { name: /群聊/ })).toBeInTheDocument()
@@ -689,7 +689,7 @@ describe('DialogObjectsPage', () => {
 
     render(<DialogObjectsPage />)
 
-    expect(await screen.findByRole('heading', { name: '对话对象管理' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: '联系人与群聊' })).toBeInTheDocument()
     expect((await screen.findAllByText('Alice')).length).toBeGreaterThan(0)
     expect(toastMock.error).toHaveBeenCalled()
   })
@@ -821,7 +821,7 @@ describe('DialogObjectsPage', () => {
     const groupDetail = screen.getByRole('heading', { name: '群聊详情' }).closest('.card')
     expect(groupDetail).not.toBeNull()
     const scopedGroupDetail = within(groupDetail as HTMLElement)
-    expect(scopedGroupDetail.getByText('来源渠道：wechat-main')).toBeInTheDocument()
+    expect(scopedGroupDetail.getByText('来源聊天方式：wechat-main')).toBeInTheDocument()
     expect(scopedGroupDetail.getByText('群成员数量：2')).toBeInTheDocument()
     expect(scopedGroupDetail.getByText('master_in_group：是')).toBeInTheDocument()
     expect(scopedGroupDetail.getByRole('button', { name: '编辑群权限' })).toBeInTheDocument()

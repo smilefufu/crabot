@@ -30,7 +30,7 @@ function describe(item: DialogObjectListItem): { title: string; subtitle: string
     const friend = item as DialogObjectFriend
     return {
       title: friend.display_name,
-      subtitle: `${friend.identities.length} 个渠道身份`,
+      subtitle: `${friend.identities.length} 个聊天方式身份`,
       tag: friend.permission === 'master' ? 'Master' : undefined,
     }
   }

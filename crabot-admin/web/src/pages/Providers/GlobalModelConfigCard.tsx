@@ -5,6 +5,7 @@ import { Button } from '../../components/Common/Button'
 import { Select } from '../../components/Common/Select'
 import { useToast } from '../../contexts/ToastContext'
 import type { GlobalModelConfig, ModelProvider } from '../../types'
+import { ModelCapabilities } from '../../components/Common/ModelCapabilities'
 
 interface GlobalModelConfigCardProps {
   providers: ModelProvider[]
@@ -22,12 +23,19 @@ export const GlobalModelConfigCard: React.FC<GlobalModelConfigCardProps> = ({
   const toast = useToast()
   const [config, setConfig] = useState<GlobalModelConfig>({})
   const [saving, setSaving] = useState(false)
+  const [readError, setReadError] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [retry, setRetry] = useState(0)
 
   useEffect(() => {
-    providerService.getGlobalConfig().then(setConfig).catch(() => {
-      // 拉不到就用空配置，用户改完保存即可
-    })
-  }, [])
+    let active = true
+    setLoading(true)
+    setReadError(false)
+    providerService.getGlobalConfig().then(value => { if (active) setConfig(value) })
+      .catch(() => { if (active) setReadError(true) })
+      .finally(() => { if (active) setLoading(false) })
+    return () => { active = false }
+  }, [retry])
 
   const handleSave = async () => {
     try {
@@ -47,6 +55,10 @@ export const GlobalModelConfigCard: React.FC<GlobalModelConfigCardProps> = ({
   const imageProviders = providers.filter(p => p.models.some(m => m.type === 'image'))
   const selectedImageProvider = providers.find(p => p.id === config.default_image_provider_id)
   const canSave = !!config.default_llm_provider_id && !!config.default_llm_model_id
+  const selectedModel = selectedLlmProvider?.models.find(model => model.model_id === config.default_llm_model_id)
+
+  if (loading) return <p role="status">正在读取默认模型配置…</p>
+  if (readError) return <div role="alert">无法读取默认模型配置，已有设置保持保留。<Button variant="secondary" onClick={() => setRetry(value => value + 1)}>重新检查</Button></div>
 
   const body = (
     <div className="global-model-form">
@@ -76,14 +88,15 @@ export const GlobalModelConfigCard: React.FC<GlobalModelConfigCardProps> = ({
               .filter(m => m.type === 'llm')
               .map(m => ({
                 value: m.model_id,
-                label: m.display_name + (m.supports_vision ? '  · VLM' : ''),
+                label: m.display_name,
               }))}
             value={config.default_llm_model_id || ''}
             onChange={e => setConfig({ ...config, default_llm_model_id: e.target.value || undefined })}
           />
         )}
       </div>
-      <div className="global-model-row">
+      {selectedModel && <><ModelCapabilities model={selectedModel} /><p className="global-model-hint">能力自动填写，平时无需调整。</p></>}
+      <details className="partner-advanced"><summary>高级：生图模型</summary><div className="global-model-row">
         <Select
           label="生图供应商"
           options={[
@@ -118,6 +131,7 @@ export const GlobalModelConfigCard: React.FC<GlobalModelConfigCardProps> = ({
           />
         )}
       </div>
+      </details>
       <div className="global-model-actions">
         <Button variant="primary" onClick={handleSave} disabled={saving || !canSave}>
           {saving ? '保存中...' : '保存为全局默认'}

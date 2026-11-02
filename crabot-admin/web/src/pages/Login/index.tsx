@@ -1,7 +1,5 @@
 import React, { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { providerService } from '../../services/provider'
-import { agentService } from '../../services/agent'
 import { useAuth } from '../../contexts/AuthContext'
 import { Input } from '../../components/Common/Input'
 import { Button } from '../../components/Common/Button'
@@ -20,20 +18,7 @@ export const Login: React.FC = () => {
 
     try {
       await login(password)
-      let destination = '/chat'
-      try {
-        const [globalConfig, agentConfig] = await Promise.all([
-          providerService.getGlobalConfig(),
-          agentService.getConfig(),
-        ])
-        const defaultModel = agentConfig.model_config?.default
-        const hasModel = (defaultModel?.provider_id && defaultModel.model_id)
-          || (globalConfig.default_llm_provider_id && globalConfig.default_llm_model_id)
-        if (!hasModel) destination = '/providers'
-      } catch {
-        // 配置查询暂时不可用不影响已成功的登录，默认进入聊天。
-      }
-      navigate(destination, { replace: true })
+      navigate('/', { replace: true })
     } catch (err) {
       setError(err instanceof Error ? err.message : '登录失败')
     } finally {
@@ -45,8 +30,8 @@ export const Login: React.FC = () => {
     <div className="login-page">
       <div className="login-container">
         <div className="login-brand">
-          <h1 className="login-title">Crabot</h1>
-          <p className="login-subtitle">AI Employee Administration</p>
+          <h1 className="login-title">CRABOT</h1>
+          <p className="login-subtitle">你的 AI 伙伴</p>
         </div>
 
         <div className="login-card">

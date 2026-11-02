@@ -26,7 +26,7 @@ const ChannelOnboardingCallout: React.FC<{ visible: boolean; onDismiss: () => vo
       <span className="channel-onboarding__eyebrow">下一步</span>
       <h3 className="channel-onboarding__title">完成主人认证 (<code>/认主</code>)</h3>
       <p className="channel-onboarding__text">
-        新接入的渠道启动后，需要在该平台的<strong>私聊</strong>或<strong>群聊</strong>中向 Crabot 发送 <code>/认主</code>。
+        新接入的聊天方式启动后，需要在该平台的<strong>私聊</strong>或<strong>群聊</strong>中向 CRABOT 发送 <code>/认主</code>。
         认证通过后你才会被识别为 Master，写命令、记忆与工具权限等才能正常使用。
       </p>
       <p className="channel-onboarding__text">
@@ -450,7 +450,7 @@ export const ChannelConfig: React.FC = () => {
   const handleStart = async (instanceId: string) => {
     try {
       await channelService.startInstance(instanceId)
-      toast.success('Channel 已启动')
+      toast.success('聊天方式已启动')
       loadInstances()
     } catch (err) {
       toast.error(`启动失败: ${err instanceof Error ? err.message : '未知错误'}`)
@@ -461,7 +461,7 @@ export const ChannelConfig: React.FC = () => {
     try {
       const result = await channelService.stopInstance(instanceId)
       if (result.status === 'stopped') {
-        toast.success('Channel 已停止')
+        toast.success('聊天方式已停止')
       } else if (['running', 'starting', 'stopping'].includes(result.status)) {
         toast.info('停止请求已受理，正在等待进程退出')
       } else {
@@ -481,7 +481,7 @@ export const ChannelConfig: React.FC = () => {
   const handleRestart = async (instanceId: string) => {
     try {
       await channelService.restartInstance(instanceId)
-      toast.success('Channel 已重启')
+      toast.success('聊天方式已重启')
       loadInstances()
     } catch (err) {
       toast.error(`重启失败: ${err instanceof Error ? err.message : '未知错误'}`)
@@ -489,10 +489,10 @@ export const ChannelConfig: React.FC = () => {
   }
 
   const handleDelete = async (instance: ChannelInstance) => {
-    if (!window.confirm(`确认删除 Channel "${instance.name}"？此操作不可恢复。`)) return
+    if (!window.confirm(`确认删除聊天方式 "${instance.name}"？此操作不可恢复。`)) return
     try {
       await channelService.deleteInstance(instance.id)
-      toast.success('Channel 已删除')
+      toast.success('聊天方式已删除')
       if (selectedInstanceId === instance.id) {
         setSelectedInstanceId(null)
         setConfig(null)
@@ -557,7 +557,7 @@ export const ChannelConfig: React.FC = () => {
         ...(Object.keys(envToSave).length > 0 && { env: envToSave }),
         auto_start: false,
       })
-      toast.success('Channel 实例已创建。启动后请在该平台向 Crabot 发送 /认主 完成主人认证')
+      toast.success('聊天方式已创建。启动后请在该平台向 CRABOT 发送 /认主 完成主人认证')
       setShowCreateForm(false)
       setCreateName('')
       setCreatePlatform('')
@@ -590,10 +590,10 @@ export const ChannelConfig: React.FC = () => {
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: '1.75rem' }}>
           <div>
             <h1 style={{ fontFamily: 'var(--font-display)', fontSize: '1.375rem', fontWeight: 700, color: 'var(--text-primary)', letterSpacing: '0.02em' }}>
-              Channel 配置
+              聊天方式
             </h1>
             <p style={{ fontSize: '0.8125rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
-              管理消息渠道实例与连接配置
+              通过微信、飞书、Slack 或语音联系 CRABOT
             </p>
           </div>
           <div style={{ display: 'flex', gap: '0.625rem' }}>
@@ -613,8 +613,8 @@ export const ChannelConfig: React.FC = () => {
         {/* Create Form */}
         {showCreateForm && (
           <div className="channel-create-panel">
-            <h2 className="channel-create-panel__title">{selectedImpl?.id === 'channel-voice' ? '新建语音渠道' : '新建 Channel 实例'}</h2>
-            {selectedImpl?.id === 'channel-voice' && <p className="schema-field__desc">先填写渠道名称并创建实例；启动后展开“配置”，生成一次性配对二维码，再用 Android App 扫码并核对两端配对码。</p>}
+            <h2 className="channel-create-panel__title">{selectedImpl?.id === 'channel-voice' ? '新建语音聊天方式' : '新建聊天方式'}</h2>
+            {selectedImpl?.id === 'channel-voice' && <p className="schema-field__desc">先填写聊天方式名称并创建实例；启动后展开“配置”，生成一次性配对二维码，再用 Android App 扫码并核对两端配对码。</p>}
             <div className="channel-create-grid">
               <div className="form-group form-group--flush">
                 <label className="form-label">实现（Implementation）</label>
@@ -666,12 +666,12 @@ export const ChannelConfig: React.FC = () => {
           {instances.length === 0 ? (
             <div className="channel-empty-state">
               <div className="channel-empty-icon">⬡</div>
-              <p style={{ color: 'var(--text-secondary)', fontSize: '0.9375rem', fontWeight: 500 }}>暂无 Channel 实例</p>
+              <p style={{ color: 'var(--text-secondary)', fontSize: '0.9375rem', fontWeight: 500 }}>暂无聊天方式</p>
               <p style={{ color: 'var(--text-muted)', fontSize: '0.8125rem', marginTop: '0.375rem' }}>
-                通过安装向导或手动创建来添加第一个渠道
+                通过安装向导或手动创建来添加第一个聊天方式
               </p>
               <p style={{ color: 'var(--text-muted)', fontSize: '0.75rem', marginTop: '0.875rem', maxWidth: '420px', lineHeight: 1.55 }}>
-                创建并启动渠道后，记得在该平台向 Crabot 发送 <code>/认主</code> 完成主人认证——这是写命令、记忆与工具权限生效的前提。
+                创建并启动聊天方式后，记得在该平台向 CRABOT 发送 <code>/认主</code> 完成主人认证——这是写命令、记忆与工具权限生效的前提。
               </p>
             </div>
           ) : (

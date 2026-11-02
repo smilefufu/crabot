@@ -84,9 +84,9 @@ export const ComputerUseSetupCard: React.FC = () => {
   return (
     <Card title="桌面控制" className="settings-card">
       <section id="computer-use" className="computer-use-setup" aria-label="桌面控制设置">
-        <p className="settings-card__hint">让 Crabot 读取屏幕并操作桌面应用。系统授权完成后会自动验证并连接工具。</p>
+        <p className="settings-card__hint">让 CRABOT 读取屏幕并操作桌面应用。系统授权完成后会自动验证并连接工具。</p>
         <p role="status">{status ? `${status.enabled ? '已启用 · ' : ''}${desktopStatusText(status)}` : '正在读取实际状态…'}</p>
-        {status && <p className="settings-card__hint">设置目标：运行 Crabot 的电脑「{status.host.hostname}」（{platformText[status.host.platform] ?? status.host.platform}）</p>}
+        {status && <p className="settings-card__hint">设置目标：运行 CRABOT 的电脑「{status.host.hostname}」（{platformText[status.host.platform] ?? status.host.platform}）</p>}
         <div className="browser-settings__actions">
           <Button onClick={start} disabled={blocked || loading || running}>{running ? '设置进行中…' : '设置桌面控制'}</Button>
           <Button variant="secondary" onClick={() => { void check() }} disabled={loading}>重新检查</Button>
@@ -97,7 +97,7 @@ export const ComputerUseSetupCard: React.FC = () => {
         {open && status && (
           <div className="computer-use-setup__steps">
             {status.host.platform === 'darwin' ? <>
-              <p>CuaDriver 是 Crabot 使用的桌面控制组件。请在系统提示中为 CuaDriver 批准以下权限。</p>
+              <p>CuaDriver 是 CRABOT 使用的桌面控制组件。请在系统提示中为 CuaDriver 批准以下权限。</p>
               <div className="computer-use-setup__step"><strong>1. 辅助功能</strong><span>{permissionText[status.permissions.accessibility]}</span><p>读取控件并执行桌面输入。</p></div>
               <div className="computer-use-setup__step"><strong>2. 屏幕与系统音频录制</strong><span>{permissionText[status.permissions.screen_recording]}</span><p>用于读取截图；桌面控制不录制系统音频。</p></div>
               <div className="computer-use-setup__step"><strong>3. 屏幕访问验证</strong><span>{status.capture.status === 'verified' ? '已验证' : status.capture.status === 'failed' ? '未通过' : '待验证'}</span><p>部分系统版本会再显示一次屏幕访问确认，请按提示批准。</p></div>
@@ -107,7 +107,7 @@ export const ComputerUseSetupCard: React.FC = () => {
               <div className="computer-use-setup__step"><strong>原生控件读取</strong><span>{nativeCheck('ax_capability')}</span></div>
               <div className="computer-use-setup__step"><strong>屏幕访问验证</strong><span>{status.capture.status === 'verified' ? '已验证' : status.capture.status === 'failed' ? '未通过' : '待验证'}</span></div>
             </>}
-            {running && <p>正在自动复查；完成授权后无需重启 Crabot。关闭此面板会取消等待。</p>}
+            {running && <p>正在自动复查；完成授权后无需重启 CRABOT。关闭此面板会取消等待。</p>}
             {status.setup?.phase === 'ready' && <p>桌面环境已就绪，可在新任务中使用。正在运行的任务沿用原有权限和能力。</p>}
             {status.host.platform === 'darwin' && status.app_path && <details>
               <summary>系统列表里没有 CuaDriver？</summary>

@@ -26,7 +26,7 @@ export const PrivatePoolWorkbench: React.FC<PrivatePoolWorkbenchProps> = ({
     <Card title="私聊池详情">
       <div style={{ display: 'grid', gap: '0.75rem' }}>
         <div><strong>{entry.title}</strong></div>
-        <div>来源渠道：{entry.channel_id}</div>
+        <div>来源聊天方式：{entry.channel_id}</div>
         <div>Session ID：{entry.id}</div>
         <div>参与者：{entry.participants.map((participant) => participant.platform_user_id).join(', ')}</div>
         <div>关联申请：{entry.matching_pending_application_ids.length}</div>

@@ -19,7 +19,7 @@ const DesktopVersionUpgradeCard: React.FC = () => {
   const open = async () => {
     setOpening(true)
     try {
-      if (!await desktopBridge?.openUpdateDialog()) throw new Error('未能打开本机更新界面，请从 Crabot 菜单重试。')
+      if (!await desktopBridge?.openUpdateDialog()) throw new Error('未能打开本机更新界面，请从 CRABOT 菜单重试。')
     } catch (error) { toast.error(error instanceof Error ? error.message : '未能打开本机更新界面。') }
     finally { setOpening(false) }
   }

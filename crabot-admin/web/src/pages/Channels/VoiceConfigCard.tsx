@@ -22,7 +22,7 @@ export function VoiceConfigCard({ channelId, running, stage, ownerRequired = fal
   }, [channelId, running])
   const activation = state?.owner_activation
   const ownerStatus = activation?.status === 'completed' ? `设备所有者 ${activation.owner.display_name} 已关联 Master` : activation ? `设备所有者 ${activation.owner.display_name} 正在关联 Master；请保持手机前台连接并重试同步` : ownerRequired ? '等待手机登记本人声纹并完成配对；关联完成后才能继续' : '既有设备保留原联系人与好友绑定，所有者引用将在核验后恢复'
-  return <section className="voice-config" aria-label="语音渠道配置">
+  return <section className="voice-config" aria-label="语音聊天方式配置">
     <p>手机只在前台、现场开启后收音。后台不会远程打开麦克风。</p>
     {!stage && <VoiceServices channelId={channelId} />}
     {(!stage || stage === 'phone') && <VoicePairing channelId={channelId} running={running} state={state} onChanged={status} />}
