@@ -20,15 +20,19 @@ static DWORD Parent(DWORD pid) {
   } while (Process32NextW(snapshot, &entry));
   CloseHandle(snapshot); return parent;
 }
+static std::wstring Image(DWORD pid) {
+  wchar_t image[32768]{}; DWORD size = 32768;
+  HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+  if (process) { QueryFullProcessImageNameW(process, 0, image, &size); CloseHandle(process); }
+  return image;
+}
 static void CALLBACK Event(HWINEVENTHOOK, DWORD event, HWND window, LONG object, LONG child, DWORD, DWORD time) {
   if (!window || object != OBJID_WINDOW || child != CHILDID_SELF || GetAncestor(window, GA_ROOT) != window) return;
   DWORD pid = 0; GetWindowThreadProcessId(window, &pid);
   wchar_t klass[256]{}; GetClassNameW(window, klass, 256);
-  wchar_t image[32768]{}; DWORD size = 32768;
-  HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-  if (process) { QueryFullProcessImageNameW(process, 0, image, &size); CloseHandle(process); }
-  output << Read(L"phase") << L'\t' << time << L'\t' << event << L'\t' << pid << L'\t' << Parent(pid)
-    << L'\t' << reinterpret_cast<UINT_PTR>(window) << L'\t' << IsWindowVisible(window) << L'\t' << klass << L'\t' << image << std::endl;
+  DWORD parent = Parent(pid);
+  output << Read(L"phase") << L'\t' << time << L'\t' << event << L'\t' << pid << L'\t' << parent
+    << L'\t' << reinterpret_cast<UINT_PTR>(window) << L'\t' << IsWindowVisible(window) << L'\t' << klass << L'\t' << Image(pid) << L'\t' << Image(parent) << std::endl;
 }
 int wmain(int argc, wchar_t** argv) {
   if (argc == 2 && std::wstring(argv[1]) == L"--visible-control") {

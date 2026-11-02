@@ -59,6 +59,20 @@ try {
       } finally { clearTimeout(timer); await job.stop(); job = undefined }
     })
   }
+  // Paired diagnostic experiment only: replace generated fixture hooks, never product sources.
+  const literal = text => "'" + text.replaceAll("'", "''") + "'"
+  const noWindow = (file, mode) => `$s=New-Object System.Diagnostics.ProcessStartInfo;$s.FileName=${literal(process.execPath)};$s.Arguments=${literal('"' + file + '" ' + mode)};$s.UseShellExecute=$false;$s.CreateNoWindow=$true;$s.RedirectStandardOutput=$true;$s.RedirectStandardError=$true;$p=[System.Diagnostics.Process]::Start($s);$o=$p.StandardOutput.ReadToEndAsync();$e=$p.StandardError.ReadToEndAsync();$p.WaitForExit();[Console]::Out.Write($o.Result);[Console]::Error.Write($e.Result);exit $p.ExitCode`
+  const wrappedConfig = path.join(project, 'diagnostic-get-hooks.cjs')
+  await fs.writeFile(wrappedConfig, 'console.log(' + JSON.stringify(JSON.stringify({runtime:'node',hooks:{'get-manifest':noWindow(path.join(project,'hook.mjs'),'manifest')},config:{'sdk-managed-connection-enabled':true}})) + ')')
+  await fs.writeFile(path.join(project,'.slack/hooks.json'),JSON.stringify({runtime:'node',hooks:{'get-hooks':noWindow(wrappedConfig,'')},config:{'sdk-managed-connection-enabled':true}}))
+  for (let index=0; index<3; index++) await phase(`fixture-inner-node-no-window-${index}`,async()=>{
+    job=startCli(executable,['manifest','info','--source','local','--skip-update','--no-color','--config-dir',path.join(root,'data/cli')],project,{mode:'none'})
+    let timer
+    try {
+      const result=await Promise.race([job.result,new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('Fixture hook stalled')),30000)})])
+      return {code:result.code,output:result.output.slice(-10000)}
+    }finally{clearTimeout(timer);await job.stop();job=undefined}
+  })
   await phase('official-onboarding-local-api-fixture', async () => {
     const requests = [], commands = []
     const server = http.createServer((request, response) => {
@@ -98,8 +112,8 @@ try {
   await fs.writeFile(path.join(root, 'report.json'), JSON.stringify(report, null, 2))
 }
 const events = (await fs.readFile(path.join(root, 'window-events.tsv'), 'utf8')).split(/\r?\n/).filter(Boolean).map(line => {
-  const [phase, time, event, pid, parent_pid, hwnd, visible, window_class, image] = line.split('\t')
-  return { phase, time: +time, event: +event, pid: +pid, parent_pid: +parent_pid, hwnd, visible: +visible === 1, window_class, image }
+  const [phase, time, event, pid, parent_pid, hwnd, visible, window_class, image, parent_image] = line.split('\t')
+  return { phase, time: +time, event: +event, pid: +pid, parent_pid: +parent_pid, hwnd, visible: +visible === 1, window_class, image, parent_image }
 })
 const shown = events.filter(event => event.event === 0x8002)
 const positive = shown.filter(event => event.phase === 'positive-visible-cmd' && /ConsoleWindowClass|CASCADIA/i.test(event.window_class))
