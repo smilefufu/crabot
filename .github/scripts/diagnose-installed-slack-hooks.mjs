@@ -92,6 +92,15 @@ try {
 } catch (error) { report.preparation_error = redact(error.message) }
 finally {
   await job?.stop().catch(error => { report.cleanup_error = redact(error.message) })
+  if (temporary) {
+    // Only logs from this tool's empty temporary CLI profile, never user logs.
+    const logs = path.join(temporary, 'cli', 'logs')
+    const names = await fs.readdir(logs).catch(() => [])
+    report.local_cli_debug = []
+    for (const name of names.filter(name => /^slack-debug-.*\.log$/.test(name)).slice(-2)) {
+      report.local_cli_debug.push(redact(await fs.readFile(path.join(logs, name), 'utf8')))
+    }
+  }
   if (temporary) await fs.rm(temporary, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }).catch(error => { report.cleanup_error = redact(error.message) })
   await fs.writeFile(output, JSON.stringify(report, null, 2))
   console.log('Local diagnostic report: ' + output)
