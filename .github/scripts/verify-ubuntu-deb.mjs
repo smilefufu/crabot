@@ -61,8 +61,8 @@ async function prepareLegacyFixture() {
     const marker = source + '/crabot-' + module + '/schema_version'
     try { await fs.copyFile(marker, oldData + '/' + module + '/SCHEMA_VERSION') } catch (error) { if (error.code !== 'ENOENT') throw error }
   }
-  const seed = 'import{pathToFileURL}from"node:url";const m=await import(pathToFileURL(process.argv[1]));await m.createCredentialsIfAbsent(process.argv[2],await m.newCredentialsFromPassword("isolated-legacy-acceptance",{is_temp:false,changed_via:"start"}))'
-  await command(core + '/.product-runtime/node/bin/node', ['--input-type=module', '-e', seed, core + '/crabot-admin/dist/credentials.js', oldData + '/admin'])
+  const seed = 'import{pathToFileURL}from"node:url";const m=await import(pathToFileURL(process.argv[1]));await m.writeCredentials(process.argv[2],await m.newCredentialsFromPassword("isolated-legacy-acceptance",{is_temp:false,changed_via:"start"}))'
+  await command(core + '/.product-runtime/node/bin/node', ['--input-type=module', '-e', seed, source + '/crabot-admin/dist/credentials.js', oldData + '/admin'])
   const sentinels = ['agent/preserved-history.txt', 'memory/preserved.txt', 'mcp-deps/preserved.txt', 'workspaces/old-project/content.txt']
   for (const name of sentinels) { await fs.mkdir(path.dirname(oldData + '/' + name), { recursive: true }); await fs.writeFile(oldData + '/' + name, 'retained ' + legacyVersion) }
   await fs.mkdir(home + '/.local/bin', { recursive: true, mode: 0o700 }); await fs.symlink(source + '/cli.mjs', home + '/.local/bin/crabot')
@@ -139,6 +139,9 @@ try {
     assert.deepEqual(await fs.readFile(data + '/admin/credentials.json'), legacy.credentials)
     assert.deepEqual(await fs.readFile(legacy.oldData + '/admin/credentials.json'), legacy.credentials)
     assert.equal(await fs.readlink(home + '/.local/bin/crabot'), core + '/bin/crabot')
+    const login = await fetch('http://127.0.0.1:3000/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: 'isolated-legacy-acceptance' }), signal: AbortSignal.timeout(10000) })
+    assert.equal(login.status, 200, 'the password created by the published old library must still authenticate')
+    assert.equal(typeof (await login.json()).token, 'string')
     report.checks.push({ name: 'native_legacy_data_consent_import_preserves_source_password_history_dependencies_workspace_and_cli', passed: true })
   }
   const status = JSON.parse(await cli('status', '--json')); assert.equal(status.running, true)
