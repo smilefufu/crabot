@@ -6,7 +6,7 @@ on:
         description: 'Native Mac/Windows installer or Linux source-only acceptance'
         type: choice
         default: darwin-arm64
-        options: [darwin-arm64, win32-x64, linux-x64]
+        options: [darwin-arm64, darwin-x64, win32-x64, linux-x64]
       source_only:
         description: 'Run only the real source development acceptance, without rebuilding installers'
         type: boolean
@@ -121,7 +121,7 @@ jobs:
   source:
     if: inputs.cleanup_facts_only != true
     name: Source cold boot ${{ inputs.target || 'darwin-arm64' }}
-    runs-on: ${{ inputs.target == 'win32-x64' && 'windows-latest' || inputs.target == 'linux-x64' && 'ubuntu-24.04' || 'macos-15' }}
+    runs-on: ${{ inputs.target == 'win32-x64' && 'windows-latest' || inputs.target == 'linux-x64' && 'ubuntu-24.04' || inputs.target == 'darwin-x64' && 'macos-15-intel' || 'macos-15' }}
     timeout-minutes: 30
     env:
       UV_PYTHON: '3.12'
@@ -162,7 +162,7 @@ jobs:
   installer:
     if: inputs.cleanup_facts_only != true && inputs.source_only != true && inputs.target != 'linux-x64'
     name: Offline test installer ${{ inputs.target || 'darwin-arm64' }}
-    runs-on: ${{ inputs.target == 'win32-x64' && 'windows-latest' || 'macos-15' }}
+    runs-on: ${{ inputs.target == 'win32-x64' && 'windows-latest' || inputs.target == 'darwin-x64' && 'macos-15-intel' || 'macos-15' }}
     timeout-minutes: 120
     env:
       UV_PYTHON: '3.12'
