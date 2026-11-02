@@ -1,5 +1,11 @@
 # Crabot 项目进度
 
+### Ubuntu AppImage：可行性验证完成，未切换正式方案
+
+- 用户倾向AppImage，要求先验证GUI、内置浏览器、后台Core、移动/替换与数据保留。[隔离实测41434615154](https://github.com/smilefufu/crabot/actions/runs/41434615154)复用已核验Linux载荷`b4cc1a76`及固定摘要的官方type2 runtime；只调整实验包布局，不修改产品源码、main、发行或真实服务。相关后台启动、身份判断、Scrapling代码已与当前修正分支逐文件比对一致。
+- Ubuntu24默认限制下直接运行被沙箱拒绝；外层AppImage确切文件许可可继承到GUI/Core，随后GUI启动、认证、内置CLI同实例以及GUI渲染器内核沙箱通过。显式沙箱Chromium抓取通过；原单体布局Scrapling抓取虽成功，但其受管沙箱守卫未启用，实际renderer缺少seccomp及独立user namespace，不能判通过。
+- 已复现：GUI被结束后MM仍存活、health仍返回200，但AppImage挂载消失、Node/CLI返回ENOENT；同文件重开、同路径同版替换、移动后重开均因临时Core路径变化报`CRABOT_DESKTOP_TAKEOVER_REQUIRED`。测试数据及模拟密钥保留。正式改造尚未获逐项许可；本次为Ubuntu24/Xvfb组件实测，不替代26.04、GNOME/Wayland、真人授权或跨版本升级验收。
+
 ### 桌面初版：Windows19验收通过，按用户许可合入main；暂不发版
 
 - 11月2日用户反馈本版明显改善，明确许可合并推送；随后要求暂不发版。本次不创建发行标签或GitHub Release，不改本机源码部署、服务或真实数据。
