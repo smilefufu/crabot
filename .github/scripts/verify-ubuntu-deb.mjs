@@ -57,9 +57,14 @@ try {
   assert.match(menu, /Exec=.*\/opt\/Crabot\/crabot-desktop/)
   report.checks.push({ name: 'standard_install_fixed_program_and_conffile', menu, conffiles })
   let gui = await launch('first_default_location', true)
+  const sandbox = JSON.parse(await command('/usr/bin/sudo', ['-n', '/usr/bin/python3', path.resolve('.github/scripts/ubuntu-renderer-sandbox.py'), String(gui.pid), String(process.getuid())]))
+  report.checks.push({ name: 'actual_gui_renderer_kernel_sandbox', ...sandbox })
   const binding = JSON.parse(await fs.readFile(home + '/config/crabot/desktop-binding.json', 'utf8'))
   assert.equal(binding.data_dir, data); assert.equal(binding.core_root, core)
   const status = JSON.parse(await cli('status', '--json')); assert.equal(status.running, true)
+  const browser = await command(core + '/.product-runtime/node/bin/node', [path.resolve('.github/scripts/smoke-scrapling.mjs'), core, '--offline', '--kernel-check'], { env, timeout: 240000 })
+  await fs.writeFile(path.join(base, 'acceptance-browser.log'), browser)
+  report.checks.push({ name: 'actual_production_mcp_browser_and_kernel_sandbox', output: browser })
   let refused = false
   try { await install() } catch (error) { refused = true; assert.match(error.stdout + error.stderr, /Crabot 仍在运行/); report.checks.push({ name: 'running_reinstall_refused_without_signal', output: error.stdout + error.stderr }) }
   assert.ok(refused); assert.equal(gui.exitCode, null); assert.equal(JSON.parse(await cli('status', '--json')).running, true)

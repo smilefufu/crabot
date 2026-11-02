@@ -52,6 +52,13 @@ try {
     await call(fetch, { url: url + '/cookie/set', session_id })
     await call(fetch, { url: url + '/cookie/read', session_id, extraction_type: 'text' }, 'scrapling=retained')
     if (session_type !== 'static') {
+      if (process.argv.includes('--kernel-check')) {
+        check(process.platform === 'linux' && process.env.GITHUB_ACTIONS === 'true', 'kernel check requires disposable Ubuntu CI')
+        const observed = spawnSync('/usr/bin/sudo', ['-n', '/usr/bin/python3', fileURLToPath(new URL('./ubuntu-renderer-sandbox.py', import.meta.url)),
+          String(transport.pid), String(process.getuid())], { encoding: 'utf8', timeout: 10000 })
+        check(!observed.error && observed.status === 0, 'kernel sandbox observation failed: ' + observed.stderr)
+        console.log('CRABOT_BROWSER_KERNEL ' + JSON.stringify({ session_type, ...JSON.parse(observed.stdout) }))
+      }
       const shot = await call('screenshot', { url, session_id })
       const png = Buffer.from(shot.content.find(c => c.type === 'image')?.data ?? '', 'base64')
       check(png.length > 4000 && png.subarray(1, 4).toString() === 'PNG', 'expected nonempty screenshot')
