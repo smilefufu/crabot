@@ -1,6 +1,11 @@
 name: Admin desktop sessions and HTTP transport
 on:
   workflow_dispatch:
+    inputs:
+      windows_only:
+        description: 'Run the native Windows session reproduction only'
+        type: boolean
+        default: false
   push:
     branches: ['feat/desktop-admin-transport']
   pull_request:
@@ -20,7 +25,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-2022]
+        os: ${{ fromJSON(inputs.windows_only && '["windows-2022"]' || '["ubuntu-24.04","macos-15","macos-15-intel","windows-2022"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:

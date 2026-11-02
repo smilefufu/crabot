@@ -35,6 +35,8 @@ async function fixture(t) {
     }
     if(process.env.TEST_ELECTRON_CLIENT==='1') Object.defineProperty(process,'execPath',{value:'/different/Electron'});
     const data=process.env.TEST_DATA;
+    const timing=[],parse=Date.parse;
+    Date.parse=value=>{const deadline=parse(value);timing.push({remaining_ms:deadline-Date.now()});return deadline};
     async function manual(nonce, action) {
       const metadata=JSON.parse(readFileSync(join(data,'desktop-session.json'),'utf8'));
       const {socket}=await transport.connectLocalAuth(metadata.socket_address);
@@ -59,7 +61,7 @@ async function fixture(t) {
           try {const result=await manual('b'.repeat(42)+'A',action);process.send({type:'result',result})}
           catch {process.send({type:'result',closed:true})}
         }else process.send({type:'result',session:await openDesktopSession(data)});
-      }catch(error){process.send({type:'result',error:error.code??'UNAVAILABLE'})}
+      }catch(error){process.send({type:'result',error:error.code??'UNAVAILABLE',timing:timing.slice(-4)})}
     }
     process.on('message',command=>{if(command==='renew')void run();if(command==='exit')process.exit(0)});
     await run();setInterval(()=>{},1000);`)
@@ -182,7 +184,7 @@ test('Windows repeated native handshakes retain every final response', { skip: p
   for (let attempt = 1; attempt <= 20; attempt++) {
     child.send('renew')
     const [renewed] = await once(child, 'message')
-    assert.equal(renewed.session?.type, 'session', JSON.stringify({ attempt, error: renewed.error, has_session: !!renewed.session }))
+    assert.equal(renewed.session?.type, 'session', JSON.stringify({ attempt, error: renewed.error, has_session: !!renewed.session, timing: renewed.timing }))
     assert.equal(await f.validate(renewed.session), true)
   }
 })
