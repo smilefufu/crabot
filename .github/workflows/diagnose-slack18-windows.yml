@@ -42,16 +42,12 @@ jobs:
           cmd /d /c .desktop-build\compile-observer.cmd
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Continuous window events with visible and hidden controls
-        shell: pwsh
+        shell: bash
         run: |
           pnpm --dir crabot-channel-slack test
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node .github/scripts/smoke-slack-onboarding.mjs
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node .github/scripts/diagnose-slack18-windows.mjs
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node .github/scripts/check-slack-hook-window-report.mjs
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node .github/scripts/test-installed-slack-diagnostic.mjs
       - uses: actions/upload-artifact@v4
         if: always()
