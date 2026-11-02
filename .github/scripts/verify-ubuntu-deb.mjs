@@ -73,10 +73,10 @@ async function launch(label, chooseDefault = false, expectedVersion = artifact.v
   }
   await fs.writeFile(path.join(base, 'acceptance-' + label + '.log'), output)
   assert.ok(output.split('\n').some(line => { try { const v = JSON.parse(line); return v.component === 'desktop' && v.phase === 'ready' } catch { return false } }), label + ': ' + output.slice(-5000))
-  const state = output.split('\n').map(line => { try { return JSON.parse(line) } catch { return {} } }).find(v => v.component === 'desktop' && v.phase === 'ready')
-  assert.equal(state.app_version, expectedVersion)
+  const boot = output.split('\n').map(line => { try { return JSON.parse(line) } catch { return {} } }).find(v => v.component === 'desktop-bootstrap' && v.phase === 'app-ready')
+  assert.equal(boot?.app_version, expectedVersion)
   assert.equal((await cli('--version')).trim(), expectedVersion)
-  report.checks.push({ name: label, ready: true, app_version: state.app_version, cli_version: expectedVersion, modules: await healthyModules() })
+  report.checks.push({ name: label, ready: true, app_version: boot.app_version, cli_version: expectedVersion, modules: await healthyModules() })
   return child
 }
 try {
