@@ -29,6 +29,27 @@ describe('ModelProviderManager', () => {
   })
 
   describe('Provider CRUD', () => {
+    it('keeps saved capability overrides and output budgets when refreshing a standard API provider', async () => {
+      const created = await manager.createProvider({
+        name: 'Configured', type: 'preset', preset_vendor: 'openai', format: 'openai',
+        endpoint: 'https://api.openai.com/v1', api_key: 'fixture-key',
+        models: [{ model_id: 'gpt-5.2', display_name: 'GPT', type: 'llm', supports_vision: false, context_window: 32000, max_tokens: 4000 }],
+      })
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ data: [{ id: 'gpt-5.2', capabilities: { vision: true }, context_window: 400000 }] })))
+      const result = await manager.refreshModels(created.id)
+      expect(result.models[0]).toMatchObject({ supports_vision: false, context_window: 32000, max_tokens: 4000 })
+      expect(await manager.buildConnectionInfo(created.id, 'gpt-5.2')).toMatchObject({ context_window: 32000, max_tokens: 4000 })
+    })
+
+    it('does not erase the existing model catalog when a vendor request fails', async () => {
+      const created = await manager.createProvider({ name: 'Configured', type: 'preset', preset_vendor: 'openai', format: 'openai',
+        endpoint: 'https://api.openai.com/v1', api_key: 'fixture-key', models: [{ model_id: 'gpt-5.2', display_name: 'GPT', type: 'llm' }] })
+      const before = await fs.readFile(path.join(testDataDir, 'model_providers.json'), 'utf8')
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 503 }))
+      await expect(manager.refreshModels(created.id)).rejects.toThrow('已有配置已保留')
+      expect(await fs.readFile(path.join(testDataDir, 'model_providers.json'), 'utf8')).toBe(before)
+      expect(manager.getProvider(created.id)?.models[0]).toMatchObject({ model_id: 'gpt-5.2', context_window: 400000, supports_vision: true })
+    })
     it('should create a provider', async () => {
       const params: CreateModelProviderParams = {
         name: 'Test Provider',

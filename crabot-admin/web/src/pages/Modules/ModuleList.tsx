@@ -51,7 +51,7 @@ interface ChannelDetail {
 /** P6-D：唯一 live agent 是静态 core；legacy 记录以 unsupported archive 摘要呈现。 */
 const CORE_AGENT_ITEM: ModuleItem = {
   id: 'crabot-agent',
-  name: 'Crabot Core Agent',
+  name: 'CRABOT Core Agent',
   module_type: 'agent',
   install_type: 'builtin',
   version: '-',
@@ -86,7 +86,7 @@ function toModuleItemFromChannel(impl: ChannelImplementation): ModuleItem {
 
 const BUILTIN_MEMORY: ModuleItem = {
   id: 'memory-default',
-  name: 'Crabot Memory',
+  name: 'CRABOT Memory',
   module_type: 'memory',
   install_type: 'builtin',
   version: '0.1.0',

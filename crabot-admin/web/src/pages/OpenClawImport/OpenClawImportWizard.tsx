@@ -43,7 +43,7 @@ const SKIP_REASON_LABEL: Record<string, string> = {
 
 const CRABOT_CATEGORY_LABELS: Record<string, string> = {
   config: '配置（模型 / Agent / 模板 / MCP）',
-  channels: '渠道与朋友（含权限）',
+  channels: '聊天方式与朋友（含权限）',
   skills: '技能',
   memory: '长期记忆',
   tasks: '任务与日程',
@@ -115,7 +115,7 @@ export const OpenClawImportWizard: React.FC = () => {
         setAvailableCategories(overview.categories)
         setSelCategories(new Set(overview.categories))
         setCrabotStep(1)
-        toast.success('Crabot 备份识别成功')
+        toast.success('CRABOT 备份识别成功')
       } else {
         // openclaw：需要再上传一次到 openclaw-import/parse
         setBranch('openclaw')
@@ -224,7 +224,7 @@ export const OpenClawImportWizard: React.FC = () => {
           <div>
             <h1 className="oci-title">导入</h1>
             <p className="oci-subtitle">
-              支持从 <strong>Crabot 备份</strong> 或 <strong>OpenClaw 备份</strong> 导入。
+              支持从 <strong>CRABOT 备份</strong> 或 <strong>OpenClaw 备份</strong> 导入。
             </p>
           </div>
         </header>
@@ -332,7 +332,7 @@ const UploadStep: React.FC<{
       <div className={`oci-drop ${file ? 'has-file' : ''}`} onClick={() => inputRef.current?.click()}>
         <div className="oci-drop-icon">{file ? '📦' : '⬆'}</div>
         <p className="oci-drop-main">{file ? '已选择备份文件' : '点击选择备份文件'}</p>
-        <p className="oci-drop-sub">支持 Crabot 备份 或 OpenClaw 备份（.tar.gz）</p>
+        <p className="oci-drop-sub">支持 CRABOT 备份 或 OpenClaw 备份（.tar.gz）</p>
         {file && (
           <p className="oci-drop-file">
             {file.name} · {(file.size / 1024 / 1024).toFixed(1)} MB

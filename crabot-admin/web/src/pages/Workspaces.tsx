@@ -83,7 +83,7 @@ function RelocationPreviewPanel({ client, source, revision, locked, canStart, re
   return <Card title="迁移工作目录">
     <p className="workspace-path">当前位置：{source}</p>
     <form aria-label="工作目录迁移预检" onSubmit={preview} className="workspace-form">
-      <label>目标工作目录<input disabled={submitting} value={target} onChange={event => edit(event.target.value)} placeholder="运行 Crabot 的电脑或服务器上的绝对路径" /></label>
+      <label>目标工作目录<input disabled={submitting} value={target} onChange={event => edit(event.target.value)} placeholder="运行 CRABOT 的电脑或服务器上的绝对路径" /></label>
       {desktopBridge?.selectWorkspaceDirectory && <Button type="button" variant="secondary" disabled={locked || busy || submitting || choosing} onClick={() => void chooseDirectory()}>{choosing ? '正在选择文件夹…' : '选择本机文件夹'}</Button>}
       <p className="workspace-note">先检查迁移范围、空间和兼容问题。检查不会停止任务或搬动文件。</p>
       <div className="workspace-actions"><Button type="submit" disabled={locked || busy || submitting || choosing || !target.trim()}>{busy ? '正在检查…' : '检查迁移位置'}</Button>
@@ -259,7 +259,7 @@ function WorkspaceDetails({ item, revision, client, refresh, onSaved, locked }: 
   if (execution.status === 'running') executionLabel = '正在执行'
   else if (execution.status === 'idle') executionLabel = '当前空闲'
   let sourceLabel = '默认工作区'
-  if (workspace.kind === 'project') sourceLabel = workspace.source === 'managed' ? 'Crabot 管理的项目目录' : '原有项目目录'
+  if (workspace.kind === 'project') sourceLabel = workspace.source === 'managed' ? 'CRABOT 管理的项目目录' : '原有项目目录'
   return <Card title={workspace.kind === 'default' ? '默认工作区 · 未归属项目' : workspace.name}>
     <dl className="workspace-facts">
       <dt>目录</dt><dd className="workspace-path">{workspace.root}</dd>
@@ -271,7 +271,7 @@ function WorkspaceDetails({ item, revision, client, refresh, onSaved, locked }: 
       <dt>观察时间</dt><dd>{execution.observed_at ? new Date(execution.observed_at).toLocaleString() : '未知'}</dd>
       <dt>最近使用</dt><dd>{workspace.last_used_at ? new Date(workspace.last_used_at).toLocaleString() : '未知'}</dd>
     </dl>
-    <p className="workspace-note">路径位于运行 Crabot 的电脑或服务器。空间是带时间的估算，可能包含共享数据块；不等于删除后可释放的空间。</p>
+    <p className="workspace-note">路径位于运行 CRABOT 的电脑或服务器。空间是带时间的估算，可能包含共享数据块；不等于删除后可释放的空间。</p>
     {desktopBridge?.revealWorkspaceFolder && <Button variant="secondary" disabled={locked || opening || item.directory_status !== 'ready'} onClick={() => void openFolder()}>在文件管理器打开</Button>}
     {openError && <p role="alert">{openError}</p>}
     <p><Link to={`/traces?tab=workers&workspace_id=${encodeURIComponent(workspace.workspace_id)}`}>查看关联执行器（含历史）</Link></p>
@@ -378,8 +378,8 @@ function WorkspacePage({ scope }: { scope: string }) {
     {creating && <Card title="添加项目工作区"><form onSubmit={create} className="workspace-form">
       <label>项目名称<input value={name} onChange={event => setName(event.target.value)} required maxLength={120} /></label>
       <label>用途说明<textarea value={purpose} onChange={event => setPurpose(event.target.value)} maxLength={2000} /></label>
-      <label>已有项目目录（可选）<input value={root} onChange={event => setRoot(event.target.value)} placeholder="留空由 Crabot 创建项目目录" /></label>
-      <p className="workspace-note">填写运行 Crabot 的电脑或服务器上的绝对路径。绑定原有目录会保留其中的文件。</p>
+      <label>已有项目目录（可选）<input value={root} onChange={event => setRoot(event.target.value)} placeholder="留空由 CRABOT 创建项目目录" /></label>
+      <p className="workspace-note">填写运行 CRABOT 的电脑或服务器上的绝对路径。绑定原有目录会保留其中的文件。</p>
       <div className="workspace-actions"><Button type="submit" disabled={saving || locked}>保存工作区</Button><Button type="button" variant="secondary" disabled={saving} onClick={() => setCreating(false)}>取消</Button></div>
     </form></Card>}
     <div className="workspace-actions"><label>搜索工作区<input value={search} onChange={event => setSearch(event.target.value)} placeholder="名称、用途或路径" /></label>

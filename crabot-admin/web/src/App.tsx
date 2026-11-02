@@ -35,9 +35,9 @@ import { OpenClawImportWizard } from './pages/OpenClawImport/OpenClawImportWizar
 import { BackupExportPage } from './pages/Backup/BackupExportPage'
 import './App.css'
 import './desktop-theme.css'
+import './partner-theme.css'
 import { DesktopGate } from './components/DesktopGate'
 import { DesktopWelcome } from './pages/DesktopWelcome'
-import { isDesktop } from './services/desktop-host'
 import { DesktopDiagnosticsPanel } from './components/DesktopDiagnosticsPanel'
 import { MainLayout } from './components/Layout/MainLayout'
 import { DesktopPermissions } from './pages/DesktopPermissions'
@@ -75,6 +75,8 @@ const AppRoutes: React.FC = () => {
         }
       />
       <Route path="/workspaces" element={<PrivateRoute><Workspaces /></PrivateRoute>} />
+      <Route path="/companion" element={<PrivateRoute><AgentConfig key="companion" profileOnly /></PrivateRoute>} />
+      <Route path="/setup" element={<PrivateRoute><DesktopWelcome /></PrivateRoute>} />
       <Route
         path="/providers"
         element={
@@ -289,7 +291,7 @@ const AppRoutes: React.FC = () => {
           </PrivateRoute>
         }
       />
-      <Route path="/" element={isDesktop ? <PrivateRoute><DesktopWelcome /></PrivateRoute> : <Navigate to="/chat" replace />} />
+      <Route path="/" element={<PrivateRoute><DesktopWelcome /></PrivateRoute>} />
       <Route path="/desktop/diagnostics" element={<PrivateRoute><MainLayout><DesktopDiagnosticsPanel /></MainLayout></PrivateRoute>} />
       <Route path="/desktop/permissions" element={<PrivateRoute><DesktopPermissions /></PrivateRoute>} />
     </Routes>

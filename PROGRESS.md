@@ -1,5 +1,11 @@
 # Crabot 项目进度
 
+### 伙伴视角导航、首次使用与品牌：实现完成，待 PR 审查
+
+- 依据已确认 [Spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-11-02-partner-navigation-onboarding-design.md)，GUI / Web 共用“聊天、任务与计划、工作区、记忆、本领、社交、设置”；模型服务位于本领，渠道展示统一为聊天方式，旧 URL 保留。
+- 已接入 CRABOT 大写品牌、已确认像素 Logo、本地供应商图标；隐藏百炼 Coding Plan 新增预设，保留存量解析。首次配置复用现有引用保存与聊天链路，模型能力按已核实接入和精确型号补缺，保留已保存能力与输出预算，无持久化迁移。
+- Web 全量 479 项、模型配置相关后端（含 HTTP）86 项、Client 模型 5 项通过，Admin / Web / Desktop 构建通过。真实前端在 Web 与桌面宿主模拟下完成接入、保存默认模型及发送首条消息，覆盖五种宽度与明暗主题；模型响应使用夹具，真实模型调用、原生桌面安装和生产部署尚未验证。已完成本次 diff 自审，按设计型任务提交 PR。
+
 ### Slack 频道远端历史：实现完成，PR 验证中
 
 - 依据已确认 [Spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-11-02-slack-remote-history-design.md)，群 get_history 查询平台主聊天，包含入群前及未 @Bot 的消息；after/before 在 Slack Channel 内转为 start/end。查询不回填缓存或重新执行旧消息，DM／单条详情仍为缓存，完整 thread 不在本次范围内。

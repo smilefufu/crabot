@@ -186,7 +186,7 @@ export const FriendWorkbench: React.FC<FriendWorkbenchProps> = ({
             </select>
           </label>
           <div style={{ display: 'flex', gap: '1rem', fontSize: '0.75rem', color: 'var(--text-tertiary)' }}>
-            <span>状态：{friend.status === 'active' ? '活跃' : '无渠道'}</span>
+            <span>状态：{friend.status === 'active' ? '活跃' : '无聊天方式'}</span>
             <span>权限等级：{friend.permission}</span>
           </div>
           <Button

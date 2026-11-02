@@ -209,7 +209,7 @@ describe('SubagentEditor', () => {
     })
   })
 
-  it('direct child 的 Skill 白名单不展示主线专用或任何 Agent 都不可用的 Crabot Skill', async () => {
+  it('direct child 的 Skill 白名单不展示主线专用或任何 Agent 都不可用的 CRABOT Skill', async () => {
     ;(skillService.list as ReturnType<typeof vi.fn>).mockResolvedValue([
       { id: 'normal', name: 'writing-plans', enabled: true },
       { id: 'tmp-page', name: 'tmp-page', enabled: true },

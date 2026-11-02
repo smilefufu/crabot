@@ -501,7 +501,7 @@ export const WorkersPage: React.FC = () => {
                 </>
               )}
               {dialog.method === 'existing_host' && (
-                <p className="worker-config__host-note">使用宿主机已有的 CLI 配置；Crabot 不保存登录凭证。</p>
+                <p className="worker-config__host-note">使用宿主机已有的 CLI 配置；CRABOT 不保存登录凭证。</p>
               )}
             </div>
           )}
