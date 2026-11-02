@@ -72,6 +72,8 @@ try {
   const started = performance.now(); await fs.rm(app, { recursive: true }); await fs.cp(next, app, { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE }); report.replace_ms = Math.round(performance.now() - started)
   report.target_ready_ms = await launch()
   report.to = JSON.parse(await fs.readFile(path.join(core, 'core-release.json'), 'utf8')).version; assert.equal(report.to, '0.1.0-desktop.19')
+  const boot = (await fs.readFile(path.join(data, 'desktop-profile/bootstrap.log'), 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+  assert.ok(boot.some(frame => frame.phase === 'app-ready' && frame.app_version === report.to)); report.actual_gui_version = report.to
   const after = JSON.parse((await cli('status', '--json')).stdout), runtimeAfter = JSON.parse(await fs.readFile(path.join(data, 'instance-runtime.json'), 'utf8'))
   assert.equal(after.running, true); assert.equal(after.data_dir, data); assert.equal(runtimeAfter.instance_id, runtimeBefore.instance_id); assert.notEqual(runtimeAfter.generation, runtimeBefore.generation)
   assert.equal(await hash(credentials), credentialHash)
