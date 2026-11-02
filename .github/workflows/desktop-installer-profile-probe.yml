@@ -2,6 +2,10 @@ name: Desktop installer initialization probe
 on:
   workflow_dispatch:
     inputs:
+      ubuntu_deb:
+        description: 'Install and verify an already-built exact DEB on Ubuntu24/26; no rebuild'
+        type: boolean
+        default: false
       directory_only:
         description: 'Run only native installation-directory regressions without a package download'
         type: boolean
@@ -29,7 +33,44 @@ permissions:
   contents: read
   actions: read
 jobs:
+  ubuntu-deb:
+    if: inputs.ubuntu_deb == true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-26.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.source_run }}
+          name: ${{ inputs.artifact_name }}
+          path: .desktop-build/deb
+      - name: Native system display and ordinary package dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends apparmor-utils libgtk-3-0t64 libnss3 libxss1 libasound2t64 libgbm1 xvfb xauth xdotool dbus-x11 zstd
+      - name: Actual same-package installation and kernel sandbox acceptance
+        run: |
+          ulimit -c 0
+          dbus-run-session -- xvfb-run -a node .github/scripts/verify-ubuntu-deb.mjs .desktop-build/deb/distribution
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ubuntu-deb-acceptance-${{ matrix.os }}-${{ github.run_id }}
+          path: |
+            .desktop-build/deb/acceptance.json
+            .desktop-build/deb/acceptance-*.log
+          if-no-files-found: warn
+          retention-days: 7
   recheck:
+    if: inputs.ubuntu_deb != true
     runs-on: windows-latest
     timeout-minutes: 40
     defaults:

@@ -16,7 +16,8 @@ for (const key of ['DATA_DIR', 'CRABOT_HOME', 'CRABOT_DEV', 'CRABOT_PORT_OFFSET'
 const artifact = JSON.parse(await fs.readFile(path.join(distribution, 'installers.json'), 'utf8'))
 const file = path.join(distribution, artifact.files.find(v => v.file.endsWith('.deb')).file)
 assert.equal(createHash('sha256').update(await fs.readFile(file)).digest('hex'), artifact.files.find(v => v.file.endsWith('.deb')).sha256)
-const report = { source: process.env.GITHUB_SHA, version: artifact.version, environment: 'Ubuntu24 GitHub VM, Xvfb; GNOME/Wayland and Ubuntu26 not represented', checks: [] }
+const report = { harness_source: process.env.GITHUB_SHA, version: artifact.version,
+  system: (await fs.readFile('/etc/os-release', 'utf8')).trim(), environment: 'Native GitHub VM, Xvfb; GNOME/Wayland human acceptance not represented', checks: [] }
 const children = [], pause = ms => new Promise(resolve => setTimeout(resolve, ms))
 const command = async (file, args, options = {}) => (await exec(file, args, { timeout: 180000, maxBuffer: 2000000, ...options })).stdout
 const cli = (...args) => command('/usr/bin/crabot', args, { env, timeout: 90000 })
@@ -53,6 +54,7 @@ try {
   assert.equal((await fs.stat(entry)).uid, 0)
   const corePackage = JSON.parse(await fs.readFile(core + '/package.json', 'utf8'))
   assert.equal(corePackage.version, artifact.version)
+  report.package_source = JSON.parse(await fs.readFile(core + '/core-release.json', 'utf8')).commit
   const menu = await fs.readFile('/usr/share/applications/crabot.desktop', 'utf8')
   assert.match(menu, /Exec=.*\/opt\/Crabot\/crabot-desktop/)
   report.checks.push({ name: 'standard_install_fixed_program_and_conffile', menu, conffiles })
