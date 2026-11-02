@@ -36,7 +36,10 @@ try {
   if (process.platform === 'darwin') {
     const cua = require(join(root, 'scripts/lib/computer-use-runtime.cjs')).loadRuntime(root, { full: true })
     report.desktop_control_arch = await run('/usr/bin/lipo', ['-archs', cua.command])
-    assert.equal(report.desktop_control_arch, process.arch === 'arm64' ? 'arm64' : 'x86_64')
+    const nativeArch = process.arch === 'arm64' ? 'arm64' : 'x86_64'
+    const architectures = report.desktop_control_arch.split(/\s+/)
+    if (root === await fs.realpath(source)) assert.ok(architectures.includes(nativeArch))
+    else assert.deepEqual(architectures, [nativeArch])
     await run('/usr/bin/codesign', ['--verify', '--deep', '--strict', cua.app])
   }
   report.node = await run(runtime.executables.node, ['--version'])
