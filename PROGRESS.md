@@ -84,6 +84,8 @@
 
 ### 语音：wire9已部署，按优先级收口验收
 
+- 2026-11-02按已确认自然轮次设计完成[安卓暂停持续处理与实际控制器隔离接线](https://github.com/smilefufu/crabot-voice-android/blob/main/docs/verification/2026-11-02-pause-speech-confirmation.md)，安卓main `9ba14c8`。旧实现暂停后失去近端判断已先复现；改为真实硬件时间/消费游标映射播放历史与未播尾部，暂停/饥饿持续APM，时间戳缺失有界等待。既有WebRTC默认VAD候选＋原Silero确认，身份/上传保留原采音；控制器确认后只取消旧语音消费并建新turn，不取消Worker，等待/播报采音不上传。89项JVM（30轮插话及原60轮待机）、9组27150块产品Kotlin/JNI公开重放与独立APM逐样本一致、两组纯回声零确认及两类APK构建通过。默认产品入口仍wire9，不选择未过关端点；中文EOT固定失败保留，硬件时钟/漂移、实际AEC/短词、声纹兼容、wire10联合及真人体验尚未验收。未改阈值/超时/提示词/spec/协议、本机部署或手机，未连接ADB或安排用户重测；[实施计划](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-27-natural-voice-turn-taking-implementation.md)已同步。
+
 - Android 0.8.1/code18 已保留数据升级并直推 main（4d11bef）：恢复原“一次开启、多轮待机”，修复接话到期重复开麦及通知跨过接话期限后退出待机两条路径；旧实现两项回归失败，修复后30项JVM、4项隔离控制器及1项方向检查通过。首页/分组设置/既有FuFu记录已真机核对；安装与测试阶段即时密文摘要一致，正常重连的目录同步仍按原逻辑重加密。真人连续唤醒/接话验收待补，声纹规则和后台部署不变；[验证记录](https://github.com/smilefufu/crabot-voice-android/blob/main/docs/verification/2026-10-24-persistent-standby-and-home.md)。
 - 用户已确认后端/安卓配套设计及一处提示词文字；正式 Voice v0.9.0/wire9 先行发布。不增加通用 SSML 或新模型配置，普通 voice_reply 按需完整回答，宿主自动断句、单个 TTS 请求加一个预取，按实际播放游标保持最多一秒在途音频。
 - 原回答总字数、20/25/30秒累计播放限制已从普通输出移除；原60秒仅限制首次接纳，已接纳回应保持原请求/epoch，按首音频、合成、消费和收尾阶段检测卡住。reply_end 短返回与实际完成分离；只有真实全播才记 completed，取消和未知不自动重播。登记引导继续使用原有限预算。
