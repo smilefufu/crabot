@@ -63,7 +63,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends apparmor-utils libgtk-3-0t64 libnss3 libxss1 libasound2t64 libgbm1 xvfb xauth xdotool dbus-x11 zstd
-      - name: Actual same-package installation and kernel sandbox acceptance
+      - name: Exact DEB installation and kernel sandbox before independent source preparation
+        run: |
+          ulimit -c 0
+          dbus-run-session -- xvfb-run -a node .github/scripts/verify-ubuntu-deb.mjs .desktop-build/deb/distribution
+      - name: Actual fixed-path upgrade and independent source coexistence
         env:
           CRABOT_CI_DEVELOPMENT_COEXISTENCE: '1'
         run: |
@@ -83,6 +87,8 @@ jobs:
           name: ubuntu-deb-acceptance-${{ matrix.os }}-${{ github.run_id }}
           path: |
             .desktop-build/deb-upgrade/acceptance.json
+            .desktop-build/deb/acceptance.json
+            .desktop-build/deb/acceptance-*.log
             .desktop-build/deb-upgrade/legacy-*/acceptance.json
             .desktop-build/deb-upgrade/legacy-*/acceptance-*.log
             .desktop-build/deb-upgrade/acceptance-*.log
