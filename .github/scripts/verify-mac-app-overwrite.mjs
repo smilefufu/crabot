@@ -8,16 +8,19 @@ import { promisify } from 'node:util'
 import { once } from 'node:events'
 import { pathToFileURL } from 'node:url'
 assert.equal(process.env.GITHUB_ACTIONS, 'true'); assert.equal(process.platform, 'darwin')
+assert.ok([4, 6].includes(process.argv.length))
+const expectedFrom = process.argv[4] ?? '0.1.0-desktop.11', expectedTo = process.argv[5] ?? '0.1.0-desktop.19'
 const execute = promisify(execFile), temporary = await fs.mkdtemp(path.join(process.env.RUNNER_TEMP, 'mac-overwrite-'))
 const home = path.join(temporary, 'home'), app = path.join(temporary, 'Crabot.app'), data = path.join(home, 'data')
 await fs.mkdir(home, { mode: 0o700 })
 const env = { ...process.env, HOME: home, DATA_DIR: data }
 for (const key of ['ELECTRON_RUN_AS_NODE', 'NODE_OPTIONS', 'NODE_PATH', 'CRABOT_HOME', 'CRABOT_DEV', 'CRABOT_PORT_OFFSET', 'WORKER_WORKSPACES_DIR']) delete env[key]
 let gui, output = '', core, node, registered
-const report = { platform: process.platform, arch: process.arch, native_first_use_dialog_tested: false }
+const report = { platform: process.platform, arch: process.arch, same_source_version_fixture: expectedTo.endsWith('-desktop-fixture.1'), native_first_use_dialog_tested: false }
 const hash = async file => { const h = createHash('sha256'); for await (const b of createReadStream(file)) h.update(b); return h.digest('hex') }
 const load = name => import(pathToFileURL(path.join(core, 'scripts/lib', name)).href)
 async function extract(directory, name) {
+  if (directory.endsWith('.app')) { await execute('/usr/bin/codesign', ['--verify', '--deep', '--strict', directory], { timeout: 120000 }); return fs.realpath(directory) }
   const files = await fs.readdir(directory, { recursive: true }), dmg = files.filter(file => file.endsWith('.dmg'))
   assert.equal(dmg.length, 1)
   const expected = (await fs.readFile(path.join(directory, path.dirname(dmg[0]), 'SHA256SUMS'), 'utf8')).split('\n').find(line => line.trim().endsWith(path.basename(dmg[0])))?.split(/\s+/)[0]
@@ -65,7 +68,7 @@ try {
   await fs.writeFile(path.join(data, 'admin/credentials.json'), JSON.stringify(await newCredentialsFromPassword('fixture-existing-password', { is_temp: false, changed_via: 'start' })), { mode: 0o600 })
   report.source_ready_ms = await launch()
   const before = JSON.parse((await cli('status', '--json')).stdout), runtimeBefore = JSON.parse(await fs.readFile(path.join(data, 'instance-runtime.json'), 'utf8'))
-  report.from = JSON.parse(await fs.readFile(path.join(core, 'core-release.json'), 'utf8')).version; assert.equal(report.from, '0.1.0-desktop.11')
+  report.from = JSON.parse(await fs.readFile(path.join(core, 'core-release.json'), 'utf8')).version; assert.equal(report.from, expectedFrom)
   assert.equal(before.running, true)
   const { installDesktopCli } = await load('desktop-cli-install.mjs'); registered = await installDesktopCli({ coreRoot: core, dataDir: data, home, env })
   const sentinels = ['agent/overwrite-preserved.txt', 'memory/overwrite-preserved.txt', 'workspaces/project/overwrite-preserved.txt']
@@ -74,7 +77,7 @@ try {
   const credentials = path.join(data, 'admin/credentials.json'), credentialHash = await hash(credentials)
   const started = performance.now(); await fs.rm(app, { recursive: true }); await fs.cp(next, app, { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE }); report.replace_ms = Math.round(performance.now() - started)
   report.target_ready_ms = await launch()
-  report.to = JSON.parse(await fs.readFile(path.join(core, 'core-release.json'), 'utf8')).version; assert.equal(report.to, '0.1.0-desktop.19')
+  report.to = JSON.parse(await fs.readFile(path.join(core, 'core-release.json'), 'utf8')).version; assert.equal(report.to, expectedTo)
   const boot = (await fs.readFile(path.join(data, 'desktop-profile/bootstrap.log'), 'utf8')).trim().split('\n').map(line => JSON.parse(line))
   assert.ok(boot.some(frame => frame.phase === 'app-ready' && frame.app_version === report.to)); report.actual_gui_version = report.to
   const after = JSON.parse((await cli('status', '--json')).stdout), runtimeAfter = JSON.parse(await fs.readFile(path.join(data, 'instance-runtime.json'), 'utf8'))

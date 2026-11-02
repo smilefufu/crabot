@@ -336,6 +336,26 @@ jobs:
       - name: Published CLI data into ordinary Mac App
         if: runner.os == 'macOS'
         run: node .github/scripts/smoke-mac-app-legacy.mjs .desktop-build/manual/gui 2>&1 | tee .desktop-build/mac-app-legacy-stage.log
+      - name: Intel Mac ordinary App same-location version overwrite
+        if: inputs.target == 'darwin-x64'
+        run: |
+          node --input-type=module <<'NODE'
+          import { preparePairedUpdateCore } from './.github/scripts/prepare-paired-update-core.mjs'
+          await preparePairedUpdateCore('.desktop-build/manual/core', '.desktop-build/manual/mac-future-core', '0.1.1-desktop-fixture.1')
+          NODE
+          node scripts/desktop/package-application.mjs --candidate=true --core=.desktop-build/manual/mac-future-core --out=.desktop-build/manual/mac-future-gui
+          node --input-type=module <<'NODE'
+          import { promises as fs } from 'node:fs'
+          import path from 'node:path'
+          import { execFileSync } from 'node:child_process'
+          const apps = []
+          for (const project of ['.desktop-build/manual/gui', '.desktop-build/manual/mac-future-gui']) {
+            const location = JSON.parse(await fs.readFile(path.join(project, 'packaged-location.json'), 'utf8'))
+            apps.push(path.resolve(project, path.dirname(location.executable), '../..'))
+          }
+          await fs.rm('.desktop-build/manual/mac-future-core', { recursive: true })
+          execFileSync(process.execPath, ['.github/scripts/verify-mac-app-overwrite.mjs', ...apps, '0.1.0-desktop.19', '0.1.1-desktop-fixture.1'], { stdio: 'inherit' })
+          NODE
       - name: Real source GUI and release coexistence
         env:
           CRABOT_CI_DEVELOPMENT_COEXISTENCE: '1'
