@@ -44,6 +44,7 @@ jobs:
       - name: Continuous window events with visible and hidden controls
         shell: bash
         run: |
+          node --test .github/scripts/slack-diagnostic-checks.test.mjs
           pnpm --dir crabot-channel-slack test
           node .github/scripts/smoke-slack-onboarding.mjs
           node .github/scripts/diagnose-slack18-windows.mjs
@@ -58,6 +59,6 @@ jobs:
             .desktop-build/slack18-diagnosis/report.json
             .desktop-build/slack18-diagnosis/window-events.tsv
             .desktop-build/slack18-diagnosis/process-starts.tsv
-            .desktop-build/slack18-diagnosis/installed-local-diagnostic.json
+            .desktop-build/slack18-diagnosis/installed*-local-diagnostic.json
           if-no-files-found: warn
           retention-days: 7

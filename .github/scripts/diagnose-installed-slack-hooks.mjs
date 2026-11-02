@@ -7,6 +7,7 @@ import { pathToFileURL } from 'node:url'
 import { createHash } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { validateCheck } from './slack-diagnostic-checks.mjs'
 const execute = promisify(execFile)
 const output = path.resolve(process.argv[3] || 'Slack-local-diagnosis.json')
 const report = { platform: process.platform, node: process.versions.node, local_only: true, checks: [] }
@@ -16,8 +17,13 @@ const redact = value => String(value).replace(/\b(?:xox[baprs]-|xapp-|xoxe[.-])[
   .slice(-24000)
 let temporary, job
 async function check(name, operation) {
-  try { const value = await operation(); report.checks.push({ name, code: value.code ?? 0, output: redact(value.output ?? value.stdout ?? ''), stderr: redact(value.stderr ?? '') }) }
-  catch (error) { report.checks.push({ name, code: error.code ?? 'error', error: redact(error.message), output: redact(error.stdout ?? ''), stderr: redact(error.stderr ?? '') }) }
+  try {
+    const value = await operation()
+    const result = { name, code: value.code ?? 0, output: redact(value.output ?? value.stdout ?? ''), stderr: redact(value.stderr ?? '') }
+    try { validateCheck(name, value); result.passed = true }
+    catch (error) { result.passed = false; result.error = redact(error.message) }
+    report.checks.push(result)
+  } catch (error) { report.checks.push({ name, passed: false, code: error.code ?? 'error', error: redact(error.message), output: redact(error.stdout ?? ''), stderr: redact(error.stderr ?? '') }) }
 }
 try {
   if (process.platform !== 'win32') throw new Error('Windows only')
@@ -41,25 +47,42 @@ try {
   await check('direct_node_config', () => execute(process.execPath, [path.join(project, 'hook.mjs'), 'config'], { env, windowsHide: true, timeout: 15000, maxBuffer: 1024 * 1024 }))
   await check('direct_node_manifest', () => execute(process.execPath, [path.join(project, 'hook.mjs'), 'manifest'], { env, windowsHide: true, timeout: 15000, maxBuffer: 1024 * 1024 }))
   const shell = path.join(process.env.SystemRoot || process.env.SYSTEMROOT, 'System32/WindowsPowerShell/v1.0/powershell.exe')
-  await check('powershell_without_profile_config', () => execute(shell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', hooks.hooks['get-hooks']], { env, windowsHide: true, cwd: project, timeout: 15000, maxBuffer: 1024 * 1024 }))
+  const runShell = command => execute(shell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command], { env, windowsHide: true, cwd: project, timeout: 15000, maxBuffer: 1024 * 1024 })
+  await check('powershell_basic_execution', () => execute(shell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', "[Console]::Out.Write('POWERSHELL_EXECUTED')"], { env, windowsHide: true, cwd: project, timeout: 15000 }))
+  await check('powershell_without_profile_config', () => runShell(hooks.hooks['get-hooks']))
+  await check('powershell_encoded_config', () => execute(shell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(hooks.hooks['get-hooks'], 'utf16le').toString('base64')], { env, windowsHide: true, cwd: project, timeout: 15000, maxBuffer: 1024 * 1024 }))
   const configCheck = report.checks.find(item => item.name === 'direct_node_config')
-  if (configCheck?.code === 0) await check('powershell_start_with_synthetic_credentials', async () => {
-    const config = JSON.parse(configCheck.output)
-    job = tools.startCli(shell, ['-Command', "$env:SLACK_BOT_TOKEN='xoxb-diagnostic-fixture';$env:SLACK_APP_TOKEN='xapp-diagnostic-fixture';" + config.hooks.start], project, { mode: 'none' })
+  async function syntheticStart(command) {
+    for (const name of ['handoff.json', 'hook-state.json']) await fs.rm(path.join(temporary, name), { force: true })
+    job = tools.startCli(shell, ['-Command', "$env:SLACK_BOT_TOKEN='xoxb-diagnostic-fixture';$env:SLACK_APP_TOKEN='xapp-diagnostic-fixture';" + command], project, { mode: 'none' })
     let exited = false, handoff = false
     void job.result.finally(() => { exited = true }).catch(() => {})
     try {
       for (let index = 0; index < 300; index++) {
         try { await fs.access(path.join(temporary, 'handoff.json')); handoff = true; break } catch { /* only this temporary fake credential handoff */ }
-        if (exited) return await job.result
+        if (exited) return await job.result // check() requires a real handoff, even on exit 0.
         await new Promise(resolve => setTimeout(resolve, 50))
       }
       if (!handoff) throw new Error('Synthetic local start did not return its handoff within 15 seconds')
+      const credentials = JSON.parse(await fs.readFile(path.join(temporary, 'handoff.json'), 'utf8'))
+      if (credentials.bot_token !== 'xoxb-diagnostic-fixture' || credentials.app_token !== 'xapp-diagnostic-fixture') throw new Error('Unexpected synthetic credential handoff')
       await job.stop()
       const value = await job.result
       return { ...value, output: value.output + '\nSYNTHETIC_HANDOFF_OK' }
     } finally { await job.stop(); job = undefined }
-  })
+  }
+  if (configCheck?.passed) await check('powershell_start_with_synthetic_credentials', () => syntheticStart(JSON.parse(configCheck.output).hooks.start))
+  // Compare the already implemented windowless launch locally, without changing
+  // the installed project or invoking Slack's remote APIs.
+  const literal = text => "'" + text.replaceAll("'", "''") + "'"
+  const windowless = mode => `& { $s=New-Object System.Diagnostics.ProcessStartInfo;$s.FileName=${literal(process.execPath)};$s.Arguments=${literal('"' + path.join(project, 'hook.mjs') + '" ' + mode)};$s.UseShellExecute=$false;$s.CreateNoWindow=$true;$s.RedirectStandardOutput=$true;$s.RedirectStandardError=$true;$p=[System.Diagnostics.Process]::Start($s);try{$o=$p.StandardOutput.ReadToEndAsync();$e=$p.StandardError.ReadToEndAsync();$p.WaitForExit();[Console]::Out.Write($o.Result);[Console]::Error.Write($e.Result);$c=$p.ExitCode}finally{$p.Dispose()};exit $c }`
+  await check('powershell_windowless_config', () => runShell(windowless('config')))
+  await check('powershell_windowless_start_with_synthetic_credentials', () => syntheticStart(windowless('handoff')))
+  // Prevent the official CLI from passing through its manifest.json fallback.
+  // Only the generated hook knows this diagnostic-only filename.
+  await fs.rename(path.join(project, 'manifest.json'), path.join(project, 'diagnostic-manifest.json'))
+  const hookFile = path.join(project, 'hook.mjs')
+  await fs.writeFile(hookFile, (await fs.readFile(hookFile, 'utf8')).replace("'./manifest.json'", "'./diagnostic-manifest.json'"))
   await check('official_cli_local_manifest', async () => {
     job = tools.startCli(executable, ['manifest', 'info', '--source', 'local', '--skip-update', '--no-color', '--config-dir', path.join(temporary, 'cli')], project, { mode: 'none' })
     let timer
