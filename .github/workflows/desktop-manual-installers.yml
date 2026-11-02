@@ -43,7 +43,7 @@ jobs:
       - name: Standard Debian build tools and real display
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends dh-apparmor debhelper apparmor-utils libgtk-3-0t64 libnss3 libxss1 libasound2t64 libgbm1 xvfb xauth xdotool dbus-x11 zstd
+          sudo apt-get install -y --no-install-recommends build-essential libcurl4-openssl-dev libexpat1-dev zlib1g-dev dh-apparmor debhelper apparmor-utils libgtk-3-0t64 libnss3 libxss1 libasound2t64 libgbm1 xvfb xauth xdotool dbus-x11 zstd
       - name: Locked same-source build dependencies
         run: |
           mkdir -p .desktop-build
@@ -62,7 +62,7 @@ jobs:
           pnpm --dir crabot-desktop install --frozen-lockfile
           pnpm --dir crabot-desktop run build
       - name: Data and packaging boundaries before expensive assembly
-        run: node --test scripts/lib/__tests__/ubuntu-app-binding.test.mjs scripts/lib/__tests__/core-release.test.mjs scripts/desktop/__tests__/ubuntu-deb.test.mjs crabot-desktop/tests/ubuntu-first-launch.test.mjs scripts/lib/__tests__/desktop-data-import.test.mjs
+        run: node --test scripts/lib/__tests__/ubuntu-app-binding.test.mjs scripts/lib/__tests__/unix-legacy-cli.test.mjs scripts/lib/__tests__/core-release.test.mjs scripts/desktop/__tests__/ubuntu-deb.test.mjs crabot-desktop/tests/ubuntu-first-launch.test.mjs scripts/lib/__tests__/desktop-data-import.test.mjs
       - name: Prepare locked offline runtime
         run: |
           node scripts/prepare-scrapling.mjs --release=desktop-ci
