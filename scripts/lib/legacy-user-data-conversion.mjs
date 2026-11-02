@@ -4,6 +4,7 @@ import { promises as fs, realpathSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import product from './product-runtime.cjs'
+import macBinding from './mac-app-binding.cjs'
 import { acquireExistingCliLock, releaseCliLock } from './cli-lock.mjs'
 import { fenceLegacyEntries, inspectLegacyEntryFence, resumeLegacyEntryFence, restoreLegacyEntries } from './legacy-entry-fence.mjs'
 import { inspectInstance } from './instance-runtime.mjs'
@@ -26,7 +27,7 @@ function matches(value, source, target, entryFenceId) {
 export async function convertLegacyUserData({ installation, target, verifyPrograms, signal, progress = () => {}, inspectEnvironment = inspectLegacyPythonEnvironment }) {
   const root = realpathSync(fileURLToPath(new URL('../../', import.meta.url)))
   if (root !== target?.root || typeof verifyPrograms !== 'function') fail()
-  const runtime = product.loadProductRuntime(root, { required: true, full: true })
+  const runtime = product.loadProductRuntime(root, { required: true, full: !(process.platform === 'darwin' && macBinding.macAppForCore(root)) })
   if (realpathSync(process.execPath) !== realpathSync(runtime.executables.node)) fail()
   const dataDir = installation.dataRoot
   const rootLock = await acquireExistingCliLock(installation.installRoot, 'legacy-desktop-takeover')

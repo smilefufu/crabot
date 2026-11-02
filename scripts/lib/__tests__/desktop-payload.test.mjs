@@ -2234,7 +2234,7 @@ for (const conversionFailure of [false, true, 'pre-conversion-stop', 'core-chang
   } else {
     const result = JSON.parse((await run()).stdout.trim())
     if (stale) assert.deepEqual(await fs.readdir(stale.records), [])
-    assert.ok(result.core_scans <= 9, 'Keep initial and final admission integrity checks without callback rescan: ' + result.core_scans)
+    assert.equal(result.core_scans, 0, 'Installed Mac admission checks its necessary entry and versions without complete program rescans')
     assert.equal(result.dataDir, f.data); assert.equal(result.verification_pending, true)
     assert.equal(await fs.readFile(path.join(f.data, 'fixture/executions'), 'utf8'), 'once\n')
     assert.equal(JSON.parse((await run()).stdout.trim()).maintenance_id, result.maintenance_id)

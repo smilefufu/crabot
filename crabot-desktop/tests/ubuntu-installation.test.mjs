@@ -46,6 +46,12 @@ test('failure feedback contains only closed codes and phases, never raw third-pa
   assert.deepEqual(ubuntuInstallationFailure(error, true), { code: 'CANCELLED', phase: 'kernel' })
   assert.deepEqual(ubuntuInstallationFailure(null, false), { code: 'NOT_READY' })
 })
+
+test('legacy handoff preserves a known sandbox cause without exposing raw subprocess output', () => {
+  const cause = { code: 'CRABOT_INSTALL_BROWSER_SANDBOX', phase: 'runtime', message: 'Bearer private-secret' }
+  assert.deepEqual(ubuntuInstallationFailure({ code: 'CRABOT_MAINTENANCE_PENDING', cause }, false), { code: cause.code, phase: cause.phase })
+  assert.deepEqual(ubuntuInstallationFailure({ code: 'CRABOT_MAINTENANCE_PENDING', cause: { code: 'private-secret', phase: 'secret' } }, false), { code: 'CRABOT_MAINTENANCE_PENDING' })
+})
 test('probe stderr accepts only a complete fixed diagnostic line', () => {
   assert.equal(probeFailurePhase('third party log\nCRABOT_GUI_SANDBOX_PROBE_FAILED:kernel\n'), 'kernel')
   assert.equal(probeFailurePhase('CRABOT_BROWSER_SANDBOX_PROBE_FAILED:scrapling-fetch\r\n'), 'scrapling-fetch')
