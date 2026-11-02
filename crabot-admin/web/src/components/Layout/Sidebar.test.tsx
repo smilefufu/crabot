@@ -1,5 +1,5 @@
 import { render, screen } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
 import { Sidebar } from './Sidebar'
 import { SectionNavigation } from './SectionNavigation'
@@ -7,7 +7,10 @@ import { navigationForPath } from './navigation'
 
 vi.mock('../../contexts/DialogApplicationsContext', () => ({ useDialogApplications: () => ({ count: 2 }) }))
 vi.mock('../../hooks/useSystemVersion', () => ({ useSystemVersion: () => ({ state: null }) }))
-vi.mock('../../services/desktop-host', () => ({ isDesktop: false, useDesktopState: () => null }))
+const host = vi.hoisted(() => ({ desktop: false }))
+vi.mock('../../services/desktop-host', () => ({ get isDesktop() { return host.desktop }, useDesktopState: () => null }))
+
+beforeEach(() => { host.desktop = false })
 
 describe('companion navigation', () => {
   it('keeps the existing scene URL under memory and highlights only its local category', () => {
@@ -27,5 +30,13 @@ describe('companion navigation', () => {
   })
   it('does not match unrelated routes by partial prefix', () => {
     expect(navigationForPath('/providers-other')).toBeUndefined()
+  })
+  it.each([false, true])('shows native diagnostics only with a desktop host (%s)', desktop => {
+    host.desktop = desktop
+    render(<MemoryRouter initialEntries={['/settings']}><SectionNavigation /></MemoryRouter>)
+    screen.getByText('更多数据与诊断选项').click()
+    expect(!!screen.queryByRole('link', { name: '设备诊断' })).toBe(desktop)
+    expect(screen.getByRole('link', { name: '设备与授权' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: '导入数据' })).toBeInTheDocument()
   })
 })
