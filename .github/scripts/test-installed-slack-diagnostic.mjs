@@ -27,8 +27,13 @@ try {
       assert.equal(report.preparation_error, undefined)
       assert.equal(report.cleanup_error, undefined)
       assert.equal(report.checks.length, 9)
-      for (const check of report.checks) assert.equal(check.passed, true, JSON.stringify(check))
-      console.log(name + ': nine semantic checks passed, including real handoff and no manifest file fallback.')
+      const baselineFailures = new Set(['powershell_without_profile_config', 'powershell_encoded_config', 'powershell_start_with_synthetic_credentials', 'official_cli_local_manifest'])
+      for (const check of report.checks) {
+        const expected = name !== 'installed-v18-local-diagnostic' || !baselineFailures.has(check.name)
+        assert.equal(check.passed, expected, JSON.stringify(check))
+      }
+      if (name === 'installed-v18-local-diagnostic') console.log('Reproduced v18: silent config, absent handoff and manifest fallback dependency; windowless controls succeed.')
+      else console.log('Fixed hooks: nine semantic checks passed, including real handoff and no manifest file fallback.')
     }
   } finally { await fs.writeFile(installedModule, current) }
 } finally { await fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }) }
