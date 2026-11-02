@@ -4,9 +4,11 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import assert from 'node:assert/strict'
+import http from 'node:http'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { ensureCli, startCli, privateDirectory } from '../../crabot-channel-slack/dist/cli-tools.js'
 import { prepareProject } from '../../crabot-channel-slack/dist/cli-project.js'
+import { SlackOnboarder } from '../../crabot-channel-slack/dist/onboard.js'
 
 assert.equal(process.platform, 'win32')
 assert.equal(process.env.RUNNER_ENVIRONMENT, 'github-hosted')
@@ -57,6 +59,38 @@ try {
       } finally { clearTimeout(timer); await job.stop(); job = undefined }
     })
   }
+  await phase('official-onboarding-local-api-fixture', async () => {
+    const requests = [], commands = []
+    const server = http.createServer((request, response) => {
+      const method = request.url.split('?')[0].split('/').pop()
+      requests.push(method)
+      request.resume()
+      const identity = { team_id: 'TTEST', user_id: 'UTEST', team: 'fixture', team_name: 'fixture', team_domain: 'fixture', user: 'fixture', url: 'https://fixture.slack.com' }
+      const result = method === 'apps.hosted.generateAuthTicket' ? { ok: true, ticket: 'fixture-ticket' }
+        : method === 'apps.hosted.exchangeAuthTicket' ? { ok: true, is_ready: true, token: 'xoxp-diagnostic-fixture', ...identity }
+        : method === 'auth.test' ? { ok: true, ...identity }
+        : method === 'apps.manifest.validate' ? { ok: true }
+        : { ok: false, error: 'diagnostic_probe_stop', description: 'Local diagnostic fixture only; no real Slack request.' }
+      response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify(result))
+    })
+    server.listen(0, '127.0.0.1'); await once(server, 'listening')
+    const base = `http://127.0.0.1:${server.address().port}`
+    const onboarder = new SlackOnboarder({ dataDir: path.join(root, 'synthetic-onboarding'), ensureCli: async () => executable, configureMs: 60000,
+      startCli: (file, args, cwd) => {
+        const child = startCli(file, [...args, '--apihost', base], cwd, { mode: 'none' })
+        void child.result.then(result => commands.push({ command: args[0], code: result.code, output: result.output.slice(-10000) }), error => commands.push({ command: args[0], failure: String(error) }))
+        return child
+      }, verify: async () => { throw new Error('Fixture must stop before verification') },
+    })
+    try {
+      const begin = await onboarder.begin({ instance_name: 'slack-on-win', __admin_proxy: { mode: 'none' } })
+      await onboarder.submit(begin.session_id, { challenge_code: 'synthetic-challenge' })
+      let terminal
+      for await (const event of onboarder.poll(begin.session_id)) if (event.type !== 'pending') { terminal = event; break }
+      return { requests, commands, terminal, real_slack_contacted: false }
+    } catch (error) { return { requests, commands, failure: String(error), real_slack_contacted: false } }
+    finally { await onboarder.dispose(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)) }
+  })
 } finally {
   await job?.stop().catch(() => {})
   await fs.writeFile(path.join(root, 'observer-stop'), '1')
