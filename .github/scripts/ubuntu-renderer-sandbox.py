@@ -16,7 +16,8 @@ for entry in Path('/proc').iterdir():
         fields = (entry / 'stat').read_text().rsplit(')', 1)[1].split()
         status = (entry / 'status').read_text()
         uid = int(next(line for line in status.splitlines() if line.startswith('Uid:')).split()[1])
-        args = (entry / 'cmdline').read_bytes().decode(errors='replace').split('\0')
+        # Chromium rewrites argv into one process-title string on Linux.
+        args = (entry / 'cmdline').read_bytes().decode(errors='replace').replace('\0', ' ').split()
         processes[int(entry.name)] = (int(fields[1]), uid, args, status)
     except (FileNotFoundError, ProcessLookupError, PermissionError):
         continue
