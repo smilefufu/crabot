@@ -271,10 +271,6 @@ async function boot() {
     configureProfile(path.join(app.getPath('appData'), 'Crabot/bootstrap'))
     if (!claimInstance()) return
     await app.whenReady()
-    mainSession = session.fromPartition('persist:crabot-desktop')
-    window = createMainWindow(mainSession)
-    startupPage = await showStartupPage(window, app.getVersion(), () => preparationAbort?.abort())
-    if (!process.argv.includes('--background')) show()
     const { prepareMacAppData } = await import('./mac-first-launch.js')
     while (true) {
       preparingData = true
@@ -283,6 +279,14 @@ async function boot() {
         const selected = await prepareMacAppData({ appPath: path.resolve(path.dirname(process.execPath), '../..'), coreRoot,
           home: homedir(), dialog, version: app.getVersion(),
           load: name => import(new URL('./bootstrap/scripts/lib/' + name, import.meta.url).href),
+          onDataSelected: async dataDir => {
+            if (window) return
+            configureProfile(dataDir)
+            mainSession = session.fromPartition('persist:crabot-desktop')
+            window = createMainWindow(mainSession)
+            startupPage = await showStartupPage(window, app.getVersion(), () => preparationAbort?.abort())
+            if (!process.argv.includes('--background')) show()
+          },
           discoverLegacy: async root => {
             const { discoverUserSourceDeployment } = await loadCore('scripts/lib/source-installation.mjs')
             if (root === path.join(homedir(), '.crabot') && discoverUserSourceDeployment()) return null
@@ -311,7 +315,9 @@ async function boot() {
         preparingData = false
         bootstrapStage('data-preparation-failed', { detail: error instanceof Error ? error.message : String(error) })
         show()
-        if (!await startupPage.retry(error, path.join(app.getPath('userData'), 'bootstrap.log'))) { quitting = true; app.quit(); return }
+        const retry = startupPage ? await startupPage.retry(error, path.join(app.getPath('userData'), 'bootstrap.log'))
+          : (await dialog.showMessageBox({ type: 'error', title: '选择数据位置', message: error instanceof Error ? error.message : String(error), buttons: ['重试', '退出 Crabot'], cancelId: 1 })).response === 0
+        if (!retry) { quitting = true; app.quit(); return }
       } finally { preparingData = false; preparationAbort = undefined }
     }
   }

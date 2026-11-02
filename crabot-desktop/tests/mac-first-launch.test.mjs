@@ -15,8 +15,8 @@ function fixture(t, { response = 0, readOnly = false, chosen } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'crabot-Mac-first-'))), home = join(root, 'home'), appPath = join(root, 'Crabot.app')
   const coreRoot = join(appPath, 'Contents/Resources/core'); mkdirSync(coreRoot, { recursive: true }); mkdirSync(home)
   t.after(() => rmSync(root, { recursive: true, force: true }))
-  const messages = [], directories = [], stages = []
-  const options = { home, appPath, coreRoot, version: '0.1.0', dialog: {
+  const messages = [], directories = [], stages = [], selected = []
+  const options = { home, appPath, coreRoot, version: '0.1.0', onDataSelected: async data => { selected.push(data) }, dialog: {
     showMessageBox: async value => { messages.push(value); return { response } },
     showOpenDialog: async value => { directories.push(value); return chosen ? { canceled: false, filePaths: [chosen] } : { canceled: true, filePaths: [] } },
   }, load: async name => {
@@ -24,7 +24,7 @@ function fixture(t, { response = 0, readOnly = false, chosen } = {}) {
     if (name === 'process-identity.cjs' && readOnly) return { default: { inspectInstallFilesystem: () => ({ supported: false }) } }
     return import(new URL('../../scripts/lib/' + name, import.meta.url))
   } }
-  return { root, options, home, appPath, messages, directories, stages }
+  return { root, options, home, appPath, messages, directories, stages, selected }
 }
 test('cancel and read-only DMG do not initialize business data or publish a locator', mac, async t => {
   for (const settings of [{ response: 2 }, { readOnly: true }, { response: 1 }]) {
@@ -32,6 +32,7 @@ test('cancel and read-only DMG do not initialize business data or publish a loca
     assert.equal(await exports.prepareMacAppData(f.options), null)
     assert.equal(existsSync(binding.bindingFile(f.home)), false)
     assert.equal(existsSync(join(f.home, 'Library/Application Support/Crabot/data')), false)
+    assert.deepEqual(f.selected, [])
     if (settings.readOnly) { assert.equal(f.stages.length, 0); assert.match(f.messages[0].message, /拖到 Applications/) }
   }
 })
@@ -45,6 +46,7 @@ test('default first launch creates only external data and reopen uses the same d
   assert.equal(await exports.prepareMacAppData(f.options), selected)
   assert.equal(f.messages.length, count)
   assert.equal(binding.readMacAppBinding({ home: f.home }).app_path, f.appPath)
+  assert.deepEqual(f.selected, [selected, selected])
 })
 test('native picker includes hidden directories and unknown source data is preserved rather than adopted', mac, async t => {
   const temporary = realpathSync(mkdtempSync(join(tmpdir(), 'crabot-old-data-')))
@@ -62,7 +64,7 @@ test('supported legacy release needs explicit consent and retains the original d
   mkdirSync(dataRoot, { recursive: true }); writeFileSync(join(dataRoot, 'old-chat'), 'keep')
   const calls = []
   f.options.discoverLegacy = async () => ({ installation: { installRoot: oldRoot, dataRoot, version: 'v2026.10.15.1' } })
-  f.options.adoptLegacy = async (root, data) => { calls.push([root, data]); assert.equal(binding.readMacAppBinding({ home: f.home }).data_dir, dataRoot) }
+  f.options.adoptLegacy = async (root, data) => { calls.push([root, data]); assert.deepEqual(f.selected, [dataRoot]); assert.equal(binding.readMacAppBinding({ home: f.home }).data_dir, dataRoot) }
   assert.equal(await exports.prepareMacAppData(f.options), dataRoot)
   assert.equal(calls.length, 1); assert.equal(f.messages[0].title, '接入已有 Crabot')
   assert.equal(readFileSync(join(dataRoot, 'old-chat'), 'utf8'), 'keep')
