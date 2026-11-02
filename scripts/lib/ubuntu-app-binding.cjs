@@ -3,7 +3,6 @@ const fs = require('node:fs')
 const path = require('node:path')
 const { homedir } = require('node:os')
 const { randomUUID } = require('node:crypto')
-const management = require('./desktop-management.cjs')
 const fail = message => { throw Object.assign(new Error(message), { code: 'CRABOT_UBUNTU_APP_BINDING' }) }
 const xdg = (env, key, fallback) => env[key] && path.isAbsolute(env[key]) ? env[key] : fallback
 const bindingFile = ({ home = homedir(), env = process.env } = {}) => path.join(xdg(env, 'XDG_CONFIG_HOME', path.join(home, '.config')), 'crabot/desktop-binding.json')
@@ -36,12 +35,14 @@ function readUbuntuAppBinding(options = {}) {
   return value
 }
 function requireUbuntuAppBinding(options) {
+  const management = require('./desktop-management.cjs')
   const value = readUbuntuAppBinding(options)
   if (!value || value.core_root !== fs.realpathSync(options.coreRoot)) fail('请先打开 Crabot 确认数据位置，未创建另一实例。')
   management.requireExistingDataRoot(value.data_dir)
   return value
 }
 function writeUbuntuAppBinding({ coreRoot, dataDir, sourceRoot, ...options }) {
+  const management = require('./desktop-management.cjs')
   const program = ubuntuAppForCore(coreRoot)
   if (!program) fail('当前核心不属于DEB桌面安装。')
   coreRoot = fs.realpathSync(coreRoot); dataDir = management.requireExistingDataRoot(dataDir)
@@ -60,6 +61,7 @@ function writeUbuntuAppBinding({ coreRoot, dataDir, sourceRoot, ...options }) {
 }
 function applyUbuntuAppEnvironment(coreRoot, options = {}) {
   if (process.platform !== 'linux' || !ubuntuAppForCore(coreRoot)) return null
+  const management = require('./desktop-management.cjs')
   const value = requireUbuntuAppBinding({ ...options, coreRoot }), env = options.env ?? process.env
   if (env.DATA_DIR && fs.realpathSync(env.DATA_DIR) !== value.data_dir || env.CRABOT_DEV === 'true' || Number(env.CRABOT_PORT_OFFSET || 0) !== 0) fail('命令环境与桌面数据位置冲突，未创建另一实例。')
   if (!management.readDesktopManagement(value.data_dir)) fail('数据准备尚未完成，请先打开GUI继续；未启动半成品副本。')
