@@ -2,6 +2,11 @@ name: Desktop installer initialization probe
 on:
   workflow_dispatch:
     inputs:
+      legacy_version:
+        description: Published CLI version used for the real data-admission check
+        type: choice
+        options: [v2026.10.14.1, v2026.10.15.1]
+        default: v2026.10.14.1
       linux_installation:
         description: Verify the completed native Ubuntu installer independently
         type: boolean
@@ -97,9 +102,9 @@ jobs:
       - name: Exact EXE extraction with the original and sufficient output budgets
         if: inputs.directory_only != true && inputs.ui_only != true
         run: node .github/scripts/recheck-windows-single-layer.mjs 2>&1 | tee .desktop-build/exact-exe-recheck.log
-      - name: Real v14 data confirmation in the unchanged packaged GUI
+      - name: Published CLI data confirmation in the unchanged packaged GUI
         if: inputs.directory_only != true && inputs.ui_only != true
-        run: node .github/scripts/verify-legacy-user-takeover.mjs .desktop-build/manual/paired .desktop-build/manual/installer v2026.10.14.1 2>&1 | tee .desktop-build/exact-exe-legacy-gui.log
+        run: node .github/scripts/verify-legacy-user-takeover.mjs .desktop-build/manual/paired .desktop-build/manual/installer '${{ inputs.legacy_version }}' 2>&1 | tee .desktop-build/exact-exe-legacy-gui.log
       - name: Real EXE Finish opens the GUI with 1.5 GiB free TEMP
         env:
           CRABOT_UPGRADE_FROM14: ${{ inputs.upgrade_from14 }}
