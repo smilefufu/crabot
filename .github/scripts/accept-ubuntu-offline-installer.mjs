@@ -16,7 +16,9 @@ const project = await fs.realpath(process.argv[2]), info = JSON.parse(await fs.r
 assert.equal(info.bootstrap, 'gtk4'); assert.equal(info.candidate_only, true); assert.equal(info.release_signed, false)
 assert.equal(info.executable, 'ubuntu-native/crabot-installer'); assert.equal(info.payload, 'ubuntu-native/offline')
 const bundle = path.join(project, 'ubuntu-native'), native = JSON.parse(await fs.readFile(path.join(bundle, 'native-bootstrap.json'), 'utf8'))
-assert.equal(native.commit, process.env.GITHUB_SHA); assert.equal(native.build_os, 'ubuntu-24.04'); assert.equal(native.source_dirty, false)
+const sourceCommit = process.env.CRABOT_CI_INSTALLER_COMMIT ?? process.env.GITHUB_SHA
+assert.match(sourceCommit ?? '', /^[a-f0-9]{40}$/)
+assert.equal(native.commit, sourceCommit); assert.equal(native.build_os, 'ubuntu-24.04'); assert.equal(native.source_dirty, false)
 for (const name of ['crabot-installer', 'crabot-maintenance', 'crabot-sandbox-helper']) {
   const bytes = await fs.readFile(path.join(bundle, name))
   assert.equal(bytes.length, native.files[name].size)

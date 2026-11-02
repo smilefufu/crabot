@@ -171,6 +171,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22.22.3'
+      - name: Resolve exact installer source from its GitHub run
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN: ${{ inputs.source_run }}
+        run: |
+          [[ "$SOURCE_RUN" =~ ^[0-9]+$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN" --jq '"commit=" + .head_sha' >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@v4
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -184,6 +192,8 @@ jobs:
           mkdir -p .desktop-build/ubuntu-installation
           tar -xzf .desktop-build/ubuntu-native-candidate.tar.gz -C .desktop-build/ubuntu-installation
       - name: Exercise actual user backend, test authorization, GUI and MCP sandbox
+        env:
+          CRABOT_CI_INSTALLER_COMMIT: ${{ steps.source.outputs.commit }}
         timeout-minutes: 14
         run: |
           ulimit -c 0
