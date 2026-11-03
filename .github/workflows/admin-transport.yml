@@ -58,7 +58,11 @@ jobs:
         run: node --test crabot-client/tests/*.test.mjs
       - name: Probe finite private-copy cleanup on Windows
         if: inputs.windows_only == true
-        run: node --test --test-name-pattern='native private-copy exit and closed-file scope' scripts/lib/__tests__/removal-copy-cleanup.test.mjs
+        shell: bash
+        run: |
+          for attempt in {1..30}; do
+            node --test --test-name-pattern='native private-copy exit and closed-file scope: complete' scripts/lib/__tests__/removal-copy-cleanup.test.mjs || exit $?
+          done
       - name: Verify HTTP, credentials, current WS authority and original Chat semantics
         working-directory: crabot-admin
         run: >-
