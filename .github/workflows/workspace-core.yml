@@ -37,4 +37,5 @@ jobs:
         working-directory: crabot-core
         env:
           CRABOT_WORKSPACE_BUSINESS_ONSTART_CI: '1'
-        run: node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern='starts only the planned cold validation generations: completion release$' --maxWorkers=1 --minWorkers=1 --bail=1
+        run: |
+          node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern='starts only the planned cold validation generations: completion release$' --maxWorkers=1 --minWorkers=1 --bail=1
