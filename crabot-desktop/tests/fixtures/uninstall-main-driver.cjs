@@ -62,7 +62,7 @@ if (!host && !config.registration) {
   const inspect = setInterval(async () => {
     if (!fs.existsSync(path.join(config.control, 'allow-remove'))) return
     const items = Menu.getApplicationMenu()?.items.flatMap(item => item.submenu?.items || []) || []
-    const item = items.find(value => value.label === '卸载 Crabot…')
+    const item = items.find(value => value.label === '卸载 CRABOT…')
     if (!item?.enabled) return
     clearInterval(inspect)
     try {

@@ -17,6 +17,7 @@
 - Review复核：底层initializeDesktopManagement已有非空目录拒绝，实际调用确认旧CLI数据不会原地初始化管理标记；撤回此前相反定性。确认遗留是onDataSelected/configureProfile先于非空/重叠拒绝，可能留下desktop-profile目录；仅此副作用单独待办，不混入当前CI修正，不以review批准或CI通过宣称已处理。
 - CI预算实测：Intel有限工作区组仅调35分钟后，`8146d713`同组22分34秒完整通过；Windows业务组45分钟曾截断已通过的28项恢复测试，仅该组合改75分钟后，`6714c85c`完整28项及后续真实Agent/Memory两项均通过。当前同提交四平台Release全部通过、publish跳过，Windows PS7/PS5.1的全部安装/升级断言为true。Intel头文件下载的外部超时保持原来源/哈希，仅原样重跑失败作业，四平台传输组通过。
 - 新增Intel失败仍区分处理：冷恢复作业被GitHub25分钟硬上限取消，离线安装组已通过299项后被30分钟步骤上限截断；仅对应预算改35/45分钟。冷释放和真实Admin恢复的单项240秒上限也截断仍在推进的验证，Intel夹具对齐已有Windows的600秒测试/900秒自退出上限；产品超时和全部断言不变。隔离Intel释放计时完整通过约153秒，尚不足以单独解释原失败的更长耗时；完整新CI待验证。Electron原间歇卡顿仍未定因，四场景加50次无预置信号监听的原生检测通过仅作诊断；本轮只补等待点日志，不称已修复或改变取消/附件语义。
+- Windows整组另发现主界面品牌已改CRABOT而拒绝提示断言仍用Crabot；只对齐该断言及卸载验收驱动的实际菜单名称，保留ENOENT/文件/日志及所有保护检查。原生Windows绑定9项和本机9项通过，卸载驱动仅做源码对齐，完整卸载验收仍以整组结果为准。
 - Windows临时维护副本清理曾失败，新增安全阶段/错误号诊断，清理范围/guard/断言不变；[独立30次41550694054](https://github.com/smilefufu/crabot/actions/runs/41550694054)和`486078f9`[完整Windows维护组](https://github.com/smilefufu/crabot/actions/runs/41551345699/job/125639418794)通过，原始间歇失败根因仍未定位，不称已修复。Mac权限CI另复现好友刚显示时打开绑定框被晚到的表单初始化关闭；新增稳定先红后绿回归，将原初始化移到显示前完成，身份/权限/API保持。Native CI补建元数据测试所需Shared；Web482项、权限界面62项、Native本机99项通过/24项平台跳过，类型检查通过，当前完整CI继续核对。证据与范围见[Ubuntu验收记录](https://github.com/smilefufu/crabot-docs/blob/main/guides/desktop-ubuntu-acceptance.md)。
 
 ### Slack 频道远端历史：实现完成，PR 验证中
