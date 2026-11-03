@@ -16,8 +16,15 @@
     "crabot-shared": "file:../crabot-shared"
   },
   "devDependencies": {
+    "@peculiar/x509": "1.14.3",
     "@types/node": "^22.0.0",
+    "reflect-metadata": "0.2.2",
     "typescript": "~5.8.0",
     "vitest": "^1.6.1"
+  },
+  "pnpm": {
+    "patchedDependencies": {
+      "@slack/socket-mode@3.1.0": "patches/@slack__socket-mode@3.1.0.patch"
+    }
   }
 }
