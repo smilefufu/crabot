@@ -29,3 +29,5 @@ jobs:
       - name: Verify actual scoped migration with both canonical and aliased program paths
         working-directory: crabot-admin
         run: node node_modules/vitest/vitest.mjs run src/legacy-directory-migration.test.ts --maxWorkers=1 --minWorkers=1
+      - name: Confirm real credentials keep the copied DLL mapped only until their writer exits
+        run: node .github/scripts/credentials-lock-probe.mjs
