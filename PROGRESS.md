@@ -1,5 +1,9 @@
 # Crabot 项目进度
 
+### Mac 首启遗漏修正（R3/R4）
+
+- PR231同步main并移除已过时GTK/Ubuntu探针、旧打包版本及重复Core辅助实现，仅补Mac正常主窗口接入进度、取消/错误重试和删除已安装App的重复全量扫描；继续使用main既有入口/版本校验，安装更新的完整核验保持。按已确认R3/R4实施；本机TypeScript编译、116项定向回归（含真实Electron单窗口页面、5项旧数据接入）通过，旧数据接入完整程序扫描计数为0；尚未进入已发布desktop21，也未做完整DMG人工安装验收。
+
 ### Slack Markdown 与完整媒体：已合入，未部署
 
 - 依据已确认的 [Markdown Spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-11-03-slack-markdown-adaptation-design.md) 和 [媒体 Spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-11-03-slack-media-adaptation-design.md)，文字使用原生 Markdown，表格／代码按结构分片且缓存保留原文；图片、多图选择及音视频／文档等附件支持按需获取和回传，保持原 Session、群 @过滤及路径授权。

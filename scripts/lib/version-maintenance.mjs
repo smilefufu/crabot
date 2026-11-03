@@ -9,7 +9,8 @@ import identity from './process-identity.cjs'
 import management from './desktop-management.cjs'
 import installation from './desktop-installation.cjs'
 import { acquireStartupLock, releaseCliLock, cliLockToken } from './cli-lock.mjs'
-import { verifyCoreRelease } from './core-release.mjs'
+import { verifyCoreRelease, readInstalledCoreRelease } from './core-release.mjs'
+import macBinding from './mac-app-binding.cjs'
 import { inspectInstance } from './instance-runtime.mjs'
 import { verifyMaintenanceBackup } from './maintenance-backup.mjs'
 import { previewMigrations } from '../upgrade-lib/migrate.mjs'
@@ -164,7 +165,8 @@ export async function beginLegacyUserVersionMaintenance({ dataDir, installation,
   if (readVersionMaintenance(dataDir) || !uuid(entryFenceId) || installation?.dataRoot !== dataDir
     || !legacyVersions.includes(installation?.version) || dataProtection !== undefined && dataProtection !== 'scoped') fail()
   targetRoot = realpathSync(targetRoot)
-  const release = await verifyCoreRelease(targetRoot)
+  const release = await (process.platform === 'darwin' && macBinding.macAppForCore(targetRoot)
+    ? readInstalledCoreRelease(targetRoot) : verifyCoreRelease(targetRoot))
   const record = { schema_version: dataProtection === 'scoped' ? 4 : 2, id: randomUUID(), data_dir: dataDir, install_root: realpathSync(installation.installRoot),
     source_version: installation.version, target_version: release.version,
     legacy_source: { scope: 'user', entry_fence_id: entryFenceId, fingerprint: installation.fingerprint },
@@ -306,7 +308,9 @@ export async function prepareScopedVersionMaintenance(dataDir, id) {
 async function protectionOf(dataDir, record) {
   if (!hasScopedProtection(record)) return backupOf(dataDir, record)
   if (!record.target_core || inspectInstance(dataDir).state !== 'stopped') fail()
-  const release = await verifyCoreRelease(record.target_core.root, { version: record.target_version })
+  const release = await (record.schema_version === 4 && process.platform === 'darwin' && macBinding.macAppForCore(record.target_core.root)
+    ? readInstalledCoreRelease(record.target_core.root, { version: record.target_version })
+    : verifyCoreRelease(record.target_core.root, { version: record.target_version }))
   if (release.inventory_sha256 !== record.target_core.inventory_sha256) fail()
   if (record.schema_version === 4) {
     const source = await legacyUserSource(record)
@@ -401,11 +405,10 @@ export async function recoverLegacyUserVersionMaintenance({ dataDir, root, appVe
       await verifyTakeover()
       const entry = await legacyUserEntry(record)
       if (entry.phase !== 'data_changing') fail()
-      const { default: macBinding } = await import('./mac-app-binding.cjs')
       const macApp = process.platform === 'darwin' && macBinding.macAppForCore(root)
       if (macApp) {
         const bound = macBinding.applyMacAppEnvironment(root, { env: {} })
-        const release = await verifyCoreRelease(root, { version: appVersion })
+        const release = await readInstalledCoreRelease(root, { version: appVersion })
         if (bound.data_dir !== dataDir || release.inventory_sha256 !== record.target_core.inventory_sha256) fail()
       } else {
         const prepared = await readLegacyDesktopPrograms(record.install_root, path.resolve(root, '../..'))

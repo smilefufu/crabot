@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
 import binding from './mac-app-binding.cjs'
 import management from './desktop-management.cjs'
-import { verifyCoreRelease } from './core-release.mjs'
+import { readInstalledCoreRelease } from './core-release.mjs'
 import { discoverLegacyDesktopTakeover } from './legacy-desktop-discovery.mjs'
 import { convertLegacyUserData } from './legacy-user-data-conversion.mjs'
 import { acquireExistingCliLock, releaseCliLock } from './cli-lock.mjs'
@@ -55,9 +55,9 @@ export async function admitLegacyMacData({ sourceRoot, home = homedir(), signal,
   const own = binding.applyMacAppEnvironment(root, { home, env: {} })
   const source = await discoverLegacyDesktopTakeover({ root: sourceRoot, source: {} })
   if (!source || source.installation.dataRoot !== own.data_dir) fail()
-  const release = await verifyCoreRelease(root), target = { root, version: release.version, core_id: release.inventory_sha256 }
+  const release = await readInstalledCoreRelease(root), target = { root, version: release.version, core_id: release.inventory_sha256 }
   const listenHost = await legacyListenHost(source.installation.installRoot)
-  // Full Core checks bracket this admission; callbacks recheck source/binding.
+  // The App was installed before admission; recheck the source/data binding here.
   const verifyPrograms = async () => {
     const current = await discoverLegacyDesktopTakeover({ root: source.installation.installRoot, source: {} })
     if (!current || await legacyListenHost(source.installation.installRoot) !== listenHost
@@ -70,7 +70,7 @@ export async function admitLegacyMacData({ sourceRoot, home = homedir(), signal,
   try {
     dataLock = await acquireExistingCliLock(own.data_dir, 'mac-legacy-commit')
     await verifyPrograms()
-    const verified = await verifyCoreRelease(root, { version: target.version })
+    const verified = await readInstalledCoreRelease(root, { version: target.version })
     if (verified.inventory_sha256 !== target.core_id) fail()
     const record = readVersionMaintenance(own.data_dir), entry = await inspectLegacyEntryFence(source.installation.installRoot)
     if (record?.id !== converted.maintenance_id || record.phase !== 'verifying' || record.schema_version !== 4

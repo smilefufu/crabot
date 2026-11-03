@@ -8,6 +8,7 @@ export async function prepareMacAppData(options: {
   load: (name: string) => Promise<any>; version: string;
   discoverLegacy?: (root: string) => Promise<{ installation: { installRoot: string; dataRoot: string; version: string } } | null>;
   adoptLegacy?: (sourceRoot: string, dataDir: string) => Promise<void>
+  onDataSelected?: (dataDir: string) => Promise<void>
 }): Promise<string | null> {
   const { appPath, coreRoot, home, dialog, load, version } = options
   const binding = (await load('mac-app-binding.cjs')).default
@@ -18,8 +19,8 @@ export async function prepareMacAppData(options: {
       detail: '当前App位于只读镜像或不支持的位置。尚未初始化业务数据。', buttons: ['知道了'] })
     return null
   }
-  const { verifyCoreRelease } = await load('core-release.mjs')
-  await verifyCoreRelease(coreRoot, { version })
+  const { readInstalledCoreRelease } = await load('core-release.mjs')
+  await readInstalledCoreRelease(coreRoot, { version })
   const previous = binding.readMacAppBinding({ home })
   let selected: string
   let legacy: { installation: { installRoot: string; dataRoot: string; version: string } } | null = null
@@ -43,7 +44,7 @@ export async function prepareMacAppData(options: {
   }
   if (previous) {
     selected = management.requireExistingDataRoot(previous.data_dir)
-    if (previous.app_path === realpathSync(appPath) && !legacy) return selected
+    if (previous.app_path === realpathSync(appPath) && !legacy) { await options.onDataSelected?.(selected); return selected }
     if (previous.app_path !== realpathSync(appPath) && existsSync(previous.app_path)) {
       const answer = await dialog.showMessageBox({ type: 'question', title: '使用已有数据', message: '用当前 Crabot 打开已有数据？',
         detail: `数据：${selected}\n另一份App仍在：${previous.app_path}\n两份App共用同一个正式实例。开发环境不受影响。`, buttons: ['使用已有数据', '取消'], defaultId: 0, cancelId: 1 })
@@ -79,6 +80,7 @@ export async function prepareMacAppData(options: {
   if (legacy) {
     if (!options.adoptLegacy) throw new Error('已有数据接入入口未准备完成。')
     binding.writeMacAppBinding({ appPath, dataDir: selected, home })
+    await options.onDataSelected?.(selected)
     await options.adoptLegacy(legacy.installation.installRoot, selected)
     return selected
   }
@@ -90,6 +92,7 @@ export async function prepareMacAppData(options: {
     if (current.state === 'legacy' || current.record && current.record.install_root !== realpathSync(coreRoot)) throw Object.assign(new Error('所选数据仍属于另一部署，请先用原命令停止并选择独立数据位置。'), { code: 'CRABOT_DESKTOP_TAKEOVER_REQUIRED' })
     management.initializeDesktopManagement(selected)
     binding.writeMacAppBinding({ appPath, dataDir: selected, home })
+    await options.onDataSelected?.(selected)
   } finally { releaseCliLock(lock) }
   return selected
 }
