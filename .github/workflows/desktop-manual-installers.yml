@@ -2,11 +2,15 @@ name: Desktop manual test installers
 on:
   workflow_dispatch:
     inputs:
+      source_ref:
+        description: 'Exact clean source commit to package after merge'
+        type: string
+        required: true
       target:
         description: 'Native Mac/Windows installer or standard Ubuntu DEB'
         type: choice
         default: darwin-arm64
-        options: [darwin-arm64, win32-x64, linux-x64]
+        options: [darwin-arm64, darwin-x64, win32-x64, linux-x64]
       source_only:
         description: 'Run only the real source development acceptance, without rebuilding installers'
         type: boolean
@@ -30,6 +34,8 @@ jobs:
       UV_PYTHON: '3.12'
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -92,7 +98,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: crabot-linux-x64-deb-test-${{ github.sha }}
+          name: crabot-linux-x64-deb-test-${{ inputs.source_ref }}
           path: |
             .desktop-build/deb/distribution/*candidate.deb
             .desktop-build/deb/distribution/installers.json
@@ -112,6 +118,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -133,6 +141,8 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -182,6 +192,8 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -205,7 +217,7 @@ jobs:
   source:
     if: inputs.cleanup_facts_only != true && inputs.source_only == true
     name: Source cold boot ${{ inputs.target || 'darwin-arm64' }}
-    runs-on: ${{ inputs.target == 'win32-x64' && 'windows-latest' || inputs.target == 'linux-x64' && 'ubuntu-24.04' || 'macos-15' }}
+    runs-on: ${{ inputs.target == 'win32-x64' && 'windows-latest' || inputs.target == 'linux-x64' && 'ubuntu-24.04' || inputs.target == 'darwin-x64' && 'macos-15-intel' || 'macos-15' }}
     timeout-minutes: 30
     env:
       UV_PYTHON: '3.12'
@@ -214,6 +226,8 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -246,7 +260,7 @@ jobs:
   installer:
     if: inputs.cleanup_facts_only != true && inputs.source_only != true && inputs.target != 'linux-x64'
     name: Offline test installer ${{ inputs.target || 'darwin-arm64' }}
-    runs-on: ${{ inputs.target == 'win32-x64' && 'windows-latest' || 'macos-15' }}
+    runs-on: ${{ inputs.target == 'win32-x64' && 'windows-latest' || inputs.target == 'darwin-x64' && 'macos-15-intel' || 'macos-15' }}
     timeout-minutes: 120
     env:
       UV_PYTHON: '3.12'
@@ -255,6 +269,8 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -304,7 +320,7 @@ jobs:
           pnpm --dir crabot-admin/web run build
       - name: Build same-source offline GUI and Core installer
         run: |
-          node scripts/desktop/stage-core.mjs --out=.desktop-build/manual/core --version=0.1.0-desktop.20
+          node scripts/desktop/stage-core.mjs --out=.desktop-build/manual/core --version=0.1.0-desktop.21
           node .github/scripts/verify-release-payload.mjs "$GITHUB_WORKSPACE/.desktop-build/manual/core"
           node --input-type=module <<'NODE'
           import { createRequire } from 'node:module';
@@ -342,7 +358,7 @@ jobs:
             }
             return total;
           }
-          const report = { commit: process.env.GITHUB_SHA, platform: process.platform, arch: process.arch, program_regular_file_bytes: await bytes(root), measurement: 'logical regular file bytes, symlinks not followed, user data excluded' };
+          const report = { commit: (await import('node:child_process')).execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), platform: process.platform, arch: process.arch, program_regular_file_bytes: await bytes(root), measurement: 'logical regular file bytes, symlinks not followed, user data excluded' };
           await fs.writeFile('.desktop-build/runtime-footprint.json', JSON.stringify(report) + '\n');
           console.log(JSON.stringify(report));
           NODE
@@ -365,7 +381,7 @@ jobs:
       - name: Deliver test installer
         uses: actions/upload-artifact@v4
         with:
-          name: crabot-${{ inputs.target || 'darwin-arm64' }}-offline-test-${{ github.sha }}
+          name: crabot-${{ inputs.target || 'darwin-arm64' }}-offline-test-${{ inputs.source_ref }}
           path: |
             .desktop-build/runtime-footprint.json
             .desktop-build/manual/distribution/*candidate.dmg
@@ -448,9 +464,11 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
       - uses: actions/download-artifact@v4
         with:
-          name: crabot-win32-x64-offline-test-${{ github.sha }}
+          name: crabot-win32-x64-offline-test-${{ inputs.source_ref }}
           path: .desktop-build/wrapper-ui
       - name: Install the exact candidate through its real EXE interface
         shell: pwsh
