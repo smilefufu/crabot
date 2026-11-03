@@ -47,10 +47,10 @@ export class ChatSnapshotController {
         queryFn: async ({ signal }): Promise<ChatSnapshot> => {
           let limit = Math.max(pageSize, known.length + pageSize)
           let messages = await this.readers.history(limit, undefined, signal)
-          const cutoff = oldest ?? (messages.length === limit ? messages.at(-1)?.timestamp : undefined)
+          const cutoff = oldest ?? (messages.length === limit ? messages.slice(-1)[0]?.timestamp : undefined)
           // Increase the window until it covers the oldest displayed timestamp, including ties.
           // This uses the existing latest-N API and does not need a new cursor/event log.
-          while (cutoff && messages.length === limit && messages.at(-1)!.timestamp >= cutoff) {
+          while (cutoff && messages.length === limit && messages.slice(-1)[0]!.timestamp >= cutoff) {
             signal.throwIfAborted(); limit *= 2
             messages = await this.readers.history(limit, undefined, signal)
           }

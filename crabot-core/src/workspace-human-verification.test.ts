@@ -3336,7 +3336,7 @@ describe('normal fixed-job Admin completion preparation', () => {
     const withMemory = mode === 'Agent and Memory'
     const checkRpcContract = !resumeModes.includes(mode) || mode === 'resume actual Admin startup'
     const extraModule = mode === 'resume tool' ? 'tool' : ['resume inactive module', 'resume actual Admin startup'].includes(mode) ? 'inactive' : mode === 'resume running module' ? 'running' : undefined
-    const processLifetimeMs = process.platform === 'win32' ? 900000 : 300000
+    const processLifetimeMs = process.platform === 'win32' || process.platform === 'darwin' && process.arch === 'x64' ? 900000 : 300000
     const f = await fixture({ actualAgent: true, actualAdmin: true, extraModule, ...(mode === 'catalog changed after probe' ? { adminReadyDelayMs: 1100 } : {}), validationHealth: 'healthy', withMemory, inactiveMemory: !withMemory, memoryHealth: withMemory ? 'healthy' : undefined, processLifetimeMs })
     let human = 'fixture-human', webPort = f.port
     const actualAdminStartup = mode === 'resume actual Admin startup'
@@ -3908,7 +3908,7 @@ describe('normal fixed-job Admin completion preparation', () => {
       if (cold) await cold.stop()
       locks.releaseCliLock(lock); await f.cleanup()
     }
-  }, process.platform === 'win32' ? 600000 : 240000)
+  }, process.platform === 'win32' || process.platform === 'darwin' && process.arch === 'x64' ? 600000 : 240000)
 
   it('locates sealed workspace history while the original archive still retains maintenance', async () => {
     const f = await fixture({ actualAgent: true, actualAdmin: true, validationHealth: 'healthy', historyWorkspace: true, processLifetimeMs: 300000 })

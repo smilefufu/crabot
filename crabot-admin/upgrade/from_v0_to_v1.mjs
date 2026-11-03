@@ -15,7 +15,7 @@ if (!process.argv.includes('--dry-run')) {
     || description.from !== null || description.to !== 'v1' || await fs.realpath(description.data_root) !== dataRoot || await fs.realpath(path.join(dataRoot, 'admin')) !== dataDir
     || description.id !== 'crabot-admin-v0-v1' || await fs.realpath(filename) !== path.join(dataRoot, '.upgrade-migrations', description.id, 'plan.json')) throw new Error('Admin migration context mismatch')
   const state = JSON.parse(await fs.readFile(path.join(path.dirname(filename), 'state.json'), 'utf8'))
-  const script = fileURLToPath(import.meta.url), expected = description.scripts.length === 1 ? description.scripts[0] : undefined
+  const script = await fs.realpath(fileURLToPath(import.meta.url)), expected = description.scripts.length === 1 ? description.scripts[0] : undefined
   if (state.phase !== 'running' || state.plan_sha256 !== hash(bytes) || !expected || await fs.realpath(expected.path) !== script || await fileDigest(script) !== expected.sha256) throw new Error('Admin scoped backup is not active')
   for (const [name, records] of [['admin/friend-permission-configs.json', result.friendConfigs], ['admin/session-configs.json', result.groups]]) {
     if (!description.scope.writes.includes(name.split('/').join(path.sep))) throw new Error('Admin migration write outside declared scope')

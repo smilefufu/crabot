@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 import { createHash } from 'node:crypto'
 import { verifyCoreRelease } from '../lib/core-release.mjs'
+import { prepareUbuntuDeb } from './ubuntu-deb.mjs'
 
 for (const key of ['CSC_LINK', 'WIN_CSC_LINK', 'CSC_KEY_PASSWORD', 'WIN_CSC_KEY_PASSWORD']) {
   if (process.env[key]) throw new Error('Unsigned candidate generation must run without signing credentials')
@@ -51,6 +52,7 @@ async function digest(file) {
 }
 const app = { asar_sha256: await digest(path.join(resources, 'app.asar')), executable_sha256: await digest(executable) }
 const artifacts = []
+const deb = process.platform === 'linux' ? await prepareUbuntuDeb({ core, resources, directory: path.join(output, 'debian-package') }) : undefined
 await build({ projectDir: project, prepackaged: packaged, publish: 'never',
   targets: Platform.current().createTarget(process.platform === 'darwin' ? ['dmg', 'zip'] : process.platform === 'win32' ? ['nsis'] : ['deb'], Arch[process.arch]),
   config: {
@@ -63,8 +65,9 @@ await build({ projectDir: project, prepackaged: packaged, publish: 'never',
     win: { executableName: 'Crabot', icon, signAndEditExecutable: false },
     nsis: { oneClick: true, perMachine: false, deleteAppDataOnUninstall: false, runAfterFinish: false,
       createDesktopShortcut: false, shortcutName: 'Crabot' },
-    linux: { executableName: 'crabot-desktop', icon, category: 'Utility', desktop: { entry: { Name: 'Crabot' } },
-      maintainer: 'Crabot Team' },
+    linux: { executableName: 'crabot-desktop', icon, category: 'Utility', syncDesktopName: true, desktop: { entry: { Name: 'Crabot' } },
+      maintainer: 'Crabot Team <noreply@github.com>' },
+    ...(deb ? { deb } : {}),
     afterAllArtifactBuild: async result => { for (const file of result.artifactPaths) artifacts.push(file); return [] },
   },
 })

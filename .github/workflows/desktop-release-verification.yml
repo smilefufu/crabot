@@ -1,12 +1,6 @@
 name: Desktop release verification
 on:
   workflow_dispatch:
-  push:
-    branches: ['feat/desktop-release-verification']
-  pull_request:
-    paths:
-      - 'crabot-desktop/**'
-      - '.github/workflows/desktop-release-verification.yml'
 permissions:
   contents: read
 jobs:

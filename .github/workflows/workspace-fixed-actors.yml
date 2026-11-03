@@ -1,17 +1,6 @@
 name: Workspace fixed actors and original CLI carriers
 on:
   workflow_dispatch:
-  push:
-    branches: ['feat/desktop-workspace-fixed-actors']
-  pull_request:
-    paths:
-      - 'scripts/lib/workspace-*-journal.mjs'
-      - 'scripts/lib/workspace-coordinator-*.mjs'
-      - 'scripts/lib/workspace-file-*.mjs'
-      - 'scripts/workspace-relocation-coordinator.mjs'
-      - 'scripts/workspace-file-host.mjs'
-      - 'crabot-agent/src/workers/harness/harness.ts'
-      - '.github/workflows/workspace-fixed-actors.yml'
 permissions:
   contents: read
 jobs:

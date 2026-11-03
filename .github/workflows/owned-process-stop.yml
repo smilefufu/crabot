@@ -1,15 +1,6 @@
 name: Owned process capture and stop
 on:
   workflow_dispatch:
-  push:
-    branches: ['feat/desktop-owned-process-stop']
-  pull_request:
-    paths:
-      - 'scripts/lib/known-process-stop.cjs'
-      - 'scripts/lib/spawned-process-tree.cjs'
-      - 'scripts/lib/__tests__/known-process-stop.test.mjs'
-      - 'scripts/lib/__tests__/spawned-process-tree.test.mjs'
-      - '.github/workflows/owned-process-stop.yml'
 permissions:
   contents: read
 jobs:

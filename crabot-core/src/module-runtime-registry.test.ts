@@ -169,9 +169,10 @@ describe('ModuleRuntimeRegistry', () => {
     expect((await registry.listRecords()).map(item => item.runtime_id)).toEqual(['runtime-foreign'])
   })
 
-  it('removes a dead runtime record without signalling another process', async () => {
+  it.each(['linux', 'darwin', 'win32'] as const)('removes a dead runtime record without signalling another process (%s)', async platform => {
     const identities = new Map<number, string | null>([[301, 'start-301']])
-    const { registry, terminateTree } = makeRegistry(identities)
+    const inspectWindowsPortOwners = vi.fn(async () => [])
+    const { registry, terminateTree } = makeRegistry(identities, new Set(), { platform, inspectWindowsPortOwners })
     await record(registry, 'runtime-dead', 'feishu-default', 301, 19005)
     identities.set(301, null)
 
@@ -182,6 +183,8 @@ describe('ModuleRuntimeRegistry', () => {
     })
 
     expect(terminateTree).not.toHaveBeenCalled()
+    expect(inspectWindowsPortOwners).toHaveBeenCalledTimes(platform === 'win32' ? 1 : 0)
+    if (platform === 'win32') expect(inspectWindowsPortOwners).toHaveBeenCalledWith(19005)
     expect(await registry.listRecords()).toEqual([])
   })
 

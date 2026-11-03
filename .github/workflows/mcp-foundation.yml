@@ -1,21 +1,6 @@
 name: Managed MCP preparation foundation
 on:
   workflow_dispatch:
-  push:
-    branches: ['feat/desktop-mcp-foundation']
-    paths:
-      - 'scripts/lib/managed-mcp-*'
-      - 'scripts/lib/product-*'
-      - 'scripts/lib/agent-python-selection.cjs'
-      - 'scripts/lib/__tests__/managed-mcp-prepare.test.mjs'
-      - '.github/workflows/mcp-foundation.yml'
-  pull_request:
-    paths:
-      - 'scripts/lib/managed-mcp-*'
-      - 'scripts/lib/product-*'
-      - 'scripts/lib/agent-python-selection.cjs'
-      - 'scripts/lib/__tests__/managed-mcp-prepare.test.mjs'
-      - '.github/workflows/mcp-foundation.yml'
 permissions:
   contents: read
 jobs:

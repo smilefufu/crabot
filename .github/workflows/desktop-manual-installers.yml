@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
     inputs:
       target:
-        description: 'Native Mac/Windows installer or Linux source-only acceptance'
+        description: 'Native Mac/Windows installer or standard Ubuntu DEB'
         type: choice
         default: darwin-arm64
         options: [darwin-arm64, win32-x64, linux-x64]
@@ -21,6 +21,90 @@ concurrency:
   group: desktop-manual-installer-${{ inputs.target || 'darwin-arm64' }}${{ inputs.source_only && format('-source-{0}', github.run_id) || '' }}
   cancel-in-progress: false
 jobs:
+  ubuntu-deb:
+    name: Standard Ubuntu DEB and native acceptance
+    if: inputs.cleanup_facts_only != true && inputs.source_only != true && inputs.target == 'linux-x64'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      UV_PYTHON: '3.12'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.13.0'
+      - name: Standard Debian build tools and real display
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential libcurl4-openssl-dev libexpat1-dev zlib1g-dev dh-apparmor debhelper apparmor-utils libgtk-3-0t64 libnss3 libxss1 libasound2t64 libgbm1 xvfb xauth xdotool dbus-x11 zstd
+      - name: Locked same-source build dependencies
+        run: |
+          mkdir -p .desktop-build
+          node scripts/build-native.mjs
+          pnpm --dir crabot-client install --frozen-lockfile
+          pnpm --dir crabot-client run build
+          pnpm install --frozen-lockfile
+          pnpm --dir scripts/lib install --frozen-lockfile
+          pnpm --dir crabot-shared install --frozen-lockfile
+          pnpm --dir crabot-shared run build
+          for module in crabot-core crabot-agent crabot-admin crabot-mcp-tools crabot-channel-telegram crabot-channel-wechat crabot-channel-feishu crabot-channel-dingtalk crabot-channel-slack crabot-channel-voice; do
+            pnpm --dir "$module" install --frozen-lockfile
+            pnpm --dir "$module" run build
+          done
+          pnpm --dir crabot-admin/web install --frozen-lockfile
+          pnpm --dir crabot-desktop install --frozen-lockfile
+          (cd crabot-desktop && node -e "require('electron')")
+          pnpm --dir crabot-desktop run build
+      - name: Data and packaging boundaries before expensive assembly
+        run: |
+          node --test scripts/lib/__tests__/desktop-entry.test.mjs scripts/lib/__tests__/ubuntu-app-binding.test.mjs scripts/lib/__tests__/unix-legacy-cli.test.mjs scripts/lib/__tests__/core-release.test.mjs scripts/desktop/__tests__/ubuntu-deb.test.mjs crabot-desktop/tests/ubuntu-first-launch.test.mjs scripts/lib/__tests__/desktop-data-import.test.mjs
+          node .github/scripts/ubuntu-electron-test-sandbox.mjs
+          xvfb-run -a node --test crabot-desktop/tests/ubuntu-profile.test.mjs
+      - name: Prepare locked offline runtime
+        run: |
+          node scripts/prepare-scrapling.mjs --release=desktop-ci
+          node scripts/prepare-computer-use.mjs
+          node scripts/prepare-product-runtime.mjs
+      - name: Build the full new DEB from this exact commit
+        run: |
+          node scripts/desktop/stage-core.mjs --out=.desktop-build/deb/core --version=0.1.0-desktop.21
+          node scripts/desktop/package-application.mjs --candidate=true --core=.desktop-build/deb/core --out=.desktop-build/deb/gui
+          node scripts/desktop/package-installers.mjs --candidate=true --project=.desktop-build/deb/gui --out=.desktop-build/deb/distribution
+      - name: Build a second version stamp for actual fixed-path upgrade
+        run: |
+          node --input-type=module -e 'import{rm}from"node:fs/promises";for(const file of [".desktop-build/deb/core",".desktop-build/deb/gui"])await rm(file,{recursive:true,force:true})'
+          node scripts/desktop/stage-core.mjs --out=.desktop-build/deb-upgrade/core --version=0.1.0-desktop.22
+          node scripts/desktop/package-application.mjs --candidate=true --core=.desktop-build/deb-upgrade/core --out=.desktop-build/deb-upgrade/gui
+          node scripts/desktop/package-installers.mjs --candidate=true --project=.desktop-build/deb-upgrade/gui --out=.desktop-build/deb-upgrade/distribution
+      - name: Install both completed DEBs and verify actual version replacement
+        run: |
+          ulimit -c 0
+          dbus-run-session -- xvfb-run -a node .github/scripts/verify-ubuntu-deb.mjs .desktop-build/deb/distribution
+          dbus-run-session -- xvfb-run -a node .github/scripts/verify-ubuntu-deb.mjs .desktop-build/deb-upgrade/distribution --baseline=.desktop-build/deb/distribution
+      - name: Retain candidate and actual evidence; never publish a release
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crabot-linux-x64-deb-test-${{ github.sha }}
+          path: |
+            .desktop-build/deb/distribution/*candidate.deb
+            .desktop-build/deb/distribution/installers.json
+            .desktop-build/deb/acceptance.json
+            .desktop-build/deb/acceptance-*.log
+            .desktop-build/deb-upgrade/distribution/*candidate.deb
+            .desktop-build/deb-upgrade/distribution/installers.json
+            .desktop-build/deb-upgrade/acceptance.json
+            .desktop-build/deb-upgrade/acceptance-*.log
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 7
   cleanup-facts:
     name: Pinned legacy compiled-program facts
     if: inputs.cleanup_facts_only == true

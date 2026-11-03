@@ -7,20 +7,6 @@ on:
         description: 'Only native Slack process and configuration feedback regressions'
         type: boolean
         default: false
-  pull_request:
-    paths:
-      - 'crabot-channel-slack/**'
-      - 'crabot-shared/src/onboarder.ts'
-      - 'crabot-admin/src/*onboard*'
-      - 'crabot-admin/src/channel-manager*'
-      - 'crabot-admin/src/index.ts'
-      - 'crabot-admin/src/types.ts'
-      - 'crabot-admin/web/src/pages/Channels/*Onboarding*'
-      - 'crabot-admin/web/src/services/channel.ts'
-      - 'crabot-admin/web/src/types/index.ts'
-      - '.github/scripts/smoke-slack-onboarding.mjs'
-      - '.github/workflows/slack-ci.yml'
-
 permissions:
   contents: read
 

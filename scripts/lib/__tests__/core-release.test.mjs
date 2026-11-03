@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
-import { writeCoreRelease, verifyCoreRelease } from '../core-release.mjs'
+import { writeCoreRelease, verifyCoreRelease, readInstalledCoreRelease } from '../core-release.mjs'
 
 async function fixture(t) {
   const parent = await fs.mkdtemp(path.join(tmpdir(), 'crabot-core-integrity-'))
@@ -16,6 +16,18 @@ async function fixture(t) {
   return { parent, root, release: { schema_version: 1, version: '1.2.3', platform: process.platform, arch: process.arch,
     commit: '1'.repeat(40), source_dirty: false } }
 }
+
+test('ordinary installed checks validate version and CLI without scanning unrelated payload', async t => {
+  const f = await fixture(t)
+  await fs.writeFile(path.join(f.root, 'cli.mjs'), '// fixed entry')
+  await writeCoreRelease(f.root, f.release)
+  await fs.writeFile(path.join(f.root, 'bin/node'), 'different-runtime')
+  assert.equal((await readInstalledCoreRelease(f.root, { version: '1.2.3' })).version, '1.2.3')
+  await assert.rejects(verifyCoreRelease(f.root), { code: 'CRABOT_CORE_INTEGRITY' })
+  await assert.rejects(readInstalledCoreRelease(f.root, { version: '1.2.4' }), { code: 'CRABOT_CORE_INTEGRITY' })
+  await fs.writeFile(path.join(f.root, 'cli.mjs'), '// changed entry')
+  await assert.rejects(readInstalledCoreRelease(f.root), { code: 'CRABOT_CORE_INTEGRITY' })
+})
 
 test('the complete core survives relocation and rejects version/platform mixing', async t => {
   const f = await fixture(t)

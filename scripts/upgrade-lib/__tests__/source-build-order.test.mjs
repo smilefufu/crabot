@@ -20,6 +20,7 @@ vi.mock('../../lib/scrapling-prepare.mjs', () => ({
 }))
 vi.mock('../../lib/memory-deps.mjs', () => ({ prepareMemoryDependencies: vi.fn() }))
 import { runSourceUpgrade } from '../source.mjs'
+import { prepareMemoryDependencies } from '../../lib/memory-deps.mjs'
 
 let root
 beforeEach(async () => { root = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-source-order-')); observed.commands.length = 0; observed.failElectron = false })
@@ -46,6 +47,7 @@ it('retains the original source preparation when no local SDK exists', async () 
 })
 
 it('developer preparation reuses verified outputs and refreshes file consumers after SDK changes', async () => {
+  await fs.mkdir(path.join(root, 'crabot-memory'))
   for (const name of ['crabot-client', 'crabot-shared', 'crabot-core', 'crabot-admin', 'crabot-admin/web', 'crabot-desktop']) {
     const directory = path.join(root, name)
     await fs.mkdir(path.join(directory, 'src'), { recursive: true })
@@ -54,6 +56,9 @@ it('developer preparation reuses verified outputs and refreshes file consumers a
   }
   await fs.mkdir(path.join(root, 'dist/cli'), { recursive: true }); await fs.writeFile(path.join(root, 'dist/cli/main.js'), '')
   await runSourceUpgrade(root, logger, { incremental: true })
+  expect(prepareMemoryDependencies).toHaveBeenLastCalledWith(path.join(root, 'crabot-memory'), {
+    dev: true, logger, uv: expect.any(String), relocatable: false,
+  })
   expect(observed.commands.some(call => call.cwd === path.join(root, 'crabot-desktop'))).toBe(false)
   observed.commands.length = 0
   await runSourceUpgrade(root, logger, { incremental: true })

@@ -2,12 +2,6 @@ name: Workspace foundation
 
 on:
   workflow_dispatch:
-  push:
-    branches: ['feat/desktop-workspace-foundation']
-    paths: ['crabot-shared/**', 'crabot-native/**', 'scripts/build-native.mjs', '.github/workflows/workspace-foundation.yml']
-  pull_request:
-    paths: ['crabot-shared/**', 'crabot-native/**', 'scripts/build-native.mjs', '.github/workflows/workspace-foundation.yml']
-
 permissions:
   contents: read
 concurrency:

@@ -1,15 +1,6 @@
 name: Workspace fixed job and recovery records
 on:
   workflow_dispatch:
-  push:
-    branches: ['feat/desktop-workspace-job-records']
-  pull_request:
-    paths:
-      - 'scripts/lib/workspace-relocation-intent.mjs'
-      - 'scripts/lib/workspace-*-records.mjs'
-      - 'scripts/lib/workspace-recovery-*.mjs'
-      - 'scripts/lib/cli-lock.mjs'
-      - '.github/workflows/workspace-job-records.yml'
 permissions:
   contents: read
 jobs:

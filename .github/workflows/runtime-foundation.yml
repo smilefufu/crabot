@@ -1,35 +1,6 @@
 name: Runtime foundation
 on:
   workflow_dispatch:
-  push:
-    branches: ['feat/desktop-runtime-foundation']
-    paths:
-      - 'crabot-native/**'
-      - 'scripts/build-native.mjs'
-      - 'scripts/lib/product-*'
-      - 'scripts/lib/physical-fs.cjs'
-      - 'scripts/lib/agent-python-selection.cjs'
-      - 'scripts/lib/desktop-management.cjs'
-      - 'scripts/lib/core-release.mjs'
-      - 'scripts/lib/process-identity.cjs'
-      - 'scripts/lib/__tests__/product-*'
-      - 'scripts/lib/__tests__/agent-python-selection.test.mjs'
-      - 'scripts/lib/__tests__/core-release.test.mjs'
-      - '.github/workflows/runtime-foundation.yml'
-  pull_request:
-    paths:
-      - 'crabot-native/**'
-      - 'scripts/build-native.mjs'
-      - 'scripts/lib/product-*'
-      - 'scripts/lib/physical-fs.cjs'
-      - 'scripts/lib/agent-python-selection.cjs'
-      - 'scripts/lib/desktop-management.cjs'
-      - 'scripts/lib/core-release.mjs'
-      - 'scripts/lib/process-identity.cjs'
-      - 'scripts/lib/__tests__/product-*'
-      - 'scripts/lib/__tests__/agent-python-selection.test.mjs'
-      - 'scripts/lib/__tests__/core-release.test.mjs'
-      - '.github/workflows/runtime-foundation.yml'
 permissions:
   contents: read
 concurrency:

@@ -72,6 +72,7 @@ stage('core-verification')
 await verifyCoreRelease(core)
 stage('core-verified')
 let macBindingFile
+let ubuntuBindingFile
 if (process.platform === 'darwin' && location.schema_version === 1) {
   // Isolated CI preselects data through the real locator API. Native first-use
   // dialogs are covered separately; this smoke still runs the ordinary sealed App.
@@ -82,6 +83,18 @@ if (process.platform === 'darwin' && location.schema_version === 1) {
   management.initializeDesktopManagement(data)
   binding.writeMacAppBinding({ appPath: binding.macAppForCore(core), dataDir: data })
   macBindingFile = binding.bindingFile(homedir())
+}
+if (process.platform === 'linux' && location.schema_version === 1) {
+  const binding = (await import(pathToFileURL(path.join(core, 'scripts/lib/ubuntu-app-binding.cjs')))).default
+  if (binding.ubuntuAppForCore(core)) {
+    const options = { home: homedir() }
+    if (binding.readUbuntuAppBinding(options)) throw new Error('CI user already has an Ubuntu App binding')
+    const management = (await import(pathToFileURL(path.join(core, 'scripts/lib/desktop-management.cjs')))).default
+    management.ensurePrivateDataRoot(data)
+    management.initializeDesktopManagement(data)
+    binding.writeUbuntuAppBinding({ coreRoot: core, dataDir: data, ...options })
+    ubuntuBindingFile = binding.bindingFile(options)
+  }
 }
 const env = { ...process.env, DATA_DIR: data }
 delete env.ELECTRON_RUN_AS_NODE; delete env.NODE_OPTIONS; delete env.NODE_PATH; delete env.CRABOT_DEV; delete env.CRABOT_PORT_OFFSET
@@ -144,9 +157,10 @@ try {
   assert.equal(firstStatus.running, true, JSON.stringify({ cli_status: firstStatus, before_status: first, after_status: afterStatus }))
   const cliHome = path.join(temporary, '命令 用户')
   const registrationEnv = { ...env, HOME: cliHome, SHELL: process.platform === 'darwin' ? '/bin/zsh' : '/bin/bash',
+    XDG_CONFIG_HOME: path.join(cliHome, '.config'),
     LOCALAPPDATA: path.join(cliHome, 'AppData/Local'), PATH: process.platform === 'win32' ? path.join(process.env.SystemRoot, 'System32') : '/usr/bin:/bin' }
   delete registrationEnv.ZDOTDIR
-  const registrationCode = 'import{pathToFileURL}from"node:url";import path from"node:path";const[root,dataDir,home]=process.argv.slice(1);const management=(await import(pathToFileURL(path.join(root,"scripts/lib/desktop-management.cjs")))).default;management.ensurePrivateDataRoot(home);if(process.platform==="darwin"){const binding=(await import(pathToFileURL(path.join(root,"scripts/lib/mac-app-binding.cjs")))).default;if(binding.macAppForCore(root))binding.writeMacAppBinding({appPath:binding.macAppForCore(root),dataDir,home})}const{installDesktopCli}=await import(pathToFileURL(path.join(root,"scripts/lib/desktop-cli-install.mjs")));console.log(JSON.stringify(await installDesktopCli({coreRoot:root,dataDir,home})))'
+  const registrationCode = 'import{pathToFileURL}from"node:url";import path from"node:path";const[root,dataDir,home]=process.argv.slice(1);const management=(await import(pathToFileURL(path.join(root,"scripts/lib/desktop-management.cjs")))).default;management.ensurePrivateDataRoot(home);if(process.platform==="darwin"){const binding=(await import(pathToFileURL(path.join(root,"scripts/lib/mac-app-binding.cjs")))).default;if(binding.macAppForCore(root))binding.writeMacAppBinding({appPath:binding.macAppForCore(root),dataDir,home})}if(process.platform==="linux"){const binding=(await import(pathToFileURL(path.join(root,"scripts/lib/ubuntu-app-binding.cjs")))).default;if(binding.ubuntuAppForCore(root))binding.writeUbuntuAppBinding({coreRoot:root,dataDir,home})}const{installDesktopCli}=await import(pathToFileURL(path.join(root,"scripts/lib/desktop-cli-install.mjs")));console.log(JSON.stringify(await installDesktopCli({coreRoot:root,dataDir,home})))'
   const registration = JSON.parse((await promisify(execFile)(node, ['--input-type=module', '-e', registrationCode, core, data, cliHome],
     { env: registrationEnv, timeout: 90_000, maxBuffer: 2 * 1024 * 1024 })).stdout)
   const commandEnv = { ...registrationEnv, DATA_DIR: data, CRABOT_REGISTERED_CLI: registration.command }
@@ -241,6 +255,11 @@ try {
       const current = JSON.parse(await fs.readFile(macBindingFile, 'utf8'))
       if (current.data_dir !== data || current.app_path !== path.resolve(core, '../../..')) throw new Error('CI Mac binding changed')
       await fs.unlink(macBindingFile)
+    }
+    if (ubuntuBindingFile) {
+      const current = JSON.parse(await fs.readFile(ubuntuBindingFile, 'utf8'))
+      if (current.data_dir !== data || current.core_root !== core) throw new Error('CI Ubuntu binding changed')
+      await fs.unlink(ubuntuBindingFile)
     }
     await fs.rm(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
     stage('cleanup-completed')

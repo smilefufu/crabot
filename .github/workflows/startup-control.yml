@@ -1,18 +1,6 @@
 name: Shared startup control
 on:
   workflow_dispatch:
-  push:
-    branches: ['feat/desktop-startup-control']
-  pull_request:
-    paths:
-      - 'scripts/lib/*preflight*'
-      - 'scripts/lib/cli-lock.mjs'
-      - 'scripts/lib/workspace-maintenance.cjs'
-      - 'scripts/start.mjs'
-      - 'scripts/restart.mjs'
-      - 'scripts/ui-upgrade.mjs'
-      - 'crabot-core/src/main.ts'
-      - '.github/workflows/startup-control.yml'
 permissions:
   contents: read
 jobs:
