@@ -8,11 +8,14 @@
 
 ### Ubuntu 标准 DEB：安装/升级与源码共存通过，CI收尾中
 
+- 11月3日完整Linux原生CI确认两处失败：DEB组件冒烟夹具缺少GUI/临时CLI用户的数据绑定，真实GUI停在首启选择，CLI明确拒绝缺失绑定；只补测试准备与确切绑定清理。旧system转换另在完成记录两次发布间隙被CLI误报持久化失败；4项时序回归先3红后全绿，只在原协调器仍运行时沿既有轮询等待，退出后重读且真实不一致保持原错误，不重派作业、不改迁移/恢复。27项系统与14项首启/绑定测试通过（另1项Linux专用本机跳过），当前原生完整验证待核实。
+- 用户已明确接受下一版同时发布CLI及桌面公开预览：Windows EXE、Mac ARM/Intel DMG、Ubuntu DEB；保留未签名提示，暂不开应用内自动更新。须完成现有CI、自动合并和同提交最终产物验证后再发版，不改现场部署。
+
 - Windows Core新一轮5秒超时已定位为单测夹具：虚构PID已mock，但空端口探测未mock，实际调用PowerShell查询宿主端口。将该用例覆盖Linux/Mac/Windows并注入空监听者，复现旧夹具在Windows分支调用真实系统后先红；修正后21项全部通过，原不发信号/清理确切记录断言保持，产品代码/超时不改。
 
 - 2026-11-03用户明确要求继续完成下一版发版，Windows候选包不等于完成。当前修正仅CI：Linux完整打包补齐DEB构建依赖；Mac源码准备阶段允许已校验上游通用架构，封装成品仍严格要求目标单架构及原签名验证。原生CI已分别复现缺少dh_apparmor和两种Mac架构误拒绝；87项定向回归通过，原生完整结果待核实，不改产品设计或现场部署。
 
-- 按逐项许可使用标准DEB、系统固定目录和包管理器覆盖；新GUI默认XDG数据位置、首启可改，已有绑定保留。按用户要求合入main界面优化`f9113364`。旧GTK GUI/自启动入口迁移、成功后询问清理旧程序及GNOME/Wayland真人项仍未完成；[PR233](https://github.com/smilefufu/crabot/pull/233)正式待审，不自行合并、不发版、不改现场部署或真实数据。
+- 按逐项许可使用标准DEB、系统固定目录和包管理器覆盖；新GUI默认XDG数据位置、首启可改，已有绑定保留。按用户要求合入main界面优化`f9113364`。旧GTK GUI/自启动入口迁移、成功后询问清理旧程序及GNOME/Wayland真人项仍未完成；[PR233](https://github.com/smilefufu/crabot/pull/233)等待完整CI及自动审查合并，不自行合并、不改现场部署或真实数据。
 - Linux Electron一行参数兼容已获单项许可并实现：完整受信程序/源码路径、原两个开关、用户/PID代际/握手保持。源码`a75d472d`的同一新包在[Ubuntu24/26终验41532885769](https://github.com/smilefufu/crabot/actions/runs/41532885769)通过初装、内核沙箱、已发布CLI14/15加合成数据接入及旧密码实际登录、21→22固定覆盖、真实源码GUI认证与独立启停。21→22是同源码版本号夹具；Ubuntu24截图首次超时原样重跑一次通过，根因未定位。22版DEB下载911471650字节，SHA256 `ee8274fabf5cadb0b04a8529a7a7605891db016ee4fab586c1b6261796cf2f18`。
 - 含main界面的`50ec04e0`已在[41543135859](https://github.com/smilefufu/crabot/actions/runs/41543135859)完成新DEB构建、Ubuntu24实际初装/固定覆盖和源码冷启动；不代替当前新增CI修正后的完整包验收。Web481项/类型检查、CLI编译通过；Core/Admin/Agent/迁移权限组246项通过、1项跳过。Admin全量既有2项静态失败曾在独立main复现；两个发布载荷专用入口未用其打包Python runner验收，不算全仓通过。
 - CI修正：补齐SDK/Native构建顺序和普通CLI归档中的必需SDK、Native及Windows Slack辅助件，组装时实际加载Native；等价替换7处ES2020不支持的at调用；Intel程序组30分钟实际被截断，依实测仅改45分钟后，[534项完整执行](https://github.com/smilefufu/crabot/actions/runs/41557551709/job/125660013217)：505通过、29平台跳过，测试32.1分钟；其余平台30分钟预算不变，不改产品等待或断言。Windows原生记录确认两进程时钟差3ms导致5003ms被误判已过期：只删客户端重复跨时钟上限比较，原本机5秒timer、Admin端5秒challenge/15分钟签发及所有身份/nonce/代际校验保持。先红后绿回归通过；[Windows41550248594](https://github.com/smilefufu/crabot/actions/runs/41550248594)实际100次续接、SDK及HTTP/凭据/WS回归整体通过。

@@ -41,6 +41,7 @@ jobs:
           scripts/lib/__tests__/system-recovery.test.mjs
           scripts/lib/__tests__/system-upgrade.test.mjs
           scripts/lib/__tests__/system-operation.test.mjs
+          scripts/lib/__tests__/system-job-client.test.mjs
           scripts/lib/__tests__/legacy-system-fence.test.mjs
           scripts/lib/__tests__/legacy-system-command.test.mjs
           scripts/lib/__tests__/legacy-system-release.test.mjs
