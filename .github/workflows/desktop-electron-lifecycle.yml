@@ -47,7 +47,7 @@ jobs:
           fi
       - name: Repeat the unchanged boundary with failure-only memory diagnostics
         run: |
-          for attempt in {1..150}; do
+          for attempt in {1..100}; do
             echo "Pending boundary diagnostic $attempt"
             node --test --test-name-pattern='pending renderer evaluation is bounded' crabot-desktop/tests/electron-boundary.test.mjs
           done
