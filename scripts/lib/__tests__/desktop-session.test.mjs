@@ -35,6 +35,16 @@ async function fixture(t) {
     }
     if(process.env.TEST_ELECTRON_CLIENT==='1') Object.defineProperty(process,'execPath',{value:'/different/Electron'});
     const data=process.env.TEST_DATA;
+    if(process.env.TEST_CLOCK_MODE){
+      const parse=Date.parse;let calls=0;
+      Date.parse=value=>{
+        calls++;
+        if(calls===1&&process.env.TEST_CLOCK_MODE==='challenge-ahead')return Date.now()+6000;
+        if(calls===1&&process.env.TEST_CLOCK_MODE==='expired')return Date.now()-1000;
+        if(calls>1&&process.env.TEST_CLOCK_MODE==='session-ahead')return Date.now()+16*60_000;
+        return parse(value);
+      };
+    }
     async function manual(nonce, action) {
       const metadata=JSON.parse(readFileSync(join(data,'desktop-session.json'),'utf8'));
       const {socket}=await transport.connectLocalAuth(metadata.socket_address);
@@ -100,10 +110,10 @@ async function fixture(t) {
   })
   const [ready] = await once(mm, 'message'); assert.equal(ready.type, 'ready')
   server = identity.inspectProcess(ready.pid)
-  async function client(action, trusted = true, slowPreflight = false, electronClient = false) {
+  async function client(action, trusted = true, slowPreflight = false, electronClient = false, clockMode) {
     const entry = trusted ? uiEntry : join(root, 'impostor-ui.mjs')
     if (!trusted) writeFileSync(entry, readFileSync(uiEntry))
-    const child = spawn(process.execPath, [entry], { env: { ...process.env, TEST_DATA: data, ...(slowPreflight ? { TEST_SLOW_PREFLIGHT: '1' } : {}), ...(electronClient ? { TEST_ELECTRON_CLIENT: '1' } : {}), ...(action ? { TEST_ACTION: action } : {}) },
+    const child = spawn(process.execPath, [entry], { env: { ...process.env, TEST_DATA: data, ...(slowPreflight ? { TEST_SLOW_PREFLIGHT: '1' } : {}), ...(electronClient ? { TEST_ELECTRON_CLIENT: '1' } : {}), ...(action ? { TEST_ACTION: action } : {}), ...(clockMode ? { TEST_CLOCK_MODE: clockMode } : {}) },
       stdio: ['ignore', 'ignore', 'inherit', 'ipc'] })
     clients.add(child)
     const [result] = await once(child, 'message')
@@ -179,10 +189,21 @@ test('source client verifies the actual MM standalone Node rather than its own E
 test('Windows repeated native handshakes retain every final response', { skip: process.platform !== 'win32', timeout: 90_000 }, async t => {
   const f = await fixture(t), { child, result } = await f.client()
   assert.equal(result.session?.type, 'session', JSON.stringify({ error: result.error, has_session: !!result.session }))
-  for (let attempt = 1; attempt <= 20; attempt++) {
+  for (let attempt = 1; attempt <= 100; attempt++) {
     child.send('renew')
     const [renewed] = await once(child, 'message')
     assert.equal(renewed.session?.type, 'session', JSON.stringify({ attempt, error: renewed.error, has_session: !!renewed.session }))
     assert.equal(await f.validate(renewed.session), true)
+  }
+})
+
+for (const mode of ['challenge-ahead', 'session-ahead', 'expired']) test('verified Admin expiry does not require identical process clocks: ' + mode, async t => {
+  const f = await fixture(t), { result } = await f.client(undefined, true, false, false, mode)
+  if (mode === 'expired') assert.equal(result.error, 'DESKTOP_CHALLENGE_EXPIRED')
+  else {
+    assert.equal(result.session?.type, 'session', JSON.stringify({ error: result.error, has_session: !!result.session }))
+    const claims = JSON.parse(Buffer.from(result.session.token, 'base64url').toString())
+    assert.ok(claims.exp <= Math.floor(Date.now() / 1000) + 15 * 60)
+    assert.equal(await f.validate(result.session), true, 'Admin retains the signed and registered fifteen-minute expiry')
   }
 })

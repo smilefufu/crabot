@@ -55,11 +55,9 @@ export async function openDesktopSession(dataRoot) {
     const challenge = DesktopChallengeSchema.parse(raw)
     if (challenge.instance_id !== record.instance_id || challenge.generation !== record.generation) fail('DESKTOP_STALE_INSTANCE')
     const deadline = Date.parse(challenge.expires_at)
-    const before = Date.now(), after = Date.now()
-    if (deadline <= before || deadline > after + 5000) {
-      console.error('CHALLENGE_CLOCK_DIAG ' + JSON.stringify({ deadline, before, after, remaining_ms: deadline - after }))
-      fail('DESKTOP_CHALLENGE_EXPIRED')
-    }
+    // Windows process clocks can differ. The local timer and Admin enforce the
+    // lifetime; comparing their absolute clocks again can reject a fresh reply.
+    if (deadline <= Date.now()) fail('DESKTOP_CHALLENGE_EXPIRED')
     frames.write({ type: 'open_session', protocol_version: 1, instance_id: record.instance_id, generation: record.generation,
       challenge: challenge.challenge, client_nonce: randomBytes(32).toString('base64url') })
     const response = await frames.read(), error = DesktopSessionErrorSchema.safeParse(response)
@@ -70,7 +68,7 @@ export async function openDesktopSession(dataRoot) {
       || !identity.sameProcess(latest.record.mm, identity.inspectProcess(latest.record.mm.pid))
       || session.instance_id !== record.instance_id || session.generation !== record.generation) fail('DESKTOP_STALE_INSTANCE')
     if (session.admin_url !== description.admin_url || Date.parse(session.expires_at) <= Date.now()
-      || Date.parse(session.expires_at) > Date.now() + 15 * 60_000 || !identity.sameProcess(description.server, identity.inspectProcess(connection.peer.pid))) fail('DESKTOP_UNAUTHORIZED')
+      || !identity.sameProcess(description.server, identity.inspectProcess(connection.peer.pid))) fail('DESKTOP_UNAUTHORIZED')
     return Object.freeze(session)
   } catch (error) {
     if (/^DESKTOP_[A-Z_]+$/.test(error?.code)) throw error
