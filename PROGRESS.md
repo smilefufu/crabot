@@ -4,7 +4,7 @@
 
 - 已复现 `@slack/socket-mode@3.1.0` 在自动重连请求失败时遗失 Promise rejection，触发 Node 进程退出；通过 pnpm 补丁收口异常，网络故障沿用既有自动重连，保留首次启动请求预算及不可恢复凭据错误的处理。
 - 错误日志补充嵌套网络错误码与脱敏后的实际代理地址；HTTPS 控制请求、WSS、断线后请求失败再恢复覆盖 custom / system / none，开启证书校验，不访问真实 workspace。
-- Slack 本地回归 96 项通过、5 项 Windows 专属跳过，构建及生产依赖冻结安装通过；Windows CI 与目标电脑实连仍待验证，首次 TLS ECONNRESET 的来源尚未确认。
+- Slack 本地回归 96 项通过、5 项 Windows 专属跳过；[Windows CI](https://github.com/smilefufu/crabot/actions/runs/41597272102) 全部 101 项及官方 CLI 本地 hooks 通过，构建与生产依赖冻结安装通过。目标电脑尚未部署修复，首次 TLS ECONNRESET 的来源尚未确认。
 
 ### 伙伴视角导航、首次使用与品牌：实现完成，待 PR 审查
 
