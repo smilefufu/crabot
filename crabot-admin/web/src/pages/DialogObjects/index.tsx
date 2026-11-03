@@ -1,6 +1,6 @@
 import { storagePermissionFromFields } from '../../components/storage-permission-form'
 import { StoragePermissionEditor } from '../../components/StoragePermissionEditor'
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Button } from '../../components/Common/Button'
 import { Drawer } from '../../components/Common/Drawer'
 import { Input } from '../../components/Common/Input'
@@ -335,7 +335,7 @@ export const DialogObjectsPage: React.FC = () => {
     [friends]
   )
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (domain !== 'friends' || !selectedItem) return
     const friend = selectedItem as DialogObjectFriend
     setEditName(friend.display_name)
