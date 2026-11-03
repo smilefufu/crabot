@@ -19,12 +19,13 @@ try {
   const exited = once(writer, 'exit')
   const ready = await Promise.race([once(writer, 'message'), exited.then(() => { throw new Error('writer exited before credentials were ready') }), new Promise((_, reject) => setTimeout(() => reject(new Error('writer deadline')), 10000).unref())])
   assert.deepEqual(ready[0], { ready: true, mapped: true })
-  const addon = path.join(root, 'crabot-native/build/Release/crabot-native.node')
+  await fs.rename(path.join(root, 'crabot-native'), path.join(root, 'native-moved'))
+  const addon = path.join(root, 'native-moved/build/Release/crabot-native.node')
   let code
   await assert.rejects(fs.unlink(addon), error => { code=error.code; return ['EACCES','EPERM'].includes(code) })
   writer.send('exit'); assert.deepEqual(await exited, [0, null])
   await fs.unlink(addon)
-  console.log(JSON.stringify({ actual_credentials_loads_target_addon: true, same_process_replacement_rejected: code, finite_writer_exit_releases_addon: true }))
+  console.log(JSON.stringify({ actual_credentials_loads_target_addon: true, loaded_addon_directory_can_rename: true, same_process_replacement_rejected: code, finite_writer_exit_releases_addon: true }))
 } finally {
   if (writer && writer.exitCode === null) { writer.kill(); await once(writer, 'exit') }
   await fs.rm(root, { recursive: true, force: true })
