@@ -89,6 +89,7 @@ describe('workspace planned execution module stops', () => {
     const f = await fixture(true), legacy = vi.spyOn(f.manager, 'terminateChildTree')
     try {
       const admin = f.manager.processes.get('admin-web')
+      console.log('WORKSPACE_STOP_FIXTURE_SCOPE ' + JSON.stringify(f.scope.map((item: any) => ({ module: item.module_id, processes: item.processes.map((entry: any) => ({ pid: entry.pid, parent: entry.parent, executable: path.basename(entry.executable) })) }))))
       const result = await f.manager.requestWorkspaceRelocationModuleStops(JSON.parse(canonicalizeJson(f.scope)), f.journal)
       expect(result).toEqual({ dispatch: 'dispatch', results: [
         { module_id: 'fixture-memory', runtime_id: f.scope[0].runtime_id, shutdown: 'submitted', status: 'known_scope_exited' },
