@@ -30,7 +30,7 @@ describe('ModuleList (P6-D)', () => {
 
   it('唯一 live agent 是静态 core；legacy 以 unsupported 摘要呈现且不含 raw', async () => {
     render(<MemoryRouter><ModuleList /></MemoryRouter>)
-    await waitFor(() => expect(screen.getByText('Crabot Core Agent')).toBeTruthy())
+    await waitFor(() => expect(screen.getByText('CRABOT Core Agent')).toBeTruthy())
     expect(screen.getByText(/不受支持的 legacy.*front-agent/)).toBeTruthy()
     // 列表页不出现动态 create/install 控件
     expect(screen.queryByText(/安装 Agent/i)).toBeNull()

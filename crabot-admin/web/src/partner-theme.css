@@ -1,0 +1,87 @@
+/* Shared companion surfaces in the desktop shell and Web Admin. */
+:root, :root.is-desktop {
+  color-scheme: light dark;
+  --font-display: -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI", sans-serif;
+  --font-body: var(--font-display);
+  --primary: light-dark(#a64c23, #e8a077);
+  --primary-light: var(--primary);
+  --primary-dim: light-dark(#8f3d19, #dda17f);
+  --primary-subtle: light-dark(#f0ded0, #38271f);
+  --text-on-primary: light-dark(#fffefa, #211b17);
+  --bg-primary: light-dark(#faf9f6, #101013);
+  --bg-secondary: light-dark(#f1eee8, #17171b);
+  --bg-tertiary: light-dark(#f5f1eb, #252329);
+  --surface: light-dark(#fffefa, #1e1e23);
+  --surface-raised: var(--surface);
+  --surface-elevated: var(--surface);
+  --surface-modal: var(--surface);
+  --surface-hover: var(--bg-tertiary);
+  --text-primary: light-dark(#27231e, #eee9e1);
+  --text-secondary: light-dark(#72695e, #aaa198);
+  --text-muted: var(--text-secondary);
+  --border: light-dark(#ddd6cc, #343139);
+  --border-color: var(--border);
+  --border-highlight: var(--border);
+  --sidebar-width: 230px;
+}
+.sidebar { background: var(--bg-secondary); }
+.partner-identity { display: flex; align-items: center; gap: 10px; text-decoration: none; color: var(--text-primary); }
+.partner-identity strong { font-size: 17px; font-weight: 600; }
+.partner-identity .sidebar-tagline, .partner-identity small { display: block; }
+.partner-identity small { font-size: 11px; color: var(--text-secondary); margin-top: 3px; }
+.crabot-logo { object-fit: contain; image-rendering: pixelated; flex-shrink: 0; }
+.sidebar-nav { display: flex; flex-direction: column; flex: 1; gap: 18px; }
+.sidebar-section-label { font: 11px var(--font-body); letter-spacing: .04em; }
+.sidebar-nav-item, .is-desktop .sidebar-nav-item { border: 0; border-radius: 8px; margin: 3px 12px; padding: 10px; gap: 10px; }
+.sidebar-nav-item.active { background: var(--primary-subtle); color: var(--primary); }
+.partner-nav-symbol { width: 19px; font-size: 20px; line-height: 1; flex-shrink: 0; text-align: center; }
+.sidebar-nav-label { min-width: 0; }
+.sidebar-nav-label small { display: block; color: var(--text-secondary); font-size: 11px; font-weight: 400; margin-top: 3px; white-space: normal; line-height: 1.5; }
+.partner-settings { margin-top: auto; padding-top: 10px; border-top: 1px solid var(--border); }
+.partner-breadcrumb { font-size: 12px; color: var(--text-secondary); margin-bottom: 12px; }
+.section-navigation { margin-bottom: 24px; }
+.partner-tabs { display: flex; flex-wrap: wrap; gap: 22px; border-bottom: 1px solid var(--border); }
+.partner-tabs a { color: var(--text-secondary); text-decoration: none; padding: 8px 0; border-bottom: 2px solid transparent; }
+.partner-tabs a.active { color: var(--primary); border-color: var(--primary); }
+.partner-advanced { margin-top: 12px; color: var(--text-secondary); font-size: 12px; }
+.partner-advanced summary { cursor: pointer; }
+.partner-advanced nav { display: flex; flex-wrap: wrap; gap: 16px; padding: 12px 0; }
+.partner-advanced a { color: var(--primary); }
+.vendor-choice-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 16px 0; }
+.vendor-choice { display: flex; align-items: center; gap: 12px; text-align: left; padding: 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); color: var(--text-primary); font: inherit; cursor: pointer; min-width: 0; }
+.vendor-choice[aria-pressed="true"] { border-color: var(--primary); background: var(--primary-subtle); }
+.vendor-choice span { min-width: 0; overflow-wrap: anywhere; }
+.vendor-choice small { display: block; color: var(--text-secondary); font-size: 12px; margin-top: 4px; }
+.vendor-logo { width: 40px; height: 40px; padding: 7px; background: #fff; border-radius: 9px; object-fit: contain; flex-shrink: 0; }
+.vendor-wordmark { display: grid; place-items: center; color: #27231e; font-size: 10px; padding: 0; }
+.model-capabilities { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.model-capabilities span { padding: 3px 8px; background: var(--primary-subtle); color: var(--primary); border-radius: 5px; font-size: 12px; }
+.partner-link { background: transparent; border: 0; color: var(--primary); padding: 8px 0; font: inherit; cursor: pointer; }
+.provider-list-area > a, .desktop-welcome-links a { color: var(--primary); text-decoration: none; display: inline-block; margin-top: 10px; }
+.provider-card-header, .provider-card-name, .provider-list-section-header { flex-wrap: wrap; gap: 10px; }
+.provider-card .badge, .provider-card-default-tag { white-space: nowrap; }
+.provider-card-meta { overflow-wrap: anywhere; }
+.model-table-col-type { white-space: normal; padding-right: 8px; }
+.model-setup-brand { display: flex; align-items: center; gap: 12px; margin-bottom: 24px; color: var(--text-primary); }
+.model-setup-brand strong { font-size: 18px; }
+.model-setup-brand small { display: block; color: var(--text-secondary); }
+.desktop-welcome-card { max-width: 780px; }
+.desktop-welcome-steps { flex-wrap: wrap; }
+.desktop-welcome-links, .desktop-welcome-actions { flex-wrap: wrap; }
+.setup-read-error { border: 1px solid var(--border); padding: 16px; border-radius: 10px; }
+@media (max-width: 768px) {
+  .app-layout { display: flex; flex-direction: column; }
+  .sidebar { display: flex; position: relative; width: 100%; height: auto; border-right: 0; border-bottom: 1px solid var(--border); }
+  .sidebar-brand { padding: 14px 18px; }
+  .sidebar-nav { display: flex; flex-direction: row; flex-wrap: wrap; gap: 0; padding: 0 8px 12px; }
+  .sidebar-section { display: flex; flex-wrap: wrap; margin: 0; }
+  .sidebar-section-label, .sidebar-nav-label small, .sidebar-footer { display: none; }
+  .sidebar-nav-item, .is-desktop .sidebar-nav-item { margin: 2px; padding: 9px; }
+  .partner-settings { margin: 0; padding: 0; border: 0; }
+  .app-layout__content { margin-left: 0; width: 100%; }
+  .app-header { position: static; padding: 12px 16px; flex-wrap: wrap; gap: 10px; }
+  .app-layout__main { padding: 18px 16px; }
+  .desktop-welcome { padding: 24px 16px; }
+  .desktop-welcome-steps { gap: 16px; }
+  .vendor-choice-grid { grid-template-columns: 1fr; }
+}

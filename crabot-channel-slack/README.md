@@ -13,7 +13,7 @@ CLI 仅在接入阶段运行。交接前确认 CLI/hook 完全退出，完成后
 ## 手动创建 App 与接入
 
 1. 在 [Slack Apps](https://api.slack.com/apps) 创建内部 App，开启 Socket Mode。创建 App-Level Token，授权 `connections:write`，得到 `xapp-…`。
-2. 添加 Bot scopes：`chat:write`、`channels:history`、`groups:history`、`channels:read`、`groups:read`、`im:history`、`im:read`、`im:write`、`users:read`；安装到自己的 workspace，取得 `xoxb-…` Bot Token。增改 scopes 后重新安装授权。
+2. 添加 Bot scopes：`chat:write`、`channels:history`、`groups:history`、`channels:read`、`groups:read`、`im:history`、`im:read`、`im:write`、`users:read`、`files:read`、`files:write`；安装到自己的 workspace，取得 `xoxb-…` Bot Token。增改 scopes 后重新安装授权。
 3. Event Subscriptions 订阅 Bot events：`message.channels`、`message.groups`、`message.im`。不能仅订阅 `app_mention`，否则关闭 @过滤后也收不到普通群消息；额外订阅它会按 conversation + ts 去重。
 4. App Home 开启 Messages Tab 并允许用户向 App 发消息；邀请 Bot 加入目标群，私有群也须邀请。
 5. Admin 的 Channel 页选择 Slack，新建实例，填写两种 Token，启动。Master/Friend 身份在 Admin 绑定真实 Slack user ID，Channel 不自动认主。
@@ -26,11 +26,15 @@ CLI 仅在接入阶段运行。交接前确认 CLI/hook 完全退出，完成后
 - 私聊人类新消息无需 @，继续由 Admin 按 Friend 规则鉴权。
 - 群 `group.only_respond_to_mentions` 默认 `true`，只转发新消息中的真实 @Bot；`false` 转发收到的人类新消息。Admin 修改立即作用于后续消息，重启保留。代码块、行内代码、引用里的旧 @ 不触发。
 - thread 消息仍属于原群或 DM，遵循同样的 @过滤；只保存 `features.thread_id = thread_ts`。Bot 历史发言不产生免 @接话资格。回复一律发到原会话主界面；显式 thread/quote/reply/换原生目标请求返回不支持。
-- 出站纯文本/mention；超过 4000 字符顺序拆分，每个会话约每秒一条，限流后按 Retry-After 推迟后续发送。部分成功的真实 IDs 会随错误返回并记入缓存；结果未知不自动重发。
-- 入站附件保留文字/文件名及“未读取”占位，不下载，不支持出站文件/图片、reaction、交互卡片或搜索。
-- `get_history/get_message` 是本地交互缓存：只有通过过滤的入站和确认成功的出站，默认 30 天/每会话 1000 条，不是完整 Slack 群史/thread。过期或未缓存消息明确返回不可用。缓存清理按写入/查询和每小时执行。
+- 出站文字使用原生 Markdown block，支持标准加粗、列表、链接、代码和表格，真实 mention 独立保留。按 Markdown 结构拆分到每条 4000 字符以内，表格续段重复表头、代码续段补围栏，fallback 和缓存保留原文；极端超长单元按字面保留。每个会话约每秒一条，限流后按 Retry-After 推迟后续发送。部分成功的真实 IDs 会随错误返回并记入缓存；结果未知不自动重发。
+- 入站／历史保留所有图片、音频、视频、文档和其他文件的元数据与获取引用，不提前下载。`fetch_image` 默认原图，多图可按 `attachment_id` 选择；JPEG／PNG／GIF／WebP 单图最多 20 MiB，其他格式可作为原文件下载。`fetch_media` 沿用附件工具链，单文件最多 100 MiB，已知至少 10 MiB 的文件后台下载后通知原会话；媒体文件按 7 天 TTL 清理，引用持久化后可重取。音视频不自动转写或转码。
+- 支持图片／文件出站：先验证所有来源，发送说明文字，再依序上传和分享至原会话；确认该会话真实消息 ts 才算送达。错误保留 `sent_platform_message_ids`、`uploaded_file_ids` 和 `delivery_unknown`，不把上传成功冒充分享成功。单个媒体获取／上传流程限时 120 秒；停止时取消本实例传输。私有文件下载仅向受信 Slack 文件主机附凭据，所有阶段遵循当前网络代理并校验 TLS。不支持 reaction、交互卡片或搜索。
+- 群 `get_history` 主动查询 Slack 当前可读的频道主聊天，包含 Bot 入群前和未 @Bot 的人类／Bot 消息；不受本地缓存命中、容量或 @开关限制，不展开完整 thread。支持日期、关键词、最新 N 条及分页；Channel 内兼容工具的 after/before→start/end，范围为 [start,end)。每次最多读取 20 页、每页请求最多 50 条，无法完成时提示缩小范围，失败不返回缓存片段。查询不回填缓存、不将旧消息重新入站。
+- DM `get_history` 和所有 `get_message` 仍查询本地交互缓存：只有通过过滤的入站和确认成功的出站，默认 30 天/每会话 1000 条；远端历史的 ID 不保证能用 `get_message` 重读，未缓存不代表平台消息不存在。缓存清理按写入/查询和每小时执行。缺 history scope 或 Bot 不在频道时明确报错；平台历史受限、已删除或超过平台保留期的消息不保证可读。
 - 联系人/群/群成员使用平台完整分页；缺权限返回错误。只枚举 Bot 已加入的群；成员 count 取实际枚举全集，角色保守返回 `member`，不把 workspace 管理员误标为群管理员。
 - 实例数据存放于 Admin 注入的 `DATA_DIR`，不硬编码机器路径。`installation.json` 防止将同一实例切到另一安装，换 workspace/Bot 请新建实例。
+
+旧 App 无需重建渠道：在启动日志给出的原 App `OAuth & Permissions` 页面补 `files:read`／`files:write`，执行 **Reinstall to Workspace**，再按需在 Admin 更新 Bot Token 并重启。无法确认 scope 时会如实提示；媒体权限不足不会关闭正常文字服务。私有外部云盘仍需其自身授权，没有公开文件实体时请提供原文件。
 
 ## 配置与持久化
 
@@ -47,5 +51,7 @@ Token 查询掩码 `***` 不覆盖真值。模块按 base-protocol 先完整校�
 ## 本地验证
 
 使用仓库指定的 pnpm 和 Node 22：先在 `crabot-shared` 执行 `corepack pnpm install --frozen-lockfile && corepack pnpm run build`，再到本目录执行 `corepack pnpm install --frozen-lockfile && corepack pnpm run build && corepack pnpm test`。Admin 的 `src/channel-manager.slack.test.ts` 验证真实本地 HTTP RPC 保存与重启。
+
+`patches/@slack__socket-mode@3.1.0.patch` 由 pnpm 安装时应用：修正 SDK 重连计时器遗漏 Promise rejection 的问题，已建立连接后的网络请求失败继续走 SDK 原有重连延迟；初次启动的请求预算和不可恢复的凭据错误保持原处理。日志只记录错误码和脱敏代理地址。升级 SDK 时须重跑子进程退出、HTTPS/WSS 代理及断线恢复测试，并核对补丁是否仍需保留。
 
 自动化使用 fake Slack 边界与临时实例目录，不访问真实 workspace、不调用模型。断线期间 Slack 未送达消息、ACK 后进程崩溃等不承诺完整补送或端到端恰好一次。上线前仍须用真实 App 验证 Token 配对、scope、DM/公开群/私有群和实际 Agent 消费及 Slack 投递。

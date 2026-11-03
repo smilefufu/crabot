@@ -32,7 +32,7 @@ function relativeTime(iso: string): string {
 
 function implementationLabel(worker: LedgerWorker): string {
   if (worker.legacy_source) return '旧版'
-  const implementation = worker.incarnations.at(-1)?.impl
+  const implementation = worker.incarnations.slice(-1)[0]?.impl
   return implementation ? IMPLEMENTATION_LABEL[implementation] ?? implementation : '—'
 }
 

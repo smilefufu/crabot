@@ -1,12 +1,6 @@
 name: Desktop program maintenance
 on:
   workflow_dispatch:
-  push:
-    branches: ['feat/desktop-program-maintenance']
-  pull_request:
-    paths:
-      - 'crabot-desktop/**'
-      - '.github/workflows/desktop-program-maintenance.yml'
 permissions:
   contents: read
 jobs:

@@ -1,0 +1,61 @@
+{
+  "date": "2026-11-02",
+  "scope": "Confirmed natural-turn ingress/cancellation isolation, compatible wire9; no deployment or device/model acceptance",
+  "baseline_commit": "b7f4137c",
+  "contract": "protocol-voice sections 5 and 8",
+  "product_source_sha256": "c5f8948d035fb0ca0bf3f7fabe1d38a083ccf6591050abcdc6ee8b7af68d6b05",
+  "tests_source_sha256": "ece5bd6da0316c97f69b0aaad6873cf5da7a5da42bea8f915f7cf1f77bfd3509",
+  "regressions": [
+    {
+      "case": "cancelled durable admission response blocks next ready",
+      "baseline": "failed before fix",
+      "invariant": "old and new messages remain durably accepted, no Worker cancellation"
+    },
+    {
+      "case": "cancel while initial input configuration is pending",
+      "baseline": "old turn_ready returned instead of new",
+      "invariant": "exact preparation object and connection checked before applying config/creating input"
+    },
+    {
+      "case": "old status query holds new input",
+      "baseline": "failed before fix",
+      "invariant": "read completion belongs to queried ID, retired errors cannot close a successor"
+    },
+    {
+      "case": "same-callback PCM/cancel/new-start and start/cancel/new-start",
+      "baseline": "both failed on fixed main with identical corrected foreground fixture",
+      "invariant": "ready PCM is validated synchronously; start/end reserve exact ownership before asynchronous work"
+    }
+  ],
+  "test_fixture_audit": "Direct Receiver callback tests must wait for the actual foreground heartbeat. Initial fixture omitted this in one case; fixed before the final old-main comparison. No product timeout/threshold changed.",
+  "verification": {
+    "voice_channel": {
+      "files": 9,
+      "tests": 55,
+      "failures": 0
+    },
+    "shared_unchanged_voice_audio_baseline": {
+      "tests": 17,
+      "failures": 0
+    },
+    "shared_build": "passed",
+    "channel_build": "passed",
+    "cycles": 30,
+    "durably_accepted_turns_in_cycles": 60,
+    "pending_inbox_turns_after_cancellation": 60,
+    "asr_calls_in_cycles": 180
+  },
+  "failure_cleanup": [
+    "Cancelled terminal wait removes its AbortSignal listener; dispatched Admin request retains its original 15-second RPC lifetime and durable ownership.",
+    "Only the exact input-preparation object may apply a fetched config or send turn_ready; cancelled/stale errors do not mutate successors.",
+    "Binary data is wiped after validation; bad ID/sequence/size and audio before turn_ready still reject. No new audio queue.",
+    "Queries are read-only, keep original RPC timeouts, and never create/retry business work. Current-query errors still reject the current interaction."
+  ],
+  "unchanged": [
+    "wire version 9 and public fields",
+    "identity/permission/ASR segmentation and whole-message admission",
+    "Worker execution and completion reporting",
+    "prompt text and model thresholds/timeouts",
+    "installed backend/APK/ADB and real business data"
+  ]
+}

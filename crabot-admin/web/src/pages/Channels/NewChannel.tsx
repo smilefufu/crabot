@@ -64,7 +64,7 @@ export const NewChannel: React.FC = () => {
       <div style={{ padding: '1.5rem 2rem', maxWidth: 900, margin: '0 auto' }}>
         <div style={{ marginBottom: '1.5rem' }}>
           <h1 style={{ fontFamily: 'var(--font-display)', fontSize: '1.375rem', fontWeight: 700, color: 'var(--text-primary)' }}>
-            新建 Channel
+            新增聊天方式
           </h1>
           <p style={{ fontSize: '0.8125rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
             选择平台 + 入口方式。"推荐"标签的入口由模块自带交互式流程（如扫码授权），手动填写适合已有凭证的场景。
@@ -132,7 +132,7 @@ export const NewChannel: React.FC = () => {
               textDecoration: 'underline',
             }}
           >
-            ← 返回 Channel 列表
+            ← 返回 聊天方式列表
           </button>
         </div>
       </div>

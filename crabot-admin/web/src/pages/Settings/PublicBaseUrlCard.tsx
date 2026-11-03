@@ -60,7 +60,7 @@ export const PublicBaseUrlCard: React.FC = () => {
     <Card title="对外访问地址">
       <div className="public-base-url">
         <p className="settings-card__hint">
-          别人（包括非本机的人）打开临时页面时用的对外地址。Crabot 会用它拼出页面链接发给对方。留空则退化为本机地址，仅本机可访问。
+          别人（包括非本机的人）打开临时页面时用的对外地址。CRABOT 会用它拼出页面链接发给对方。留空则退化为本机地址，仅本机可访问。
         </p>
 
         <div className="public-base-url__row">

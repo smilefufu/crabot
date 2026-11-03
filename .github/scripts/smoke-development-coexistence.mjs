@@ -110,10 +110,29 @@ export async function verifyDevelopmentCoexistence({ inspectRelease, releaseCli 
     gui.stdout.on('data', consume)
     gui.stderr.on('data', chunk => { output = (output + chunk.toString()).slice(-128_000) })
     gui.on('error', error => { launchError = error })
+    let diagnosed = false
+    const diagnoseEntry = async () => {
+      if (diagnosed) return
+      diagnosed = true
+      try {
+        const require = createRequire(path.join(root, 'package.json')), identity = require('./scripts/lib/process-identity.cjs'), entry = require('./scripts/lib/desktop-entry.cjs')
+        const peer = identity.inspectProcess(gui.pid), policy = entry.loadDesktopEntry(root)
+        const record = JSON.parse(await fs.readFile(path.join(root, 'data/instance-runtime.json'), 'utf8'))
+        const file = path.join(root, 'data/desktop-session.json'), discovery = JSON.parse(await fs.readFile(file, 'utf8'))
+        console.log('CRABOT_DEVELOPMENT_ENTRY_DIAGNOSTIC ' + JSON.stringify({ peer, policy, args: identity.inspectProcessArguments(gui.pid), verified: entry.verifyDesktopEntry(peer, policy),
+          runtime: { install_root: record.install_root, controller: record.controller, mm: record.mm },
+          server: { recorded: discovery.server, actual: identity.inspectProcess(discovery.server.pid), args: identity.inspectProcessArguments(discovery.server.pid), mode: (await fs.stat(file)).mode & 0o777 },
+          source_environment: { CRABOT_DEV: env.CRABOT_DEV, CRABOT_PRODUCT_REQUIRED: env.CRABOT_PRODUCT_REQUIRED, DATA_DIR: env.DATA_DIR } }))
+      } catch (error) { console.log('CRABOT_DEVELOPMENT_ENTRY_DIAGNOSTIC ' + JSON.stringify({ unavailable: error.message })) }
+    }
     const waitForSourceGui = async (phase, after = 0) => {
       const deadline = Date.now() + 180_000
       while (phases.indexOf(phase, after) === -1) {
-        if (launchError || gui.exitCode !== null || gui.signalCode !== null || Date.now() >= deadline) throw new Error('Source GUI did not reach ' + phase + '\n' + output)
+        if (phases.includes('disconnected')) await diagnoseEntry()
+        if (launchError || gui.exitCode !== null || gui.signalCode !== null || Date.now() >= deadline) {
+          await diagnoseEntry()
+          throw new Error('Source GUI did not reach ' + phase + '\n' + output)
+        }
         await new Promise(done => setTimeout(done, 100))
       }
       return phases.indexOf(phase, after) + 1

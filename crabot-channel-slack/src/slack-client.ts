@@ -5,12 +5,23 @@ import type { SlackApi, SlackEnvelope, SlackResult } from './types.js'
 
 // Do not let SDK logs expose tokens, websocket URLs, or raw message payloads.
 const logger = { debug() {}, info() {}, warn() {}, error() {}, setLevel() {}, getLevel: () => LogLevel.ERROR, setName() {} }
+function logConnectionError(error: unknown) {
+  const codes: string[] = []
+  let cause = error as { code?: unknown; original?: unknown; cause?: unknown } | undefined
+  for (let depth = 0; cause && depth < 5; depth++) {
+    if (typeof cause.code === 'string' && /^(?:[A-Z][A-Z0-9_]+|slack_[a-z_]+)$/.test(cause.code)) codes.push(cause.code)
+    cause = (cause.original ?? cause.cause) as typeof cause
+  }
+  let proxy = 'direct'
+  try { const url = proxyManager.getProxyUrl(); if (url) proxy = new URL(url).origin } catch { proxy = 'invalid' }
+  console.error(`[Slack] Socket connection failed: code=${codes.join('>') || 'unknown'}, proxy=${proxy}`)
+}
 export function platformError(error: unknown, fallback = 'CHANNEL_SEND_FAILED'): RpcError {
   const e = error as { code?: string; data?: { error?: string; needed?: string }; retryAfter?: number }
   const reason = e?.data?.error
   if (reason === 'invalid_auth' || reason === 'not_authed' || reason === 'token_revoked' || reason === 'account_inactive') return new RpcError('UNAUTHORIZED', 'Slack 凭据失效，请在 Admin 更新并重启模块')
-  if (reason === 'missing_scope' || reason === 'no_permission' || reason === 'not_allowed_token_type' || reason === 'restricted_action' || reason === 'not_in_channel') return new RpcError('PERMISSION_DENIED', 'Slack 应用没有执行此操作的权限', { ...(e.data?.needed ? { missing_scope: e.data.needed } : {}) })
-  if (reason === 'user_not_found' || reason === 'channel_not_found') return new RpcError('NOT_FOUND', 'Slack 用户或会话不可见/不存在')
+  if (reason === 'missing_scope' || reason === 'no_permission' || reason === 'not_allowed_token_type' || reason === 'restricted_action' || reason === 'not_in_channel' || reason === 'access_denied' || reason === 'ekm_access_denied') return new RpcError('PERMISSION_DENIED', 'Slack 应用没有执行此操作的权限', { ...(e.data?.needed ? { missing_scope: e.data.needed } : {}) })
+  if (reason === 'user_not_found' || reason === 'channel_not_found' || reason === 'file_not_found' || reason === 'file_deleted') return new RpcError('NOT_FOUND', 'Slack 用户、会话或文件不可见/不存在')
   if (e?.code === 'slack_webapi_rate_limited_error' || reason === 'ratelimited') return new RpcError('RATE_LIMITED', 'Slack 限流，请稍后重试', { retry_after: e.retryAfter })
   // Unknown write outcomes must not expose network strings that upstream retries automatically.
   return new RpcError(fallback, 'Slack 操作失败；发送结果可能未知，请核查后再重试')
@@ -24,7 +35,8 @@ export class SlackClient implements SlackApi {
     this.socket = new SocketModeClient({ appToken, logger, autoReconnectEnabled: true,
       dispatcher: { dispatch: (options, handler) => proxyManager.getDispatcher().dispatch(options, handler) }, clientOptions: { timeout: 15000, retryConfig: { retries: 2 }, rejectRateLimitedCalls: true } })
     this.socket.on('connected', () => { this.connected = true })
-    for (const name of ['disconnected', 'reconnecting', 'error']) this.socket.on(name, () => { this.connected = false })
+    for (const name of ['disconnected', 'reconnecting']) this.socket.on(name, () => { this.connected = false })
+    this.socket.on('error', error => { this.connected = false; logConnectionError(error) })
   }
   async call(method: string, args: Record<string, unknown> = {}): Promise<SlackResult> {
     try { return await this.web.apiCall(method, args) as SlackResult }
@@ -33,7 +45,9 @@ export class SlackClient implements SlackApi {
       if (method === 'chat.postMessage') fallback = 'CHANNEL_SEND_FAILED'
       if (method === 'users.info') fallback = 'CHANNEL_PLATFORM_USER_QUERY_UNAVAILABLE'
       if (method === 'conversations.open') fallback = 'CHANNEL_PRIVATE_SESSION_UNAVAILABLE'
-      throw platformError(error, fallback)
+      const mapped = platformError(error, fallback)
+      if (method.startsWith('files.') && mapped.code === 'PERMISSION_DENIED') throw new RpcError(mapped.code, 'Slack 媒体权限不足；请在原 App OAuth & Permissions 补 files:read/files:write，Reinstall to Workspace 后在 Admin 更新 Bot Token 并重启；无需重建渠道', mapped.details)
+      throw mapped
     }
   }
   async start(onEvent: (body: SlackEnvelope) => Promise<void>) {

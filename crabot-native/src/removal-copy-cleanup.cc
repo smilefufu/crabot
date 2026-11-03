@@ -25,6 +25,7 @@
 #endif
 #endif
 namespace fs = std::filesystem;
+static const char* step = "startup";
 static void Require(bool value) { if (!value) throw std::runtime_error("Private copy cleanup remains unverified"); }
 #ifdef _WIN32
 struct Handle { HANDLE value = INVALID_HANDLE_VALUE; ~Handle() { if (value != INVALID_HANDLE_VALUE && value != nullptr) CloseHandle(value); } };
@@ -158,7 +159,9 @@ static std::vector<Entry> Capture(const fs::path& root, const std::string& volum
 static void Remove(const std::vector<Entry>& entries) {
   for (auto it = entries.rbegin(); it != entries.rend(); ++it) {
     if (!fs::exists(fs::symlink_status(it->file))) continue;
+    step = "captured-file-identity";
     Require(Identity(it->file, it->directory) == it->identity);
+    step = "captured-file-delete";
     Require(fs::remove(it->file));
   }
 }
@@ -188,7 +191,8 @@ int main(int argc, char**) {
 #else
     std::cout << "READY\n" << std::flush;
 #endif
-    parent.Wait(); Require(Identity(root, true, true) == original);
+    step = "parent-exit";
+    parent.Wait(); step = "root-identity"; Require(Identity(root, true, true) == original);
     Remove(programs);
 #ifndef __linux__
     Remove(Capture(root / "profile", volume));
@@ -205,5 +209,7 @@ int main(int argc, char**) {
     Require(fs::remove(self));
 #endif
     Require(fs::remove(root)); return 0;
-  } catch (...) { std::cerr << "CRABOT_PRIVATE_COPY_RETAINED\n"; return 1; }
+  } catch (const fs::filesystem_error& error) {
+    std::cerr << "CRABOT_PRIVATE_COPY_RETAINED " << step << " code=" << error.code().value() << '\n'; return 1;
+  } catch (...) { std::cerr << "CRABOT_PRIVATE_COPY_RETAINED " << step << '\n'; return 1; }
 }

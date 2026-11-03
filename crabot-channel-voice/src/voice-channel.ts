@@ -19,9 +19,20 @@ interface Connection {
   speechEnabled: boolean; activity: VoiceOutputState['activity']
   microphone: VoiceTerminalState['microphone']; playback: VoiceTerminalState['playback']
   appliedRevision: number; confirmedRevision: number; helloSent: boolean
-  input?: VoiceInputBuffer; processing?: AbortController; processingTurn?: string
+  input?: VoiceInputBuffer; starting?: { turnId: string }; processing?: AbortController; processingTurn?: string
 }
 interface ReplySlot { context: VoiceReplyContext; digest: string; responseId?: string }
+/** Cancel only this terminal's wait. A dispatched admission retains its durable Admin ownership and original RPC timeout. */
+async function waitForTurn<T>(request: Promise<T>, signal: AbortSignal): Promise<T> {
+  let abort!: () => void
+  const cancelled = new Promise<never>((_, reject) => {
+    abort = () => reject(signal.reason)
+    signal.addEventListener('abort', abort, { once: true })
+    if (signal.aborted) abort()
+  })
+  try { return await Promise.race([request, cancelled]) }
+  finally { signal.removeEventListener('abort', abort) }
+}
 function failed(message: string): never { throw new RpcError('CHANNEL_SEND_FAILED', message) }
 function compatible(models: { segmentation: string; embedding: string }): boolean {
   return models.segmentation === VOICE_MODEL_VERSIONS.segmentation && models.embedding === VOICE_MODEL_VERSIONS.embedding
@@ -127,8 +138,10 @@ export class VoiceChannel extends ModuleBase {
     if (!this.adminPort) { const modules = await this.rpcClient.resolve({ module_type: 'admin' }, this.config.moduleId); if (!modules[0]) throw new Error('Admin is unavailable'); this.adminPort = modules[0].port }
     return this.rpcClient.callSensitive(this.adminPort, method, params, this.config.moduleId, { authorizationBearer: this.runtimeBearer, timeoutMs: 15000 })
   }
-  private async refreshConfig(): Promise<void> {
-    this.settings = await this.admin('get_voice_config', { channel_id: this.config.moduleId })
+  private async refreshConfig(current: () => boolean = () => true): Promise<void> {
+    const settings: GetVoiceConfigResult = await this.admin('get_voice_config', { channel_id: this.config.moduleId })
+    if (!current()) return
+    this.settings = settings
     if (this.pairing && (this.pairing.url !== this.settings.terminal_entry?.url || this.pairing.tls_fingerprint_sha256 !== this.settings.terminal_entry?.tls_fingerprint_sha256)) {
       this.pairing.socket?.terminate(); this.pairing = undefined
     }
@@ -325,6 +338,14 @@ export class VoiceChannel extends ModuleBase {
       try {
         const data = Buffer.isBuffer(raw) ? raw : Array.isArray(raw) ? Buffer.concat(raw) : Buffer.from(raw)
         const control = binary ? undefined : parseVoiceClientControl(data.toString('utf8'))
+        if (binary) {
+          try {
+            const c = this.connection
+            if (!authenticated || !c || c.socket !== socket || socket.readyState !== WebSocket.OPEN || !c.input) throw new Error('No ready turn')
+            c.input.append(data)
+          } finally { data.fill(0) }
+          return
+        }
         if (control?.type === 'heartbeat' && authenticated) {
           const c = this.connection; if (!c || c.socket !== socket) throw new Error('Connection changed')
           const wasReady = c.foreground && c.speechEnabled && c.activity === 'idle'
@@ -336,12 +357,25 @@ export class VoiceChannel extends ModuleBase {
           this.heartbeatSync(); return
         }
         if (control?.type === 'cancel' && authenticated) {
+          const c = this.connection; if (!c || c.socket !== socket) return
           if (control.playback_id && control.playback_id !== this.playback?.id && control.playback_id !== this.reservation?.id) return
-          if (control.turn_id && control.turn_id !== this.connection?.input?.turnId && control.turn_id !== this.connection?.processingTurn && control.turn_id !== this.reply?.context.turn_id) return
+          if (control.turn_id && !this.ownsTurn(c, control.turn_id)) return
           this.cancelInteraction(); return
         }
+        if ((control?.type === 'turn_start' || control?.type === 'turn_end') && authenticated) {
+          const c = this.connection; if (!c || c.socket !== socket || socket.readyState !== WebSocket.OPEN) throw new Error('Connection changed')
+          void this.control(c, control).catch(reject)
+          return
+        }
+        if (control?.type === 'turn_query' && authenticated) {
+          const c = this.connection; if (!c || c.socket !== socket) throw new Error('Connection changed')
+          const current = () => this.ownsTurn(c, control.turn_id)
+          const wasCurrent = current()
+          void this.queryTurn(c, control).catch(error => { if (!wasCurrent || current()) reject(error) })
+          return
+        }
         if (control?.type === 'playback_ready' && authenticated) { if (this.reservation?.connection.socket === socket && this.reservation.id === control.playback_id) this.reservation.finish(control.accepted); return }
-        if (control?.type === 'playback' && authenticated) { this.playbackReceipt(control); return }
+        if (control?.type === 'playback' && authenticated) { if (this.connection?.socket === socket) this.playbackReceipt(control); return }
         if (control?.type === 'playback_progress' && authenticated) { if (this.connection?.socket === socket) this.playbacks.get(control.playback_id)?.progress(control.played_samples); return }
         queue = queue.then(async () => {
           if (!authenticated) {
@@ -360,11 +394,13 @@ export class VoiceChannel extends ModuleBase {
             authenticated = true; clearTimeout(handshake); await this.sync(); this.sendHello(this.connection); return
           }
           const c = this.connection; if (!c || c.socket !== socket) throw new Error('Connection changed')
-          if (binary) { if (!c.input) throw new Error('No ready turn'); c.input.append(data); data.fill(0); return }
           await this.control(c, control!)
         }).catch(reject)
       } catch (error) { reject(error) }
     })
+  }
+  private ownsTurn(c: Connection, id: string): boolean {
+    return this.connection === c && (c.starting?.turnId === id || c.input?.turnId === id || c.processingTurn === id || this.reply?.context.turn_id === id)
   }
   private async control(c: Connection, control: VoiceClientControl): Promise<void> {
     switch (control.type) {
@@ -383,19 +419,26 @@ export class VoiceChannel extends ModuleBase {
         if (c === this.connection && this.settings.owner_activation) this.send(c.socket, { type: 'owner_activation', activation: this.settings.owner_activation })
         return
       }
-      case 'turn_start':
-        if (!c.foreground || c.input || c.processing || this.playback || this.reservation) throw new Error('Voice is not ready')
-        this.reply = undefined; await this.refreshConfig(); await this.sync()
-        if (c.confirmedRevision !== this.settings.enrollment_revision || this.settings.pending_enrollment) { this.send(c.socket, { type: 'error', code: 'VOICE_CATALOG_NOT_READY', message: '请等待声纹目录同步或完成当前登记' }); return }
-        if (this.settings.owner_activation_required && this.settings.owner_activation?.status !== 'completed') { this.send(c.socket, { type: 'error', code: 'VOICE_OWNER_NOT_READY', message: '请先完成设备所有者关联' }); return }
-        if (this.settings.setup_status !== 'complete') { this.send(c.socket, { type: 'error', code: 'VOICE_REJECTED', message: '请先完成语音创建向导' }); return }
-        if (!this.settings.asr_connection || !this.settings.tts_connection || !this.connection || this.connection !== c || !c.foreground) throw new Error('Voice configuration unavailable')
-        c.input = new VoiceInputBuffer(control.turn_id); this.send(c.socket, { type: 'turn_ready', turn_id: control.turn_id }); return
-      case 'turn_end': await this.completeTurn(c, control); return
-      case 'turn_query': {
-        const status = await this.admin<{ channel_id: string; turn_id: string; payload_sha256: string }, VoiceTurnResult>('get_voice_turn_status', { channel_id: this.config.moduleId, turn_id: control.turn_id, payload_sha256: control.payload_sha256 })
-        this.send(c.socket, { type: 'turn_status', turn_id: control.turn_id, ...status }); return
+      case 'turn_start': {
+        if (!c.foreground || !c.speechEnabled || c.starting || c.input || c.processing || this.playback || this.reservation) throw new Error('Voice is not ready')
+        const starting = { turnId: control.turn_id }; c.starting = starting; this.reply = undefined
+        const current = () => this.connection === c && c.starting === starting
+        try {
+          await this.refreshConfig(current)
+          if (!current()) return
+          await this.sync()
+          if (!current()) return
+          if (c.confirmedRevision !== this.settings.enrollment_revision || this.settings.pending_enrollment) { this.send(c.socket, { type: 'error', code: 'VOICE_CATALOG_NOT_READY', message: '请等待声纹目录同步或完成当前登记' }); return }
+          if (this.settings.owner_activation_required && this.settings.owner_activation?.status !== 'completed') { this.send(c.socket, { type: 'error', code: 'VOICE_OWNER_NOT_READY', message: '请先完成设备所有者关联' }); return }
+          if (this.settings.setup_status !== 'complete') { this.send(c.socket, { type: 'error', code: 'VOICE_REJECTED', message: '请先完成语音创建向导' }); return }
+          if (!this.settings.asr_connection || !this.settings.tts_connection || !c.foreground || !c.speechEnabled) throw new Error('Voice configuration unavailable')
+          c.input = new VoiceInputBuffer(control.turn_id); this.send(c.socket, { type: 'turn_ready', turn_id: control.turn_id })
+        } catch (error) { if (current()) throw error }
+        finally { if (c.starting === starting) c.starting = undefined }
+        return
       }
+      case 'turn_end': await this.completeTurn(c, control); return
+      case 'turn_query': await this.queryTurn(c, control); return
       case 'enrollment_done': {
         if (!c.foreground || control.model_id !== VOICE_MODEL_VERSIONS.embedding) throw new Error('Enrollment acknowledgement mismatch')
         await this.sync({ completed_enrollment: { registration_id: control.registration_id, model_id: control.model_id, enrollment_revision: control.enrollment_revision } }); return
@@ -417,6 +460,10 @@ export class VoiceChannel extends ModuleBase {
       }
       default: throw new Error('Unexpected terminal control')
     }
+  }
+  private async queryTurn(c: Connection, control: Extract<VoiceClientControl, { type: 'turn_query' }>): Promise<void> {
+    const status = await this.admin<{ channel_id: string; turn_id: string; payload_sha256: string }, VoiceTurnResult>('get_voice_turn_status', { channel_id: this.config.moduleId, turn_id: control.turn_id, payload_sha256: control.payload_sha256 })
+    if (this.connection === c) this.send(c.socket, { type: 'turn_status', turn_id: control.turn_id, ...status })
   }
   private async completeTurn(c: Connection, control: Extract<VoiceClientControl, { type: 'turn_end' }>): Promise<void> {
     const input = c.input
@@ -443,18 +490,19 @@ export class VoiceChannel extends ModuleBase {
       const reply = this.reply
       this.replyTimer = setTimeout(() => { if (this.reply === reply) { this.send(c.socket, { type: 'error', code: 'VOICE_REPLY_EXPIRED', message: '本轮回答等待已结束', turn_id: reply.context.turn_id }); this.cancelInteraction() } }, 60000)
       submittedDigest = digest
-      const result = await this.admin<SubmitVoiceTurnParams, VoiceTurnResult>('submit_voice_turn', params)
+      const result = await waitForTurn(this.admin<SubmitVoiceTurnParams, VoiceTurnResult>('submit_voice_turn', params), controller.signal)
       if (result.status === 'rejected' && this.reply?.context.turn_id === control.turn_id) this.reply = undefined
       if (this.connection === c) this.send(c.socket, { type: 'turn_status', turn_id: control.turn_id, ...result, payload_sha256: result.payload_sha256 ?? digest })
     } catch (error) {
+      if (c.processing !== controller) return
       if (!submittedDigest && this.reply?.context.turn_id === control.turn_id) this.reply = undefined
       if (this.connection === c) {
         let result: VoiceTurnResult = { status: 'rejected', reason: error instanceof Error ? error.message : '本轮失败' }
         if (submittedDigest) {
-          try { result = await this.admin('get_voice_turn_status', { channel_id: this.config.moduleId, turn_id: control.turn_id, payload_sha256: submittedDigest }) }
+          try { result = await waitForTurn(this.admin('get_voice_turn_status', { channel_id: this.config.moduleId, turn_id: control.turn_id, payload_sha256: submittedDigest }), controller.signal) }
           catch { result = { status: 'unknown', payload_sha256: submittedDigest, reason: '接纳状态暂时无法确认，请查询原轮次' } }
         }
-        this.send(c.socket, { type: 'turn_status', turn_id: control.turn_id, ...result })
+        if (c.processing === controller) this.send(c.socket, { type: 'turn_status', turn_id: control.turn_id, ...result })
       }
     } finally { clearTimeout(deadline); pcm.fill(0); if (c.processing === controller) { c.processing = undefined; c.processingTurn = undefined } }
   }
@@ -627,7 +675,7 @@ export class VoiceChannel extends ModuleBase {
   }
   private cancelInteraction(): void {
     this.reservation?.finish(false); this.reservation = undefined
-    this.connection?.input?.clear(); if (this.connection) this.connection.input = undefined
+    this.connection?.input?.clear(); if (this.connection) { this.connection.input = undefined; this.connection.starting = undefined }
     this.connection?.processing?.abort(); if (this.connection) { this.connection.processing = undefined; this.connection.processingTurn = undefined }
     if (this.replyTimer) clearTimeout(this.replyTimer); this.replyTimer = undefined
     this.playbacks.clear(); this.outputContexts.clear(); this.reply = undefined; this.cancelPlayback('语音交互已结束')

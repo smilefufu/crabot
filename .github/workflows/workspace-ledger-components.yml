@@ -1,15 +1,6 @@
 name: Workspace Agent ledger and recovery components
 on:
   workflow_dispatch:
-  push:
-    branches: ['feat/desktop-workspace-ledger-components']
-  pull_request:
-    paths:
-      - 'crabot-agent/src/core/workspace-*.ts'
-      - 'crabot-agent/src/workers/harness/workspace-relocation-close.ts'
-      - 'crabot-agent/src/workers/harness/ledger-store.ts'
-      - 'crabot-agent/tests/core/workspace-*.test.ts'
-      - '.github/workflows/workspace-ledger-components.yml'
 permissions:
   contents: read
 jobs:

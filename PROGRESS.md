@@ -1,9 +1,62 @@
 # Crabot 项目进度
 
+### Mac 首启遗漏修正（R3/R4）
+
+- PR231同步main并移除已过时GTK/Ubuntu探针、旧打包版本及重复Core辅助实现，仅补Mac正常主窗口接入进度、取消/错误重试和删除已安装App的重复全量扫描；继续使用main既有入口/版本校验，安装更新的完整核验保持。按已确认R3/R4实施；本机TypeScript编译、116项定向回归（含真实Electron单窗口页面、5项旧数据接入）通过，旧数据接入完整程序扫描计数为0；尚未进入已发布desktop21，也未做完整DMG人工安装验收。
+
+### Slack Markdown 与完整媒体：已合入，未部署
+
+- 依据已确认的 [Markdown Spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-11-03-slack-markdown-adaptation-design.md) 和 [媒体 Spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-11-03-slack-media-adaptation-design.md)，文字使用原生 Markdown，表格／代码按结构分片且缓存保留原文；图片、多图选择及音视频／文档等附件支持按需获取和回传，保持原 Session、群 @过滤及路径授权。
+- 引用持久化、下载前核验当前权限、100 MiB 文件／20 MiB 视觉上限、120 秒总期限、7 天媒体清理及停止取消；出站先说明再附件，按原会话真实分享 ts 确认，保留部分成功和未知分享信息，不自动重发。新 App 补文件 scopes，旧 App 提示在原安装重新授权。
+- 合入最新 main 后，本地 Slack 全量 113 项通过、5 项 Windows 专属跳过；Agent 相关 106 项和微信全量 122 项通过。相关构建、生产冻结安装及 SDK 重连四种子进程场景通过。Windows 首轮 Slack 118 项通过，Agent 两项既有 Unix 测试夹具修正后复验。Agent 全量另有 5039 通过／27 失败／69 跳过及 3 个套件加载失败，不计全通过；main 对照已复现多项相同失败，详见实施计划。真实 HTTPS 覆盖三种代理，串联验证原图 bytes 进入下一次模型请求；真实 App 权限、客户端渲染和最终投递仍须独立验收，未调用真实 Slack／收费模型或部署。
+- Windows 最终媒体／Agent／微信及 CLI hooks 检查通过，自动 review 批准后按仓库原有规则合入。Review 中 CRLF 表格样式丢失已实测复现为 3 项失败；局部修正词法器换行与原文位置映射、列表尾部换行保留，缓存原文不变，新旧 Markdown 回归通过。索引容量／写放大及旧非视觉截图 `/tmp` 回退分别记 follow-up；媒体说明从共同 Agent builder 保留，各渠道继续按自身既有语义消费。
+
+### PR CI 收敛：按用户要求删除自动长矩阵
+
+- PR 不再自动构建安装包或执行多平台安装/迁移/集成矩阵；保留原手动验收入口，正式 Release 仍由 tag 触发构建发布；发版构建只负责依赖准备、编译、封装、载荷完整性检查及上传，不再重复执行安装/升级/多发行版验收。现有 Claude review 和自动合并保持，取消旧 PR 长任务；不改产品代码、测试断言或安装包内容。
+
+### Slack 网络断线导致渠道进程退出：局部修复
+
+- 已复现 `@slack/socket-mode@3.1.0` 在自动重连请求失败时遗失 Promise rejection，触发 Node 进程退出；通过 pnpm 补丁收口异常，网络故障沿用既有自动重连，保留首次启动请求预算及不可恢复凭据错误的处理。
+- 错误日志补充嵌套网络错误码与脱敏后的实际代理地址；HTTPS 控制请求、WSS、断线后请求失败再恢复覆盖 custom / system / none，开启证书校验，不访问真实 workspace。
+- Slack 本地回归 96 项通过、5 项 Windows 专属跳过；[Windows CI](https://github.com/smilefufu/crabot/actions/runs/41597272102) 全部 101 项及官方 CLI 本地 hooks 通过，构建与生产依赖冻结安装通过。目标电脑尚未部署修复，首次 TLS ECONNRESET 的来源尚未确认。
+
+### 伙伴视角导航、首次使用与品牌：实现完成，待 PR 审查
+
+- 依据已确认 [Spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-11-02-partner-navigation-onboarding-design.md)，GUI / Web 共用“聊天、任务与计划、工作区、记忆、本领、社交、设置”；模型服务位于本领，渠道展示统一为聊天方式，旧 URL 保留。
+- 已接入 CRABOT 大写品牌、已确认像素 Logo、本地供应商图标；隐藏百炼 Coding Plan 新增预设，保留存量解析。首次配置复用现有引用保存与聊天链路，模型能力按已核实接入和精确型号补缺，保留已保存能力与输出预算，无持久化迁移。
+- Web 全量 479 项、模型配置相关后端（含 HTTP）86 项、Client 模型 5 项通过，Admin / Web / Desktop 构建通过。真实前端在 Web 与桌面宿主模拟下完成接入、保存默认模型及发送首条消息，覆盖五种宽度与明暗主题；模型响应使用夹具，真实模型调用、原生桌面安装和生产部署尚未验证。已完成本次 diff 自审，按设计型任务提交 PR。
+
+### Ubuntu 标准 DEB：安装/升级与源码共存通过，CI收尾中
+
+- 当前原生验证已通过Linux真实App/CLI启停、旧system CLI14/15转换与备份失败恢复；另一个Linux红项已确认仍在执行废弃GTK后端，报CRABOT_MAINTENANCE_PENDING。CI改为传递实际DEB，在独立Ubuntu VM用现有DEB验收器验证首启、CLI14/15经GUI导入、覆盖/卸载重装及内核沙箱；Linux不再跑GTK/每版本paired产品安装流程，独立CLI/system及公共组件回归保留。该验收器历史同组实测约8分钟，原14分钟步骤/20分钟作业预算不变；本轮最终原生结果待核实。
+- 11月3日完整Linux原生CI确认两处失败：DEB组件冒烟夹具缺少GUI/临时CLI用户的数据绑定，真实GUI停在首启选择，CLI明确拒绝缺失绑定；只补测试准备与确切绑定清理。旧system转换另在完成记录两次发布间隙被CLI误报持久化失败；4项时序回归先3红后全绿，只在原协调器仍运行时沿既有轮询等待，退出后重读且真实不一致保持原错误，不重派作业、不改迁移/恢复。27项系统与14项首启/绑定测试通过（另1项Linux专用本机跳过），当前原生完整验证待核实。
+- 用户已明确接受下一版同时发布CLI及桌面公开预览：Windows EXE、Mac ARM/Intel DMG、Ubuntu DEB；保留未签名提示，暂不开应用内自动更新。按最新许可取消PR自动长CI；现有review自动合并和同提交最终产物验证后再发版，不改现场部署。
+
+- Windows Core新一轮5秒超时已定位为单测夹具：虚构PID已mock，但空端口探测未mock，实际调用PowerShell查询宿主端口。将该用例覆盖Linux/Mac/Windows并注入空监听者，复现旧夹具在Windows分支调用真实系统后先红；修正后21项全部通过，原不发信号/清理确切记录断言保持，产品代码/超时不改。
+
+- 2026-11-03用户明确要求继续完成下一版发版，Windows候选包不等于完成。当前修正仅CI：Linux完整打包补齐DEB构建依赖；Mac源码准备阶段允许已校验上游通用架构，封装成品仍严格要求目标单架构及原签名验证。原生CI已分别复现缺少dh_apparmor和两种Mac架构误拒绝；87项定向回归通过，原生完整结果待核实，不改产品设计或现场部署。
+
+- 按逐项许可使用标准DEB、系统固定目录和包管理器覆盖；新GUI默认XDG数据位置、首启可改，已有绑定保留。按用户要求合入main界面优化`f9113364`。旧GTK GUI/自启动入口迁移、成功后询问清理旧程序及GNOME/Wayland真人项仍未完成；[PR233](https://github.com/smilefufu/crabot/pull/233)等待完整CI及自动审查合并，不自行合并、不改现场部署或真实数据。
+- Linux Electron一行参数兼容已获单项许可并实现：完整受信程序/源码路径、原两个开关、用户/PID代际/握手保持。源码`a75d472d`的同一新包在[Ubuntu24/26终验41532885769](https://github.com/smilefufu/crabot/actions/runs/41532885769)通过初装、内核沙箱、已发布CLI14/15加合成数据接入及旧密码实际登录、21→22固定覆盖、真实源码GUI认证与独立启停。21→22是同源码版本号夹具；Ubuntu24截图首次超时原样重跑一次通过，根因未定位。22版DEB下载911471650字节，SHA256 `ee8274fabf5cadb0b04a8529a7a7605891db016ee4fab586c1b6261796cf2f18`。
+- 含main界面的`50ec04e0`已在[41543135859](https://github.com/smilefufu/crabot/actions/runs/41543135859)完成新DEB构建、Ubuntu24实际初装/固定覆盖和源码冷启动；不代替当前新增CI修正后的完整包验收。Web481项/类型检查、CLI编译通过；Core/Admin/Agent/迁移权限组246项通过、1项跳过。Admin全量既有2项静态失败曾在独立main复现；两个发布载荷专用入口未用其打包Python runner验收，不算全仓通过。
+- CI修正：补齐SDK/Native构建顺序和普通CLI归档中的必需SDK、Native及Windows Slack辅助件，组装时实际加载Native；等价替换7处ES2020不支持的at调用；Intel程序组30分钟实际被截断，依实测仅改45分钟后，[534项完整执行](https://github.com/smilefufu/crabot/actions/runs/41557551709/job/125660013217)：505通过、29平台跳过，测试32.1分钟；其余平台30分钟预算不变，不改产品等待或断言。Windows原生记录确认两进程时钟差3ms导致5003ms被误判已过期：只删客户端重复跨时钟上限比较，原本机5秒timer、Admin端5秒challenge/15分钟签发及所有身份/nonce/代际校验保持。先红后绿回归通过；[Windows41550248594](https://github.com/smilefufu/crabot/actions/runs/41550248594)实际100次续接、SDK及HTTP/凭据/WS回归整体通过。
+- Windows实际CLI归档在Admin首次迁移失败：当前脚本URL路径与计划的realpath直接比较，短路径/别名会误拒绝同一文件。新增同脚本别名入口的真实迁移回归先红后绿；仅对当前脚本同样做realpath，计划/状态/摘要/范围守卫保持，Admin权限94项、迁移54项通过，实际Windows定向通过，最终归档已越过迁移，重装另失败于验收父进程持有目标Native DLL：[真实凭据模块诊断](https://github.com/smilefufu/crabot/actions/runs/41562448296)确认在场写入者导致EPERM、退出后可删除。仅改验收预置密码为有限子进程，不改安装/启停规则，完整归档继续复验。Mac Electron边界组一次在取消下载后卡住，原始原因未定；本机无新增日志4轮完整组及[同Mac runner八轮32场景](https://github.com/smilefufu/crabot/actions/runs/41555578779)通过，不记原间歇问题已修复。
+- `84b3ce6e`四平台Release完整通过，publish按PR条件跳过；Windows PS7/PS5.1的初装/启动、运行中拒绝、重装/CLI/UI升级、旧公开CLI修复、数据保留及坏校验和拒绝均通过。私有夹具清理实测52905/62742ms完整结束，确认原60秒CI硬上限会截断正常清理；仅Windows私有清理为300秒并保留有界诊断，Unix仍60秒，产品超时/断言不变。Foundation另确认[第三个进程为本模块conhost](https://github.com/smilefufu/crabot/actions/runs/41567303571)：测试改核对确切Node角色PID、只允许其Windows控制台后代，并原生验证全部捕获对象退出；未知成员仍拒绝，Admin/运行记录等断言保留，未改产品停服。29项本机及[真实Windows](https://github.com/smilefufu/crabot/actions/runs/41568241806)通过。
+- Review复核：底层initializeDesktopManagement已有非空目录拒绝，实际调用确认旧CLI数据不会原地初始化管理标记；撤回此前相反定性。确认遗留是onDataSelected/configureProfile先于非空/重叠拒绝，可能留下desktop-profile目录；仅此副作用单独待办，不混入当前CI修正，不以review批准或CI通过宣称已处理。
+- CI预算实测：Intel有限工作区组仅调35分钟后，`8146d713`同组22分34秒完整通过；Windows业务组45分钟曾截断已通过的28项恢复测试，仅该组合改75分钟后，`6714c85c`完整28项及后续真实Agent/Memory两项均通过。当前同提交四平台Release全部通过、publish跳过，Windows PS7/PS5.1的全部安装/升级断言为true。Intel头文件下载的外部超时保持原来源/哈希，仅原样重跑失败作业，四平台传输组通过。
+- 新增Intel失败仍区分处理：冷恢复作业被GitHub25分钟硬上限取消，离线安装组已通过299项后被30分钟步骤上限截断；仅对应预算改35/45分钟。冷释放和真实Admin恢复的单项240秒上限也截断仍在推进的验证，Intel夹具对齐已有Windows的600秒测试/900秒自退出上限；产品超时和全部断言不变。隔离Intel释放计时完整通过约153秒，尚不足以单独解释原失败的更长耗时；完整新CI待验证。Electron原间歇卡顿仍未定因，四场景加50次无预置信号监听的原生检测通过仅作诊断；本轮只补等待点日志，不称已修复或改变取消/附件语义。
+- Windows整组另发现主界面品牌已改CRABOT而拒绝提示断言仍用Crabot；只对齐该断言及卸载验收驱动的实际菜单名称，保留ENOENT/文件/日志及所有保护检查。原生Windows绑定9项和本机9项通过，卸载驱动仅做源码对齐，完整卸载验收仍以整组结果为准。
+- Windows临时维护副本清理曾失败，新增安全阶段/错误号诊断，清理范围/guard/断言不变；[独立30次41550694054](https://github.com/smilefufu/crabot/actions/runs/41550694054)和`486078f9`[完整Windows维护组](https://github.com/smilefufu/crabot/actions/runs/41551345699/job/125639418794)通过，原始间歇失败根因仍未定位，不称已修复。Mac权限CI另复现好友刚显示时打开绑定框被晚到的表单初始化关闭；新增稳定先红后绿回归，将原初始化移到显示前完成，身份/权限/API保持。Native CI补建元数据测试所需Shared；Web482项、权限界面62项、Native本机99项通过/24项平台跳过，类型检查通过，当前完整CI继续核对。证据与范围见[Ubuntu验收记录](https://github.com/smilefufu/crabot-docs/blob/main/guides/desktop-ubuntu-acceptance.md)。
+
+### Slack 频道远端历史：实现完成，PR 验证中
+
+- 依据已确认 [Spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-11-02-slack-remote-history-design.md)，群 get_history 查询平台主聊天，包含入群前及未 @Bot 的消息；after/before 在 Slack Channel 内转为 start/end。查询不回填缓存或重新执行旧消息，DM／单条详情仍为缓存，完整 thread 不在本次范围内。
+- 正式协议和[实施计划](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-11-02-slack-remote-history-implementation.md)已更新；公开／私有频道缺失先复现为 2 项失败，修复后 Slack 全模块 88 项通过、5 项因平台条件跳过，相关 Agent 工具 19 项通过；Slack 构建、Agent 类型检查通过。已验证 Agent→Channel 日期转换、完整性错误及无缓存／事件副作用。本机未配置 Slack 实例，尚未部署或完成真实 Windows Slack 验收。
+
 ### 桌面初版：Windows19验收通过，按用户许可合入main；暂不发版
 
 - 11月2日用户反馈本版明显改善，明确许可合并推送；随后要求暂不发版。本次不创建发行标签或GitHub Release，不改本机源码部署、服务或真实数据。
-- 终验发现的问题已进入修复：Ubuntu浏览器探针显式选择共享Node；旧数据接入保留白名单内具体沙箱原因；Mac按已批准R3/R4在正常主窗口呈现进度/取消/重试，已安装App接入完整程序扫描降为0，同时拒绝必要CLI入口损坏。Mac接入5场景、维护/恢复76项、安装16项、Core完整性12项及构建下载8项定向回归通过，同一原安装器/Core仅替换修正探针的[Ubuntu原生组件复验](https://github.com/smilefufu/crabot/actions/runs/41423659959)中，初装及CLI14/15接入、目标GUI/Core/CLI和原数据/密码均通过，已确认旧接入失败同因；这不替代完整原生新包，后者仍在复验。构建下载504仅补入原一次/120秒重试预算，不换源或放宽摘要。Ubuntu固定目录的系统沙箱规则命名单项选择待用户确认；不将组件回归冒充完整新包验收，不发版。
 - Windows19验收包来源`4b73d69e`，产品树与分支合并提交`25e98b51`一致。完整[Windows验收41385827811](https://github.com/smilefufu/crabot/actions/runs/41385827811)通过：源码冷启动、离线包/旧CLI v2026.10.14.1数据接入、真实EXE安装与Finish启动；三项独立可选诊断作业未运行，不计通过。EXE 559578880字节，SHA256 `7db9bd813cc4fa93e5ccfd801c686ecddebed401aa1d45b339c908a64ca0720d`。Windows Server CI不代替所有Win11真实业务验收。
 - 已交付：安装器一次解包并标准覆盖固定GUI/Core及入口，数据准备移到GUI；数据复制最多8并发；Windows固定HTTP/HTTPS系统代理；精确自有进程启停。Slack内层PowerShell调用Node退出0却丢stdout/handoff的首次失败及闪窗已原生复现并修正，严格hook/窗口观察通过；真实远端Slack创建不以本地夹具代验。
 - 按用户要求删除`intent.json`全部读写、历史扫描/阻断/复用；失败/取消收口自有CLI后清理整个临时会话，现有Admin完成回执继续负责实例幂等与授权。旧清理Promise失败不再永久阻断后续begin，Windows并发清理增加有界重试。PR #229最终review批准；Windows53项和官方CLI本地hooks通过，Mac Slack48项通过/5项平台跳过、Admin鉴权/回执/认主36项通过。远端App不自动删除，不宣称外部API原子回滚。
@@ -11,7 +64,7 @@
 - 11月2日补做全平台终验，结论仍为**未全通过**。只在隔离CI分支补充测试/诊断，不改产品、部署或发布。[四平台GUI/首次设置窗口](https://github.com/smilefufu/crabot/actions/runs/41405754459)通过；这不等于所有首次授权对话框均已真人操作。
 - Windows真实EXE初装、CLI14/15接入、旧GUI14覆盖19、Finish自动启动和原开始菜单重新打开、数据/密码保留及重复启停通过：[完整初装](https://github.com/smilefufu/crabot/actions/runs/41405060431)、[GUI14升级](https://github.com/smilefufu/crabot/actions/runs/41406539869)、[CLI15接入](https://github.com/smilefufu/crabot/actions/runs/41413007095)。Mac ARM普通App及CLI14/15接入通过，[真实已交付App11同位置覆盖19](https://github.com/smilefufu/crabot/actions/runs/41408359061)通过；[Intel](https://github.com/smilefufu/crabot/actions/runs/41408992500)同样通过，但普通App版本覆盖用同源19→测试版本夹具，不能冒充历史已交付Intel App升级。Mac原生接入确认对话框未实点；Intel新App就绪约31～33秒，未作性能验收。Mac R3/R4仍未完成：独立接入窗口和普通启动全量校验仍存在。
 - 新dev流程的源码GUI/Core与release GUI/Core在Windows、Mac ARM/Intel、Linux均实际并行运行，数据/端口隔离、分别停止和重启通过；Linux证据在[41405225245已完成的共存步骤](https://github.com/smilefufu/crabot/actions/runs/41405225245)日志中，该整次作业后因旧CLI接入失败取消，不能记整次成功。新dev使用29000/13000，release使用19000/3000；既有源码生产部署不会自动搬端口。未验证并行真实模型任务。
-- Ubuntu原始原生安装器初装失败`CRABOT_INSTALL_BROWSER_SANDBOX`：浏览器探针未指定共享Node，寻找已在瘦身时删除的Playwright私有Node。相同不可变包的原探针失败、共享Node驱动成功，且[仅给探针补环境路径的完整安装反事实检查](https://github.com/smilefufu/crabot/actions/runs/41412234314)通过；原始产品仍失败，不能算修复。旧CLI14→GUI另失败`CRABOT_MAINTENANCE_PENDING`，schema4停在verifying，未启动MM；当时具体原因未明；本轮仅替换修正探针后CLI14/15均完成接入，确认同因，完整新包仍待复验。Ubuntu仍使用app/releases、releases及current-release.json，未落实固定目录覆盖。GNOME Wayland/图形polkit、完整卸载与真实Win11用户环境不以CI代验。
+- Ubuntu原始原生安装器初装失败`CRABOT_INSTALL_BROWSER_SANDBOX`：浏览器探针未指定共享Node，寻找已在瘦身时删除的Playwright私有Node。相同不可变包的原探针失败、共享Node驱动成功，且[仅给探针补环境路径的完整安装反事实检查](https://github.com/smilefufu/crabot/actions/runs/41412234314)通过；原始产品仍失败，不能算修复。旧CLI14→GUI另失败`CRABOT_MAINTENANCE_PENDING`，schema4停在verifying，未启动MM；具体底层原因尚未证实，CLI15及后续升级未通过。Ubuntu仍使用app/releases、releases及current-release.json，未落实固定目录覆盖。GNOME Wayland/图形polkit、完整卸载与真实Win11用户环境不以CI代验。
 
 ### 主控常驻职责与指南生命周期：实现完成，PR 验证中
 
@@ -89,7 +142,9 @@
 
 ### 语音：wire9已部署，按优先级收口验收
 
-- 2026-11-02按已确认自然轮次设计完成[安卓暂停持续处理与实际控制器隔离接线](https://github.com/smilefufu/crabot-voice-android/blob/main/docs/verification/2026-11-02-pause-speech-confirmation.md)，安卓main `9ba14c8`。旧实现暂停后失去近端判断已先复现；改为真实硬件时间/消费游标映射播放历史与未播尾部，暂停/饥饿持续APM，时间戳缺失有界等待。既有WebRTC默认VAD候选＋原Silero确认，身份/上传保留原采音；控制器确认后只取消旧语音消费并建新turn，不取消Worker，等待/播报采音不上传。89项JVM（30轮插话及原60轮待机）、9组27150块产品Kotlin/JNI公开重放与独立APM逐样本一致、两组纯回声零确认及两类APK构建通过。默认产品入口仍wire9，不选择未过关端点；中文EOT固定失败保留，硬件时钟/漂移、实际AEC/短词、声纹兼容、wire10联合及真人体验尚未验收。未改阈值/超时/提示词/spec/协议、本机部署或手机，未连接ADB或安排用户重测；[实施计划](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-27-natural-voice-turn-taking-implementation.md)已同步。
+- 2026-11-02继续自然轮次后端入口隔离：复现并修复取消后仍等待旧接纳/查询、准备期间旧turn_ready及同批PCM/取消清空新输入；按确切连接/准备对象处理，已接纳任务仍留原持久收件箱。Channel55项、Shared原语音/音频17项及两模块编译通过，30轮取消保留60条消息/180次分段ASR；同一修正前台心跳夹具在固定旧main两条同批回归均失败。兼容wire9，未改模型/提示词/协议或现场；[验证证据](crabot-channel-voice/verification/2026-11-02-ingress-isolation.json)。自然输入、中文判停和真机声学仍未验收，整组wire10未发布到产品。
+
+- 2026-11-02安卓自然输入隔离接线继续收口：真实时钟/游标保留已播历史及未播尾部，暂停持续APM，WebRTC候选＋原Silero确认，原采音仍供身份/上传；确认仅取消旧语音消费，不取消Worker。现95项JVM（含30轮插话、原60轮待机与3项恢复边界）、9组27150块产品Kotlin/JNI公开差分及三类APK构建通过。[独立音频探针](https://github.com/smilefufu/crabot-voice-android/blob/main/docs/verification/2026-11-02-isolated-audio-probe.md)包名隔离、仅麦克风权限、无网络/配对/身份存储，用户按钮采音，每项最多12秒，结果不超时消失；未安装或连接ADB。Namo两版及Easy Turn固定集均不通过，原失败与解析审计全保留，未选端点/调参；[模型结论](https://github.com/smilefufu/crabot-voice-android/blob/main/docs/research/2026-10-27-natural-turn-taking/README.md)。默认仍wire9，现场/提示词/协议不变；下一步仅按明确授权做硬件时钟、真实回声和一次开口专项，不冒充中文思考停顿或完整对话已验收。中文EOT、原向量兼容及wire10联合仍待完成；[实施计划](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-27-natural-voice-turn-taking-implementation.md)。
 
 - Android 0.8.1/code18 已保留数据升级并直推 main（4d11bef）：恢复原“一次开启、多轮待机”，修复接话到期重复开麦及通知跨过接话期限后退出待机两条路径；旧实现两项回归失败，修复后30项JVM、4项隔离控制器及1项方向检查通过。首页/分组设置/既有FuFu记录已真机核对；安装与测试阶段即时密文摘要一致，正常重连的目录同步仍按原逻辑重加密。真人连续唤醒/接话验收待补，声纹规则和后台部署不变；[验证记录](https://github.com/smilefufu/crabot-voice-android/blob/main/docs/verification/2026-10-24-persistent-standby-and-home.md)。
 - 用户已确认后端/安卓配套设计及一处提示词文字；正式 Voice v0.9.0/wire9 先行发布。不增加通用 SSML 或新模型配置，普通 voice_reply 按需完整回答，宿主自动断句、单个 TTS 请求加一个预取，按实际播放游标保持最多一秒在途音频。

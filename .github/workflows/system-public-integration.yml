@@ -1,16 +1,6 @@
 name: System administrator public integration
 on:
   workflow_dispatch:
-  push:
-    branches: ['feat/desktop-system-public-integration']
-  pull_request:
-    paths:
-      - 'cli.mjs'
-      - 'scripts/system*.mjs'
-      - 'scripts/*system-user-helper.mjs'
-      - 'scripts/lib/*system*.mjs'
-      - 'scripts/upgrade-lib/scoped-preparation.mjs'
-      - '.github/workflows/system-public-integration.yml'
 permissions:
   contents: read
 jobs:

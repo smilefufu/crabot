@@ -50,7 +50,16 @@ def paired_linux_core():
         raise RuntimeError("Invalid desktop program identity")
     record = json.loads(host.read_text())
     if isinstance(record, dict) and type(record.get("schema_version")) is int and record["schema_version"] == 1:
-        return False  # Existing embedded/independent CLI behavior is unchanged.
+        package_type = RUNTIME.parent.parent / "package-type"
+        if not package_type.exists():
+            return False  # Historical embedded/independent CLI behavior is unchanged.
+        package_info = package_type.lstat()
+        if (set(record) != {"schema_version", "platform", "arch"} or record["platform"] != "linux" or record["arch"] != "x64"
+                or not stat.S_ISREG(package_info.st_mode) or package_info.st_nlink != 1 or package_info.st_size > 64
+                or package_info.st_uid != 0 or package_info.st_mode & 0o022
+                or info.st_uid != 0 or info.st_nlink != 1 or info.st_mode & 0o022 or package_type.read_text().strip() != "deb"):
+            raise RuntimeError("Invalid DEB desktop program identity")
+        return True
     if (not isinstance(record, dict) or set(record) != {"schema_version", "platform", "arch"}
             or type(record.get("schema_version")) is not int or record["schema_version"] != 2
             or record["platform"] != "linux" or record["arch"] != "x64"

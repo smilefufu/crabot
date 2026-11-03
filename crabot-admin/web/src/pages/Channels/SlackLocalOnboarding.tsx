@@ -162,10 +162,10 @@ export function SlackLocalOnboarding() {
     <h1>Slack · 本地授权</h1>
     {error && <p role="alert" className="error-message">{error}</p>}
     {phase === 'idle' && <>
-      <p>Crabot 会在你的 workspace 创建和配置一个自己的 Slack App，保持本地直连。授权包含 App 管理能力，CLI 只在接入时运行。</p>
-      <label htmlFor="slack-instance-name">渠道名称</label>
+      <p>CRABOT 会在你的 workspace 创建和配置一个自己的 Slack App，保持本地直连。授权包含 App 管理能力，CLI 只在接入时运行。</p>
+      <label htmlFor="slack-instance-name">聊天方式名称</label>
       <input id="slack-instance-name" className="input" value={name} onChange={e => setName(e.target.value)} placeholder="如：slack-bot" />
-      <p>App 和 Bot 使用此渠道名称，Slack CLI 会添加 (local) 后缀；渠道名称最多 27 个字符。</p>
+      <p>App 和 Bot 使用此聊天方式名称，Slack CLI 会添加 (local) 后缀；聊天方式名称最多 27 个字符。</p>
       <p>你只需在 Slack 确认一次授权，并填回验证码；完成后将自动认主，无需手工配置 Bot 或填写 Token。</p>
       <Button onClick={start} disabled={!name.trim()}>开始授权</Button>
     </>}
@@ -183,20 +183,20 @@ export function SlackLocalOnboarding() {
       <input id="slack-challenge" className="input" autoComplete="off" spellCheck={false} value={code} onChange={e => setCode(e.target.value)} />
       <Button onClick={submit} disabled={!code.trim()}>确认并配置 App</Button>
     </>}
-    {busy && <p role="status">{phase === 'starting' ? '正在准备本地授权工具…' : phase === 'creating' ? 'App 已配置，正在保存并创建渠道…' : '正在确认授权并配置 App，请稍候…'}</p>}
+    {busy && <p role="status">{phase === 'starting' ? '正在准备本地授权工具…' : phase === 'creating' ? 'App 已配置，正在保存并创建聊天方式…' : '正在确认授权并配置 App，请稍候…'}</p>}
     {phase === 'finish_error' && <><p>App 已配置。重试完成会继续使用本次结果，请勿重复授权。</p><Button onClick={() => { if (session.current) void finish(session.current, name, generation.current) }}>重试完成创建</Button></>}
     {phase === 'error' && <><p>若 Slack App 已创建，请先在 <a href="https://api.slack.com/apps" target="_blank" rel="noreferrer">Slack App 后台</a> 核对。取消不会自动删除 App。</p><Button onClick={cancel}>重新开始授权</Button></>}
     {phase !== 'idle' && phase !== 'created' && phase !== 'error' && <Button variant="secondary" disabled={phase === 'creating'} onClick={cancel}>取消本轮授权</Button>}
     {phase === 'created' && <>
-      <p>App 已配置，渠道 <strong>{instanceId}</strong> 已创建。</p>
-      <p role="status">{connected ? 'Slack 渠道已连接' : '渠道尚未确认连接，可到渠道设置查看状态'}；真实消息收发尚未验证。</p>
+      <p>App 已配置，聊天方式 <strong>{instanceId}</strong> 已创建。</p>
+      <p role="status">{connected ? 'Slack 聊天方式已连接' : '聊天方式尚未确认连接，可到聊天方式设置查看状态'}；真实消息收发尚未验证。</p>
       {master ? <p>已自动认主：{master.displayName || identity?.platform_display_name || identity?.platform_user_id || '主人'}。可以直接开始聊天，无需再次关联。</p> : <>
-        <p role="alert">渠道已创建，但自动认主未完成。可重试认主；若已有身份绑定冲突，请在「对话对象」中核对，原关联不会被覆盖。</p>
+        <p role="alert">聊天方式已创建，但自动认主未完成。可重试认主；若已有身份绑定冲突，请在「对话对象」中核对，原关联不会被覆盖。</p>
         <Button onClick={() => { if (session.current) void finish(session.current, name, generation.current) }}>重试认主</Button>
         <p><a href="/friends">管理对话对象</a></p>
       </>}
-      <p>可选消息测试：在 Slack 中打开此 Bot 私聊，发送一条消息。群聊请先邀请 Bot 加入，再 @Bot 发起；群聊默认仅响应 @，可在渠道设置修改。</p>
-      <Button onClick={() => navigate(`/channels/config?selected=${encodeURIComponent(instanceId)}`)}>完成并查看渠道</Button>
+      <p>可选消息测试：在 Slack 中打开此 Bot 私聊，发送一条消息。群聊请先邀请 Bot 加入，再 @Bot 发起；群聊默认仅响应 @，可在聊天方式设置修改。</p>
+      <Button onClick={() => navigate(`/channels/config?selected=${encodeURIComponent(instanceId)}`)}>完成并查看聊天方式</Button>
     </>}
     {phase === 'idle' && <p><a href="/channels/config?implementation_id=channel-slack">已有 Token？使用手动配置</a></p>}
   </div></MainLayout>

@@ -21,7 +21,7 @@ function install() {
   }
   dialog.showMessageBox = async (...args) => {
     const options = args.at(-1)
-    if (options.title === '退出 Crabot') return { response: quitResponse, checkboxChecked: false }
+    if (options.title === '退出 CRABOT') return { response: quitResponse, checkboxChecked: false }
     emit('unexpected_dialog', { message: options.message }); return { response: 0, checkboxChecked: false }
   }
   function capture(created) {

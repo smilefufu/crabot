@@ -11,7 +11,7 @@ export function DesktopPermissions() {
     <ComputerUseSetupCard />
     <section style={{ marginTop: 24 }}>
       <h2 style={{ fontSize: 18 }}>任务权限单独管理</h2>
-      <p style={{ color: 'var(--text-secondary)', margin: '12px 0', lineHeight: 1.7 }}>系统授权不会扩大联系人、会话或 Worker 的任务权限。这里不会申请麦克风或摄像头；音视频渠道按自身流程设置。</p>
+      <p style={{ color: 'var(--text-secondary)', margin: '12px 0', lineHeight: 1.7 }}>系统授权不会扩大联系人、会话或 Worker 的任务权限。这里不会申请麦克风或摄像头；音视频聊天方式按自身流程设置。</p>
       <Link to="/permission-templates">管理任务权限模板</Link>
     </section>
   </MainLayout>

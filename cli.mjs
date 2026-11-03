@@ -34,6 +34,10 @@ try {
     const { default: macBinding } = await import(new URL('./scripts/lib/mac-app-binding.cjs', import.meta.url))
     macBinding.applyMacAppEnvironment(__dirname)
   }
+  if (process.platform === 'linux' && cliInstallation?.scope !== 'desktop') {
+    const { default: ubuntuBinding } = await import(new URL('./scripts/lib/ubuntu-app-binding.cjs', import.meta.url))
+    ubuntuBinding.applyUbuntuAppEnvironment(__dirname)
+  }
   if (cliInstallation?.scope === 'desktop') {
     const { default: desktopInstallation } = await import(new URL('./scripts/lib/desktop-installation.cjs', import.meta.url))
     desktopInstallation.applyDesktopEnvironment(cliInstallation)

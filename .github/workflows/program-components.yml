@@ -1,17 +1,6 @@
 name: Desktop program components
 on:
   workflow_dispatch:
-  push:
-    branches: ['feat/desktop-program-components']
-  pull_request:
-    paths:
-      - 'scripts/lib/desktop-*.mjs'
-      - 'scripts/lib/desktop-removal-record.cjs'
-      - 'scripts/lib/__tests__/desktop-asar.test.mjs'
-      - 'scripts/lib/__tests__/desktop-payload.test.mjs'
-      - 'scripts/lib/__tests__/desktop-removal-programs.test.mjs'
-      - 'scripts/lib/__tests__/desktop-removal-system-processes.test.mjs'
-      - '.github/workflows/program-components.yml'
 permissions:
   contents: read
 jobs:
@@ -21,7 +10,9 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-15, macos-15-intel, windows-2022]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: ${{ matrix.os == 'macos-15-intel' && 45 || 30 }}
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -33,8 +24,12 @@ jobs:
         run: |
           pnpm --dir crabot-client install --frozen-lockfile --ignore-scripts
           pnpm --dir crabot-client run build
+          pnpm --dir crabot-shared install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-shared run build
           pnpm install --frozen-lockfile --ignore-scripts
           node scripts/build-native.mjs
+          pnpm --dir crabot-desktop install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-desktop run build
       - name: Verify real archive bytes, fresh preparation and retained-data program boundaries
         run: >-
           node --test --test-concurrency=1

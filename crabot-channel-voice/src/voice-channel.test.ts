@@ -47,11 +47,19 @@ describe('Voice Channel with loopback WS, service adapters and durable Admin/cor
   let store: VoiceTurnStore, inbox: VoiceInbox, registrations: string[], friends: Map<string, Friend>
   let accepted: VoiceTurnAuthorizedPayload[], asrCalls: number, ttsCalls: number, phones: Phone[]
   let asrResponses: string[], setupStatus: 'draft' | 'complete', ttsDelay: number, ttsInvalid: boolean
+  let admissionGate: Promise<void> | undefined
+  let admissionFailure: boolean, statusGate: Promise<void> | undefined, statusStarted: boolean
+  let configGate: Promise<void> | undefined, configStarted: boolean
+  let statusFailure: boolean
   const channelId = '语音终端'
   const rpc = new RpcClient(), runtime = 'isolated-voice-runtime', human = 'isolated-human-admin', core = 'isolated-core'
   beforeEach(async () => {
     dir = await fs.mkdtemp(path.join(os.tmpdir(), 'voice-channel-')); phones = []; accepted = []; asrCalls = 0; ttsCalls = 0
     setupStatus = 'complete'; ttsDelay = 0; ttsInvalid = false
+    admissionGate = undefined
+    admissionFailure = false; statusGate = undefined; statusStarted = false
+    configGate = undefined; configStarted = false
+    statusFailure = false
     asrResponses = ['开灯', '别开灯', '好的']
     store = new VoiceTurnStore(dir); await store.load(); inbox = new VoiceInbox(path.join(dir, 'core-inbox')); inbox.load(); friends = new Map(); registrations = []
     for (const name of ['A', 'B']) {
@@ -72,7 +80,10 @@ describe('Voice Channel with loopback WS, service adapters and durable Admin/cor
         if (bearer !== `Bearer ${request.method === 'verify_voice_agent' ? core : request.method === 'verify_voice_admin' ? human : runtime}`) throw new Error('invalid runtime/human bearer')
         let result: unknown
         switch (request.method) {
-          case 'get_voice_config': result = { owner_activation_required: false, owner_activation: null, setup_status: setupStatus, terminal_entry: { url: `ws://localhost:3000/ws/voice/${encodeURIComponent(channelId)}` }, config: { asr: { provider_id: 'local', model_id: 'sensevoice' }, tts: { provider_id: 'local', model_id: 'kokoro' }, wake_word: '你好螃蟹' }, ...store.registrations(channelId), contacts: store.registrations(channelId).contacts.map(c => ({ ...c, ...(friends.get(c.platform_user_id) ? { friend_id: friends.get(c.platform_user_id)!.id } : {}) })),
+          case 'get_voice_config':
+            configStarted = true
+            if (configGate) { const gate = configGate; configGate = undefined; await gate }
+            result = { owner_activation_required: false, owner_activation: null, setup_status: setupStatus, terminal_entry: { url: `ws://localhost:3000/ws/voice/${encodeURIComponent(channelId)}` }, config: { asr: { provider_id: 'local', model_id: 'sensevoice' }, tts: { provider_id: 'local', model_id: 'kokoro' }, wake_word: '你好螃蟹' }, ...store.registrations(channelId), contacts: store.registrations(channelId).contacts.map(c => ({ ...c, ...(friends.get(c.platform_user_id) ? { friend_id: friends.get(c.platform_user_id)!.id } : {}) })),
             asr_connection: { provider_id: 'local', format: 'sherpa-offline-ws', endpoint: `ws://localhost:${(admin.address() as AddressInfo).port}/asr`, model_id: 'sensevoice', api_key: 'provider-secret' },
             tts_connection: { provider_id: 'local', format: 'mlx-audio-http', endpoint: `http://localhost:${(admin.address() as AddressInfo).port}`, model_id: 'kokoro', voice: 'zf_xiaobei', api_key: 'provider-secret' } }; break
           case 'verify_voice_agent':
@@ -80,11 +91,17 @@ describe('Voice Channel with loopback WS, service adapters and durable Admin/cor
           case 'sync_voice_terminal': await store.sync(request.params); result = { synced: true, catalog: store.catalog(channelId), guided_enrollment: store.guidedEnrollment(channelId), owner_activation: null, setup_status: setupStatus }; break
           case 'manage_voice_contacts': result = await store.manage(channelId, request.params.request, VOICE_MODEL_VERSIONS.embedding); break
           case 'get_voice_management_result': result = store.managementResult(channelId, request.params.request_id); break
-          case 'get_voice_turn_status': result = store.status(request.params.channel_id, request.params.turn_id, request.params.payload_sha256); break
+          case 'get_voice_turn_status':
+            statusStarted = true
+            if (statusGate) { const gate = statusGate; statusGate = undefined; await gate }
+            if (statusFailure) throw new Error('test: status transport failed')
+            result = store.status(request.params.channel_id, request.params.turn_id, request.params.payload_sha256); break
           case 'submit_voice_turn': {
             const submission = await store.submit(request.params, id => friends.get(id), async () => true)
             if (submission.payload) { const record = inbox.accept(submission.payload); result = await store.confirm(channelId, record.turn_id, record.payload_sha256); inbox.confirm(record); accepted.push(submission.payload) }
             else result = submission.result
+            if (admissionGate) { const gate = admissionGate; admissionGate = undefined; await gate }
+            if (admissionFailure) throw new Error('test: admission acknowledgement lost')
             break
           }
           default: throw new Error('unexpected test RPC')
@@ -132,14 +149,18 @@ describe('Voice Channel with loopback WS, service adapters and durable Admin/cor
     const hello = await live.wait('hello'); expect(JSON.stringify(hello)).not.toContain('provider-secret')
     live.send({ type: 'heartbeat', foreground: true, microphone: 'closed', playback: 'idle' })
     await live.wait('catalog_confirmed')
-    return { phone: live, hello }
+    return { phone: live, hello, credential }
   }
-  async function turn(phone: Phone, unknown = false) {
+  async function sendTurn(phone: Phone, unknown = false) {
     const id = randomUUID(); phone.send({ type: 'turn_start', turn_id: id }); await phone.wait('turn_ready')
     const pcm = Buffer.alloc(320 * 9 * 2, 1)
     for (let i = 0; i < 9; i++) phone.socket.send(encodeVoiceFrame(1, id, i, pcm.subarray(i * 640, (i + 1) * 640)))
     phone.send({ type: 'turn_end', turn_id: id, audio_sample_count: 2880, sample_rate: 16000, models: VOICE_MODEL_VERSIONS, enrollment_revision: store.registrations(channelId).enrollment_revision,
       segments: [0, 1, 0].map((speaker, index) => ({ segment_index: index, start_sample: index * 960, end_sample: (index + 1) * 960, anonymous_speaker: String(speaker), identity_status: unknown && index === 1 ? 'unknown' : 'matched', ...(unknown && index === 1 ? {} : { registration_id: registrations[speaker] }) })) })
+    return id
+  }
+  async function turn(phone: Phone, unknown = false) {
+    await sendTurn(phone, unknown)
     return phone.wait('turn_status')
   }
   it('rejects draft turns before turn_ready and before calling ASR', async () => {
@@ -150,6 +171,124 @@ describe('Voice Channel with loopback WS, service adapters and durable Admin/cor
     expect(phone.controls.some(c => c.type === 'turn_ready')).toBe(false)
     expect(asrCalls).toBe(0); expect(accepted).toHaveLength(0)
   })
+  it('accepts a fresh input after exact cancellation without waiting for the old durable admission response', async () => {
+    const { phone } = await pair()
+    let release!: () => void
+    admissionGate = new Promise<void>(resolve => { release = resolve })
+    const old = await sendTurn(phone)
+    try {
+      await vi.waitFor(() => expect(accepted).toHaveLength(1))
+      const next = randomUUID()
+      phone.send({ type: 'cancel', turn_id: old })
+      phone.send({ type: 'turn_start', turn_id: next })
+      await vi.waitFor(() => expect(phone.controls.some(c => c.type === 'turn_ready' && c.turn_id === next)).toBe(true), { timeout: 250, interval: 5 })
+      expect(accepted.map(item => item.turn_id)).toEqual([old])
+      phone.socket.send(encodeVoiceFrame(1, next, 0, Buffer.alloc(640)))
+      phone.send({ type: 'turn_end', turn_id: next, audio_sample_count: 320, sample_rate: 16000, models: VOICE_MODEL_VERSIONS,
+        enrollment_revision: phone.revision, segments: [{ segment_index: 0, start_sample: 0, end_sample: 320, anonymous_speaker: '0', identity_status: 'unknown' }] })
+      expect(await phone.wait('turn_status')).toMatchObject({ turn_id: next, status: 'accepted' })
+      expect(accepted.map(item => item.turn_id)).toEqual([old, next])
+    } finally { release() }
+    await vi.waitFor(() => expect(store.status(channelId, old, accepted[0].payload_sha256).status).toBe('accepted'))
+  })
+  it('does not admit an input while the authenticated terminal reports speech disabled', async () => {
+    const { phone } = await pair()
+    phone.send({ type: 'heartbeat', foreground: true, microphone: 'closed', playback: 'idle', speech_enabled: false })
+    phone.send({ type: 'turn_start', turn_id: randomUUID() })
+    await phone.wait('error')
+    expect(asrCalls).toBe(0); expect(accepted).toHaveLength(0)
+    expect(phone.controls.some(c => c.type === 'turn_ready')).toBe(false)
+  })
+  it('releases a cancelled admission recovery query without losing the accepted message', async () => {
+    const { phone } = await pair()
+    let release!: () => void
+    admissionFailure = true; statusGate = new Promise<void>(resolve => { release = resolve })
+    const old = await sendTurn(phone)
+    try {
+      await vi.waitFor(() => expect(statusStarted).toBe(true))
+      phone.send({ type: 'cancel', turn_id: old })
+      const next = randomUUID(); phone.send({ type: 'turn_start', turn_id: next })
+      await vi.waitFor(() => expect(phone.controls.some(c => c.type === 'turn_ready' && c.turn_id === next)).toBe(true), { timeout: 250, interval: 5 })
+      expect(accepted.map(item => item.turn_id)).toEqual([old])
+    } finally { release() }
+    expect(store.status(channelId, old, accepted[0].payload_sha256).status).toBe('accepted')
+  })
+  it('does not send a stale turn_ready when cancellation arrives during input preparation', async () => {
+    const { phone } = await pair()
+    let release!: () => void
+    configStarted = false; configGate = new Promise<void>(resolve => { release = resolve })
+    const old = randomUUID(), next = randomUUID()
+    phone.send({ type: 'turn_start', turn_id: old })
+    try {
+      await vi.waitFor(() => expect(configStarted).toBe(true))
+      phone.send({ type: 'cancel', turn_id: old })
+      phone.send({ type: 'turn_start', turn_id: next })
+    } finally { release() }
+    const ready = await phone.wait('turn_ready')
+    expect(ready.turn_id).toBe(next)
+    expect(asrCalls).toBe(0); expect(accepted).toHaveLength(0)
+  })
+  it.each([false, true])('does not let an old status query hold or fail the next input (query failure=%s)', async failure => {
+    const { phone } = await pair(), previous = await turn(phone)
+    let release!: () => void
+    statusStarted = false; statusFailure = failure; statusGate = new Promise<void>(resolve => { release = resolve })
+    phone.send({ type: 'turn_query', turn_id: previous.turn_id, payload_sha256: accepted[0].payload_sha256 })
+    try {
+      await vi.waitFor(() => expect(statusStarted).toBe(true))
+      phone.send({ type: 'cancel', turn_id: previous.turn_id })
+      const next = randomUUID(); phone.send({ type: 'turn_start', turn_id: next })
+      await vi.waitFor(() => expect(phone.controls.some(c => c.type === 'turn_ready' && c.turn_id === next)).toBe(true), { timeout: 250, interval: 5 })
+    } finally { release() }
+    expect(accepted).toHaveLength(1)
+  })
+  it('still rejects a failed status query belonging to the current interaction', async () => {
+    const { phone } = await pair(), previous = await turn(phone)
+    statusFailure = true
+    phone.send({ type: 'turn_query', turn_id: previous.turn_id, payload_sha256: accepted[0].payload_sha256 })
+    expect((await phone.wait('error')).code).toBe('VOICE_REJECTED')
+  })
+  it('keeps a same-callback PCM and cancel burst from clearing the next input', async () => {
+    const { phone } = await pair(), old = randomUUID(), next = randomUUID()
+    phone.send({ type: 'turn_start', turn_id: old }); await phone.wait('turn_ready')
+    const socket = (channel as unknown as { connection: { socket: WebSocket } }).connection.socket
+    // A WebSocket Receiver can synchronously deliver several frames from one TCP read.
+    socket.emit('message', encodeVoiceFrame(1, old, 0, Buffer.alloc(640)), true)
+    socket.emit('message', Buffer.from(JSON.stringify({ type: 'cancel', turn_id: old })), false)
+    socket.emit('message', Buffer.from(JSON.stringify({ type: 'turn_start', turn_id: next })), false)
+    expect((await phone.wait('turn_ready')).turn_id).toBe(next)
+    expect(phone.socket.readyState).toBe(WebSocket.OPEN)
+    expect(accepted).toHaveLength(0)
+  })
+  it('reserves the pending input before a same-callback start and cancel burst', async () => {
+    const { phone } = await pair(), old = randomUUID(), next = randomUUID()
+    await vi.waitFor(() => expect(store.connectionState(channelId)?.foreground).toBe(true))
+    const socket = (channel as unknown as { connection: { socket: WebSocket } }).connection.socket
+    for (const control of [{ type: 'turn_start', turn_id: old }, { type: 'cancel', turn_id: old }, { type: 'turn_start', turn_id: next }]) {
+      socket.emit('message', Buffer.from(JSON.stringify(control)), false)
+    }
+    expect((await phone.wait('turn_ready')).turn_id).toBe(next)
+    expect(accepted).toHaveLength(0)
+  })
+  it('keeps thirty cancelled admission waits separate from sixty durable messages', async () => {
+    const { phone } = await pair()
+    const ids = new Set<string>()
+    for (let i = 0; i < 30; i++) {
+      let release!: () => void
+      admissionGate = new Promise<void>(resolve => { release = resolve })
+      const old = await sendTurn(phone)
+      try {
+        await vi.waitFor(() => expect(accepted).toHaveLength(i * 2 + 1))
+        phone.send({ type: 'cancel', turn_id: old })
+        const next = await turn(phone)
+        expect(next.status).toBe('accepted'); ids.add(old); ids.add(next.turn_id)
+        const state: any = await rpc.callSensitive(port, 'get_voice_output_state', { channel_id: channelId, session_id: voiceSessionId(channelId) }, 'agent', { authorizationBearer: core })
+        expect(state.current_turn_id).toBe(next.turn_id)
+        phone.send({ type: 'cancel', turn_id: next.turn_id })
+      } finally { release() }
+    }
+    expect(ids.size).toBe(60); expect(accepted).toHaveLength(60)
+    expect(inbox.pending()).toHaveLength(60); expect(asrCalls).toBe(180)
+  }, 15000)
   it('guides a bounded management task with separate playback IDs, waits for real completion and never calls ASR', async () => {
     const { phone } = await pair()
     await vi.waitFor(() => expect(store.connectionState(channelId)?.foreground).toBe(true))

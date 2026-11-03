@@ -3,7 +3,7 @@ import path from 'node:path'
 export const SLACK_MANIFEST = {
   display_information: { name: 'Crabot', description: 'Crabot local direct connection' },
   features: { bot_user: { display_name: 'Crabot', always_online: false }, app_home: { home_tab_enabled: false, messages_tab_enabled: true, messages_tab_read_only_enabled: false } },
-  oauth_config: { scopes: { bot: ['chat:write', 'channels:history', 'groups:history', 'channels:read', 'groups:read', 'im:history', 'im:read', 'im:write', 'users:read'] } },
+  oauth_config: { scopes: { bot: ['chat:write', 'channels:history', 'groups:history', 'channels:read', 'groups:read', 'im:history', 'im:read', 'im:write', 'users:read', 'files:read', 'files:write'] } },
   settings: { event_subscriptions: { bot_events: ['message.channels', 'message.groups', 'message.im'] }, socket_mode_enabled: true, org_deploy_enabled: false, token_rotation_enabled: false },
 }
 export async function prepareProject(root: string, name = 'Crabot'): Promise<string> {

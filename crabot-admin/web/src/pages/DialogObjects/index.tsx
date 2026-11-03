@@ -1,6 +1,6 @@
 import { storagePermissionFromFields } from '../../components/storage-permission-form'
 import { StoragePermissionEditor } from '../../components/StoragePermissionEditor'
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Button } from '../../components/Common/Button'
 import { Drawer } from '../../components/Common/Drawer'
 import { Input } from '../../components/Common/Input'
@@ -335,7 +335,7 @@ export const DialogObjectsPage: React.FC = () => {
     [friends]
   )
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (domain !== 'friends' || !selectedItem) return
     const friend = selectedItem as DialogObjectFriend
     setEditName(friend.display_name)
@@ -738,7 +738,7 @@ export const DialogObjectsPage: React.FC = () => {
         <header className="dlg-page__header">
           <div>
             <span className="dlg-page__eyebrow">Dialog Objects</span>
-            <h1 className="dlg-page__title">对话对象管理</h1>
+            <h1 className="dlg-page__title">联系人与群聊</h1>
             <p className="dlg-page__subtitle">
               用统一模型查看好友、未归属私聊与可处理群聊；事件归属与权限调整在此一站完成。
             </p>
@@ -765,7 +765,7 @@ export const DialogObjectsPage: React.FC = () => {
 
         <div className="dlg-toolbar">
           <Input
-            placeholder="按名字、渠道或参与者搜索"
+            placeholder="按名字、聊天方式或参与者搜索"
             aria-label="搜索"
             value={search}
             onChange={(event) => setSearch(event.target.value)}

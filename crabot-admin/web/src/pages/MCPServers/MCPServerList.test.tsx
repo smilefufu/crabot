@@ -32,7 +32,7 @@ describe('MCP environment selection', () => {
   it('displays old entries as custom and sends null when changing a managed entry back to custom', async () => {
     vi.mocked(mcpService.list).mockResolvedValue([{ ...existing, managed_runtime: 'node' }])
     render(<MCPServerList />)
-    expect(await screen.findByText(/Crabot 管理 node/)).toBeInTheDocument()
+    expect(await screen.findByText(/CRABOT 管理 node/)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '编辑' }))
     expect(screen.getByLabelText('运行环境')).toHaveValue('node')
     fireEvent.change(screen.getByLabelText('运行环境'), { target: { value: 'custom' } })

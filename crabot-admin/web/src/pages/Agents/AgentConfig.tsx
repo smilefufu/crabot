@@ -106,7 +106,7 @@ function thinkingSelectValue(t: SlotThinkingConfig | undefined): ThinkingSelectV
   return 'custom'
 }
 
-export const AgentConfig: React.FC = () => {
+export const AgentConfig: React.FC<{ profileOnly?: boolean }> = ({ profileOnly = false }) => {
   const toast = useToast()
   const [providers, setProviders] = useState<ModelProvider[]>([])
   const [llmRequirements, setLlmRequirements] = useState<LLMRoleRequirement[]>([])
@@ -135,6 +135,11 @@ export const AgentConfig: React.FC = () => {
   const loadData = async () => {
     try {
       setLoading(true)
+      if (profileOnly) {
+        const existing = await agentService.getConfig()
+        setConfig(previous => ({ ...previous, system_prompt: existing.system_prompt || '' }))
+        return
+      }
       const [providersData, requirements, mcpServers, skills] = await Promise.all([
         providerService.listProviders(),
         agentService.getLLMRequirements(),
@@ -176,6 +181,11 @@ export const AgentConfig: React.FC = () => {
   const handleSave = async () => {
     try {
       setSaving(true)
+      if (profileOnly) {
+        await agentService.updateConfig({ system_prompt: config.system_prompt })
+        toast.success('个性与表达已保存')
+        return
+      }
       // 自定义思考值归一化 + 空值拦截（后端校验为准，这里只挡明显笔误）
       for (const [key, t] of Object.entries(config.thinking)) {
         if (t.thinking_custom !== undefined && typeof t.thinking_custom === 'string' && t.thinking_custom.trim() === '') {
@@ -292,12 +302,12 @@ export const AgentConfig: React.FC = () => {
     <MainLayout>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1.25rem' }}>
         <div>
-          <h1 style={{ fontSize: '1.5rem', fontWeight: 700, letterSpacing: '-0.01em' }}>Agent 配置</h1>
+          <h1 style={{ fontSize: '1.5rem', fontWeight: 700, letterSpacing: '-0.01em' }}>{profileOnly ? '我的 CRABOT' : '模型分工与能力设置'}</h1>
           <p style={{ color: 'var(--text-secondary)', fontSize: '0.8125rem', marginTop: '0.25rem' }}>
-            模型、工具与系统行为
+            {profileOnly ? '你希望伙伴以什么样的方式和你相处。' : '模型角色、工具与系统行为'}
           </p>
         </div>
-        <Button variant="primary" onClick={handleSave} disabled={saving}>
+        <Button variant="primary" onClick={handleSave} disabled={saving || !!error}>
           {saving ? '保存中...' : '保存配置'}
         </Button>
       </div>
@@ -307,7 +317,7 @@ export const AgentConfig: React.FC = () => {
       {/* System Prompt */}
       <Card>
         <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: '0.625rem' }}>
-          <h3 style={{ fontSize: '0.9375rem', fontWeight: 600 }}>AI 性格提示词</h3>
+          <h3 style={{ fontSize: '0.9375rem', fontWeight: 600 }}>个性与表达</h3>
           <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>工作流程指令已内置</span>
         </div>
         <textarea
@@ -324,7 +334,7 @@ export const AgentConfig: React.FC = () => {
 · 拒绝或坏消息不要用要点罗列，把话说得软一些
 · 出错就直接承认并改正，不必反复道歉；做完不邀功、不说"还有什么可以帮您"之类的客套`}
         />
-        <div style={{ marginTop: '0.875rem' }}>
+        {!profileOnly && <div style={{ marginTop: '0.875rem' }}>
           <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.5rem', marginBottom: '0.25rem' }}>
             <label style={{ fontWeight: 500, fontSize: '0.8125rem' }}>时区</label>
             <span style={{ color: 'var(--text-muted)', fontSize: '0.6875rem' }}>影响 prompt 中"当前时间"与工具结果时间戳的显示</span>
@@ -343,9 +353,11 @@ export const AgentConfig: React.FC = () => {
               </optgroup>
             ))}
           </select>
-        </div>
+        </div>}
       </Card>
 
+      {profileOnly && <p style={{ marginTop: 16, color: 'var(--text-secondary)' }}>个性描述影响表达方式；伙伴能做什么，由本领配置和相应权限共同决定。</p>}
+      {!profileOnly && <>
       {/* Model Roles */}
       <div style={{ marginTop: '1rem' }}>
         <Card>
@@ -623,6 +635,7 @@ export const AgentConfig: React.FC = () => {
           </Card>
         </div>
       )}
+      </>}
     </MainLayout>
   )
 }

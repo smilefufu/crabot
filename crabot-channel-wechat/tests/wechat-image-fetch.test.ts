@@ -22,6 +22,11 @@ beforeEach(async () => {
 afterEach(async () => { vi.unstubAllGlobals(); await fs.rm(dir, { recursive: true, force: true }) })
 
 describe('微信按需图片', () => {
+  it('明确拒绝尚不支持的附件选择，不能忽略后拿错图片', async () => {
+    expect(await fetcher.fetch({ ...params, attachment_id: 'F1' })).toEqual({ status: 'failed', error: '微信取图不支持 attachment_id 附件选择' })
+    expect(getMessage).not.toHaveBeenCalled()
+    expect(fetch).not.toHaveBeenCalled()
+  })
   it.each([[0, 'thumbnail'], [1, 'hd'], [undefined, 'unknown']])('如实保留质量 %s', (origin, quality) => {
     expect(formatWechatContent(1, message(origin as number).content).content.image_quality).toBe(quality)
   })

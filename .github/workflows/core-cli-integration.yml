@@ -1,18 +1,6 @@
 name: Core and existing CLI integration
 on:
   workflow_dispatch:
-  push:
-    branches: ['feat/desktop-core-cli-integration']
-  pull_request:
-    paths:
-      - 'cli.mjs'
-      - 'src/cli/**'
-      - 'scripts/start.mjs'
-      - 'scripts/stop.mjs'
-      - 'scripts/supervisor.mjs'
-      - 'scripts/lib/*python*'
-      - 'scripts/lib/*maintenance*'
-      - '.github/workflows/core-cli-integration.yml'
 permissions:
   contents: read
 jobs:

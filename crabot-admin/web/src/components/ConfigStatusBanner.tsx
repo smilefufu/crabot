@@ -114,12 +114,13 @@ function getTargetElementId(missing: string[]): string | null {
 
 export const ConfigStatusBanner: React.FC = () => {
   const [status, setStatus] = useState<ConfigStatus | null>(null)
+  const [readError, setReadError] = useState(false)
   const location = useLocation()
 
   useEffect(() => {
     api.get<ConfigStatus>('/config/status')
       .then(data => setStatus(data))
-      .catch(() => {})
+      .catch(() => setReadError(true))
   }, [])
 
   // Inject keyframes once
@@ -132,11 +133,13 @@ export const ConfigStatusBanner: React.FC = () => {
     document.head.appendChild(style)
   }, [])
 
+  if (readError) return <div className="setup-read-error" role="status">暂时无法读取模型配置。已有配置保持保留。<Link to="/setup">重新检查配置</Link></div>
   if (!status || status.configured) return null
   if (!Array.isArray(status.missing) || status.missing.length === 0) return null
 
   const isOnProvidersPage = location.pathname === '/providers'
-  const targetId = isOnProvidersPage ? getTargetElementId(status.missing) : null
+  const candidate = isOnProvidersPage ? getTargetElementId(status.missing) : null
+  const targetId = candidate && document.getElementById(candidate) ? candidate : null
 
   const handleHighlight = (e: React.MouseEvent) => {
     if (targetId) {
@@ -160,13 +163,13 @@ export const ConfigStatusBanner: React.FC = () => {
         ))}
       </ul>
       <Link
-        to="/providers"
+        to="/setup"
         style={styles.link}
         onClick={handleHighlight}
         onMouseEnter={e => { e.currentTarget.style.opacity = '0.85' }}
         onMouseLeave={e => { e.currentTarget.style.opacity = '1' }}
       >
-        {targetId ? '定位到配置' : '前往配置'}
+        {targetId ? '定位到配置' : '继续配置模型服务'}
         <span style={{ fontSize: '0.75rem' }}>→</span>
       </Link>
     </div>

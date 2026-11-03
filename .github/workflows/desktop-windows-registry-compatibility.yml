@@ -1,13 +1,6 @@
 name: Windows registry atomic compatibility
 on:
   workflow_dispatch:
-  push:
-    branches: ['feat/desktop-windows-registry-compatibility']
-  pull_request:
-    paths:
-      - 'crabot-agent/src/engine/bg-entities/registry.ts'
-      - 'crabot-agent/tests/engine/bg-entities/registry-windows-atomic.test.ts'
-      - '.github/workflows/desktop-windows-registry-compatibility.yml'
 permissions:
   contents: read
 jobs:

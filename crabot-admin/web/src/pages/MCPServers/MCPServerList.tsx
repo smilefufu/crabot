@@ -204,7 +204,7 @@ export const MCPServerList: React.FC = () => {
   return (
     <MainLayout>
       <header className="page-header">
-        <h1 className="page-header__title">MCP Servers</h1>
+        <h1 className="page-header__title">工具与应用</h1>
         <Button variant="primary" onClick={openCreate}>添加 MCP Server</Button>
       </header>
 
@@ -264,9 +264,9 @@ export const MCPServerList: React.FC = () => {
                   value={form.managed_runtime}
                   onChange={(e) => setForm((f) => ({ ...f, managed_runtime: e.target.value as FormData['managed_runtime'] }))}
                   options={[
-                    ...(!editingId ? [{ value: 'auto', label: '自动选择（内置发行的 npx/uvx 默认由 Crabot 管理）' }] : []),
-                    { value: 'node', label: 'Crabot 管理 · Node' },
-                    { value: 'python', label: 'Crabot 管理 · Python' },
+                    ...(!editingId ? [{ value: 'auto', label: '自动选择（内置发行的 npx/uvx 默认由 CRABOT 管理）' }] : []),
+                    { value: 'node', label: 'CRABOT 管理 · Node' },
+                    { value: 'python', label: 'CRABOT 管理 · Python' },
                     { value: 'custom', label: '自定义环境（保留原命令和包来源）' },
                   ]}
                 />
@@ -344,7 +344,7 @@ export const MCPServerList: React.FC = () => {
                     </span>
                   </div>
                   <div className="mcp-row__cmd">
-                    {s.managed_runtime ? `Crabot 管理 ${s.managed_runtime} · ` : s.is_builtin ? '内置工具 · ' : '自定义环境 · '}{s.name === 'computer-use' && desktop?.standard ? 'computer-use · ' : ''}{s.command}{s.args?.length ? ' ' + s.args.join(' ') : ''}
+                    {s.managed_runtime ? `CRABOT 管理 ${s.managed_runtime} · ` : s.is_builtin ? '内置工具 · ' : '自定义环境 · '}{s.name === 'computer-use' && desktop?.standard ? 'computer-use · ' : ''}{s.command}{s.args?.length ? ' ' + s.args.join(' ') : ''}
                   </div>
                   {s.name === 'computer-use' && desktop && (
                     <p className="mcp-row__desc">桌面控制：{desktopStatusText(desktop)} · <Link to="/settings#computer-use">设置桌面控制</Link></p>

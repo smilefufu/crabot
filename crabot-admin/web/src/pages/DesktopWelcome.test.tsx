@@ -20,6 +20,22 @@ beforeEach(() => {
 })
 function show() { render(<MemoryRouter><Routes><Route path="/" element={<DesktopWelcome />} /><Route path="/chat" element={<p>聊天页面</p>} /></Routes></MemoryRouter>) }
 
+it('shows an unknown read state instead of asking for replacement credentials', async () => {
+  mocks.hasManagerModel.mockRejectedValue(new Error('fixture offline'))
+  show()
+  expect(await screen.findByRole('alert')).toHaveTextContent('未能读取已有模型配置')
+  expect(screen.queryByLabelText('API Key')).toBeNull()
+  expect(mocks.selectDefault).not.toHaveBeenCalled()
+})
+
+it('shows model capabilities without requesting a paid model probe', async () => {
+  mocks.choices.mockResolvedValue({ items: [{ ...provider, models: [{ ...provider.models[0], supports_vision: true, context_window: 1050000 }] }] })
+  show()
+  expect(await screen.findByText('上下文 1.05M')).toBeInTheDocument()
+  expect(screen.getByText('文字 + 图片')).toBeInTheDocument()
+  expect(mocks.selectDefault).not.toHaveBeenCalled()
+})
+
 it('existing model configuration opens chat without asking for configuration or writing defaults', async () => {
   mocks.hasManagerModel.mockResolvedValue(true)
   show()

@@ -19,8 +19,8 @@ export function VoiceServices({ channelId, onChange }: { channelId?: string; onC
   async function run(work: () => Promise<void>) { setBusy(true); setError(''); setNotice(''); try { await work() } catch (e) { setError(e instanceof Error ? e.message : '操作失败') } finally { setBusy(false) } }
   const changed = JSON.stringify(config) !== JSON.stringify(savedConfig)
   return <div>{error && <p role="alert">{error}</p>}{notice && <p role="status">{notice}</p>}
-    <h4>语音服务</h4><p>ASR/TTS 均通过外部 API 接入，模型由服务提供方部署和维护。Crabot 只配置服务连接与模型 ID，不下载或运行 ASR/TTS 模型。</p>
-    <p>仅此渠道使用 ASR/TTS。保存服务连接或模型引用会结束当前交互，手机需要现场重新开始；云服务可能留存音频，请按所选服务规则核对。</p>
+    <h4>语音服务</h4><p>ASR/TTS 均通过外部 API 接入，模型由服务提供方部署和维护。CRABOT 只配置服务连接与模型 ID，不下载或运行 ASR/TTS 模型。</p>
+    <p>仅此聊天方式使用 ASR/TTS。保存服务连接或模型引用会结束当前交互，手机需要现场重新开始；云服务可能留存音频，请按所选服务规则核对。</p>
     <div className="voice-fields">{(['asr', 'tts'] as const).map(cap => <label key={cap}>{cap === 'asr' ? '语音转文字 ASR' : '文字转语音 TTS'}<select className="select" value={config[cap] ? JSON.stringify(config[cap]) : ''} onChange={e => setConfig({ ...config, [cap]: e.target.value ? JSON.parse(e.target.value) : null })}><option value="">未配置</option>{providers.flatMap(p => p.models.filter(m => m.capabilities.includes(cap)).map(m => <option key={p.id + m.model_id} value={JSON.stringify({ provider_id: p.id, model_id: m.model_id })}>{p.name} · {m.display_name} · {p.endpoint}</option>))}</select></label>)}
       <label>手机端唤醒词<input className="input" value={config.wake_word} onChange={e => setConfig({ ...config, wake_word: e.target.value })} /></label>
     </div>

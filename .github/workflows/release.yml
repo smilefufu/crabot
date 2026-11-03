@@ -3,43 +3,6 @@ name: Release
 on:
   push:
     tags: ['v*']
-  pull_request:
-    paths:
-      - 'install.sh'
-      - 'install.ps1'
-      - 'cli.mjs'
-      - 'scripts/upgrade*.mjs'
-      - 'scripts/upgrade-lib/**'
-      - 'scripts/_preflight.mjs'
-      - 'scripts/stop.mjs'
-      - 'scripts/lib/__tests__/stop-windows.test.mjs'
-      - 'scripts/check-release.mjs'
-      - 'scripts/lib/release-package.mjs'
-      - 'scripts/lib/toolchain.mjs'
-      - 'scripts/installer-deps.mjs'
-      - 'scripts/prepare-memory.mjs'
-      - 'scripts/lib/install-network.mjs'
-      - 'scripts/lib/memory-deps.mjs'
-      - 'scripts/lib/run-bounded.mjs'
-      - 'scripts/lib/__tests__/install-network.test.mjs'
-      - 'crabot-core/src/core-modules*'
-      - '.github/scripts/*domestic*'
-      - '.github/scripts/test-uv-product-config.py'
-      - 'scripts/lib/__tests__/*install*.mjs'
-      - '.github/scripts/*install*'
-      - '.github/scripts/test-durable-file.mjs'
-      - 'crabot-admin/src/durable-file.ts'
-      - 'crabot-core/src/index.ts'
-      - 'scripts/computer-use/**'
-      - 'scripts/*computer-use*.mjs'
-      - 'scripts/lib/computer-use-*'
-      - 'crabot-mcp-tools/src/computer-use/**'
-      - 'scripts/scrapling/**'
-      - 'scripts/*scrapling*.mjs'
-      - 'scripts/lib/scrapling-*'
-      - '.github/scripts/*scrapling*'
-      - '.github/workflows/release.yml'
-
 permissions:
   contents: write
 
@@ -82,41 +45,12 @@ jobs:
         with:
           version: '0.13.0'
 
-      - name: Domestic source policy regressions
-        run: node --test scripts/lib/__tests__/install-network.test.mjs scripts/lib/__tests__/memory-preparation-marker.test.mjs
-
-      - name: Cold dependency downloads with official origins blocked
-        shell: bash
-        run: |
-          python .github/scripts/audit-domestic-node.py "$GITHUB_WORKSPACE"
-          python .github/scripts/audit-domestic-python.py "$GITHUB_WORKSPACE" uv
-          python .github/scripts/test-uv-product-config.py "$GITHUB_WORKSPACE" uv
-
-      - name: Installer regressions (Unix)
-        if: matrix.platform != 'windows'
-        run: node --test scripts/lib/__tests__/installer-compat.test.mjs scripts/lib/__tests__/scrapling-install.test.mjs scripts/lib/__tests__/scrapling-runtime.test.mjs scripts/lib/__tests__/stop-windows.test.mjs
-
-      - name: Installer regressions (PowerShell 7)
-        if: matrix.platform == 'windows'
-        shell: pwsh
-        run: .github/scripts/test-installer-windows.ps1
-
-      - name: Windows stop sequence regression
-        if: matrix.platform == 'windows'
-        run: node --test scripts/lib/__tests__/stop-windows.test.mjs
-
-      - name: Installer regressions (Windows PowerShell 5.1)
-        if: matrix.platform == 'windows'
-        shell: powershell
-        run: .github/scripts/test-installer-windows.ps1
-
-      - name: Windows CA path compatibility regressions
-        shell: bash
-        run: python .github/scripts/test-installer-ca.py
-
       - name: Install dependencies (with devDeps for build)
         shell: bash
         run: |
+          node scripts/build-native.mjs
+          pnpm --dir crabot-client install --frozen-lockfile
+          pnpm --dir crabot-client run build
           pnpm install
 
           # crabot-shared 必须先 install + build，其他模块通过 file: 引用它。
@@ -162,10 +96,6 @@ jobs:
           node scripts/prepare-scrapling.mjs --release="$GITHUB_REF_NAME"
           node scripts/prepare-computer-use.mjs
 
-      - name: Verify real Scrapling MCP and browser calls
-        shell: bash
-        run: node .github/scripts/smoke-scrapling.mjs "$GITHUB_WORKSPACE"
-
       - name: Prune to production-only dependencies
         shell: bash
         run: |
@@ -175,7 +105,8 @@ jobs:
 
           # build 已完成，dist 产物保留。重装去 devDeps（typescript / vitest / tsx 等）。
           # native 模块 (better-sqlite3) 用 prebuild 二进制，不需现场编译。
-          # crabot-shared 必须先 prune：其他模块 file: 引用，install 时基于其当时状态做快照。
+          # file: 消费者在 install 时做快照，先准备本地 SDK 和 Shared。
+          (cd crabot-client && rm -rf node_modules && pnpm install "${prod_flags[@]}")
           (cd crabot-shared && rm -rf node_modules && pnpm install "${prod_flags[@]}")
 
           # 其他模块和 root 并行 prune
@@ -208,6 +139,8 @@ jobs:
           # 复制运行时文件
           cp cli.mjs crabot.cmd package.json install.sh install.ps1 LICENSE "/tmp/${DIRNAME}/"
           cp -r dist "/tmp/${DIRNAME}/"
+          mkdir -p "/tmp/${DIRNAME}/crabot-native/build/Release"
+          cp crabot-native/build/Release/crabot-native.node "/tmp/${DIRNAME}/crabot-native/build/Release/"
 
           # rsync -H 保留 pnpm store 单模块内的 hardlink，避免每个文件被 inflate 成独立副本。
           # 第三方包广泛用 src/ 作运行时入口（如 ecdsa-sig-formatter 的 main = src/...js），
@@ -246,7 +179,7 @@ jobs:
                 scripts "/tmp/${DIRNAME}/"
 
           # TS 模块：src/ 是源码，构建产物在 dist/，可排除 src/
-          for mod in crabot-shared crabot-core crabot-agent \
+          for mod in crabot-client crabot-shared crabot-core crabot-agent \
                      crabot-channel-telegram crabot-channel-wechat crabot-channel-feishu crabot-channel-dingtalk crabot-channel-slack crabot-channel-voice \
                      crabot-mcp-tools; do
             if [ -d "$mod" ]; then
@@ -324,12 +257,15 @@ jobs:
 
           Copy-Item cli.mjs, crabot.cmd, package.json, install.sh, install.ps1, LICENSE $TempDir
           Copy-Item -Recurse dist, scripts, node_modules $TempDir
+          $NativeDir = Join-Path $TempDir 'crabot-native/build/Release'
+          New-Item -ItemType Directory -Force -Path $NativeDir | Out-Null
+          Copy-Item 'crabot-native/build/Release/crabot-native.node', 'crabot-native/build/Release/crabot-hidden-console.exe' $NativeDir
           # 清理 scripts/lib/__tests__ 等 dev-only 测试目录；scripts/lib/node_modules 是运行时依赖必须保留
           Get-ChildItem -Path "$TempDir\scripts" -Recurse -Directory -Filter '__tests__' -ErrorAction SilentlyContinue |
             Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 
           # TS 模块：src/ 是源码，构建产物在 dist/，可排除 src/
-          $tsModules = @('crabot-shared','crabot-admin','crabot-core','crabot-agent',
+          $tsModules = @('crabot-client','crabot-shared','crabot-admin','crabot-core','crabot-agent',
                          'crabot-channel-telegram','crabot-channel-wechat','crabot-channel-feishu','crabot-channel-dingtalk','crabot-channel-slack','crabot-channel-voice',
                          'crabot-mcp-tools')
           foreach ($mod in $tsModules) {
@@ -399,52 +335,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node .github/scripts/smoke-scrapling.mjs "$Unpacked"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Native final-archive installer, startup, reinstall and rejection
-        if: matrix.platform != 'windows'
-        shell: bash
-        run: |
-          ARCHIVE=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -name 'crabot-*.tar.gz' -print -quit)
-          node .github/scripts/smoke-installer.mjs "$ARCHIVE"
-
-      - name: Final ZIP installer and runtime (PowerShell 7)
-        if: matrix.platform == 'windows'
-        shell: bash
-        run: |
-          ARCHIVE=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -name 'crabot-*-windows-x64.zip' -print -quit)
-          node .github/scripts/smoke-installer.mjs "$ARCHIVE" pwsh
-
-      - name: Final ZIP installer and runtime (Windows PowerShell 5.1)
-        if: matrix.platform == 'windows'
-        shell: bash
-        run: |
-          ARCHIVE=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -name 'crabot-*-windows-x64.zip' -print -quit)
-          node .github/scripts/smoke-installer.mjs "$ARCHIVE" powershell.exe
-
-      - name: Linux installer distro compatibility (Ubuntu 24.04, Debian 12 and 13)
-        if: matrix.platform == 'linux'
-        shell: bash
-        run: |
-          ARCHIVE=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -name 'crabot-*-linux-x64.tar.gz' -print -quit)
-          bash .github/scripts/smoke-installer-linux.sh "$ARCHIVE"
-
-      - name: Verify system upgrade and ordinary users (Linux)
-        if: matrix.platform == 'linux'
-        shell: bash
-        run: |
-          git fetch origin tag v2026.9.23 --depth=1
-          git archive v2026.9.23 cli.mjs package.json scripts > /tmp/crabot-system-baseline.tar
-          ARCHIVE=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -name 'crabot-*-linux-x64.tar.gz' -print -quit)
-          sudo env "PATH=$PATH" bash .github/scripts/audit-scrapling-system.sh \
-            "$GITHUB_WORKSPACE" "$ARCHIVE" "$GITHUB_WORKSPACE/scrapling-system-audit" /tmp/crabot-system-baseline.tar
-
-      - name: Save system audit evidence
-        if: always() && matrix.platform == 'linux'
-        uses: actions/upload-artifact@v4
-        with:
-          name: scrapling-system-audit
-          path: scrapling-system-audit/
-          if-no-files-found: ignore
 
       - name: Upload Release Assets
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')

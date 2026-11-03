@@ -43,6 +43,33 @@ class PrivateBrowserPathsTest(unittest.TestCase):
 
 
 class ManagedSandboxPolicyTest(unittest.TestCase):
+    @unittest.skipUnless(hasattr(os, 'getuid'), 'Unix package identity')
+    def test_deb_identity_enables_guard_only_for_root_owned_fixed_package(self):
+        import json
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as directory:
+            resources = Path(directory) / 'resources'
+            core = resources / 'core'
+            core.mkdir(parents=True)
+            host = core / 'desktop-host.json'
+            host.write_text(json.dumps({'schema_version': 1, 'platform': 'linux', 'arch': 'x64'}))
+            marker = resources / 'package-type'
+            marker.write_text('deb\n')
+            original = Path.lstat
+            def packaged_stat(file, *args, **kwargs):
+                info = original(file, *args, **kwargs)
+                return SimpleNamespace(st_mode=info.st_mode, st_uid=0, st_nlink=info.st_nlink, st_size=info.st_size)
+            with patch.object(server, 'RUNTIME', core / '.scrapling-runtime-test'), patch.object(server.sys, 'platform', 'linux'):
+                with patch.object(Path, 'lstat', packaged_stat):
+                    self.assertTrue(server.paired_linux_core())
+                    marker.write_text('invalid')
+                    with self.assertRaisesRegex(RuntimeError, 'DEB'):
+                        server.paired_linux_core()
+                marker.write_text('deb')
+                if os.getuid() != 0:
+                    with self.assertRaisesRegex(RuntimeError, 'DEB'):
+                        server.paired_linux_core()
+
     def test_real_sdk_default_false_is_replaced_only_for_local_chromium_launch(self):
         async def launch(browser, *, chromium_sandbox=False, args=()):
             return {'sandbox': chromium_sandbox, 'args': args}

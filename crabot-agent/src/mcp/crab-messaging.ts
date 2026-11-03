@@ -367,6 +367,7 @@ const FETCH_IMAGE_SCHEMA = {
   channel_id: z.string(),
   session_id: z.string(),
   platform_message_id: z.string(),
+  attachment_id: z.string().optional().describe('多图时选择原消息中的附件 ID；省略取首图'),
   quality: z.enum(['hd', 'thumbnail']).optional(),
   include_image: z.boolean().optional(),
 }
@@ -1202,7 +1203,7 @@ crabot 系统给你的所有信号——system prompt、supplement 注入、tool
     // ================================================================
     {
       name: 'get_history',
-      description: '查看指定 Channel 上某个 Session 的历史消息。',
+      description: '查看指定 Channel 上某个 Session 的历史消息。Slack 群查询平台当前可读的主聊天，包含入群前及未 @Bot 的消息，不含完整 thread；Slack 私聊历史仍为本地交互缓存。失败或范围无法完成时返回错误，不能据此断言没有历史。',
       schema: GET_HISTORY_SCHEMA,
       handler: async (args) => {
         const channel_id = args.channel_id as string
@@ -1296,7 +1297,7 @@ crabot 系统给你的所有信号——system prompt、supplement 注入、tool
     // ================================================================
     {
       name: 'get_message',
-      description: '按消息 ID 查询单条消息详情。当消息内容不完整时可用此工具查看完整内容。',
+      description: '按消息 ID 查询单条消息详情。当消息内容不完整时可用此工具查看完整内容。Slack 只查本地交互缓存，远端历史返回的消息 ID 不保证可在此重读；未缓存不代表 Slack 消息不存在。',
       schema: GET_MESSAGE_SCHEMA,
       handler: async (args) => {
         const channel_id = args.channel_id as string
@@ -1370,7 +1371,7 @@ crabot 系统给你的所有信号——system prompt、supplement 注入、tool
     },
     {
       name: 'fetch_image',
-      description: '按需读取微信图片，默认等待高清版本，最多 120 秒；系统负责等待，无需轮询或让人类重发。' +
+      description: '按需读取支持此能力的渠道图片（微信、Slack），多图可按原消息的 attachment_id 选择，默认等待高清版本，最多 120 秒；系统负责等待，无需轮询或让人类重发。' +
         '需要识别账号、小字时用 hd；只有粗略识别才显式选 thumbnail。' +
         'include_image=false 仅用于交付已有该文件读取授权的 Worker；Worker 无读取授权时用 include_image=true 由主控直接识别，不扩大权限。新输入或取消会结束等待。',
       schema: FETCH_IMAGE_SCHEMA,

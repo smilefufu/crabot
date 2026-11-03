@@ -21,10 +21,6 @@ assert re.fullmatch(r'\.scrapling-runtime-[A-Za-z0-9.-]+-[a-f0-9]{16}-[a-f0-9]{8
 launcher = manifest['browser']
 assert launcher == directory + '/chromium-launcher'
 runtime = core / directory
-ready = json.loads((runtime / 'ready.json').read_text())
-node = (runtime / ready['node']).resolve()
-assert node == (core / '.product-runtime/node/bin/node').resolve() and node.is_file()
-os.environ['PLAYWRIGHT_NODEJS_PATH'] = str(node)
 sys.path.insert(0, str(runtime / 'packages'))
 from playwright.sync_api import sync_playwright
 

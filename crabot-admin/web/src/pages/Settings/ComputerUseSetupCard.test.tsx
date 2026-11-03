@@ -8,7 +8,7 @@ vi.mock('../../services/computerUse', async load => {
   return { ...real, computerUseService: { status: vi.fn(), start: vi.fn(), cancel: vi.fn(), reveal: vi.fn() } }
 })
 vi.mock('../../contexts/ToastContext', () => ({ useToast: () => ({ error: vi.fn(), success: vi.fn() }) }))
-const status: ComputerUseSetupStatus = { enabled: true, standard: true, host: { platform: 'darwin', hostname: 'Crabot 的电脑', session: 'active' },
+const status: ComputerUseSetupStatus = { enabled: true, standard: true, host: { platform: 'darwin', hostname: 'CRABOT 的电脑', session: 'active' },
   permissions: { accessibility: 'granted', screen_recording: 'missing' }, capture: { status: 'unverified' }, runtime: { state: 'uninitialized' }, app_path: '/fixture/CuaDriver.app' }
 beforeEach(() => { vi.clearAllMocks(); vi.mocked(computerUseService.status).mockResolvedValue(structuredClone(status)); vi.mocked(computerUseService.cancel).mockResolvedValue(status) })
 const show = () => render(<MemoryRouter><ComputerUseSetupCard /></MemoryRouter>)
@@ -17,14 +17,14 @@ describe('guided desktop setup UI', () => {
     vi.mocked(computerUseService.status).mockResolvedValue({ ...status, runtime: { state: 'uninitialized', checks: [{ name: 'ax_capability', status: 'fail' }] } })
     show()
     expect(await screen.findByText('已启用 · 尚需屏幕录制授权')).toBeTruthy()
-    expect(screen.getByText(/运行 Crabot 的电脑/)).toBeTruthy()
+    expect(screen.getByText(/运行 CRABOT 的电脑/)).toBeTruthy()
     expect(computerUseService.start).not.toHaveBeenCalled()
   })
   it('starts only from a human click and cancels its exact operation on leaving', async () => {
     vi.mocked(computerUseService.start).mockResolvedValue({ ...status, setup: { setup_id: 'current', phase: 'permissions', expires_at: new Date(Date.now() + 180000).toISOString() } })
     const page = show(); await screen.findByText(/尚需屏幕录制授权/)
     fireEvent.click(screen.getByRole('button', { name: '设置桌面控制' }))
-    expect(await screen.findByText(/CuaDriver 是 Crabot/)).toBeTruthy()
+    expect(await screen.findByText(/CuaDriver 是 CRABOT/)).toBeTruthy()
     expect(screen.getByText('1. 辅助功能')).toBeTruthy(); expect(screen.getByText('2. 屏幕与系统音频录制')).toBeTruthy()
     page.unmount()
     expect(computerUseService.cancel).toHaveBeenCalledWith('current')
@@ -41,7 +41,7 @@ describe('guided desktop setup UI', () => {
     vi.mocked(computerUseService.start).mockResolvedValue({ ...status, setup: { setup_id: 'leaving', phase: 'permissions', expires_at: new Date(Date.now() + 180000).toISOString() } })
     show(); await screen.findByText(/尚需屏幕录制授权/)
     fireEvent.click(screen.getByRole('button', { name: '设置桌面控制' }))
-    await screen.findByText(/CuaDriver 是 Crabot/)
+    await screen.findByText(/CuaDriver 是 CRABOT/)
     fireEvent(window, new Event('pagehide'))
     expect(computerUseService.cancel).toHaveBeenCalledWith('leaving', true)
   })

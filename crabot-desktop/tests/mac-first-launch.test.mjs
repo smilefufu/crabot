@@ -109,3 +109,23 @@ test('bound interrupted admission cannot fall back to creating independent empty
   assert.equal(f.messages.length, 0)
   assert.equal(binding.readMacAppBinding({ home: f.home }).data_dir, dataRoot)
 })
+
+test('Mac main-window presentation retries a failed page load without creating another window', async () => {
+  const main = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8')
+  const start = main.indexOf('onDataSelected: async dataDir => {')
+  const callback = main.slice(start + 'onDataSelected: '.length, main.indexOf(',\n          discoverLegacy:', start))
+  let windows = 0, pages = 0
+  const context = {
+    configureProfile: () => {}, session: { fromPartition: () => ({}) },
+    createMainWindow: () => { windows++; return {} },
+    showStartupPage: async () => { if (++pages === 1) throw new Error('page load failed'); return {} },
+    app: { getVersion: () => '1.2.3' }, process: { argv: [] }, show: () => {},
+    window: undefined, startupPage: undefined, mainSession: undefined,
+  }
+  const present = vm.runInNewContext('(' + callback + ')', context)
+  await assert.rejects(present('/fixture/data'), /page load failed/)
+  await present('/fixture/data')
+  await present('/fixture/data')
+  assert.equal(windows, 1)
+  assert.equal(pages, 2)
+})

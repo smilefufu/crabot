@@ -52,6 +52,15 @@ describe('Slack official SDK boundary',()=>{
     await expect(client.start(vi.fn())).rejects.toMatchObject({code:'SERVICE_UNAVAILABLE'})
     expect(state.stop).toHaveBeenCalledOnce()
   })
+  it('reports the effective proxy and nested network codes without tokens, credentials or raw URLs', () => {
+    new SlackClient('xoxb-secret', 'xapp-secret')
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const proxy = vi.spyOn(proxyManager, 'getProxyUrl').mockReturnValue('http://user:password@127.0.0.1:7890/private?secret=1')
+    try {
+      state.handlers.get('error')!({ code: 'slack_webapi_request_error', message: 'xapp-secret wss://secret', original: { cause: { code: 'ECONNRESET' } } })
+      expect(log).toHaveBeenCalledWith('[Slack] Socket connection failed: code=slack_webapi_request_error>ECONNRESET, proxy=http://127.0.0.1:7890')
+    } finally { log.mockRestore(); proxy.mockRestore() }
+  })
   it('maps permissions and Retry-After explicitly, sanitizes unknown network write errors',async()=>{
     const missing=platformError({data:{error:'missing_scope',needed:'groups:read'}})
     expect(missing).toMatchObject({code:'PERMISSION_DENIED',details:{missing_scope:'groups:read'}})

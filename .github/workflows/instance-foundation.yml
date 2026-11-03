@@ -1,31 +1,6 @@
 name: Shared instance control foundation
 on:
   workflow_dispatch:
-  push:
-    branches: ['feat/desktop-instance-foundation']
-    paths:
-      - 'scripts/lib/instance-*'
-      - 'scripts/lib/managed-core.mjs'
-      - 'scripts/lib/module-process-start.cjs'
-      - 'scripts/lib/owned-process-tree.cjs'
-      - 'scripts/lib/pid.mjs'
-      - 'scripts/lib/supervisor-shutdown.mjs'
-      - 'scripts/lib/mm-probe.mjs'
-      - 'scripts/status.mjs'
-      - 'scripts/lib/__tests__/**'
-      - '.github/workflows/instance-foundation.yml'
-  pull_request:
-    paths:
-      - 'scripts/lib/instance-*'
-      - 'scripts/lib/managed-core.mjs'
-      - 'scripts/lib/module-process-start.cjs'
-      - 'scripts/lib/owned-process-tree.cjs'
-      - 'scripts/lib/pid.mjs'
-      - 'scripts/lib/supervisor-shutdown.mjs'
-      - 'scripts/lib/mm-probe.mjs'
-      - 'scripts/status.mjs'
-      - 'scripts/lib/__tests__/**'
-      - '.github/workflows/instance-foundation.yml'
 permissions:
   contents: read
 jobs:
@@ -47,6 +22,13 @@ jobs:
         run: node scripts/build-native.mjs
       - name: Install only the existing scripts package's frozen dependencies
         run: pnpm --dir scripts/lib install --frozen-lockfile --ignore-scripts
+      - name: Build the Core producer used by the shared identity comparison
+        shell: bash
+        run: |
+          pnpm --dir crabot-shared install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-shared run build
+          pnpm --dir crabot-core install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-core run build
       - name: Verify actual finite controller children, generations and graceful shutdown
         shell: bash
         run: >-

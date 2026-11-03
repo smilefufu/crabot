@@ -46,8 +46,7 @@ export function probeFailurePhase(stderr: string): string | undefined {
   return probeFailureLine.exec(stderr)?.[1]
 }
 export function ubuntuInstallationFailure(error: unknown, cancelled: boolean): { code: string; phase?: string } {
-  let value = error as { code?: unknown; phase?: unknown; cause?: { code?: unknown; phase?: unknown } } | null | undefined
-  if (value?.code === 'CRABOT_MAINTENANCE_PENDING' && typeof value.cause?.code === 'string' && failureCodes.has(value.cause.code)) value = value.cause
+  const value = error as { code?: unknown; phase?: unknown } | null | undefined
   let code = 'NOT_READY'
   if (cancelled) code = 'CANCELLED'
   else if (typeof value?.code === 'string' && failureCodes.has(value.code)) code = value.code

@@ -1,0 +1,49 @@
+diff --git a/dist/src/SocketModeClient.js b/dist/src/SocketModeClient.js
+index 1809f52fba621ab556098d4b03c04fee898736e5..3b7a52c93c40ddd35e0ef666778c5fb343e6ad5f 100644
+--- a/dist/src/SocketModeClient.js
++++ b/dist/src/SocketModeClient.js
+@@ -162,7 +162,9 @@ class SocketModeClient extends eventemitter3_1.EventEmitter {
+             if (this.reconnectionTimer)
+                 return;
+             if (!this.shuttingDown && this.autoReconnectEnabled) {
+-                this.delayReconnectAttempt(this.start);
++                this.delayReconnectAttempt(this.start).catch((error) => {
++                    this.emit(State.Disconnected, error);
++                });
+             }
+             else {
+                 // If reconnect is disabled or user explicitly called `disconnect()`, emit a disconnected state.
+@@ -246,7 +248,7 @@ class SocketModeClient extends eventemitter3_1.EventEmitter {
+         this.numOfConsecutiveReconnectionFailures += 1;
+         const msBeforeRetry = this.clientPingTimeoutMS * this.numOfConsecutiveReconnectionFailures;
+         this.logger.debug(`Before trying to reconnect, this client will wait for ${msBeforeRetry} milliseconds`);
+-        return new Promise((res, _rej) => {
++        return new Promise((res, rej) => {
+             this.reconnectionTimer = setTimeout(() => {
+                 this.reconnectionTimer = undefined;
+                 if (this.shuttingDown) {
+@@ -255,7 +257,7 @@ class SocketModeClient extends eventemitter3_1.EventEmitter {
+                 else {
+                     this.logger.debug('Continuing with reconnect...');
+                     this.emit(State.Reconnecting);
+-                    cb.apply(this).then(res);
++                    cb.apply(this).then(res, rej);
+                 }
+             }, msBeforeRetry);
+         });
+@@ -281,13 +283,14 @@ class SocketModeClient extends eventemitter3_1.EventEmitter {
+         catch (error) {
+             // TODO: Python catches rate limit errors when interacting with this API: https://github.com/slackapi/python-slack-sdk/blob/main/slack_sdk/socket_mode/client.py#L51
+             this.logger.error(`Failed to retrieve a new WSS URL (error: ${error})`);
++            this.emit('error', error);
+             let isRecoverable = true;
+             if (error instanceof web_api_1.WebAPIPlatformError &&
+                 Object.values(UnrecoverableSocketModeStartError_1.UnrecoverableSocketModeStartError).includes(error.data.error)) {
+                 isRecoverable = false;
+             }
+             else if (error instanceof web_api_1.WebAPIRequestError) {
+-                isRecoverable = false;
++                isRecoverable = this.connectionResponse !== undefined && !this.shuttingDown;
+             }
+             else if (error instanceof web_api_1.WebAPIHTTPError) {
+                 isRecoverable = false;

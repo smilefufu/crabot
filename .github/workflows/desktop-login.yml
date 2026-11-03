@@ -1,33 +1,6 @@
 name: Desktop login startup
 
 on:
-  push:
-    branches: ['feat/desktop-final-acceptance']
-    paths:
-      - 'crabot-desktop/src/login-startup*.ts'
-      - 'crabot-desktop/tests/login-startup*'
-      - 'crabot-desktop/src/installation-entries.ts'
-      - 'crabot-desktop/src/installation-removal.ts'
-      - 'crabot-desktop/tests/installation-entries.test.mjs'
-      - 'crabot-desktop/tests/installation-removal*'
-      - 'crabot-desktop/tests/cli-removal.test.mjs'
-      - 'crabot-desktop/tests/maintenance-bootstrap*'
-      - 'crabot-native/**'
-      - 'scripts/lib/process-identity.cjs'
-      - '.github/workflows/desktop-login.yml'
-  pull_request:
-    paths:
-      - 'crabot-desktop/src/login-startup*.ts'
-      - 'crabot-desktop/tests/login-startup*'
-      - 'crabot-desktop/src/installation-entries.ts'
-      - 'crabot-desktop/src/installation-removal.ts'
-      - 'crabot-desktop/tests/installation-entries.test.mjs'
-      - 'crabot-desktop/tests/installation-removal*'
-      - 'crabot-desktop/tests/cli-removal.test.mjs'
-      - 'crabot-desktop/tests/maintenance-bootstrap*'
-      - 'crabot-native/**'
-      - 'scripts/lib/process-identity.cjs'
-      - '.github/workflows/desktop-login.yml'
   workflow_dispatch:
 
 permissions:

@@ -26,6 +26,13 @@ beforeEach(async () => {
 afterEach(async () => { vi.useRealTimers(); await fs.rm(dir, { recursive: true, force: true }) })
 
 describe('调用级图片等待', () => {
+  it('keeps attachment selection distinct and returns image bytes for each selected Slack image', async () => {
+    call.mockImplementation(async (_port, method) => method === 'get_capabilities' ? { supports_image_fetch: true } : ready())
+    const controller = new AbortController()
+    const results = await Promise.all(['F1', 'F2'].map(attachment_id => reader({ ...args, channel_id: 'slack-test', attachment_id }, { abortSignal: controller.signal })))
+    expect(call.mock.calls.filter(([, method]) => method === 'fetch_image').map(([, , params]) => params.attachment_id)).toEqual(['F1', 'F2'])
+    expect(results.every(result => result.images?.[0].data === bytes.toString('base64'))).toBe(true)
+  })
   it('等待后返回高清内容，无轮询模型或会话广播', async () => {
     const work = reader(args)
     await vi.advanceTimersByTimeAsync(1_000)

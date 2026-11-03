@@ -7,6 +7,7 @@ import { Popover } from '../../components/Common/Popover'
 import { useToast } from '../../contexts/ToastContext'
 import type { ModelProvider, ModelInfo } from '../../types'
 import { ProviderTestBadge, type ProviderTestState } from './ProviderTestBadge'
+import { formatModelContext } from '../../components/Common/ModelCapabilities'
 
 interface ProviderDrawerDetailProps {
   provider: ModelProvider
@@ -27,12 +28,7 @@ const CONTEXT_PRESETS: ReadonlyArray<{ label: string; value: number }> = [
 
 /** 格式化显示：>=1M 用 M（如 1M / 1.5M），>=1K 用 K，其余原值 */
 export function formatContext(n: number): string {
-  if (n >= 1_000_000) {
-    const m = n / 1_000_000
-    return `${m % 1 === 0 ? m : Math.round(m * 10) / 10}M`
-  }
-  if (n >= 1_000) return `${Math.round(n / 1_000)}K`
-  return String(n)
+  return formatModelContext(n)
 }
 
 /** 解析用户输入：200K / 1m / 1.5M / 128000 均可；非法返回 null */
@@ -59,6 +55,7 @@ export const ProviderDrawerDetail: React.FC<ProviderDrawerDetailProps> = ({
   // 上下文 chip 编辑器：ctxEditor 记录正在编辑的 model_id 与自定义输入草稿
   const [ctxEditor, setCtxEditor] = useState<{ modelId: string; draft: string } | null>(null)
   const [keyVisible, setKeyVisible] = useState(false)
+  const [editingCapabilities, setEditingCapabilities] = useState(false)
 
   const handleRefreshModels = async () => {
     try {
@@ -322,6 +319,8 @@ export const ProviderDrawerDetail: React.FC<ProviderDrawerDetailProps> = ({
 
       {/* 模型列表 */}
       <h4 className="provider-models-title">模型列表 ({provider.models.length})</h4>
+      <button type="button" className="partner-link" onClick={() => setEditingCapabilities(value => !value)} aria-expanded={editingCapabilities}>高级：能力来源与手动更正</button>
+      {editingCapabilities && <p>来源：当前已保存的模型配置。历史供应商信息、自动识别与手动设置无法逐项追溯。仅在确认实际接入限制后更正；刷新会保留已保存值。</p>}
       {provider.models.length === 0 ? (
         <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>暂无模型</p>
       ) : (
@@ -344,6 +343,8 @@ export const ProviderDrawerDetail: React.FC<ProviderDrawerDetailProps> = ({
                 <span className="model-table-col-type">
                   {model.type === 'image' ? (
                     <span className="badge badge-warning">生图</span>
+                  ) : !editingCapabilities ? (
+                    <span>{model.supports_vision === undefined ? '看图能力待确认' : model.supports_vision ? '文字 + 图片' : '文字'}</span>
                   ) : (
                     <>
                       <span className="badge badge-success">LLM</span>
@@ -366,6 +367,8 @@ export const ProviderDrawerDetail: React.FC<ProviderDrawerDetailProps> = ({
                 <span className="model-table-col-ctx">
                   {model.type === 'image' ? (
                     <span style={{ color: 'var(--text-secondary)' }}>—</span>
+                  ) : !editingCapabilities ? (
+                    <span>{model.context_window ? formatContext(model.context_window) : '待确认'}</span>
                   ) : (
                     <Popover
                       placement="bottom"

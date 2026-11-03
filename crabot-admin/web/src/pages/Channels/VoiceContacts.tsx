@@ -67,7 +67,7 @@ export function VoiceContacts({ channelId, state, onChanged }: { channelId: stri
   }
 
   return <div>
-    <h4>渠道联系人与声纹</h4><p>联系人、好友绑定和声纹分别管理。未绑定或未识别的发言按陌生人进入语音群；声纹不授予权限，删除声纹保留联系人与绑定。</p>
+    <h4>聊天方式联系人与声纹</h4><p>联系人、好友绑定和声纹分别管理。未绑定或未识别的发言按陌生人进入语音群；声纹不授予权限，删除声纹保留联系人与绑定。</p>
     {error && <p role="alert">{error}</p>}{notice && <p role="status">{notice}</p>}
     <div className="voice-fields"><label>录入名字<input className="input" value={name} maxLength={128} onChange={e => setName(e.target.value)} /></label></div>
     <Button disabled={busy || !state || !name.trim() || !state.connected || !state.foreground || !!state.pending_enrollment} onClick={() => void run(enrollNew)}>登记新联系人</Button>
@@ -75,7 +75,7 @@ export function VoiceContacts({ channelId, state, onChanged }: { channelId: stri
     {state?.unconfirmed_contacts.map(contact => <div className="voice-service-row" key={contact.platform_user_id}><span>{contact.display_name} · 旧记录尚未核验，原身份和绑定保留</span><Button disabled={busy || !state.connected || !state.foreground || !!state.pending_enrollment} onClick={() => void run(() => manage({ action: 'enroll', platform_user_id: contact.platform_user_id }))}>重新登记确认</Button></div>)}
     {contacts.map(contact => {
       const registration = state?.registrations.find(r => r.platform_user_id === contact.platform_user_id && r.status !== 'revoked')
-      const revoked = state?.registrations.filter(r => r.platform_user_id === contact.platform_user_id && r.status === 'revoked').at(-1)
+      const revoked = state?.registrations.filter(r => r.platform_user_id === contact.platform_user_id && r.status === 'revoked').slice(-1)[0]
       const friend = friends.find(f => f.id === contact.friend_id)
       return <div className="voice-service-row" key={contact.platform_user_id}><span><strong>{contact.display_name}</strong> · {contact.friend_id ? `已绑定 ${friend?.display_name ?? contact.friend_id}` : '未绑定好友（群内按陌生人）'}<br /><small>{registration?.status === 'active' ? '声纹可用' : registration?.status === 'pending' ? '等待手机现场登记' : revoked && !revoked.terminal_cleared ? '声纹已撤销，终端清除待完成' : '未登记声纹'}</small></span><div className="voice-actions">
         <Button disabled={busy || !state?.connected || !state.foreground || !!state.pending_enrollment} onClick={() => void run(() => manage({ action: 'enroll', platform_user_id: contact.platform_user_id }))}>{registration?.status === 'active' ? '重新录制' : '登记声纹'}</Button>
@@ -83,7 +83,7 @@ export function VoiceContacts({ channelId, state, onChanged }: { channelId: stri
         {contact.friend_id && <Button variant="secondary" disabled={busy} onClick={() => void run(() => unlink(contact))}>解绑好友</Button>}
       </div></div>
     })}
-    <div className="voice-fields"><label>绑定的渠道联系人<select className="select" value={contactId} onChange={e => setContactId(e.target.value)}><option value="">选择联系人</option>{contacts.map(c => <option key={c.platform_user_id} value={c.platform_user_id}>{c.display_name}</option>)}</select></label><label>已有好友<select className="select" value={friendId} onChange={e => setFriendId(e.target.value)}><option value="">选择好友</option>{friends.map(f => <option key={f.id} value={f.id}>{f.display_name}</option>)}</select></label></div>
+    <div className="voice-fields"><label>绑定的聊天方式联系人<select className="select" value={contactId} onChange={e => setContactId(e.target.value)}><option value="">选择联系人</option>{contacts.map(c => <option key={c.platform_user_id} value={c.platform_user_id}>{c.display_name}</option>)}</select></label><label>已有好友<select className="select" value={friendId} onChange={e => setFriendId(e.target.value)}><option value="">选择好友</option>{friends.map(f => <option key={f.id} value={f.id}>{f.display_name}</option>)}</select></label></div>
     <Button disabled={busy || !identity || !!selected?.friend_id || !friendId} onClick={() => void run(bindExisting)}>绑定已有好友</Button>
     <div className="voice-fields"><label>修改联系人名字<input className="input" value={renameName} maxLength={128} onChange={e => setRenameName(e.target.value)} /></label></div>
     <Button variant="secondary" disabled={busy || !selected || !renameName.trim() || !!state?.pending_enrollment} onClick={() => void run(() => manage({ action: 'rename_contact', platform_user_id: selected!.platform_user_id, display_name: renameName.trim() }))}>修改名字</Button>
