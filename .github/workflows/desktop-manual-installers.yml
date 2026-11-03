@@ -203,7 +203,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
   source:
-    if: inputs.cleanup_facts_only != true
+    if: inputs.cleanup_facts_only != true && inputs.source_only == true
     name: Source cold boot ${{ inputs.target || 'darwin-arm64' }}
     runs-on: ${{ inputs.target == 'win32-x64' && 'windows-latest' || inputs.target == 'linux-x64' && 'ubuntu-24.04' || 'macos-15' }}
     timeout-minutes: 30
@@ -283,33 +283,6 @@ jobs:
           pnpm --dir crabot-desktop install --frozen-lockfile
           (cd crabot-desktop && node -e "require('electron')")
           pnpm --dir crabot-desktop run build
-      - name: Shared process stop, force-kill recovery and hidden tools
-        run: |
-          node --test scripts/lib/__tests__/instance-runtime.test.mjs scripts/lib/__tests__/instance-stop-failures.test.mjs crabot-desktop/tests/controller.test.mjs crabot-desktop/tests/windows-offline-update.test.mjs
-          pnpm --dir crabot-agent exec vitest run tests/engine/host-process-console.test.ts tests/engine/host-process.test.ts tests/engine/host-process-maintenance.test.ts tests/schedule-script-runner.test.ts --maxWorkers=1 --minWorkers=1
-          node .github/scripts/probe-windows-background-tools.mjs
-      - name: Windows native proxy and Slack configuration regression
-        if: runner.os == 'Windows'
-        run: |
-          CRABOT_SYSTEM_PROXY_CI=1 node .github/scripts/probe-windows-system-proxy.mjs
-          (cd crabot-shared && node --import tsx --test src/proxy-manager.test.ts)
-          pnpm --dir crabot-channel-slack test
-          node .github/scripts/smoke-slack-onboarding.mjs
-      - name: Existing stopped GUI update retains location and data
-        if: runner.os == 'Windows'
-        run: |
-          node --test --test-name-pattern='an extracted desktop update.*: none$' scripts/lib/__tests__/desktop-payload.test.mjs
-      - name: Simplified data import and runtime regression
-        run: |
-          node --test scripts/lib/__tests__/desktop-data-import.test.mjs scripts/lib/__tests__/product-runtime.test.mjs
-          node --test crabot-desktop/tests/windows-first-launch.test.mjs crabot-desktop/tests/bootstrap-failure.test.mjs
-      - name: Windows official installed launcher and folder picker regression
-        if: runner.os == 'Windows'
-        run: |
-          node --test scripts/lib/__tests__/legacy-windows-launcher.test.mjs scripts/lib/__tests__/legacy-desktop.test.mjs scripts/lib/__tests__/legacy-entry-fence.test.mjs
-          node --test crabot-desktop/tests/installer-discovery-dialogs.test.mjs
-      - name: Verify package slimming boundaries
-        run: node --test scripts/desktop/__tests__/slim-core.test.mjs scripts/lib/__tests__/scrapling-runtime.test.mjs
       - name: Prepare locked offline runtime
         run: |
           node scripts/prepare-scrapling.mjs --release=desktop-ci
@@ -325,17 +298,13 @@ jobs:
           const { directory, manifest } = require('./scripts/lib/scrapling-runtime.cjs').loadRuntime(process.cwd(), { full: true });
           execFileSync(join(directory, manifest.command), ['-I', '-B', '.github/scripts/smoke-browser-node-sharing.py', directory], { stdio: 'inherit' });
           NODE
-      - name: Prepare isolated source memory for real coexistence
-        run: |
-          node --input-type=module -e 'import{resolve}from"node:path";import{prepareMemoryDependencies}from"./scripts/lib/memory-deps.mjs";await prepareMemoryDependencies(resolve("crabot-memory"),{dev:true,relocatable:false,uv:"uv",logger:console})'
-      - name: Verify cold source Core before packaging
+      - name: Compile CLI and Admin Web required by the installer
         run: |
           pnpm run build:cli
           pnpm --dir crabot-admin/web run build
-          node .github/scripts/smoke-development-coexistence.mjs --background-only 2>&1 | tee .desktop-build/development-source-boot.log
       - name: Build same-source offline GUI and Core installer
         run: |
-          node scripts/desktop/stage-core.mjs --out=.desktop-build/manual/core --version=0.1.0-desktop.19
+          node scripts/desktop/stage-core.mjs --out=.desktop-build/manual/core --version=0.1.0-desktop.20
           node .github/scripts/verify-release-payload.mjs "$GITHUB_WORKSPACE/.desktop-build/manual/core"
           node --input-type=module <<'NODE'
           import { createRequire } from 'node:module';
@@ -420,6 +389,12 @@ jobs:
       - name: Published CLI data into ordinary Mac App
         if: runner.os == 'macOS'
         run: node .github/scripts/smoke-mac-app-legacy.mjs .desktop-build/manual/gui 2>&1 | tee .desktop-build/mac-app-legacy-stage.log
+      - name: Prepare isolated source memory for real coexistence
+        run: |
+          node --input-type=module -e 'import{resolve}from"node:path";import{prepareMemoryDependencies}from"./scripts/lib/memory-deps.mjs";await prepareMemoryDependencies(resolve("crabot-memory"),{dev:true,relocatable:false,uv:"uv",logger:console})'
+      - name: Verify cold source Core for coexistence
+        run: |
+          node .github/scripts/smoke-development-coexistence.mjs --background-only 2>&1 | tee .desktop-build/development-source-boot.log
       - name: Real source GUI and release coexistence
         env:
           CRABOT_CI_DEVELOPMENT_COEXISTENCE: '1'
@@ -429,6 +404,33 @@ jobs:
           else
             node .github/scripts/smoke-packaged-desktop.mjs .desktop-build/manual/paired 2>&1 | tee .desktop-build/manual-coexistence.log
           fi
+      - name: Shared process stop, force-kill recovery and hidden tools
+        run: |
+          node --test scripts/lib/__tests__/instance-runtime.test.mjs scripts/lib/__tests__/instance-stop-failures.test.mjs crabot-desktop/tests/controller.test.mjs crabot-desktop/tests/windows-offline-update.test.mjs
+          pnpm --dir crabot-agent exec vitest run tests/engine/host-process-console.test.ts tests/engine/host-process.test.ts tests/engine/host-process-maintenance.test.ts tests/schedule-script-runner.test.ts --maxWorkers=1 --minWorkers=1
+          node .github/scripts/probe-windows-background-tools.mjs
+      - name: Windows native proxy and Slack configuration regression
+        if: runner.os == 'Windows'
+        run: |
+          CRABOT_SYSTEM_PROXY_CI=1 node .github/scripts/probe-windows-system-proxy.mjs
+          (cd crabot-shared && node --import tsx --test src/proxy-manager.test.ts)
+          pnpm --dir crabot-channel-slack test
+          node .github/scripts/smoke-slack-onboarding.mjs
+      - name: Existing stopped GUI update retains location and data
+        if: runner.os == 'Windows'
+        run: |
+          node --test --test-name-pattern='an extracted desktop update.*: none$' scripts/lib/__tests__/desktop-payload.test.mjs
+      - name: Simplified data import and runtime regression
+        run: |
+          node --test scripts/lib/__tests__/desktop-data-import.test.mjs scripts/lib/__tests__/product-runtime.test.mjs
+          node --test crabot-desktop/tests/windows-first-launch.test.mjs crabot-desktop/tests/bootstrap-failure.test.mjs
+      - name: Windows official installed launcher and folder picker regression
+        if: runner.os == 'Windows'
+        run: |
+          node --test scripts/lib/__tests__/legacy-windows-launcher.test.mjs scripts/lib/__tests__/legacy-desktop.test.mjs scripts/lib/__tests__/legacy-entry-fence.test.mjs
+          node --test crabot-desktop/tests/installer-discovery-dialogs.test.mjs
+      - name: Verify package slimming boundaries
+        run: node --test scripts/desktop/__tests__/slim-core.test.mjs scripts/lib/__tests__/scrapling-runtime.test.mjs
       - name: Retain build failure evidence
         if: failure()
         uses: actions/upload-artifact@v4
