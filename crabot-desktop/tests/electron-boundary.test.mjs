@@ -20,7 +20,7 @@ for (const { stalled, suffix } of [{ stalled: false, suffix: '' }, { stalled: tr
       CRABOT_BOUNDARY_HOLD_CONNECTION: stalled === 'held-connection' ? '1' : '0',
       CRABOT_BOUNDARY_STALLED_EVALUATION: stalled === true ? '1' : '0', CRABOT_BOUNDARY_PARENT_STALL: parentStall ? '1' : '0' }
     delete env.ELECTRON_RUN_AS_NODE
-    const child = spawn(createRequire(import.meta.url)('electron'), [fileURLToPath(new URL('./electron-boundary.cjs', import.meta.url))], { env, stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn(createRequire(import.meta.url)('electron'), ['--inspect-port=127.0.0.1:0', fileURLToPath(new URL('./electron-boundary.cjs', import.meta.url))], { env, stdio: ['ignore', 'pipe', 'pipe'] })
     let output = '', timer, expected
     const append = data => { output = (output + data).slice(-65536) }
     child.stdout.on('data', append); child.stderr.on('data', append)
@@ -42,8 +42,30 @@ for (const { stalled, suffix } of [{ stalled: false, suffix: '' }, { stalled: tr
         const phase = output.split('\n').filter(line => line.startsWith('CRABOT_BOUNDARY_PHASE ')).at(-1) ?? 'no fixture phase received'
         console.log('CRABOT_BOUNDARY_PARENT_DEADLINE ' + phase)
         if (!parentStall && process.platform === 'darwin' && child.exitCode === null && child.signalCode === null) {
-          child.kill('SIGUSR2') // This still-owned, unreaped fixture child only; collect memory-only stages after failure.
-          await new Promise(resolve => setTimeout(resolve, 250))
+          try {
+            child.kill('SIGUSR1') // Activate only the still-owned fixture's inspector, after failure.
+            const deadline = Date.now() + 1500
+            let address
+            while (!address && Date.now() < deadline && child.exitCode === null && child.signalCode === null) {
+              address = output.match(/Debugger listening on (ws:\/\/127\.0\.0\.1:[0-9]+\/[a-f0-9-]+)/)?.[1]
+              if (!address) await new Promise(resolve => setTimeout(resolve, 10))
+            }
+            if (address) {
+              const socket = new WebSocket(address)
+              let inspectionTimer
+              try {
+                const trace = await new Promise(resolve => {
+                  inspectionTimer = setTimeout(() => resolve({ inspection_deadline: true }), 1500)
+                  socket.addEventListener('open', () => socket.send(JSON.stringify({ id: 1, method: 'Runtime.evaluate', params: {
+                    expression: 'JSON.stringify(globalThis.__crabotBoundaryWaitState())', returnByValue: true,
+                  } })), { once: true })
+                  socket.addEventListener('error', () => resolve({ inspection_error: true }), { once: true })
+                  socket.addEventListener('message', event => { const reply = JSON.parse(event.data); if (reply.id === 1) resolve(reply.result) })
+                })
+                output += '\nCRABOT_BOUNDARY_WAIT_TRACE ' + JSON.stringify(trace) + '\n'
+              } finally { clearTimeout(inspectionTimer); socket.close() }
+            }
+          } catch (error) { output += '\nCRABOT_BOUNDARY_TRACE_ERROR ' + error.name + '\n' }
         }
         await stopKnownProcessScope([expected], { timeoutMs: 1, onObserved: () => {}, graceful: async () => {} })
         settled = true

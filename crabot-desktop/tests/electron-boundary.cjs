@@ -15,7 +15,7 @@ const waitTrace = []
 const rememberWait = value => { if (waitTrace.length < 32) waitTrace.push({ phase: value, elapsed_ms: Date.now() - started }) }
 const originalMessageBox = dialog.showMessageBox.bind(dialog)
 dialog.showMessageBox = (...args) => { rememberWait('dialog:' + args.at(-1)?.message); return originalMessageBox(...args) }
-if (process.platform === 'darwin') process.on('SIGUSR2', () => console.log('CRABOT_BOUNDARY_WAIT_TRACE ' + JSON.stringify({ pid: process.pid, stages: waitTrace })))
+globalThis.__crabotBoundaryWaitState = () => ({ pid: process.pid, stages: waitTrace })
 app.setName('Crabot boundary fixture')
 // Async server cleanup owns the exit result, including an expected failed check.
 app.on('window-all-closed', () => {})
