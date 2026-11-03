@@ -30,6 +30,20 @@ function setup(dir = fs.mkdtempSync(path.join(os.tmpdir(), 'slack-test-'))) {
   return { channel, api, events, rpc, receive, message, dir }
 }
 describe('Slack ordinary conversation routing', () => {
+  it('admits media-only DMs with all attachment references and advertises actual media endpoints', async () => {
+    const s = setup()
+    await s.receive(s.message('D1', '', { subtype: 'file_share', files: [
+      { id: 'F1', name: 'screen.png', mimetype: 'image/png' },
+      { id: 'F2', name: 'video.mp4', mimetype: 'video/mp4' },
+    ] }))
+    const incoming = s.events.find(e => e.type === 'channel.message_received').payload.message
+    expect(incoming.content).toMatchObject({ type: 'image', image_quality: 'unknown' })
+    expect(incoming.content.text).toContain('attachment_id=F1')
+    expect(incoming.content.text).toContain('attachment_id=F2')
+    expect(incoming.content.text.match(/handle=fm_/g)).toHaveLength(2)
+    expect(await s.rpc('get_capabilities')).toMatchObject({ supported_message_types: ['text', 'image', 'file'], supports_image_fetch: true, supports_media_fetch: true, supports_file_path: true })
+    expect(await s.rpc('fetch_image', { session_id: incoming.session.session_id, platform_message_id: incoming.platform_message_id, attachment_id: 'F_OTHER', quality: 'hd' })).toMatchObject({ status: 'failed' })
+  })
   it('admits DMs and real group mentions; thread history grants no exception', async () => {
     const s = setup()
     await s.receive(s.message('D1', 'hi'), 'dm')
@@ -101,17 +115,53 @@ describe('Slack ordinary conversation routing', () => {
     const session = (await s.rpc('get_sessions')).items[0]
     const history = (await s.rpc('get_history', {session_id:session.id})).items
     expect(history[0].content.text).toContain('secret.png')
-    expect(history[0].content.text).toContain('未读取')
+    expect(history[0].content.text).toContain('平台未提供文件 ID')
     expect(history[0].features.thread_id).toBe('99.001')
     await s.rpc('send_message', { session_id:session.id, content:{type:'text',text:'answer'}, request_ids:['SECRET'], task_id:'SECRET' })
     const sent = s.api.call.mock.calls.filter(c => c[0] === 'chat.postMessage')
-    expect(sent[0][1]).toEqual({channel:'D1',text:'answer',mrkdwn:true,unfurl_links:false,unfurl_media:false})
+    expect(sent[0][1]).toEqual({channel:'D1',text:'answer',blocks:[{type:'markdown',text:'answer'}],mrkdwn:true,unfurl_links:false,unfurl_media:false})
     for (const features of [{thread_id:'99'}, {quote_message_id:'99'}, {reply_to_message_id:'99'}, {native_channel_id:'C2'}]) await expect(s.rpc('send_message', {session_id:session.id,content:{type:'text',text:'x'},features})).rejects.toMatchObject({code:'CHANNEL_UNSUPPORTED_FEATURE'})
-    await expect(s.rpc('send_message',{session_id:session.id,content:{type:'file',file_path:'/sensitive'}})).rejects.toMatchObject({code:'CHANNEL_UNSUPPORTED_MESSAGE_TYPE'})
+    await expect(s.rpc('send_message',{session_id:session.id,content:{type:'file',file_path:'/sensitive'}})).rejects.toMatchObject({code:'CHANNEL_FILE_NOT_FOUND'})
   })
 })
 
 describe('Slack cache, synchronization and write failures', () => {
+  it('preflights every media source before posting a caption and keeps media[] authoritative', async () => {
+    const s = setup()
+    await s.receive(s.message('D1', 'seed'))
+    const id = (await s.rpc('get_sessions')).items[0].id
+    const file = path.join(s.dir, 'one.txt'); fs.writeFileSync(file, 'one')
+    await expect(s.rpc('send_message', { session_id: id, content: { type: 'file', text: '**说明**', file_path: file,
+      media: [{ media_url: file }, { media_url: path.join(s.dir, 'missing.txt') }] } })).rejects.toMatchObject({ code: 'CHANNEL_FILE_NOT_FOUND' })
+    expect(s.api.call.mock.calls.filter(([method]) => method === 'chat.postMessage' || method.startsWith('files.'))).toEqual([])
+  })
+  it('sends Markdown before ordered files and returns confirmed IDs plus uncertain uploads on a later failure', async () => {
+    const s = setup()
+    await s.receive(s.message('D1', 'seed'))
+    const id = (await s.rpc('get_sessions')).items[0].id
+    const file = path.join(s.dir, 'one.txt'); fs.writeFileSync(file, 'one')
+    const steps: string[] = []
+    const captionTs = String(Date.now() / 1000 + 10), fileTs = String(Date.now() / 1000 + 11)
+    const original = s.api.call.getMockImplementation()!
+    s.api.call.mockImplementation(async (method, args) => {
+      if (method === 'chat.postMessage') { steps.push(args.text); return { ts: captionTs } }
+      return original(method, args)
+    })
+    const share = vi.spyOn((s.channel as any).media, 'share').mockImplementation(async (source: any, conversation: any) => {
+      steps.push(source.filename + ':' + conversation)
+      if (source.filename === 'second.txt') throw new RpcError('SERVICE_UNAVAILABLE', '分享结果未知', { uploaded_file_ids: ['F2'], delivery_unknown: true })
+      return { ts: fileTs, uploaded: ['F1'], file: { id: 'F1', name: source.filename, mimetype: 'text/plain' } }
+    })
+    await expect(s.rpc('send_message', { session_id: id, content: { type: 'file', text: '**说明**',
+      media: [{ media_url: file, filename: 'first.txt' }, { media_url: file, filename: 'second.txt' }] } })).rejects.toMatchObject({
+      details: { partial_success: true, sent_platform_message_ids: [captionTs, fileTs], uploaded_file_ids: ['F1', 'F2'], delivery_unknown: true },
+    })
+    expect(steps).toEqual(['**说明**', 'first.txt:D1', 'second.txt:D1'])
+    expect(share).toHaveBeenCalledTimes(2)
+    const history = (await s.rpc('get_history', { session_id: id })).items
+    expect(history.find((m: any) => m.platform_message_id === captionTs).content.text).toBe('**说明**')
+    expect(history.find((m: any) => m.platform_message_id === fileTs).content).toMatchObject({ type: 'file', handle: expect.stringMatching(/^fm_/), status: 'not_fetched' })
+  })
   it('returns standard pagination, limit wins, retains features across restart and reports unavailable cache', async () => {
     const s = setup()
     for (let i=0; i<5; i++) await s.receive(s.message('D1', `message ${i}`, {thread_ts:'100.1'}), `e${i}`)

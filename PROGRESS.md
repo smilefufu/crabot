@@ -1,5 +1,11 @@
 # Crabot 项目进度
 
+### Slack Markdown 与完整媒体：实现完成，PR 验证中
+
+- 依据已确认的 [Markdown Spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-11-03-slack-markdown-adaptation-design.md) 和 [媒体 Spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-11-03-slack-media-adaptation-design.md)，文字使用原生 Markdown，表格／代码按结构分片且缓存保留原文；图片、多图选择及音视频／文档等附件支持按需获取和回传，保持原 Session、群 @过滤及路径授权。
+- 引用持久化、下载前核验当前权限、100 MiB 文件／20 MiB 视觉上限、120 秒总期限、7 天媒体清理及停止取消；出站先说明再附件，按原会话真实分享 ts 确认，保留部分成功和未知分享信息，不自动重发。新 App 补文件 scopes，旧 App 提示在原安装重新授权。
+- 合入最新 main 后，本地 Slack 全量 113 项通过、5 项 Windows 专属跳过；Agent 相关 106 项和微信全量 122 项通过。相关构建、生产冻结安装及 SDK 重连四种子进程场景通过。Windows 首轮 Slack 118 项通过，Agent 两项既有 Unix 测试夹具修正后复验。Agent 全量另有 5039 通过／27 失败／69 跳过及 3 个套件加载失败，不计全通过；main 对照已复现多项相同失败，详见实施计划。真实 HTTPS 覆盖三种代理，串联验证原图 bytes 进入下一次模型请求；真实 App 权限、客户端渲染和最终投递仍须独立验收，未调用真实 Slack／收费模型或部署。
+
 ### PR CI 收敛：按用户要求删除自动长矩阵
 
 - PR 不再自动构建安装包或执行多平台安装/迁移/集成矩阵；保留原手动验收入口，正式 Release 仍由 tag 触发构建发布；发版构建只负责依赖准备、编译、封装、载荷完整性检查及上传，不再重复执行安装/升级/多发行版验收。现有 Claude review 和自动合并保持，取消旧 PR 长任务；不改产品代码、测试断言或安装包内容。

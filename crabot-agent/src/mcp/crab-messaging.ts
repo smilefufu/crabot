@@ -367,6 +367,7 @@ const FETCH_IMAGE_SCHEMA = {
   channel_id: z.string(),
   session_id: z.string(),
   platform_message_id: z.string(),
+  attachment_id: z.string().optional().describe('多图时选择原消息中的附件 ID；省略取首图'),
   quality: z.enum(['hd', 'thumbnail']).optional(),
   include_image: z.boolean().optional(),
 }
@@ -1370,7 +1371,7 @@ crabot 系统给你的所有信号——system prompt、supplement 注入、tool
     },
     {
       name: 'fetch_image',
-      description: '按需读取微信图片，默认等待高清版本，最多 120 秒；系统负责等待，无需轮询或让人类重发。' +
+      description: '按需读取支持此能力的渠道图片（微信、Slack），多图可按原消息的 attachment_id 选择，默认等待高清版本，最多 120 秒；系统负责等待，无需轮询或让人类重发。' +
         '需要识别账号、小字时用 hd；只有粗略识别才显式选 thumbnail。' +
         'include_image=false 仅用于交付已有该文件读取授权的 Worker；Worker 无读取授权时用 include_image=true 由主控直接识别，不扩大权限。新输入或取消会结束等待。',
       schema: FETCH_IMAGE_SCHEMA,

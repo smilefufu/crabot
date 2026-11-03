@@ -1,7 +1,10 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { ModuleBase, RpcError, generateId, generateTimestamp, type Event } from 'crabot-shared'
-import { messageFeatures, messageText } from './event-mapper.js'
+import { ModuleBase, RpcError, generateId, generateTimestamp, type Event, type FetchImageParams } from 'crabot-shared'
+import { messageFeatures } from './event-mapper.js'
+import { formatSlackText } from './format.js'
+import { SlackMedia } from './media.js'
+import { MAX_FILE_BYTES } from './media-transport.js'
 import { ConfigStore } from './config.js'
 import { Store, paginate } from './store.js'
 import { SlackClient } from './slack-client.js'
@@ -13,8 +16,9 @@ export interface SlackChannelInit {
   module_id: string; port: number; data_dir: string; env: Record<string, string | undefined>
 }
 const CAPABILITIES = {
-  supported_message_types: ['text'], supported_features: ['mention'], supports_history_query: true,
-  supports_platform_user_query: true, max_message_length: 4000, max_file_size: 0, supports_file_path: false,
+  supported_message_types: ['text', 'image', 'file'], supported_features: ['mention'], supports_history_query: true,
+  supports_platform_user_query: true, max_message_length: 4000, max_file_size: MAX_FILE_BYTES, supports_file_path: true,
+  supports_media_fetch: true, supports_image_fetch: true,
   supports_list_contacts: true, supports_list_groups: true, supports_list_group_members: true,
 }
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
@@ -22,6 +26,7 @@ export class SlackChannel extends ModuleBase {
   private readonly settings: ConfigStore
   private readonly store: Store
   private readonly api: SlackApi
+  private readonly media: SlackMedia
   private identity = { team_id: '', user_id: '', app_id: '' }
   private pending: Promise<unknown> = Promise.resolve()
   private queued = 0
@@ -35,7 +40,11 @@ export class SlackChannel extends ModuleBase {
     this.settings = new ConfigStore(init.data_dir, init.env)
     this.store = new Store(init.data_dir, init.module_id)
     this.api = api ?? new SlackClient(this.settings.value.credentials.bot_token, this.settings.value.credentials.app_token)
+    this.media = new SlackMedia({ dir: init.data_dir, token: this.settings.value.credentials.bot_token, api: this.api, channelId: init.module_id,
+      session: id => this.store.session(id), publish: async event => { if (this.accepting) await this.rpcClient.publishEvent(event, this.init.module_id) } })
     this.registerMethod('get_capabilities', () => structuredClone(CAPABILITIES))
+    this.registerMethod<FetchImageParams, unknown>('fetch_image', p => this.media.fetchImage(p))
+    this.registerMethod<{ handle: string }, unknown>('fetch_media', p => this.media.fetchMedia(p.handle))
     this.registerMethod('get_config', () => this.configResult())
     this.registerMethod<{ config: unknown }, unknown>('update_config', ({ config }) => this.serial(() => {
       if (config && typeof config === 'object' && 'crab_platform_user_id' in config) {
@@ -58,7 +67,8 @@ export class SlackChannel extends ModuleBase {
     }))
     this.registerMethod<GetHistoryParams, unknown>('get_history', p => {
       const session = this.store.session(p.session_id)
-      if (session.type === 'group') return queryChannelHistory(this.api, session.platform_session_id, this.identity.user_id, p)
+      if (session.type === 'group') return queryChannelHistory(this.api, session.platform_session_id, this.identity.user_id, p,
+        raw => this.media.project(session.id, session.platform_session_id, raw.ts!, raw))
       return paginate(this.store.history(p.session_id, this.settings.value.cache, normalizeHistoryTimeRange(p.time_range), p.keyword), p.pagination, p.limit)
     })
     this.registerMethod<{ session_id: string; platform_message_id: string }, unknown>('get_message', p => {
@@ -121,21 +131,26 @@ export class SlackChannel extends ModuleBase {
       const bot = await this.api.call('bots.info', { bot: auth.bot_id })
       if (!bot.bot?.app_id) throw new RpcError('INVALID_PARAMS', '无法核验 Slack App 身份')
       this.identity = { team_id: auth.team_id, user_id: auth.user_id, app_id: bot.bot.app_id }
+      const scopes = auth.response_metadata?.scopes
+      const missing = scopes ? ['files:read', 'files:write'].filter(scope => !scopes.includes(scope)) : undefined
+      if (!missing || missing.length) console.warn(`[Slack] 媒体权限${missing ? '缺少 ' + missing.join(',') : '尚未确认'}；在原 App https://api.slack.com/apps/${this.identity.app_id}/oauth 补充 files:read/files:write，Reinstall to Workspace 后按需在 Admin 更新 Bot Token 并重启；文字服务保留。`)
       const file = path.join(this.init.data_dir, 'installation.json')
       if (fs.existsSync(file)) {
         const saved = JSON.parse(fs.readFileSync(file, 'utf8'))
         if (saved.team_id !== auth.team_id || saved.user_id !== auth.user_id || saved.app_id !== bot.bot.app_id) throw new RpcError('INVALID_PARAMS', '此实例已绑定另一 Slack 安装，请新建实例')
       } else fs.writeFileSync(file, JSON.stringify(this.identity), { mode: 0o600, flag: 'wx' })
+      await this.media.start()
       // Health reflects socket state. Each event also verifies workspace AND App to reject mismatched tokens.
       await this.api.start(body => this.receive(body))
       this.cleanup = setInterval(() => {
         void this.serial(() => { for (const s of this.store.sessions.values()) this.store.messages(s.id, this.settings.value.cache) }).catch(() => console.error('[Slack] cache cleanup failed'))
       }, 3600000)
       this.cleanup.unref()
-    } catch (error) { await this.api.stop().catch(() => {}); throw error }
+    } catch (error) { this.media.stop(); await this.api.stop().catch(() => {}); throw error }
   }
   protected override async onStop() {
     this.accepting = false
+    this.media.stop()
     if (this.cleanup) clearInterval(this.cleanup)
     await this.pending
     await this.api.stop()
@@ -184,7 +199,7 @@ export class SlackChannel extends ModuleBase {
       if (u.is_bot || u.is_app_user || u.deleted) { this.markSeen(key); return }
       const value = this.store.upsert(conversation, conversation.is_im ? displayName(u) : conversation.name || e.channel, e.user)
       await this.sessionChanged(value.created ? 'created' : 'updated', value.session)
-      const content = { type: 'text' as const, text: messageText(e) }
+      const content = await this.media.project(value.session.id, e.channel, e.ts, e)
       if (!content.text) { this.markSeen(key); return }
       const message: ChannelMessage = {
         platform_message_id: e.ts, session: { session_id: value.session.id, channel_id: this.init.module_id, type: value.session.type },
@@ -263,21 +278,44 @@ export class SlackChannel extends ModuleBase {
   }
   private async send(p: { session_id: string; content: MessageContent; features?: Record<string, unknown> }) {
     const session = this.store.session(p.session_id)
-    if (!p.content || p.content.type !== 'text' || p.content.file_path || p.content.media_url || p.content.media?.length || p.content.handle) throw new RpcError('CHANNEL_UNSUPPORTED_MESSAGE_TYPE', 'Slack 首版只支持纯文本发送')
+    if (!p.content || !['text', 'image', 'file'].includes(p.content.type) || p.content.handle) throw new RpcError('CHANNEL_UNSUPPORTED_MESSAGE_TYPE', 'Slack 只支持文字、图片与文件发送')
     for (const [key, value] of Object.entries(p.features || {})) if (key !== 'mentions' && value !== undefined) throw new RpcError('CHANNEL_UNSUPPORTED_FEATURE', 'Slack 首版不支持线程、引用或自定义投递目标')
-    if (typeof p.content.text !== 'string' || !p.content.text.trim()) throw new RpcError('INVALID_ARGUMENT', '消息正文不能为空')
+    const hasMedia = p.content.type !== 'text'
+    if (p.content.text !== undefined && typeof p.content.text !== 'string') throw new RpcError('INVALID_ARGUMENT', '消息正文必须是文字')
+    if (!hasMedia && (!p.content.text?.trim() || p.content.file_path || p.content.media_url || p.content.media?.length)) throw new RpcError('INVALID_ARGUMENT', '文字消息正文不能为空且不能携带媒体来源')
     const ids = await this.mentionIds(p.features?.mentions)
-    const text = (ids.length ? ids.map(id => `<@${id}>`).join(' ') + ' ' : '') + p.content.text
-    const chunks = splitText(text), sent: string[] = []
+    const sources = hasMedia ? await this.media.sources(p.content) : []
+    const chunks = formatSlackText(p.content.text || '', ids), sent: string[] = [], uploaded: string[] = []
+    let unknown = false
+    const confirm = (ts: string) => {
+      this.lastSend.set(session.id, Date.now()); sent.push(ts)
+    }
+    const cache = (ts: string, content: MessageContent) => {
+      const features = content.type === 'text' ? messageFeatures({ text: content.text }, this.identity.user_id) : { is_mention_crab: false }
+      const message: HistoryMessage = { platform_message_id: ts, sender: { platform_user_id: this.identity.user_id, platform_display_name: 'Crabot' }, content, features, platform_timestamp: new Date(Number(ts) * 1000).toISOString() }
+      this.store.append(session.id, message, this.settings.value.cache)
+    }
+    const pace = async () => {
+      if (!this.accepting) throw new RpcError('SERVICE_UNAVAILABLE', 'Slack 渠道已停止')
+      const wait = 1000 - (Date.now() - (this.lastSend.get(session.id) || 0))
+      if (wait > 0) await sleep(wait)
+      if (!this.accepting) throw new RpcError('SERVICE_UNAVAILABLE', 'Slack 渠道已停止')
+    }
     try {
       for (const chunk of chunks) {
-        const wait = 1000 - (Date.now() - (this.lastSend.get(session.id) || 0))
-        if (wait > 0) await sleep(wait)
-        const result = await this.api.call('chat.postMessage', { channel: session.platform_session_id, text: chunk, mrkdwn: true, unfurl_links: false, unfurl_media: false })
-        if (!result.ts) throw new RpcError('CHANNEL_SEND_FAILED', 'Slack 未返回消息 ID，结果未知')
-        this.lastSend.set(session.id, Date.now()); sent.push(result.ts)
-        const message: HistoryMessage = { platform_message_id: result.ts, sender: { platform_user_id: this.identity.user_id, platform_display_name: 'Crabot' }, content: { type: 'text', text: chunk }, features: messageFeatures({ text: chunk }, this.identity.user_id), platform_timestamp: new Date(Number(result.ts) * 1000).toISOString() }
-        this.store.append(session.id, message, this.settings.value.cache)
+        await pace(); unknown = true
+        const result = await this.api.call('chat.postMessage', { channel: session.platform_session_id, text: chunk.source, blocks: chunk.blocks, mrkdwn: true, unfurl_links: false, unfurl_media: false })
+        if (!result.ts || !/^\d+\.\d+$/.test(result.ts)) throw new RpcError('CHANNEL_SEND_FAILED', 'Slack 未返回有效消息 ID，结果未知')
+        unknown = false; confirm(result.ts); cache(result.ts, { type: 'text', text: chunk.source })
+      }
+      for (const source of sources) {
+        await pace()
+        const result = await this.media.share(source, session.platform_session_id)
+        uploaded.push(...result.uploaded)
+        // A confirmed share is retained even if local media indexing fails next.
+        confirm(result.ts)
+        const content = await this.media.project(session.id, session.platform_session_id, result.ts, { files: [result.file] })
+        cache(result.ts, content)
       }
     } catch (error) {
       const e = error instanceof RpcError ? error : new RpcError('CHANNEL_SEND_FAILED', 'Slack 发送或本地记录失败，结果可能未知')
@@ -285,19 +323,12 @@ export class SlackChannel extends ModuleBase {
         const after = Number(e.details?.retry_after)
         this.lastSend.set(session.id, Date.now() + (Number.isFinite(after) && after > 0 ? after : 1) * 1000 - 1000)
       }
-      throw new RpcError(e.code, e.message, { ...e.details, sent_platform_message_ids: sent, partial_success: sent.length > 0 })
+      if (['UNAUTHORIZED', 'PERMISSION_DENIED', 'NOT_FOUND', 'RATE_LIMITED'].includes(e.code)) unknown = false
+      throw new RpcError(e.code, e.message, { ...e.details, sent_platform_message_ids: sent, partial_success: sent.length > 0,
+        ...(hasMedia ? { uploaded_file_ids: [...uploaded, ...(Array.isArray(e.details?.uploaded_file_ids) ? e.details.uploaded_file_ids : [])], delivery_unknown: e.details?.delivery_unknown === true || unknown } : {}) })
     }
     return { platform_message_id: sent[sent.length - 1], sent_at: new Date(Number(sent[sent.length - 1]) * 1000).toISOString() }
   }
 }
 function matches(text: string, query?: string) { return !query || text.toLowerCase().includes(query.toLowerCase()) }
-export function splitText(text: string): string[] {
-  const chars = Array.from(text), chunks: string[] = []
-  while (chars.length) {
-    let size = Math.min(4000, chars.length)
-    const head = chars.slice(0, size).join(''), open = head.lastIndexOf('<')
-    if (size < chars.length && open >= 0 && head.lastIndexOf('>') < open && head.length - open < 100) size = Array.from(head.slice(0, open)).length || size
-    chunks.push(chars.splice(0, size).join(''))
-  }
-  return chunks
-}
+export function splitText(text: string): string[] { return formatSlackText(text).map(part => part.source) }
