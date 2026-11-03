@@ -61,6 +61,7 @@ describe('dispatchOutboundMessage', () => {
     }
 
     const entry = makeEntry({
+      content: '**附件说明**',
       file_path: '/sandbox/work/output.png',
       filename: 'report.png',
       content_type: 'image',
@@ -71,10 +72,11 @@ describe('dispatchOutboundMessage', () => {
 
     const sendCall = captured.find((c) => c.method === 'send_message')
     expect(sendCall).toBeDefined()
-    const sendPayload = sendCall!.payload as { content: { type: string; file_path: string; filename: string } }
+    const sendPayload = sendCall!.payload as { content: { type: string; file_path: string; filename: string; text: string } }
     expect(sendPayload.content.type).toBe('image')
     expect(sendPayload.content.file_path).toBe('/host/work/output.png') // ← 沙盒→主机
     expect(sendPayload.content.filename).toBe('report.png')
+    expect(sendPayload.content.text).toBe('**附件说明**')
   })
 
   it('admin-chat delivery：wire payload 与 prepare 落盘的 staged payload 同源（§11.7）', async () => {

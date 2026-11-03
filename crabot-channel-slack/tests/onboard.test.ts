@@ -236,7 +236,8 @@ describe('local Slack onboarding contract', () => {
     await onboarder.dispose()
   })
   it('fixed manifest preserves scopes and messages without a competing socket', () => {
-    expect(SLACK_MANIFEST.oauth_config.scopes.bot).toHaveLength(9)
+    expect(SLACK_MANIFEST.oauth_config.scopes.bot).toHaveLength(11)
+    expect(SLACK_MANIFEST.oauth_config.scopes.bot).toEqual(expect.arrayContaining(['files:read', 'files:write']))
     expect(SLACK_MANIFEST.settings).toMatchObject({ token_rotation_enabled: false, socket_mode_enabled: true })
     expect(SLACK_MANIFEST.settings.event_subscriptions.bot_events).toEqual(['message.channels', 'message.groups', 'message.im'])
   })

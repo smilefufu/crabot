@@ -32,7 +32,7 @@ export function createImageReader(deps: CrabMessagingDeps) {
     if (!signal) return read(args, context)
     let pending = calls.get(signal)
     if (!pending) { pending = new Map(); calls.set(signal, pending) }
-    const key = JSON.stringify([args.channel_id, args.session_id, args.platform_message_id, args.quality ?? 'hd'])
+    const key = JSON.stringify([args.channel_id, args.session_id, args.platform_message_id, args.quality ?? 'hd', args.attachment_id])
     const existing = pending.get(key)
     if (existing) return existing
     const work = read(args, context).finally(() => pending!.delete(key))
@@ -67,6 +67,7 @@ export function createImageReader(deps: CrabMessagingDeps) {
         session_id: args.session_id as string,
         platform_message_id: args.platform_message_id as string,
         quality: (args.quality ?? 'hd') as FetchImageParams['quality'],
+        ...(args.attachment_id !== undefined ? { attachment_id: args.attachment_id as string } : {}),
       }
       while (!stopped) {
         const result = await untilStopped(deps.rpcClient.call<FetchImageParams, FetchImageResult>(port, 'fetch_image', params, deps.moduleId))

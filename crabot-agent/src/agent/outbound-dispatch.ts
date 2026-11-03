@@ -143,6 +143,7 @@ function buildMessageContent(
     return {
       type: entry.content_type ?? 'image',
       media_url: entry.media_url,
+      ...(entry.content ? { text: entry.content } : {}),
       ...(entry.filename !== undefined ? { filename: entry.filename } : {}),
     }
   }
@@ -160,6 +161,7 @@ function buildMessageContent(
     return {
       type: entry.content_type ?? 'file',
       file_path: hostPath,
+      ...(entry.content ? { text: entry.content } : {}),
       filename: entry.filename ?? path.basename(entry.file_path),
     }
   }

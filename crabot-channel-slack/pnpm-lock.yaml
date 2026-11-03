@@ -22,6 +22,9 @@ importers:
       crabot-shared:
         specifier: file:../crabot-shared
         version: file:../crabot-shared
+      marked:
+        specifier: 15.0.12
+        version: 15.0.12
     devDependencies:
       '@peculiar/x509':
         specifier: 1.14.3
@@ -35,6 +38,9 @@ importers:
       typescript:
         specifier: ~5.8.0
         version: 5.8.3
+      undici:
+        specifier: 7.30.1
+        version: 7.30.1
       vitest:
         specifier: ^1.6.1
         version: 1.6.1(@types/node@22.20.5)
@@ -545,6 +551,11 @@ packages:
 
   magic-string@0.30.21:
     resolution: {integrity: sha512-vd2F4YUyEXKGcLHoq+TEyCjxueSeHnFxyyjNp80yg0XV4vUhnDer/lvvlqM/arB5bXQN5K2/3oinyCRyx8T2CQ==}
+
+  marked@15.0.12:
+    resolution: {integrity: sha512-8dD6FusOQSrpv9Z1rdNMdlSgQOIP880DHqnohobOmYLElGEqAL/JvxvuxZO16r4HtjTlfPRDC1hbvxC9dPN2nA==}
+    engines: {node: '>= 18'}
+    hasBin: true
 
   merge-stream@2.0.0:
     resolution: {integrity: sha512-abv/qOcuPfk3URPfDzmZU1LKmuw8kT+0nIHvKrKgFrwifol/doWcdA4ZqsWQ8ENrFKkd67Mfpo/LovbIUsbt3w==}
@@ -1246,6 +1257,8 @@ snapshots:
   magic-string@0.30.21:
     dependencies:
       '@jridgewell/sourcemap-codec': 1.6.0
+
+  marked@15.0.12: {}
 
   merge-stream@2.0.0: {}
 

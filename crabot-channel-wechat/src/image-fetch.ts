@@ -25,6 +25,7 @@ export class WechatImageFetcher {
 
   async fetch(params: FetchImageParams): Promise<FetchImageResult> {
     try {
+      if (params.attachment_id !== undefined) throw new Error('微信取图不支持 attachment_id 附件选择')
       if (params.quality !== 'hd' && params.quality !== 'thumbnail') throw new Error('图片质量参数无效')
       const talker = this.deps.getTalker(params.session_id)
       if (!talker) throw new Error('会话不存在')

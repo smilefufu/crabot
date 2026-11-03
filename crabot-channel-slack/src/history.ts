@@ -52,7 +52,7 @@ function mapMessage(raw: SlackHistoryMessage, botUserId: string, time: bigint): 
   }
 }
 
-export async function queryChannelHistory(api: SlackApi, conversationId: string, botUserId: string, params: GetHistoryParams) {
+export async function queryChannelHistory(api: SlackApi, conversationId: string, botUserId: string, params: GetHistoryParams, projectMedia?: (raw: SlackHistoryMessage) => Promise<HistoryMessage['content']>) {
   // Validate before platform access; limit keeps its existing precedence over pagination.
   paginate([], params.pagination, params.limit)
   if (params.keyword !== undefined && typeof params.keyword !== 'string') throw new RpcError('INVALID_ARGUMENT', '历史关键词必须为字符串')
@@ -96,6 +96,7 @@ export async function queryChannelHistory(api: SlackApi, conversationId: string,
       if (time < lower || time >= upper) continue
       const message = mapMessage(raw, botUserId, time)
       if (!message || (keyword && !message.content.text!.toLowerCase().includes(keyword))) continue
+      if (raw.files?.length && projectMedia) message.content = await projectMedia(raw)
       items.push({ message, time })
       if (params.limit !== undefined && items.length >= params.limit) return finish()
     }

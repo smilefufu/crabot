@@ -1623,6 +1623,61 @@ describe('runEngine compaction triggered by real usage', () => {
 
 
 describe('按需微信高清图保真', () => {
+  it('Slack 附件从渠道入站、HTTPS 原图获取直到下一次模型请求，保留真实图像字节', async () => {
+    const { promises: fs } = await import('node:fs')
+    const os = await import('node:os'), path = await import('node:path')
+    const { SlackChannel } = await import('../../../crabot-channel-slack/src/slack-channel.js')
+    const { SlackClient } = await import('../../../crabot-channel-slack/src/slack-client.js')
+    const { mediaServer } = await import('../../../crabot-channel-slack/tests/fixtures/https-media.js')
+    const { createImageReader } = await import('../../src/mcp/fetch-image.js')
+    const original = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==', 'base64')
+    const filesRead: string[] = []
+    let origin = ''
+    const fixture = await mediaServer('custom', async (req, res) => {
+      const body: Buffer[] = []; for await (const piece of req) body.push(piece)
+      const params = new URLSearchParams(Buffer.concat(body).toString())
+      const send = (value: unknown) => { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(value)) }
+      if (req.url === '/api/conversations.info') return send({ ok: true, channel: { id: 'C1', is_member: true } })
+      if (req.url === '/api/users.info') return send({ ok: true, user: { id: 'U1', name: 'Tester' } })
+      if (req.url === '/api/files.info') {
+        filesRead.push(params.get('file')!)
+        return send({ ok: true, file: { id: params.get('file'), name: 'screen.png', mimetype: 'image/png', url_private_download: origin + '/image' } })
+      }
+      if (req.url === '/image') { res.setHeader('content-type', 'image/png'); res.end(original); return }
+      res.writeHead(404); res.end()
+    })
+    origin = fixture.origin
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'slack-engine-image-'))
+    const client = new SlackClient('xoxb-fixture', 'xapp-fixture')
+    ;(client as any).web.slackApiUrl = origin + '/api/'
+    const channel = new SlackChannel({ module_id: 'slack-test', port: 0, data_dir: dir, env: { SLACK_BOT_TOKEN: 'xoxb-fixture', SLACK_APP_TOKEN: 'xapp-fixture' } }, client)
+    ;(channel as any).identity = { team_id: 'T1', app_id: 'A1', user_id: 'B1' }
+    const events: any[] = []
+    ;(channel as any).rpcClient.publishEvent = async (event: unknown) => { events.push(event) }
+    try {
+      const ts = (Date.now() / 1000).toFixed(6)
+      await channel.receive({ team_id: 'T1', api_app_id: 'A1', event: { type: 'message', subtype: 'file_share', channel: 'C1', channel_type: 'channel', user: 'U1', ts, text: '<@B1> 看第二张图',
+        files: ['F1', 'F2'].map(id => ({ id, name: id + '.png', mimetype: 'image/png' })) } })
+      const incoming = events.find(event => event.type === 'channel.message_received').payload.message
+      expect(incoming.content.text).toContain('attachment_id=F2')
+      const reader = createImageReader({ moduleId: 'agent', resolveChannelPort: async () => 1,
+        rpcClient: { call: async (_port: number, method: string, params: unknown) => (channel as any).methodHandlers.get(method)(params) } } as never)
+      const args = { channel_id: 'slack-test', session_id: incoming.session.session_id, platform_message_id: ts, attachment_id: 'F2' }
+      const adapter = mockAdapter([toolUseResponse('slack-image', 'fetch_image', args), textResponse('已读取图片')])
+      const requests: LLMStreamParams[] = [], stream = adapter.stream.bind(adapter)
+      adapter.stream = params => { requests.push({ ...params, messages: structuredClone(params.messages) }); return stream(params) }
+      await runEngine({ prompt: incoming.content.text, adapter, options: baseOptions({ supportsVision: true,
+        tools: [defineTool({ name: 'fetch_image', description: '', inputSchema: {}, isReadOnly: true, call: async input => {
+          const result = await reader(input)
+          return { output: JSON.stringify(result.content), images: result.images, isError: result.isError ?? false }
+        } })] }) })
+      const toolResult = requests[1].messages.flatMap(m => 'toolResults' in m ? m.toolResults : []).find(r => r.tool_use_id === 'slack-image')
+      expect(toolResult?.images).toEqual([{ media_type: 'image/png', data: original.toString('base64') }])
+      expect(filesRead).toEqual(['F2'])
+    } finally {
+      ;(channel as any).media.stop(); await client.stop(); await fixture.close(); await fs.rm(dir, { recursive: true, force: true })
+    }
+  })
   it('fetch_image 图片在下一次模型输入中保留 bytes 与 MIME', async () => {
     const sharp = (await import('sharp')).default
     const original = await sharp({ create: { width: 1600, height: 2400, channels: 3, background: '#abcdef' } }).png().toBuffer()

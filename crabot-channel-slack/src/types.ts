@@ -38,17 +38,24 @@ export interface SlackResult {
   ok?: boolean; team_id?: string; user_id?: string; bot_id?: string; ts?: string
   error?: string; needed?: string; messages?: SlackHistoryMessage[]; has_more?: boolean; is_limited?: boolean
   bot?: { app_id?: string }; channel?: SlackConversation; channels?: SlackConversation[]
-  user?: SlackUser; members?: Array<SlackUser | string>; response_metadata?: { next_cursor?: string }
+  file?: SlackFile; files?: SlackFile[]; upload_url?: string; file_id?: string
+  user?: SlackUser; members?: Array<SlackUser | string>; response_metadata?: { next_cursor?: string; scopes?: string[] }
+}
+export interface SlackFile {
+  id?: string; name?: string; title?: string; mimetype?: string; size?: number
+  url_private?: string; url_private_download?: string; thumb_1024?: string; thumb_720?: string; thumb_360?: string
+  mode?: string; is_external?: boolean; filetype?: string; file_access?: string
+  shares?: { public?: Record<string, Array<{ ts?: string }>>; private?: Record<string, Array<{ ts?: string }>> }
 }
 export interface SlackHistoryMessage {
   type?: string; user?: string; bot_id?: string; subtype?: string; text?: string; ts?: string; thread_ts?: string; hidden?: boolean
-  username?: string; bot_profile?: { name?: string }; files?: Array<{ name?: string; title?: string }>
+  username?: string; bot_profile?: { name?: string }; files?: SlackFile[]
 }
 export interface SlackEnvelope {
   team_id?: string; api_app_id?: string; event_id?: string
   event?: { type?: string; channel?: string; channel_type?: 'im' | 'channel' | 'group' | 'mpim'; user?: string; bot_id?: string; subtype?: string
     text?: string; ts?: string; thread_ts?: string; hidden?: boolean
-    files?: Array<{ name?: string; title?: string }> }
+    files?: SlackFile[] }
 }
 export interface SlackApi {
   connected: boolean
