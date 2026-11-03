@@ -1,6 +1,24 @@
 import { expect, it } from 'vitest'
 import { formatSlackText } from '../src/format.js'
 
+it.each(['\r\n', '\r'])('renders Windows/legacy newlines without escaping Markdown or changing fallback bytes (%j)', newline => {
+  const source = ['**标题**', '', '| A | B |', '|---|---|', '|1|2|'].join(newline)
+  expect(formatSlackText(source)).toEqual([{ source, blocks: [{ type: 'markdown', text: source }] }])
+})
+it('preserves CRLF source and source/render budgets when splitting tables, lists and fenced code', () => {
+  const source = ('| A | B |\n|---|---|\n' + '| 😀 | 中文 |\n'.repeat(300) + '\n```ts\n' + 'const a = 1\n'.repeat(700) + '```\n\n' + '- item **bold**\n'.repeat(500)).replace(/\n/g, '\r\n')
+  const parts = formatSlackText(source)
+  expect(parts.map(p => p.source).join('')).toBe(source)
+  for (const part of parts) {
+    expect(Array.from(part.source).length).toBeLessThanOrEqual(4000)
+    for (const block of part.blocks) if (block.type === 'markdown') {
+      expect(Array.from(block.text).length).toBeLessThanOrEqual(4000)
+      expect(block.text).not.toContain('\\|')
+      expect(block.text).not.toContain('\\*')
+      expect((block.text.match(/^```/gm) || []).length % 2).toBe(0)
+    }
+  }
+})
 it('uses native Markdown and keeps source, real mentions and fallback', () => {
   const source = '**标题**\n\n| 问题 | 状态 |\n|---|---|\n| BUG | 已修 |'
   const [part] = formatSlackText(source, ['U1'])
