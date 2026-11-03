@@ -1,218 +1,47 @@
-name: Desktop manual test installers
+name: Upload completed desktop preview assets
 on:
   workflow_dispatch:
-    inputs:
-      source_ref:
-        description: 'Exact clean source commit to package after merge'
-        type: string
-        required: true
-      target:
-        description: 'Native Mac/Windows installer or standard Ubuntu DEB'
-        type: choice
-        default: darwin-arm64
-        options: [darwin-arm64, darwin-x64, win32-x64, linux-x64]
-      source_only:
-        description: 'Run only the real source development acceptance, without rebuilding installers'
-        type: boolean
-        default: false
-      cleanup_facts_only:
-        description: 'Build the pinned old-program byte index without installers or product services'
-        type: boolean
-        default: false
 permissions:
-  contents: read
-concurrency:
-  group: desktop-manual-installer-${{ inputs.target || 'darwin-arm64' }}${{ inputs.source_only && format('-source-{0}', github.run_id) || '' }}
-  cancel-in-progress: false
+  contents: write
+  actions: read
 jobs:
-  ubuntu-deb:
-    name: Standard Ubuntu DEB and native acceptance
-    if: inputs.cleanup_facts_only != true && inputs.source_only != true && inputs.target == 'linux-x64'
+  upload:
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: win32-x64
+            run: '41651894183'
+          - target: darwin-x64
+            run: '41651951084'
     env:
-      UV_PYTHON: '3.12'
+      GH_TOKEN: ${{ github.token }}
+      SOURCE_SHA: d950de8fad6b4e34194c8d5f852e2bc92db627a0
+      RELEASE_TAG: v2026.11.3.1
+      TARGET: ${{ matrix.target }}
+      SOURCE_RUN: ${{ matrix.run }}
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.source_ref }}
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22.22.3'
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - uses: astral-sh/setup-uv@v6
-        with:
-          version: '0.13.0'
-      - name: Standard Debian build tools and real display
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential libcurl4-openssl-dev libexpat1-dev zlib1g-dev dh-apparmor debhelper apparmor-utils libgtk-3-0t64 libnss3 libxss1 libasound2t64 libgbm1 xvfb xauth xdotool dbus-x11 zstd
-      - name: Locked same-source build dependencies
-        run: |
-          mkdir -p .desktop-build
-          node scripts/build-native.mjs
-          pnpm --dir crabot-client install --frozen-lockfile
-          pnpm --dir crabot-client run build
-          pnpm install --frozen-lockfile
-          pnpm --dir scripts/lib install --frozen-lockfile
-          pnpm --dir crabot-shared install --frozen-lockfile
-          pnpm --dir crabot-shared run build
-          for module in crabot-core crabot-agent crabot-admin crabot-mcp-tools crabot-channel-telegram crabot-channel-wechat crabot-channel-feishu crabot-channel-dingtalk crabot-channel-slack crabot-channel-voice; do
-            pnpm --dir "$module" install --frozen-lockfile
-            pnpm --dir "$module" run build
-          done
-          pnpm --dir crabot-admin/web install --frozen-lockfile
-          pnpm --dir crabot-desktop install --frozen-lockfile
-          (cd crabot-desktop && node -e "require('electron')")
-          pnpm --dir crabot-desktop run build
-      - name: Prepare locked offline runtime
-        run: |
-          node scripts/prepare-scrapling.mjs --release=desktop-ci
-          node scripts/prepare-computer-use.mjs
-          node scripts/prepare-product-runtime.mjs
-      - name: Build the full new DEB from this exact commit
-        run: |
-          node scripts/desktop/stage-core.mjs --out=.desktop-build/deb/core --version=0.1.0-desktop.21
-          node scripts/desktop/package-application.mjs --candidate=true --core=.desktop-build/deb/core --out=.desktop-build/deb/gui
-          node scripts/desktop/package-installers.mjs --candidate=true --project=.desktop-build/deb/gui --out=.desktop-build/deb/distribution
-      - name: Record exact packaged source
-        run: node --input-type=module -e 'import{writeFileSync}from"node:fs";import{execFileSync}from"node:child_process";writeFileSync(".desktop-build/deb/source.json",JSON.stringify({commit:execFileSync("git",["rev-parse","HEAD"],{encoding:"utf8"}).trim(),version:"0.1.0-desktop.21"})+"\n")'
-      - name: Retain candidate and actual evidence; never publish a release
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: crabot-linux-x64-deb-test-${{ inputs.source_ref }}
-          path: |
-            .desktop-build/deb/distribution/*candidate.deb
-            .desktop-build/deb/distribution/installers.json
-            .desktop-build/deb/source.json
-          if-no-files-found: warn
-          compression-level: 0
-          retention-days: 7
-  installer:
-    if: inputs.cleanup_facts_only != true && inputs.source_only != true && inputs.target != 'linux-x64'
-    name: Offline test installer ${{ inputs.target || 'darwin-arm64' }}
-    runs-on: ${{ inputs.target == 'win32-x64' && 'windows-latest' || inputs.target == 'darwin-x64' && 'macos-15-intel' || 'macos-15' }}
-    timeout-minutes: 120
-    env:
-      UV_PYTHON: '3.12'
-    defaults:
-      run:
+      - name: Download verified completed artifact and upload without rebuilding
         shell: bash
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.source_ref }}
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22.22.3'
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - uses: astral-sh/setup-uv@v6
-        with:
-          version: '0.13.0'
-      - name: Prepare native helper and frozen build dependencies
         run: |
-          mkdir -p .desktop-build
-          node scripts/build-native.mjs
-          pnpm --dir crabot-client install --frozen-lockfile
-          pnpm --dir crabot-client run build
-          pnpm install --frozen-lockfile
-          pnpm --dir scripts/lib install --frozen-lockfile
-          pnpm --dir crabot-shared install --frozen-lockfile
-          pnpm --dir crabot-shared run build
-          for module in crabot-core crabot-agent crabot-admin crabot-mcp-tools crabot-channel-telegram crabot-channel-wechat crabot-channel-feishu crabot-channel-dingtalk crabot-channel-slack crabot-channel-voice; do
-            pnpm --dir "$module" install --frozen-lockfile
-            pnpm --dir "$module" run build
-          done
-          pnpm --dir crabot-admin/web install --frozen-lockfile
-          pnpm --dir crabot-desktop install --frozen-lockfile
-          (cd crabot-desktop && node -e "require('electron')")
-          pnpm --dir crabot-desktop run build
-      - name: Prepare locked offline runtime
-        run: |
-          node scripts/prepare-scrapling.mjs --release=desktop-ci
-          node scripts/prepare-computer-use.mjs
-          node scripts/prepare-product-runtime.mjs
-      - name: Compile CLI and Admin Web required by the installer
-        run: |
-          pnpm run build:cli
-          pnpm --dir crabot-admin/web run build
-      - name: Build same-source offline GUI and Core installer
-        run: |
-          node scripts/desktop/stage-core.mjs --out=.desktop-build/manual/core --version=0.1.0-desktop.21
-          node .github/scripts/verify-release-payload.mjs "$GITHUB_WORKSPACE/.desktop-build/manual/core"
-          if [ "${{ runner.os }}" = "macOS" ]; then
-            node scripts/desktop/package-application.mjs --candidate=true --core=.desktop-build/manual/core --out=.desktop-build/manual/gui
-            node scripts/desktop/package-installers.mjs --candidate=true --project=.desktop-build/manual/gui --out=.desktop-build/manual/distribution
-          else
-            node scripts/desktop/package-application.mjs --candidate=true --layout=paired --core=.desktop-build/manual/core --out=.desktop-build/manual/paired
-            node scripts/desktop/package-offline-installer.mjs --candidate=true --distribute=true --paired=.desktop-build/manual/paired --out=.desktop-build/manual/installer
-            node .github/scripts/verify-offline-installer-host.mjs .desktop-build/manual/installer
-          fi
-      - name: Record actual program footprint without user data
-        run: |
-          node --input-type=module <<'NODE'
-          import { promises as fs } from 'node:fs';
-          import path from 'node:path';
-          const project = path.resolve('.desktop-build/manual', process.platform === 'darwin' ? 'gui' : 'paired');
-          const location = JSON.parse(await fs.readFile(path.join(project, 'packaged-location.json'), 'utf8'));
-          const root = process.platform === 'darwin' ? path.resolve(project, path.dirname(location.executable), '../..') : path.join(project, 'offline');
-          async function bytes(directory) {
-            let total = 0;
-            for (const item of await fs.readdir(directory, { withFileTypes: true })) {
-              const file = path.join(directory, item.name);
-              if (item.isDirectory()) total += await bytes(file);
-              else if (item.isFile()) total += (await fs.stat(file)).size;
-            }
-            return total;
-          }
-          const report = { commit: (await import('node:child_process')).execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), platform: process.platform, arch: process.arch, program_regular_file_bytes: await bytes(root), measurement: 'logical regular file bytes, symlinks not followed, user data excluded' };
-          await fs.writeFile('.desktop-build/runtime-footprint.json', JSON.stringify(report) + '\n');
-          console.log(JSON.stringify(report));
-          NODE
-      - name: Hash completed installers
-        run: |
-          node --input-type=module <<'NODE'
-          import { createHash } from 'node:crypto';
-          import { createReadStream, promises as fs } from 'node:fs';
-          const root = process.platform === 'darwin' ? '.desktop-build/manual/distribution' : '.desktop-build/manual/installer/distribution';
-          const files = (await fs.readdir(root)).filter(file => /candidate\.(?:dmg|exe)$/.test(file));
-          if (files.length !== 1) throw new Error('Expected exactly one native test installer');
-          const sums = [];
-          for (const file of files) {
-            const hash = createHash('sha256');
-            for await (const chunk of createReadStream(root + '/' + file)) hash.update(chunk);
-            sums.push(hash.digest('hex') + '  ' + file);
-          }
-          await fs.writeFile(root + '/SHA256SUMS', sums.join('\n') + '\n');
-          NODE
-      - name: Deliver test installer
-        uses: actions/upload-artifact@v4
-        with:
-          name: crabot-${{ inputs.target || 'darwin-arm64' }}-offline-test-${{ inputs.source_ref }}
-          path: |
-            .desktop-build/runtime-footprint.json
-            .desktop-build/manual/distribution/*candidate.dmg
-            .desktop-build/manual/distribution/installers.json
-            .desktop-build/manual/distribution/SHA256SUMS
-            .desktop-build/manual/installer/distribution/*offline-candidate.exe
-            .desktop-build/manual/installer/distribution/artifacts.json
-            .desktop-build/manual/installer/distribution/SHA256SUMS
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 7
-      - name: Retain build failure evidence
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: manual-installer-failure-${{ inputs.target || 'darwin-arm64' }}
-          path: .desktop-build/*.log
-          include-hidden-files: true
-          if-no-files-found: error
-          retention-days: 7
+          python3 - <<'PY'
+          import json,subprocess,pathlib,os,hashlib
+          repo=os.environ['GITHUB_REPOSITORY'];sha=os.environ['SOURCE_SHA'];tag=os.environ['RELEASE_TAG'];target=os.environ['TARGET'];rid=os.environ['SOURCE_RUN']
+          def api(path):return json.loads(subprocess.check_output(['gh','api',path],text=True))
+          assert api(f'repos/{repo}/git/ref/tags/{tag}')['object']['sha']==sha
+          r=api(f'repos/{repo}/actions/runs/{rid}');assert r['status']=='completed' and r['conclusion']=='success'
+          folder=pathlib.Path('artifact');subprocess.run(['gh','run','download',rid,'--repo',repo,'--name',f'crabot-{target}-offline-test-{sha}','--dir',str(folder)],check=True)
+          receipts=list(folder.rglob('runtime-footprint.json'));assert len(receipts)==1 and json.loads(receipts[0].read_text())['commit']==sha
+          extension='.exe' if target=='win32-x64' else '.dmg';files=list(folder.rglob('*'+extension));assert len(files)==1 and '0.1.0-desktop.21' in files[0].name
+          file=files[0];digest=hashlib.file_digest(file.open('rb'),'sha256').hexdigest();assert digest+'  '+file.name in (file.parent/'SHA256SUMS').read_text().splitlines()
+          checksum=file.parent/(file.name+'.sha256');checksum.write_text(digest+'  '+file.name+'\n')
+          existing={a['name']:a for a in api(f'repos/{repo}/releases/tags/{tag}')['assets']}
+          for item in [file,checksum]:
+            expected='sha256:'+hashlib.file_digest(item.open('rb'),'sha256').hexdigest()
+            if item.name in existing:
+              assert existing[item.name]['state']=='uploaded' and existing[item.name]['size']==item.stat().st_size and existing[item.name]['digest']==expected
+            else:subprocess.run(['gh','release','upload',tag,'--repo',repo,str(item)],check=True)
+          print('VERIFIED_UPLOAD',target,sha,file.name,digest)
+          PY
