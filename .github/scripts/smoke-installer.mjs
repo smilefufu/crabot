@@ -245,7 +245,12 @@ try {
     }
   }
   server.close()
-  const cleanupTimer = setTimeout(() => { console.error(`Fixture cleanup timed out: ${fixture}`); process.exit(1) }, 60_000)
+  const cleanupStarted = Date.now(), cleanupBudget = windows ? 300_000 : 60_000
+  console.log('[installer smoke] removing private acceptance fixture')
+  const slowCleanup = windows ? setTimeout(() => { void fs.readdir(home).then(names => console.log('[installer smoke] slow cleanup remaining home entries: ' + JSON.stringify(names.slice(0, 16))), () => {}) }, 60_000) : undefined
+  slowCleanup?.unref()
+  const cleanupTimer = setTimeout(() => { console.error(`Fixture cleanup exceeded ${cleanupBudget}ms: ${fixture}`); process.exit(1) }, cleanupBudget)
   cleanupTimer.unref()
-  try { await fs.rm(fixture, { recursive: true, force: true, maxRetries: 2, retryDelay: 200 }) } finally { clearTimeout(cleanupTimer) }
+  try { await fs.rm(fixture, { recursive: true, force: true, maxRetries: 2, retryDelay: 200 }) } finally { clearTimeout(cleanupTimer); clearTimeout(slowCleanup) }
+  console.log(`[installer smoke] private fixture removed in ${Date.now() - cleanupStarted}ms`)
 }
