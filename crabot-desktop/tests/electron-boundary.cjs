@@ -194,9 +194,12 @@ async function main() {
   } finally { clearTimeout(streamTimer) }
   phase('release-stream-close-verified')
   assert.equal(await interrupted, true); reader.releaseLock()
+  phase('release-stream-reader-settled')
   await assert.rejects(releaseTransport.fetch(externalOrigin + '/closed', {}))
+  phase('direct-http-start')
   const result = await trusted.webContents.executeJavaScript(`fetch(${JSON.stringify(origin + '/api/probe')}).then(r=>r.json())`)
   assert.equal(result.ok, true)
+  phase('direct-http-ready')
   assert.equal(received.find(req => req.url === '/api/probe').authorization, 'Bearer fixture-main-only')
   const wsUrl = origin.replace('http:', 'ws:') + '/ws/chat'
   const wsResult = await trusted.webContents.executeJavaScript(`new Promise((resolve,reject)=>{const socket=new WebSocket(${JSON.stringify(wsUrl)});socket.onmessage=event=>resolve(JSON.parse(event.data));socket.onerror=()=>reject(new Error('WS connection failed'))})`)
