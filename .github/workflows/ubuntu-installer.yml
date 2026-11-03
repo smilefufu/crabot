@@ -1,13 +1,5 @@
 name: Ubuntu native installer
 on:
-  push:
-    branches: ['feat/desktop-final-acceptance']
-    paths:
-      - 'crabot-desktop/native/ubuntu/**'
-      - 'crabot-desktop/src/ubuntu-*'
-      - 'scripts/desktop/build-ubuntu-installer.mjs'
-      - '.github/scripts/test-ubuntu-*'
-      - '.github/workflows/ubuntu-installer.yml'
   workflow_dispatch:
 permissions:
   contents: read

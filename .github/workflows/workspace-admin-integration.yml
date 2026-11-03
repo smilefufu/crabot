@@ -1,16 +1,6 @@
 name: Workspace online Admin integration
 on:
   workflow_dispatch:
-  push:
-    branches: ['feat/desktop-workspace-admin-integration']
-  pull_request:
-    paths:
-      - 'crabot-admin/src/index.ts'
-      - 'crabot-admin/src/workspace*.ts'
-      - 'crabot-admin/src/channel-manager.ts'
-      - 'crabot-admin/src/chat-manager.ts'
-      - 'crabot-shared/src/module-base.ts'
-      - '.github/workflows/workspace-admin-integration.yml'
 permissions:
   contents: read
 jobs:

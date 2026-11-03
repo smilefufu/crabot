@@ -1,12 +1,6 @@
 name: Desktop Electron lifecycle
 on:
   workflow_dispatch:
-  push:
-    branches: ['feat/desktop-electron-lifecycle']
-  pull_request:
-    paths:
-      - 'crabot-desktop/**'
-      - '.github/workflows/desktop-electron-lifecycle.yml'
 permissions:
   contents: read
 jobs:

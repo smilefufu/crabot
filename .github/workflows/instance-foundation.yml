@@ -1,31 +1,6 @@
 name: Shared instance control foundation
 on:
   workflow_dispatch:
-  push:
-    branches: ['feat/desktop-instance-foundation']
-    paths:
-      - 'scripts/lib/instance-*'
-      - 'scripts/lib/managed-core.mjs'
-      - 'scripts/lib/module-process-start.cjs'
-      - 'scripts/lib/owned-process-tree.cjs'
-      - 'scripts/lib/pid.mjs'
-      - 'scripts/lib/supervisor-shutdown.mjs'
-      - 'scripts/lib/mm-probe.mjs'
-      - 'scripts/status.mjs'
-      - 'scripts/lib/__tests__/**'
-      - '.github/workflows/instance-foundation.yml'
-  pull_request:
-    paths:
-      - 'scripts/lib/instance-*'
-      - 'scripts/lib/managed-core.mjs'
-      - 'scripts/lib/module-process-start.cjs'
-      - 'scripts/lib/owned-process-tree.cjs'
-      - 'scripts/lib/pid.mjs'
-      - 'scripts/lib/supervisor-shutdown.mjs'
-      - 'scripts/lib/mm-probe.mjs'
-      - 'scripts/status.mjs'
-      - 'scripts/lib/__tests__/**'
-      - '.github/workflows/instance-foundation.yml'
 permissions:
   contents: read
 jobs:

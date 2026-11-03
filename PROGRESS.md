@@ -1,5 +1,9 @@
 # Crabot 项目进度
 
+### PR CI 收敛：按用户要求删除自动长矩阵
+
+- PR 不再自动构建安装包或执行多平台安装/迁移/集成矩阵；保留原手动验收入口，正式 Release 仍由 tag 触发构建发布。现有 Claude review 和自动合并保持，取消旧 PR 长任务；不改产品代码、测试断言或安装包内容。
+
 ### 伙伴视角导航、首次使用与品牌：实现完成，待 PR 审查
 
 - 依据已确认 [Spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-11-02-partner-navigation-onboarding-design.md)，GUI / Web 共用“聊天、任务与计划、工作区、记忆、本领、社交、设置”；模型服务位于本领，渠道展示统一为聊天方式，旧 URL 保留。
@@ -10,7 +14,7 @@
 
 - 当前原生验证已通过Linux真实App/CLI启停、旧system CLI14/15转换与备份失败恢复；另一个Linux红项已确认仍在执行废弃GTK后端，报CRABOT_MAINTENANCE_PENDING。CI改为传递实际DEB，在独立Ubuntu VM用现有DEB验收器验证首启、CLI14/15经GUI导入、覆盖/卸载重装及内核沙箱；Linux不再跑GTK/每版本paired产品安装流程，独立CLI/system及公共组件回归保留。该验收器历史同组实测约8分钟，原14分钟步骤/20分钟作业预算不变；本轮最终原生结果待核实。
 - 11月3日完整Linux原生CI确认两处失败：DEB组件冒烟夹具缺少GUI/临时CLI用户的数据绑定，真实GUI停在首启选择，CLI明确拒绝缺失绑定；只补测试准备与确切绑定清理。旧system转换另在完成记录两次发布间隙被CLI误报持久化失败；4项时序回归先3红后全绿，只在原协调器仍运行时沿既有轮询等待，退出后重读且真实不一致保持原错误，不重派作业、不改迁移/恢复。27项系统与14项首启/绑定测试通过（另1项Linux专用本机跳过），当前原生完整验证待核实。
-- 用户已明确接受下一版同时发布CLI及桌面公开预览：Windows EXE、Mac ARM/Intel DMG、Ubuntu DEB；保留未签名提示，暂不开应用内自动更新。须完成现有CI、自动合并和同提交最终产物验证后再发版，不改现场部署。
+- 用户已明确接受下一版同时发布CLI及桌面公开预览：Windows EXE、Mac ARM/Intel DMG、Ubuntu DEB；保留未签名提示，暂不开应用内自动更新。按最新许可取消PR自动长CI；现有review自动合并和同提交最终产物验证后再发版，不改现场部署。
 
 - Windows Core新一轮5秒超时已定位为单测夹具：虚构PID已mock，但空端口探测未mock，实际调用PowerShell查询宿主端口。将该用例覆盖Linux/Mac/Windows并注入空监听者，复现旧夹具在Windows分支调用真实系统后先红；修正后21项全部通过，原不发信号/清理确切记录断言保持，产品代码/超时不改。
 

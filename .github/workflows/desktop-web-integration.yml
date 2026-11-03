@@ -1,13 +1,6 @@
 name: Desktop and Admin Web integration
 on:
   workflow_dispatch:
-  push:
-    branches: ['feat/desktop-web-integration']
-  pull_request:
-    paths:
-      - 'crabot-admin/web/**'
-      - 'crabot-client/**'
-      - '.github/workflows/desktop-web-integration.yml'
 permissions:
   contents: read
 jobs:

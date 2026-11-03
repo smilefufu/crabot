@@ -1,18 +1,6 @@
 name: Admin desktop sessions and HTTP transport
 on:
   workflow_dispatch:
-  push:
-    branches: ['feat/desktop-admin-transport']
-  pull_request:
-    paths:
-      - 'crabot-admin/**'
-      - 'crabot-client/**'
-      - 'scripts/lib/desktop-*.cjs'
-      - 'scripts/lib/desktop-session-client.mjs'
-      - 'scripts/lib/__tests__/desktop-session.test.mjs'
-      - 'package.json'
-      - 'pnpm-lock.yaml'
-      - '.github/workflows/admin-transport.yml'
 permissions:
   contents: read
 jobs:

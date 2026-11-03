@@ -1,15 +1,6 @@
 name: First model configuration
 on:
   workflow_dispatch:
-  push:
-    branches: ['feat/desktop-first-model-config']
-  pull_request:
-    paths:
-      - 'crabot-admin/src/model-client-http.test.ts'
-      - 'crabot-admin/src/types.ts'
-      - 'crabot-agent/src/core/config-loader.ts'
-      - 'crabot-agent/tests/core/config-loader*.test.ts'
-      - '.github/workflows/first-model-config.yml'
 permissions:
   contents: read
 jobs:

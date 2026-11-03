@@ -3,43 +3,6 @@ name: Release
 on:
   push:
     tags: ['v*']
-  pull_request:
-    paths:
-      - 'install.sh'
-      - 'install.ps1'
-      - 'cli.mjs'
-      - 'scripts/upgrade*.mjs'
-      - 'scripts/upgrade-lib/**'
-      - 'scripts/_preflight.mjs'
-      - 'scripts/stop.mjs'
-      - 'scripts/lib/__tests__/stop-windows.test.mjs'
-      - 'scripts/check-release.mjs'
-      - 'scripts/lib/release-package.mjs'
-      - 'scripts/lib/toolchain.mjs'
-      - 'scripts/installer-deps.mjs'
-      - 'scripts/prepare-memory.mjs'
-      - 'scripts/lib/install-network.mjs'
-      - 'scripts/lib/memory-deps.mjs'
-      - 'scripts/lib/run-bounded.mjs'
-      - 'scripts/lib/__tests__/install-network.test.mjs'
-      - 'crabot-core/src/core-modules*'
-      - '.github/scripts/*domestic*'
-      - '.github/scripts/test-uv-product-config.py'
-      - 'scripts/lib/__tests__/*install*.mjs'
-      - '.github/scripts/*install*'
-      - '.github/scripts/test-durable-file.mjs'
-      - 'crabot-admin/src/durable-file.ts'
-      - 'crabot-core/src/index.ts'
-      - 'scripts/computer-use/**'
-      - 'scripts/*computer-use*.mjs'
-      - 'scripts/lib/computer-use-*'
-      - 'crabot-mcp-tools/src/computer-use/**'
-      - 'scripts/scrapling/**'
-      - 'scripts/*scrapling*.mjs'
-      - 'scripts/lib/scrapling-*'
-      - '.github/scripts/*scrapling*'
-      - '.github/workflows/release.yml'
-
 permissions:
   contents: write
 

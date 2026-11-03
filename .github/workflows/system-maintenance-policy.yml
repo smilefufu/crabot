@@ -1,17 +1,6 @@
 name: System UID delegation and maintenance policies
 on:
   workflow_dispatch:
-  push:
-    branches: ['feat/desktop-system-maintenance-policy']
-  pull_request:
-    paths:
-      - 'scripts/lib/system-*.mjs'
-      - 'scripts/lib/legacy-system-*.mjs'
-      - 'scripts/lib/cli-location.cjs'
-      - 'scripts/lib/desktop-installation.cjs'
-      - 'scripts/lib/__tests__/system-*.test.mjs'
-      - 'scripts/lib/__tests__/legacy-system-*.test.mjs'
-      - '.github/workflows/system-maintenance-policy.yml'
 permissions:
   contents: read
 jobs:

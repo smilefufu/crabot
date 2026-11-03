@@ -1,15 +1,6 @@
 name: Managed MCP application integration
 on:
   workflow_dispatch:
-  push:
-    branches: ['feat/desktop-managed-mcp']
-  pull_request:
-    paths:
-      - 'crabot-admin/src/*mcp*'
-      - 'crabot-agent/src/agent/mcp-connector.ts'
-      - 'crabot-agent/src/core/runtime-env.ts'
-      - 'scripts/lib/managed-mcp-*'
-      - '.github/workflows/managed-mcp.yml'
 permissions:
   contents: read
 jobs:

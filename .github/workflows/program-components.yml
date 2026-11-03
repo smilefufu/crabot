@@ -1,17 +1,6 @@
 name: Desktop program components
 on:
   workflow_dispatch:
-  push:
-    branches: ['feat/desktop-program-components']
-  pull_request:
-    paths:
-      - 'scripts/lib/desktop-*.mjs'
-      - 'scripts/lib/desktop-removal-record.cjs'
-      - 'scripts/lib/__tests__/desktop-asar.test.mjs'
-      - 'scripts/lib/__tests__/desktop-payload.test.mjs'
-      - 'scripts/lib/__tests__/desktop-removal-programs.test.mjs'
-      - 'scripts/lib/__tests__/desktop-removal-system-processes.test.mjs'
-      - '.github/workflows/program-components.yml'
 permissions:
   contents: read
 jobs:

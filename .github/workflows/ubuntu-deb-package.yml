@@ -1,10 +1,5 @@
 name: Ubuntu DEB package hooks
 on:
-  pull_request:
-    paths:
-      - 'scripts/desktop/ubuntu-deb.mjs'
-      - '.github/scripts/test-ubuntu-deb-package.mjs'
-      - '.github/workflows/ubuntu-deb-package.yml'
   workflow_dispatch:
 permissions:
   contents: read

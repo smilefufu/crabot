@@ -1,12 +1,6 @@
 name: Desktop host components
 on:
   workflow_dispatch:
-  push:
-    branches: ['feat/desktop-host-components']
-  pull_request:
-    paths:
-      - 'crabot-desktop/**'
-      - '.github/workflows/desktop-host-components.yml'
 permissions:
   contents: read
 jobs:
