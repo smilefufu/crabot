@@ -5,6 +5,17 @@ import type { SlackApi, SlackEnvelope, SlackResult } from './types.js'
 
 // Do not let SDK logs expose tokens, websocket URLs, or raw message payloads.
 const logger = { debug() {}, info() {}, warn() {}, error() {}, setLevel() {}, getLevel: () => LogLevel.ERROR, setName() {} }
+function logConnectionError(error: unknown) {
+  const codes: string[] = []
+  let cause = error as { code?: unknown; original?: unknown; cause?: unknown } | undefined
+  for (let depth = 0; cause && depth < 5; depth++) {
+    if (typeof cause.code === 'string' && /^(?:[A-Z][A-Z0-9_]+|slack_[a-z_]+)$/.test(cause.code)) codes.push(cause.code)
+    cause = (cause.original ?? cause.cause) as typeof cause
+  }
+  let proxy = 'direct'
+  try { const url = proxyManager.getProxyUrl(); if (url) proxy = new URL(url).origin } catch { proxy = 'invalid' }
+  console.error(`[Slack] Socket connection failed: code=${codes.join('>') || 'unknown'}, proxy=${proxy}`)
+}
 export function platformError(error: unknown, fallback = 'CHANNEL_SEND_FAILED'): RpcError {
   const e = error as { code?: string; data?: { error?: string; needed?: string }; retryAfter?: number }
   const reason = e?.data?.error
@@ -24,7 +35,8 @@ export class SlackClient implements SlackApi {
     this.socket = new SocketModeClient({ appToken, logger, autoReconnectEnabled: true,
       dispatcher: { dispatch: (options, handler) => proxyManager.getDispatcher().dispatch(options, handler) }, clientOptions: { timeout: 15000, retryConfig: { retries: 2 }, rejectRateLimitedCalls: true } })
     this.socket.on('connected', () => { this.connected = true })
-    for (const name of ['disconnected', 'reconnecting', 'error']) this.socket.on(name, () => { this.connected = false })
+    for (const name of ['disconnected', 'reconnecting']) this.socket.on(name, () => { this.connected = false })
+    this.socket.on('error', error => { this.connected = false; logConnectionError(error) })
   }
   async call(method: string, args: Record<string, unknown> = {}): Promise<SlackResult> {
     try { return await this.web.apiCall(method, args) as SlackResult }

@@ -49,4 +49,6 @@ Token 查询掩码 `***` 不覆盖真值。模块按 base-protocol 先完整校�
 
 使用仓库指定的 pnpm 和 Node 22：先在 `crabot-shared` 执行 `corepack pnpm install --frozen-lockfile && corepack pnpm run build`，再到本目录执行 `corepack pnpm install --frozen-lockfile && corepack pnpm run build && corepack pnpm test`。Admin 的 `src/channel-manager.slack.test.ts` 验证真实本地 HTTP RPC 保存与重启。
 
+`patches/@slack__socket-mode@3.1.0.patch` 由 pnpm 安装时应用：修正 SDK 重连计时器遗漏 Promise rejection 的问题，已建立连接后的网络请求失败继续走 SDK 原有重连延迟；初次启动的请求预算和不可恢复的凭据错误保持原处理。日志只记录错误码和脱敏代理地址。升级 SDK 时须重跑子进程退出、HTTPS/WSS 代理及断线恢复测试，并核对补丁是否仍需保留。
+
 自动化使用 fake Slack 边界与临时实例目录，不访问真实 workspace、不调用模型。断线期间 Slack 未送达消息、ACK 后进程崩溃等不承诺完整补送或端到端恰好一次。上线前仍须用真实 App 验证 Token 配对、scope、DM/公开群/私有群和实际 Agent 消费及 Slack 投递。
