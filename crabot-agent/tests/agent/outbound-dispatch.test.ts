@@ -6,6 +6,7 @@
  * - friend_id-only mention 走 admin get_friend 反查（不再 silent drop）
  */
 import { describe, it, expect, vi } from 'vitest'
+import path from 'node:path'
 import {
   dispatchOutboundMessage,
   type OutboundMessage,
@@ -74,7 +75,7 @@ describe('dispatchOutboundMessage', () => {
     expect(sendCall).toBeDefined()
     const sendPayload = sendCall!.payload as { content: { type: string; file_path: string; filename: string; text: string } }
     expect(sendPayload.content.type).toBe('image')
-    expect(sendPayload.content.file_path).toBe('/host/work/output.png') // ← 沙盒→主机
+    expect(sendPayload.content.file_path).toBe(path.normalize('/host/work/output.png')) // ← 沙盒→主机
     expect(sendPayload.content.filename).toBe('report.png')
     expect(sendPayload.content.text).toBe('**附件说明**')
   })

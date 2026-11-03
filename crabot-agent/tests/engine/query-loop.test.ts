@@ -1769,6 +1769,7 @@ describe('tool-use closure at Engine boundaries', () => {
 
   it('preserves completed results when the turn checkpoint callback throws', async () => {
     const tool = call()
+    tool.call.mockResolvedValue({ output: 'real output', isError: false, images: [] })
     const ref = { current: [] as EngineMessage[] }
     const operation = runEngine({ prompt: 'test', adapter: mockAdapter([toolUseResponse('tu-hook', 'Read', {})]),
       options: baseOptions({ tools: [tool], messagesRef: ref, onTurn: () => { throw new Error('checkpoint failed') } }) })
