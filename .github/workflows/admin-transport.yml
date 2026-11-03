@@ -56,6 +56,9 @@ jobs:
           scripts/lib/__tests__/local-auth-transport.test.mjs
       - name: Verify SDK from its own compiled output
         run: node --test crabot-client/tests/*.test.mjs
+      - name: Probe finite private-copy cleanup on Windows
+        if: inputs.windows_only == true
+        run: node --test --test-name-pattern='native private-copy exit and closed-file scope' scripts/lib/__tests__/removal-copy-cleanup.test.mjs
       - name: Verify HTTP, credentials, current WS authority and original Chat semantics
         working-directory: crabot-admin
         run: >-
