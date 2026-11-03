@@ -1,0 +1,47 @@
+name: Upload completed desktop preview assets
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+  actions: read
+jobs:
+  upload:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: win32-x64
+            run: '41651894183'
+          - target: darwin-x64
+            run: '41651951084'
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SOURCE_SHA: d950de8fad6b4e34194c8d5f852e2bc92db627a0
+      RELEASE_TAG: v2026.11.3.1
+      TARGET: ${{ matrix.target }}
+      SOURCE_RUN: ${{ matrix.run }}
+    steps:
+      - name: Download verified completed artifact and upload without rebuilding
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json,subprocess,pathlib,os,hashlib
+          repo=os.environ['GITHUB_REPOSITORY'];sha=os.environ['SOURCE_SHA'];tag=os.environ['RELEASE_TAG'];target=os.environ['TARGET'];rid=os.environ['SOURCE_RUN']
+          def api(path):return json.loads(subprocess.check_output(['gh','api',path],text=True))
+          assert api(f'repos/{repo}/git/ref/tags/{tag}')['object']['sha']==sha
+          r=api(f'repos/{repo}/actions/runs/{rid}');assert r['status']=='completed' and r['conclusion']=='success'
+          folder=pathlib.Path('artifact');subprocess.run(['gh','run','download',rid,'--repo',repo,'--name',f'crabot-{target}-offline-test-{sha}','--dir',str(folder)],check=True)
+          receipts=list(folder.rglob('runtime-footprint.json'));assert len(receipts)==1 and json.loads(receipts[0].read_text())['commit']==sha
+          extension='.exe' if target=='win32-x64' else '.dmg';files=list(folder.rglob('*'+extension));assert len(files)==1 and '0.1.0-desktop.21' in files[0].name
+          file=files[0];digest=hashlib.file_digest(file.open('rb'),'sha256').hexdigest();assert digest+'  '+file.name in (file.parent/'SHA256SUMS').read_text().splitlines()
+          checksum=file.parent/(file.name+'.sha256');checksum.write_text(digest+'  '+file.name+'\n')
+          existing={a['name']:a for a in api(f'repos/{repo}/releases/tags/{tag}')['assets']}
+          for item in [file,checksum]:
+            expected='sha256:'+hashlib.file_digest(item.open('rb'),'sha256').hexdigest()
+            if item.name in existing:
+              assert existing[item.name]['state']=='uploaded' and existing[item.name]['size']==item.stat().st_size and existing[item.name]['digest']==expected
+            else:subprocess.run(['gh','release','upload',tag,'--repo',repo,str(item)],check=True)
+          print('VERIFIED_UPLOAD',target,sha,file.name,digest)
+          PY
