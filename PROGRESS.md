@@ -6,14 +6,13 @@
 - 已接入 CRABOT 大写品牌、已确认像素 Logo、本地供应商图标；隐藏百炼 Coding Plan 新增预设，保留存量解析。首次配置复用现有引用保存与聊天链路，模型能力按已核实接入和精确型号补缺，保留已保存能力与输出预算，无持久化迁移。
 - Web 全量 479 项、模型配置相关后端（含 HTTP）86 项、Client 模型 5 项通过，Admin / Web / Desktop 构建通过。真实前端在 Web 与桌面宿主模拟下完成接入、保存默认模型及发送首条消息，覆盖五种宽度与明暗主题；模型响应使用夹具，真实模型调用、原生桌面安装和生产部署尚未验证。已完成本次 diff 自审，按设计型任务提交 PR。
 
-### Ubuntu 标准 DEB：原生安装、升级及源码GUI共存通过，收尾与审查中
+### Ubuntu 标准 DEB：安装/升级与源码共存通过，CI收尾中
 
-- 按用户要求，Ubuntu开发分支合入main上的界面优化`f9113364`（#234）；保留CRABOT品牌与Ubuntu包管理器负责命令/卸载的原行为。Web全量481项、Client全量38项及真实Electron/首模型/源码会话/Ubuntu首启复查18项通过；Admin/Desktop编译及Vite资源打包通过。Web类型检查7项、Admin全量剩余2项失败均已在独立main副本复现；桌面直接全量运行497项通过、52项跳过，5处构建准备缺失已复查通过；2个发布载荷专用入口需打包Python，未以其专用runner验收。原DEB仍对应下述候选源码，尚未重新打包含新界面的安装包。
-- 50ec04e0远端已通过原先缺准备的实例控制/程序组件检查；仍暴露Release/权限检查未构建SDK、Web的7处ES2020不支持at调用、Intel程序组15分钟超时及Windows会话两处响应缺失。补齐SDK构建/生产载荷和包内必需文件检查，等价改写at；本地Web481项与类型检查、CLI编译通过，会话13项通过/3项平台跳过。Windows原生连续握手新增安全诊断，根因仍在定位，不记已修复。
-- 按逐项许可使用标准DEB、系统固定程序目录和包管理器覆盖；新GUI默认XDG用户数据位置，首启可改，保留已有绑定。Windows、Mac、独立CLI/system不在本轮行为变更范围。
-- 已验收候选源码`a75d472d`；[41530704610](https://github.com/smilefufu/crabot/actions/runs/41530704610)构建及Ubuntu24实际包验收通过，60项边界回归与1项真实Electron profile测试通过。22版DEB下载911471650字节，SHA256 `ee8274fabf5cadb0b04a8529a7a7605891db016ee4fab586c1b6261796cf2f18`；不据此推算安装占用。
-- 用户11月3日单项批准Linux Electron一行参数兼容：仅锚定完整受信程序/源码目录及原两个开关，保留OS用户、真实程序、PID代际复验和原握手。先复现2项失败，修后本地5项定向回归及Desktop构建通过。[41530698596](https://github.com/smilefufu/crabot/actions/runs/41530698596)两系统原包＋新源码GUI共存通过；包含修正的同一新包[41532885769](https://github.com/smilefufu/crabot/actions/runs/41532885769)在Ubuntu24/26均通过初装/内核沙箱、已发布CLI14/15加合成数据经普通GUI接入及旧密码实际登录、21→22固定覆盖、真实源码GUI认证和双方独立启停。21→22为同源码版本号夹具，不冒充历史GUI数据迁移或真实业务数据验收。
-- Ubuntu24终验首次在独立Scrapling截图处30秒超时，原提交/产物/断言重跑一次后通过；失败保留，截图超时根因未定位，记独立follow-up。GNOME/Wayland真人、旧GTK GUI及自启动入口迁移、成功后旧程序清理询问仍未完成；[PR233](https://github.com/smilefufu/crabot/pull/233)已进入正式审查；仍有收尾未完成，不发正式版、不自行合并。证据及边界见[Ubuntu验收记录](https://github.com/smilefufu/crabot-docs/blob/main/guides/desktop-ubuntu-acceptance.md)。
+- 按逐项许可使用标准DEB、系统固定目录和包管理器覆盖；新GUI默认XDG数据位置、首启可改，已有绑定保留。按用户要求合入main界面优化`f9113364`。旧GTK GUI/自启动入口迁移、成功后询问清理旧程序及GNOME/Wayland真人项仍未完成；[PR233](https://github.com/smilefufu/crabot/pull/233)正式待审，不自行合并、不发版、不改现场部署或真实数据。
+- Linux Electron一行参数兼容已获单项许可并实现：完整受信程序/源码路径、原两个开关、用户/PID代际/握手保持。源码`a75d472d`的同一新包在[Ubuntu24/26终验41532885769](https://github.com/smilefufu/crabot/actions/runs/41532885769)通过初装、内核沙箱、已发布CLI14/15加合成数据接入及旧密码实际登录、21→22固定覆盖、真实源码GUI认证与独立启停。21→22是同源码版本号夹具；Ubuntu24截图首次超时原样重跑一次通过，根因未定位。22版DEB下载911471650字节，SHA256 `ee8274fabf5cadb0b04a8529a7a7605891db016ee4fab586c1b6261796cf2f18`。
+- 含main界面的`50ec04e0`已在[41543135859](https://github.com/smilefufu/crabot/actions/runs/41543135859)完成新DEB构建、Ubuntu24实际初装/固定覆盖和源码冷启动；不代替当前新增CI修正后的完整包验收。Web481项/类型检查、CLI编译通过；Core/Admin/Agent/迁移权限组246项通过、1项跳过。Admin全量既有2项静态失败曾在独立main复现；两个发布载荷专用入口未用其打包Python runner验收，不算全仓通过。
+- CI修正：补齐SDK/Native构建顺序和普通CLI归档中的必需SDK、Native及Windows Slack辅助件，组装时实际加载Native；等价替换7处ES2020不支持的at调用；Intel程序组保留断言并提高作业预算至30分钟。Windows原生记录确认两进程时钟差3ms导致5003ms被误判已过期：只删客户端重复跨时钟上限比较，原本机5秒timer、Admin端5秒challenge/15分钟签发及所有身份/nonce/代际校验保持。先红后绿回归通过；[Windows41550248594](https://github.com/smilefufu/crabot/actions/runs/41550248594)实际100次续接、SDK及HTTP/凭据/WS回归整体通过。
+- Windows临时维护副本清理曾失败，新增安全阶段/错误号诊断，清理范围/guard/断言不变；[独立30次41550694054](https://github.com/smilefufu/crabot/actions/runs/41550694054)全部通过，原始间歇失败根因仍未定位，保留follow-up，完整维护组需继续复查。证据与范围见[Ubuntu验收记录](https://github.com/smilefufu/crabot-docs/blob/main/guides/desktop-ubuntu-acceptance.md)。
 
 ### Slack 频道远端历史：实现完成，PR 验证中
 

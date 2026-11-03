@@ -117,6 +117,7 @@ jobs:
       - name: Install dependencies (with devDeps for build)
         shell: bash
         run: |
+          node scripts/build-native.mjs
           pnpm --dir crabot-client install --frozen-lockfile
           pnpm --dir crabot-client run build
           pnpm install
@@ -211,6 +212,8 @@ jobs:
           # 复制运行时文件
           cp cli.mjs crabot.cmd package.json install.sh install.ps1 LICENSE "/tmp/${DIRNAME}/"
           cp -r dist "/tmp/${DIRNAME}/"
+          mkdir -p "/tmp/${DIRNAME}/crabot-native/build/Release"
+          cp crabot-native/build/Release/crabot-native.node "/tmp/${DIRNAME}/crabot-native/build/Release/"
 
           # rsync -H 保留 pnpm store 单模块内的 hardlink，避免每个文件被 inflate 成独立副本。
           # 第三方包广泛用 src/ 作运行时入口（如 ecdsa-sig-formatter 的 main = src/...js），
@@ -327,6 +330,9 @@ jobs:
 
           Copy-Item cli.mjs, crabot.cmd, package.json, install.sh, install.ps1, LICENSE $TempDir
           Copy-Item -Recurse dist, scripts, node_modules $TempDir
+          $NativeDir = Join-Path $TempDir 'crabot-native/build/Release'
+          New-Item -ItemType Directory -Force -Path $NativeDir | Out-Null
+          Copy-Item 'crabot-native/build/Release/crabot-native.node', 'crabot-native/build/Release/crabot-hidden-console.exe' $NativeDir
           # 清理 scripts/lib/__tests__ 等 dev-only 测试目录；scripts/lib/node_modules 是运行时依赖必须保留
           Get-ChildItem -Path "$TempDir\scripts" -Recurse -Directory -Filter '__tests__' -ErrorAction SilentlyContinue |
             Remove-Item -Recurse -Force -ErrorAction SilentlyContinue

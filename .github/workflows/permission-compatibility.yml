@@ -33,6 +33,7 @@ jobs:
         shell: bash
         run: |
           set -e
+          node scripts/build-native.mjs
           pnpm --dir crabot-client install --frozen-lockfile --ignore-scripts
           pnpm --dir crabot-client run build
           pnpm install --frozen-lockfile --ignore-scripts
