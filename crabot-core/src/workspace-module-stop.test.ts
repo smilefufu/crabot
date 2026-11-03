@@ -23,7 +23,7 @@ async function fixture(withChild = false, privateJournal = false) {
   const script = path.join(data, 'finite-module.cjs'), marker = path.join(data, 'shutdown.json')
   await fs.writeFile(script, `const fs=require('node:fs'),http=require('node:http');
     const timer=setInterval(()=>{},1000),calls=[];setTimeout(()=>process.exit(0),30000).unref();
-    if(process.env.FIXTURE_DESCENDANT){const child=require('node:child_process').spawn(process.execPath,['-e','setTimeout(()=>{},20000)'],{detached:true,stdio:'ignore'});child.unref()}
+    if(process.env.FIXTURE_DESCENDANT){const child=require('node:child_process').spawn(process.execPath,['-e','setTimeout(()=>{},20000)'],{detached:true,stdio:'ignore'});fs.writeFileSync(process.env.FIXTURE_DESCENDANT_PID,String(child.pid));child.unref()}
     const server=http.createServer(async(req,res)=>{let text='';for await(const part of req)text+=part;
       const body=JSON.parse(text);calls.push(req.url);fs.writeFileSync(process.env.FIXTURE_CALLS,JSON.stringify(calls));
       const data=req.url==='/get_runtime_identity'?{instance_id:process.env.CRABOT_INSTANCE_ID,module_id:process.env.Crabot_MODULE_ID,runtime_id:process.env.CRABOT_MODULE_RUNTIME_ID}:{};
@@ -35,7 +35,7 @@ async function fixture(withChild = false, privateJournal = false) {
   manager.managementOnly = false
   for (const id of ['fixture-memory', 'stopped-channel', 'admin-web']) manager.modules.set(id, {
     module_id: id, module_type: 'service', entry: id === 'admin-web' ? `"${process.execPath}" -e "setInterval(()=>{},1000);setTimeout(()=>process.exit(0),30000).unref()"` : `"${process.execPath}" "${script}"`,
-    env: { FIXTURE_READY: path.join(data, 'ready'), FIXTURE_CALLS: marker, ...(withChild && id === 'fixture-memory' ? { FIXTURE_DESCENDANT: '1' } : {}) }, auto_start: false, auto_restart: true,
+    env: { FIXTURE_READY: path.join(data, 'ready'), FIXTURE_CALLS: marker, FIXTURE_DESCENDANT_PID: path.join(data, 'descendant.pid'), ...(withChild && id === 'fixture-memory' ? { FIXTURE_DESCENDANT: '1' } : {}) }, auto_start: false, auto_restart: true,
     skip_health_check: true, start_priority: 1, status: 'stopped', port: id === 'fixture-memory' ? port : port + 1,
   })
   await manager.startModuleProcess('fixture-memory'); await manager.startModuleProcess('admin-web')
@@ -67,7 +67,8 @@ async function fixture(withChild = false, privateJournal = false) {
   }), complete: vi.fn(async (results: any) => {
     if (relocation) relocation.completeWorkspaceRelocationModuleStops({ dataDir: data, id: jobId, results })
   }) }
-  return { data, manager, scope, journal, marker, relocation, jobId, cleanup: async () => {
+  const descendantPid = withChild ? Number(await fs.readFile(path.join(data, 'descendant.pid'), 'utf8')) : undefined
+  return { data, manager, scope, journal, marker, relocation, jobId, descendantPid, cleanup: async () => {
     vi.restoreAllMocks()
     for (const child of manager.processes.values()) {
       const state = manager.childStates.get(child)
@@ -89,6 +90,7 @@ describe('workspace planned execution module stops', () => {
     const f = await fixture(true), legacy = vi.spyOn(f.manager, 'terminateChildTree')
     try {
       const admin = f.manager.processes.get('admin-web')
+      const modulePid = f.manager.processes.get('fixture-memory').pid
       console.log('WORKSPACE_STOP_FIXTURE_SCOPE ' + JSON.stringify(f.scope.map((item: any) => ({ module: item.module_id, processes: item.processes.map((entry: any) => ({ pid: entry.pid, parent: entry.parent, executable: path.basename(entry.executable) })) }))))
       const result = await f.manager.requestWorkspaceRelocationModuleStops(JSON.parse(canonicalizeJson(f.scope)), f.journal)
       expect(result).toEqual({ dispatch: 'dispatch', results: [
@@ -100,7 +102,14 @@ describe('workspace planned execution module stops', () => {
       expect(f.manager.processes.has('fixture-memory')).toBe(false)
       expect((await f.manager.runtimeRegistry.listRecords()).map((item: any) => item.module_id)).toEqual(['admin-web'])
       expect(f.manager.restartTimers.size).toBe(0)
-      expect(f.scope[0].processes).toHaveLength(2)
+      const actors = [modulePid, f.descendantPid]
+      expect(f.scope[0].processes.map((item: any) => item.pid)).toEqual(expect.arrayContaining(actors))
+      for (const item of f.scope[0].processes.filter((entry: any) => !actors.includes(entry.pid))) {
+        expect(process.platform).toBe('win32')
+        expect(path.basename(item.executable).toLowerCase()).toBe('conhost.exe')
+        expect(actors).toContain(item.parent)
+      }
+      expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit(f.scope[0].processes).state).toBe('stopped')
       expect(f.journal.observe).toHaveBeenCalledWith('fixture-memory', f.scope[0].processes)
       expect(f.journal.complete).toHaveBeenCalledWith(result.results)
     } finally { await f.cleanup() }

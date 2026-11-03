@@ -35,4 +35,4 @@ jobs:
         run: pnpm --dir crabot-core install --frozen-lockfile --ignore-scripts
       - name: Identify the actual Windows descendants before the existing stop assertion
         working-directory: crabot-core
-        run: node node_modules/vitest/vitest.mjs run src/workspace-module-stop.test.ts -t 'uses runtime-bound shutdown and known-scope proof while Admin stays alive' --maxWorkers=1 --minWorkers=1
+        run: node node_modules/vitest/vitest.mjs run src/workspace-module-stop.test.ts --maxWorkers=1 --minWorkers=1
