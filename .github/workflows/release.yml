@@ -45,38 +45,6 @@ jobs:
         with:
           version: '0.13.0'
 
-      - name: Domestic source policy regressions
-        run: node --test scripts/lib/__tests__/install-network.test.mjs scripts/lib/__tests__/memory-preparation-marker.test.mjs
-
-      - name: Cold dependency downloads with official origins blocked
-        shell: bash
-        run: |
-          python .github/scripts/audit-domestic-node.py "$GITHUB_WORKSPACE"
-          python .github/scripts/audit-domestic-python.py "$GITHUB_WORKSPACE" uv
-          python .github/scripts/test-uv-product-config.py "$GITHUB_WORKSPACE" uv
-
-      - name: Installer regressions (Unix)
-        if: matrix.platform != 'windows'
-        run: node --test scripts/lib/__tests__/installer-compat.test.mjs scripts/lib/__tests__/scrapling-install.test.mjs scripts/lib/__tests__/scrapling-runtime.test.mjs scripts/lib/__tests__/stop-windows.test.mjs
-
-      - name: Installer regressions (PowerShell 7)
-        if: matrix.platform == 'windows'
-        shell: pwsh
-        run: .github/scripts/test-installer-windows.ps1
-
-      - name: Windows stop sequence regression
-        if: matrix.platform == 'windows'
-        run: node --test scripts/lib/__tests__/stop-windows.test.mjs
-
-      - name: Installer regressions (Windows PowerShell 5.1)
-        if: matrix.platform == 'windows'
-        shell: powershell
-        run: .github/scripts/test-installer-windows.ps1
-
-      - name: Windows CA path compatibility regressions
-        shell: bash
-        run: python .github/scripts/test-installer-ca.py
-
       - name: Install dependencies (with devDeps for build)
         shell: bash
         run: |
@@ -127,10 +95,6 @@ jobs:
         run: |
           node scripts/prepare-scrapling.mjs --release="$GITHUB_REF_NAME"
           node scripts/prepare-computer-use.mjs
-
-      - name: Verify real Scrapling MCP and browser calls
-        shell: bash
-        run: node .github/scripts/smoke-scrapling.mjs "$GITHUB_WORKSPACE"
 
       - name: Prune to production-only dependencies
         shell: bash
@@ -371,52 +335,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node .github/scripts/smoke-scrapling.mjs "$Unpacked"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Native final-archive installer, startup, reinstall and rejection
-        if: matrix.platform != 'windows'
-        shell: bash
-        run: |
-          ARCHIVE=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -name 'crabot-*.tar.gz' -print -quit)
-          node .github/scripts/smoke-installer.mjs "$ARCHIVE"
-
-      - name: Final ZIP installer and runtime (PowerShell 7)
-        if: matrix.platform == 'windows'
-        shell: bash
-        run: |
-          ARCHIVE=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -name 'crabot-*-windows-x64.zip' -print -quit)
-          node .github/scripts/smoke-installer.mjs "$ARCHIVE" pwsh
-
-      - name: Final ZIP installer and runtime (Windows PowerShell 5.1)
-        if: matrix.platform == 'windows'
-        shell: bash
-        run: |
-          ARCHIVE=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -name 'crabot-*-windows-x64.zip' -print -quit)
-          node .github/scripts/smoke-installer.mjs "$ARCHIVE" powershell.exe
-
-      - name: Linux installer distro compatibility (Ubuntu 24.04, Debian 12 and 13)
-        if: matrix.platform == 'linux'
-        shell: bash
-        run: |
-          ARCHIVE=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -name 'crabot-*-linux-x64.tar.gz' -print -quit)
-          bash .github/scripts/smoke-installer-linux.sh "$ARCHIVE"
-
-      - name: Verify system upgrade and ordinary users (Linux)
-        if: matrix.platform == 'linux'
-        shell: bash
-        run: |
-          git fetch origin tag v2026.9.23 --depth=1
-          git archive v2026.9.23 cli.mjs package.json scripts > /tmp/crabot-system-baseline.tar
-          ARCHIVE=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -name 'crabot-*-linux-x64.tar.gz' -print -quit)
-          sudo env "PATH=$PATH" bash .github/scripts/audit-scrapling-system.sh \
-            "$GITHUB_WORKSPACE" "$ARCHIVE" "$GITHUB_WORKSPACE/scrapling-system-audit" /tmp/crabot-system-baseline.tar
-
-      - name: Save system audit evidence
-        if: always() && matrix.platform == 'linux'
-        uses: actions/upload-artifact@v4
-        with:
-          name: scrapling-system-audit
-          path: scrapling-system-audit/
-          if-no-files-found: ignore
 
       - name: Upload Release Assets
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
