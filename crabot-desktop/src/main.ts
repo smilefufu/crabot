@@ -264,6 +264,55 @@ async function boot() {
     coreRoot = installation.coreRoot
   }
   bootstrapStage('installation-bound')
+  const ubuntuBinding = app.isPackaged && process.platform === 'linux' && !installation
+    ? createRequire(import.meta.url)('./bootstrap/scripts/lib/ubuntu-app-binding.cjs') : null
+  const ubuntuDeb = !!ubuntuBinding?.ubuntuAppForCore(coreRoot)
+  if (ubuntuDeb) {
+    configureProfile(path.join(path.dirname(ubuntuBinding.bindingFile()), 'bootstrap'))
+    if (!claimInstance()) return
+    await app.whenReady()
+    const { prepareUbuntuAppData } = await import('./ubuntu-first-launch.js')
+    let profileRoot: string | undefined
+    while (true) {
+      preparingData = true
+      preparationAbort = new AbortController()
+      try {
+        const selected = await prepareUbuntuAppData({ coreRoot, home: homedir(), version: app.getVersion(), dialog,
+          signal: preparationAbort.signal,
+          load: name => ['desktop-data-import.mjs', 'unix-legacy-cli.mjs'].includes(name) ? loadCore('scripts/lib/' + name) : import(new URL('./bootstrap/scripts/lib/' + name, import.meta.url).href),
+          onDataSelected: async directory => {
+            if (window && profileRoot === directory) return
+            startupPage?.close(); startupPage = undefined
+            window?.destroy(); window = undefined
+            configureProfile(directory)
+            // A partition name is cached even when app paths change after a failed choice.
+            mainSession = session.fromPath(path.join(directory, 'desktop-profile/Partitions/crabot-desktop'))
+            profileRoot = directory
+            window = createMainWindow(mainSession)
+            startupPage = await showStartupPage(window, app.getVersion(), () => preparationAbort?.abort())
+            if (!process.argv.includes('--background')) show()
+          },
+          progress: (message, cancellable) => { void startupPage?.update(message, '', false, cancellable).catch(() => {}) },
+        })
+        if (!selected) { quitting = true; app.quit(); return }
+        dataRoot = selected
+        ubuntuBinding.applyUbuntuAppEnvironment(coreRoot)
+        verifyBinding = () => { ubuntuBinding.applyUbuntuAppEnvironment(coreRoot) }
+        break
+      } catch (error) {
+        preparingData = false
+        const relaunch = !startupPage
+        if (!startupPage) {
+          mainSession = session.fromPartition('persist:crabot-desktop')
+          window = createMainWindow(mainSession)
+          startupPage = await showStartupPage(window, app.getVersion())
+        }
+        show()
+        const retry = await startupPage.retry(error, path.join(app.getPath('userData'), 'bootstrap.log'))
+        if (!retry || relaunch) { if (retry) app.relaunch(); quitting = true; app.quit(); return }
+      } finally { preparingData = false; preparationAbort = undefined }
+    }
+  }
   const macApp = app.isPackaged && process.platform === 'darwin' && !installation
   if (macApp) {
     // All self-contained Mac launches share this small profile while claiming
@@ -306,7 +355,7 @@ async function boot() {
     if (!installation) configureProfile(dataRoot)
   } catch (error) { initialError = error }
   bootstrapStage('data-location-checked')
-  if (!installation && !macApp && !claimInstance()) return
+  if (!installation && !macApp && !ubuntuDeb && !claimInstance()) return
   await app.whenReady()
   if (process.platform === 'win32') app.setAppUserModelId('com.crabot.desktop')
   bootstrapStage('app-ready', { app_version: app.getVersion() })
@@ -430,19 +479,19 @@ async function boot() {
     } finally { installingCli = false; if (!quitting) updateMenus() }
   }
   function updateMenus() {
-    const cliItem = () => ({ label: installingCli ? '正在安装 crabot 命令…' : '安装 crabot 命令…',
-      enabled: app.isPackaged && !installingCli && controller?.host.snapshot().phase !== 'migration_required', click: () => { void installCli() } })
-    const uninstallItems = () => process.platform === 'darwin' && !installation ? [] : [{ label: pendingUninstall ? '正在卸载 CRABOT…' : '卸载 CRABOT…',
+    const cliItems = () => ubuntuDeb ? [] : [{ label: installingCli ? '正在安装 crabot 命令…' : '安装 crabot 命令…',
+      enabled: app.isPackaged && !installingCli && controller?.host.snapshot().phase !== 'migration_required', click: () => { void installCli() } }]
+    const uninstallItems = () => ubuntuDeb || process.platform === 'darwin' && !installation ? [] : [{ label: pendingUninstall ? '正在卸载 CRABOT…' : '卸载 CRABOT…',
       enabled: !!requestUninstall && !pendingUninstall && !quitting, click: () => { void requestUninstall?.() } }]
     const startupItem = () => ({ label: '登录后在后台启动' + (startupState.approvalRequired ? '（待系统允许）' : ''), type: 'checkbox' as const,
       checked: startupState.enabled || startupState.approvalRequired, enabled: startupState.supported && controller?.host.snapshot().phase !== 'migration_required',
       click: (item: Electron.MenuItem) => { void changeStartup(item.checked) } })
     tray?.setContextMenu(Menu.buildFromTemplate([{ label: '打开 CRABOT', click: show }, { type: 'separator' },
       { label: '启动服务', click: () => { void controller!.start() } }, { label: '停止服务', click: () => { void controller!.stop() } },
-      { type: 'separator' }, startupItem(), cliItem(), ...uninstallItems(), { label: '检查更新…', click: () => { void updates!.open() } }, { label: '退出 CRABOT', click: () => { void quit() } }]))
+      { type: 'separator' }, startupItem(), ...cliItems(), ...uninstallItems(), { label: '检查更新…', click: () => { void updates!.open() } }, { label: '退出 CRABOT', click: () => { void quit() } }]))
     Menu.setApplicationMenu(Menu.buildFromTemplate([
       { label: 'CRABOT', submenu: [{ label: '打开 CRABOT', click: show }, startupItem(),
-        cliItem(), ...uninstallItems(),
+        ...cliItems(), ...uninstallItems(),
         { label: '检查更新…', click: () => { void updates!.open() } }, { type: 'separator' }, { label: '退出 CRABOT', accelerator: 'CommandOrControl+Q', click: () => { void quit() } }] },
       { label: '文件', submenu: [{ label: '保存当前附件…', accelerator: 'CommandOrControl+S', enabled: artifacts?.hasFocused(), click: () => { artifacts?.saveFocused() } }] },
       { role: 'editMenu' }, { role: 'viewMenu' }, { role: 'windowMenu' },

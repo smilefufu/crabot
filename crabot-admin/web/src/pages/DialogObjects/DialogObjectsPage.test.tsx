@@ -768,6 +768,26 @@ describe('DialogObjectsPage', () => {
     })
   })
 
+  it('keeps the identity drawer open when clicked as soon as the friend appears', async () => {
+    let opened = false
+    const observer = new MutationObserver(() => {
+      if (opened) return
+      const button = screen.queryByRole('button', { name: '绑定新身份' })
+      if (!button) return
+      opened = true
+      button.click()
+    })
+    observer.observe(document.body, { childList: true, subtree: true })
+    try {
+      render(<DialogObjectsPage />)
+      await waitFor(() => expect(opened).toBe(true))
+      expect(await screen.findByLabelText('Channel ID')).toBeInTheDocument()
+      expect(screen.getByLabelText('显示名称')).toHaveValue('Alice')
+    } finally {
+      observer.disconnect()
+    }
+  })
+
   it('preserves a friend selected immediately when the list appears', async () => {
     let selected = false
     const observer = new MutationObserver(() => {

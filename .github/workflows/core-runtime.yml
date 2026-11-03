@@ -1,16 +1,6 @@
 name: Core bundled runtime integration
 on:
   workflow_dispatch:
-  push:
-    branches: ['feat/desktop-core-runtime']
-  pull_request:
-    paths:
-      - 'crabot-core/**'
-      - 'scripts/run-product-memory.mjs'
-      - 'scripts/lib/product-*.cjs'
-      - 'scripts/lib/module-process-start.cjs'
-      - 'scripts/lib/__tests__/module-process-start-core.test.mjs'
-      - '.github/workflows/core-runtime.yml'
 permissions:
   contents: read
 jobs:

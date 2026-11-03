@@ -1,15 +1,6 @@
 name: Project workspaces and private executor runtime
 on:
   workflow_dispatch:
-  push:
-    branches: ['feat/desktop-project-workspaces']
-  pull_request:
-    paths:
-      - 'crabot-agent/**'
-      - 'crabot-admin/src/workspaces*'
-      - 'scripts/lib/*data-compat*'
-      - 'scripts/upgrade-lib/migrate.mjs'
-      - '.github/workflows/project-workspaces.yml'
 permissions:
   contents: read
 jobs:

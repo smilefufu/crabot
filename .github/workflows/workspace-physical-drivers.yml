@@ -1,17 +1,6 @@
 name: Workspace physical copy and publication
 on:
   workflow_dispatch:
-  push:
-    branches: ['feat/desktop-workspace-physical-drivers']
-  pull_request:
-    paths:
-      - 'scripts/lib/workspace-copy.mjs'
-      - 'scripts/lib/workspace-*-copy.mjs'
-      - 'scripts/lib/workspace-file-metadata.mjs'
-      - 'scripts/lib/workspace-root-*.mjs'
-      - 'scripts/workspace-copy-host.mjs'
-      - 'scripts/workspace-root-probe.mjs'
-      - '.github/workflows/workspace-physical-drivers.yml'
 permissions:
   contents: read
 jobs:

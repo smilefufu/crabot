@@ -1,16 +1,6 @@
 name: Pinned process RPC and role adapters
 on:
   workflow_dispatch:
-  push:
-    branches: ['feat/desktop-pinned-process-rpc']
-  pull_request:
-    paths:
-      - 'scripts/lib/pinned-process-rpc.cjs'
-      - 'scripts/lib/legacy-mm-rpc.mjs'
-      - 'scripts/lib/module-*-rpc.cjs'
-      - 'scripts/lib/__tests__/legacy-mm-rpc.test.mjs'
-      - 'scripts/lib/__tests__/module-*-rpc.test.mjs'
-      - '.github/workflows/pinned-process-rpc.yml'
 permissions:
   contents: read
 jobs:

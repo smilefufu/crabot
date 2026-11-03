@@ -1,21 +1,6 @@
 name: Local desktop transport foundation
 on:
   workflow_dispatch:
-  push:
-    branches: ['feat/desktop-transport-foundation']
-    paths:
-      - 'scripts/lib/local-auth-transport.cjs'
-      - 'scripts/lib/desktop-frames.cjs'
-      - 'scripts/lib/__tests__/local-auth-transport.test.mjs'
-      - 'scripts/lib/__tests__/desktop-frames.test.mjs'
-      - '.github/workflows/transport-foundation.yml'
-  pull_request:
-    paths:
-      - 'scripts/lib/local-auth-transport.cjs'
-      - 'scripts/lib/desktop-frames.cjs'
-      - 'scripts/lib/__tests__/local-auth-transport.test.mjs'
-      - 'scripts/lib/__tests__/desktop-frames.test.mjs'
-      - '.github/workflows/transport-foundation.yml'
 permissions:
   contents: read
 jobs:

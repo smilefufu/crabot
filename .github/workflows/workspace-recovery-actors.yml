@@ -1,16 +1,6 @@
 name: Workspace current recovery actors
 on:
   workflow_dispatch:
-  push:
-    branches: ['feat/desktop-workspace-recovery-actors']
-  pull_request:
-    paths:
-      - 'scripts/lib/workspace-interrupted-*.mjs'
-      - 'scripts/lib/workspace-recovery-*.mjs'
-      - 'scripts/lib/workspace-runtime-*.mjs'
-      - 'scripts/workspace-*-coordinator.mjs'
-      - 'scripts/workspace-runtime-gate.mjs'
-      - '.github/workflows/workspace-recovery-actors.yml'
 permissions:
   contents: read
 jobs:

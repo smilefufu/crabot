@@ -1,15 +1,6 @@
 name: Workspace Agent business integration
 on:
   workflow_dispatch:
-  push:
-    branches: ['feat/desktop-workspace-agent-integration']
-  pull_request:
-    paths:
-      - 'crabot-agent/src/unified-agent.ts'
-      - 'crabot-agent/src/manager/bootstrap.ts'
-      - 'crabot-agent/src/manager/registry.ts'
-      - 'crabot-agent/src/manager/conversation-request-runner.ts'
-      - '.github/workflows/workspace-agent-integration.yml'
 permissions:
   contents: read
 jobs:

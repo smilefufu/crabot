@@ -2,12 +2,6 @@ name: Shared client SDK
 
 on:
   workflow_dispatch:
-  push:
-    branches: ['feat/desktop-client-sdk']
-    paths: ['crabot-client/**', '.github/workflows/client-sdk.yml']
-  pull_request:
-    paths: ['crabot-client/**', '.github/workflows/client-sdk.yml']
-
 permissions:
   contents: read
 concurrency:

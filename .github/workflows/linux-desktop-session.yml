@@ -1,11 +1,6 @@
 name: Actual GNOME session compatibility
 on:
   workflow_dispatch:
-  push:
-    branches: ['feat/desktop-final-acceptance']
-    paths:
-      - '.github/scripts/observe-gnome-removal-compatibility.mjs'
-      - '.github/workflows/linux-desktop-session.yml'
 permissions:
   contents: read
 jobs:

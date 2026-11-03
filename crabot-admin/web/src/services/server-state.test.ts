@@ -28,7 +28,7 @@ describe('HTTP snapshot authority', () => {
     const snapshot = await controller.refresh(all.slice(50, 80))
     expect(history.mock.calls.map(call => call[0])).toEqual([60, 120])
     expect(snapshot?.messages).toHaveLength(80)
-    expect(snapshot?.messages.at(-1)?.message_id).toBe('20')
+    expect(snapshot?.messages.slice(-1)[0]?.message_id).toBe('20')
     expect(snapshot?.hasMore).toBe(true)
     controller.dispose()
   })

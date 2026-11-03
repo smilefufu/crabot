@@ -11,7 +11,8 @@
  * 退出码：0 = 完整，1 = 有缺失（打印缺失清单）
  */
 import { existsSync, readdirSync, statSync } from 'node:fs'
-import { join, relative, sep } from 'node:path'
+import { join, relative, resolve, sep } from 'node:path'
+import { createRequire } from 'node:module'
 import runtime from '../../scripts/lib/scrapling-runtime.cjs'
 import computerUseRuntime from '../../scripts/lib/computer-use-runtime.cjs'
 
@@ -45,6 +46,11 @@ const skillPayload = [
 const required = [
   'cli.mjs',
   'package.json',
+  'crabot-client/package.json',
+  'crabot-client/dist/index.js',
+  'crabot-client/dist/contracts/index.js',
+  'crabot-native/build/Release/crabot-native.node',
+  ...(process.platform === 'win32' ? ['crabot-native/build/Release/crabot-hidden-console.exe'] : []),
   'install.sh',
   'LICENSE',
   'scripts/start.mjs',
@@ -85,6 +91,8 @@ if (missing.length > 0) {
   process.exit(1)
 }
 
+const native = createRequire(join(resolve(stagingDir), 'package.json'))('./crabot-native/build/Release/crabot-native.node')
+if (native.inspectProcess(process.pid)?.pid !== process.pid) throw new Error('Release native process helper cannot inspect its own runtime')
 runtime.loadRuntime(stagingDir, { full: true })
 computerUseRuntime.loadRuntime(stagingDir, { full: true })
 

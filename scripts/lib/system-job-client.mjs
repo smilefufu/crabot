@@ -37,7 +37,17 @@ export async function submitSystemOperation(plan, { root, store, recoveryId, log
       if (displayed.get(row.uid) !== summary) { log(row.user + '\t' + summary); displayed.set(row.uid, summary) }
     }
     if (current.phase === 'completed' || current.phase === 'interrupted') {
-      const completed = store.completion(plan.id)
+      let completed
+      try { completed = store.completion(plan.id) }
+      catch (error) {
+        if (error.code !== 'CRABOT_SYSTEM_JOURNAL_FAILED') throw error
+        // The coordinator publishes the private result before the public fence.
+        const state = await run('/usr/bin/systemctl', ['show', unit, '--property=ActiveState', '--value'], options)
+        if (!['failed', 'inactive'].includes(state.stdout.trim())) {
+          await new Promise(resolve => setTimeout(resolve, 500)); continue
+        }
+        completed = store.completion(plan.id)
+      }
       log('作业' + (current.phase === 'completed' ? '结束' : '中断，保留维护保护') + '：' + progress.results.length + '个实例。')
       if (progress.error) log(progress.error.message)
       return completed.exit_code ?? 1

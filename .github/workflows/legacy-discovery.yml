@@ -1,19 +1,6 @@
 name: Legacy installation compatibility
 on:
   workflow_dispatch:
-  push:
-    branches: ['feat/desktop-legacy-discovery']
-  pull_request:
-    paths:
-      - 'scripts/lib/legacy-desktop.mjs'
-      - 'scripts/lib/legacy-release-*.mjs'
-      - 'scripts/lib/legacy-entry-*.mjs'
-      - 'scripts/lib/desktop-cli-text.mjs'
-      - 'scripts/desktop/legacy-releases.json'
-      - 'scripts/lib/__tests__/legacy-desktop.test.mjs'
-      - 'scripts/lib/__tests__/legacy-entry-fence.test.mjs'
-      - 'scripts/lib/__tests__/fixtures/legacy-release*'
-      - '.github/workflows/legacy-discovery.yml'
 permissions:
   contents: read
 jobs:

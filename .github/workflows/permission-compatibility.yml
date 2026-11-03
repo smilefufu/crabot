@@ -1,18 +1,6 @@
 name: Directory permission upgrade compatibility
 on:
   workflow_dispatch:
-  push:
-    branches: ['feat/desktop-permissions-compatibility']
-  pull_request:
-    paths:
-      - 'crabot-shared/**'
-      - 'crabot-admin/**'
-      - 'crabot-agent/**'
-      - 'crabot-core/**'
-      - 'scripts/upgrade-lib/**'
-      - 'scripts/lib/admin-data-compat.mjs'
-      - 'scripts/lib/__tests__/admin-data-compat.test.mjs'
-      - '.github/workflows/permission-compatibility.yml'
 permissions:
   contents: read
 jobs:
@@ -33,6 +21,9 @@ jobs:
         shell: bash
         run: |
           set -e
+          node scripts/build-native.mjs
+          pnpm --dir crabot-client install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-client run build
           pnpm install --frozen-lockfile --ignore-scripts
           pnpm --dir crabot-shared install --frozen-lockfile --ignore-scripts
           pnpm --dir crabot-shared run build

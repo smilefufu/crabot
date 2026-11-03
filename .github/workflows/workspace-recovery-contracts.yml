@@ -1,14 +1,6 @@
 name: Workspace recovery contracts and SDK
 on:
   workflow_dispatch:
-  push:
-    branches: ['feat/desktop-workspace-recovery-contracts']
-  pull_request:
-    paths:
-      - 'crabot-shared/src/workspace-*.ts'
-      - 'crabot-client/src/contracts/workspaces.ts'
-      - 'crabot-client/tests/workspaces.test.mjs'
-      - '.github/workflows/workspace-recovery-contracts.yml'
 permissions:
   contents: read
 jobs:

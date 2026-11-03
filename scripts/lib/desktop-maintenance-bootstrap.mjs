@@ -23,6 +23,7 @@ export const desktopMaintenanceBootstrap = Object.freeze([
   'scripts/lib/desktop-maintenance-bootstrap.mjs',
   'scripts/lib/desktop-management.cjs',
   'scripts/lib/mac-app-binding.cjs',
+  'scripts/lib/ubuntu-app-binding.cjs',
   'scripts/lib/source-installation.mjs',
   'scripts/lib/development-environment.mjs',
   'scripts/lib/desktop-payload.mjs',

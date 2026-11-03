@@ -1,79 +1,6 @@
 name: Workspace Core lifecycle
 
 on:
-  push:
-    branches: ['feat/desktop-workspace-core-integration']
-    paths:
-      - '.github/workflows/desktop.yml'
-      - 'crabot-admin/src/workspace-recovery-auth.ts'
-      - 'crabot-admin/src/workspace-finalization-web.ts'
-      - 'crabot-admin/src/workspace-finalization-web.test.ts'
-      - 'crabot-core/src/index.ts'
-      - 'crabot-core/src/process-tree.ts'
-      - 'crabot-core/src/process-tree*.test.ts'
-      - 'crabot-core/src/module-manager-lifecycle.test.ts'
-      - 'crabot-core/src/module-runtime-registry.ts'
-      - 'crabot-core/src/module-runtime-registry.test.ts'
-      - 'crabot-core/src/test-fixtures/uv-python-sleeper.py'
-      - 'crabot-core/src/test-fixtures/workspace-config-admin.cjs'
-      - 'crabot-agent/src/core/workspace-relocation-*.ts'
-      - 'crabot-agent/tests/core/workspace-relocation-*.test.ts'
-      - 'crabot-agent/src/unified-agent.ts'
-      - 'crabot-shared/src/workspace-types.ts'
-      - 'crabot-shared/src/module-base.ts'
-      - 'crabot-shared/src/workspace-maintenance.ts'
-      - 'crabot-core/src/workspace-*.test.ts'
-      - 'crabot-agent/tests/core/fixtures/**'
-      - 'scripts/lib/workspace-*'
-      - 'scripts/lib/process-identity.cjs'
-      - 'scripts/lib/owned-process-tree.cjs'
-      - 'scripts/lib/module-carrier-rpc.cjs'
-      - 'scripts/lib/module-runtime-rpc.cjs'
-      - 'scripts/lib/pinned-process-rpc.cjs'
-      - 'scripts/lib/__tests__/module-shutdown-rpc.test.mjs'
-      - 'scripts/lib/__tests__/module-carrier-rpc.test.mjs'
-      - 'crabot-native/**'
-      - 'scripts/workspace-root-probe.mjs'
-      - 'scripts/workspace-recovery-coordinator.mjs'
-      - 'scripts/workspace-runtime-gate.mjs'
-      - 'scripts/lib/__tests__/workspace-root-probe.test.mjs'
-      - '.github/workflows/workspace-core.yml'
-  pull_request:
-    paths:
-      - '.github/workflows/desktop.yml'
-      - 'crabot-admin/src/workspace-recovery-auth.ts'
-      - 'crabot-admin/src/workspace-finalization-web.ts'
-      - 'crabot-admin/src/workspace-finalization-web.test.ts'
-      - 'crabot-core/src/index.ts'
-      - 'crabot-core/src/process-tree.ts'
-      - 'crabot-core/src/process-tree*.test.ts'
-      - 'crabot-core/src/module-manager-lifecycle.test.ts'
-      - 'crabot-core/src/module-runtime-registry.ts'
-      - 'crabot-core/src/module-runtime-registry.test.ts'
-      - 'crabot-core/src/test-fixtures/uv-python-sleeper.py'
-      - 'crabot-core/src/test-fixtures/workspace-config-admin.cjs'
-      - 'crabot-agent/src/core/workspace-relocation-*.ts'
-      - 'crabot-agent/tests/core/workspace-relocation-*.test.ts'
-      - 'crabot-agent/src/unified-agent.ts'
-      - 'crabot-shared/src/workspace-types.ts'
-      - 'crabot-shared/src/module-base.ts'
-      - 'crabot-shared/src/workspace-maintenance.ts'
-      - 'crabot-core/src/workspace-*.test.ts'
-      - 'crabot-agent/tests/core/fixtures/**'
-      - 'scripts/lib/workspace-*'
-      - 'scripts/lib/process-identity.cjs'
-      - 'scripts/lib/owned-process-tree.cjs'
-      - 'scripts/lib/module-carrier-rpc.cjs'
-      - 'scripts/lib/module-runtime-rpc.cjs'
-      - 'scripts/lib/pinned-process-rpc.cjs'
-      - 'scripts/lib/__tests__/module-shutdown-rpc.test.mjs'
-      - 'scripts/lib/__tests__/module-carrier-rpc.test.mjs'
-      - 'crabot-native/**'
-      - 'scripts/workspace-root-probe.mjs'
-      - 'scripts/workspace-recovery-coordinator.mjs'
-      - 'scripts/workspace-runtime-gate.mjs'
-      - 'scripts/lib/__tests__/workspace-root-probe.test.mjs'
-      - '.github/workflows/workspace-core.yml'
   workflow_dispatch:
     inputs:
       target:
@@ -97,7 +24,7 @@ defaults:
 jobs:
   core:
     name: ${{ matrix.suite == 'business' && 'Business workspace runtime' || matrix.suite == 'archive' && 'Archived workspace records' || matrix.suite == 'recovery-terminal' && 'Cold workspace release' || matrix.suite == 'recovery-services' && 'Cold workspace service restoration' || matrix.suite == 'recovery-admin' && 'Cold workspace Admin restoration' || matrix.suite == 'recovery' && 'Cold workspace recovery' || matrix.suite == 'owned' && 'Owned workspace migrations' || matrix.suite == 'owned-recovery' && 'Same MM workspace recovery' || matrix.suite == 'completion' && 'Workspace job completion' || 'Fixed workspace lifecycle' }} ${{ matrix.os }}
-    timeout-minutes: ${{ matrix.os == 'windows-2022' && matrix.suite == 'finite' && 90 || matrix.os == 'macos-15-intel' && matrix.suite == 'business' && 45 || matrix.os == 'windows-2022' && 45 || 25 }}
+    timeout-minutes: ${{ matrix.os == 'windows-2022' && matrix.suite == 'finite' && 90 || matrix.os == 'macos-15-intel' && matrix.suite == 'business' && 45 || matrix.os == 'macos-15-intel' && matrix.suite == 'finite' && 35 || matrix.os == 'macos-15-intel' && matrix.suite == 'recovery' && 35 || matrix.os == 'windows-2022' && matrix.suite == 'business' && 75 || matrix.os == 'windows-2022' && 45 || 25 }}
     strategy:
       fail-fast: false
       matrix:

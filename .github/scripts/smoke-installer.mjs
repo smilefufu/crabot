@@ -151,8 +151,10 @@ try {
   await run(process.execPath, [join(product, 'cli.mjs'), '--help'])
   await run(process.execPath, [join(repo, '.github/scripts/smoke-scrapling.mjs'), product])
   await run(process.execPath, [join(repo, '.github/scripts/test-durable-file.mjs'), product])
-  const credentials = await import(pathToFileURL(join(product, 'crabot-admin/dist/credentials.js')).href)
-  await credentials.writeCredentials(join(data, 'admin'), await credentials.newCredentialsFromPassword('fixture-install-password', { is_temp: false, changed_via: 'start' }))
+  // Release the target's Windows addon before testing replacement of that installation.
+  await run(process.execPath, ['--input-type=module', '-e', `const credentials = await import(process.argv[1]);
+    await credentials.writeCredentials(process.argv[2], await credentials.newCredentialsFromPassword('fixture-install-password', { is_temp: false, changed_via: 'start' }))`,
+    pathToFileURL(join(product, 'crabot-admin/dist/credentials.js')).href, join(data, 'admin')])
   started = true
   await run(process.execPath, [join(product, 'cli.mjs'), 'start', '-d'])
   await assertServicesStarted()
@@ -243,7 +245,12 @@ try {
     }
   }
   server.close()
-  const cleanupTimer = setTimeout(() => { console.error(`Fixture cleanup timed out: ${fixture}`); process.exit(1) }, 60_000)
+  const cleanupStarted = Date.now(), cleanupBudget = windows ? 300_000 : 60_000
+  console.log('[installer smoke] removing private acceptance fixture')
+  const slowCleanup = windows ? setTimeout(() => { void fs.readdir(home).then(names => console.log('[installer smoke] slow cleanup remaining home entries: ' + JSON.stringify(names.slice(0, 16))), () => {}) }, 60_000) : undefined
+  slowCleanup?.unref()
+  const cleanupTimer = setTimeout(() => { console.error(`Fixture cleanup exceeded ${cleanupBudget}ms: ${fixture}`); process.exit(1) }, cleanupBudget)
   cleanupTimer.unref()
-  try { await fs.rm(fixture, { recursive: true, force: true, maxRetries: 2, retryDelay: 200 }) } finally { clearTimeout(cleanupTimer) }
+  try { await fs.rm(fixture, { recursive: true, force: true, maxRetries: 2, retryDelay: 200 }) } finally { clearTimeout(cleanupTimer); clearTimeout(slowCleanup) }
+  console.log(`[installer smoke] private fixture removed in ${Date.now() - cleanupStarted}ms`)
 }

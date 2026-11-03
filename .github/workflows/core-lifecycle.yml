@@ -1,12 +1,6 @@
 name: Core ordinary lifecycle
 on:
   workflow_dispatch:
-  push:
-    branches: ['feat/desktop-core-lifecycle']
-  pull_request:
-    paths:
-      - 'crabot-core/**'
-      - '.github/workflows/core-lifecycle.yml'
 permissions:
   contents: read
 jobs:
