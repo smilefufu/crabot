@@ -11,6 +11,9 @@ const { WebSocketServer } = require('../../crabot-admin/node_modules/ws')
 
 const started = Date.now()
 const phase = value => console.log('CRABOT_BOUNDARY_PHASE ' + JSON.stringify({ phase: value, elapsed_ms: Date.now() - started }))
+const waitTrace = []
+const rememberWait = value => { if (waitTrace.length < 32) waitTrace.push({ phase: value, elapsed_ms: Date.now() - started }) }
+if (process.platform === 'darwin') process.on('SIGUSR2', () => console.log('CRABOT_BOUNDARY_WAIT_TRACE ' + JSON.stringify({ pid: process.pid, stages: waitTrace })))
 app.setName('Crabot boundary fixture')
 // Async server cleanup owns the exit result, including an expected failed check.
 app.on('window-all-closed', () => {})
@@ -193,13 +196,15 @@ async function main() {
     })])
   } finally { clearTimeout(streamTimer) }
   phase('release-stream-close-verified')
+  rememberWait('waiting-release-reader')
   assert.equal(await interrupted, true); reader.releaseLock()
-  phase('release-stream-reader-settled')
+  rememberWait('release-stream-reader-settled')
+  rememberWait('waiting-closed-transport-rejection')
   await assert.rejects(releaseTransport.fetch(externalOrigin + '/closed', {}))
-  phase('direct-http-start')
+  rememberWait('direct-http-start')
   const result = await trusted.webContents.executeJavaScript(`fetch(${JSON.stringify(origin + '/api/probe')}).then(r=>r.json())`)
   assert.equal(result.ok, true)
-  phase('direct-http-ready')
+  rememberWait('direct-http-ready')
   assert.equal(received.find(req => req.url === '/api/probe').authorization, 'Bearer fixture-main-only')
   const wsUrl = origin.replace('http:', 'ws:') + '/ws/chat'
   const wsResult = await trusted.webContents.executeJavaScript(`new Promise((resolve,reject)=>{const socket=new WebSocket(${JSON.stringify(wsUrl)});socket.onmessage=event=>resolve(JSON.parse(event.data));socket.onerror=()=>reject(new Error('WS connection failed'))})`)

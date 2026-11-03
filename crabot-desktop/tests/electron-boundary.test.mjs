@@ -41,6 +41,10 @@ for (const { stalled, suffix } of [{ stalled: false, suffix: '' }, { stalled: tr
       if (result.termination_requested) {
         const phase = output.split('\n').filter(line => line.startsWith('CRABOT_BOUNDARY_PHASE ')).at(-1) ?? 'no fixture phase received'
         console.log('CRABOT_BOUNDARY_PARENT_DEADLINE ' + phase)
+        if (!parentStall && process.platform === 'darwin' && child.exitCode === null && child.signalCode === null) {
+          child.kill('SIGUSR2') // This still-owned, unreaped fixture child only; collect memory-only stages after failure.
+          await new Promise(resolve => setTimeout(resolve, 250))
+        }
         await stopKnownProcessScope([expected], { timeoutMs: 1, onObserved: () => {}, graceful: async () => {} })
         settled = true
         if (parentStall) { assert.match(output, /parent-stall-ready/); return }
