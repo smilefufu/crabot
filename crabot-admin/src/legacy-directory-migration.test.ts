@@ -39,7 +39,7 @@ it('legacy templates with an omitted storage field retain their previous effecti
 })
 let temporary: string | undefined
 afterEach(async () => { vi.restoreAllMocks(); if (temporary) await fs.rm(temporary, { recursive: true, force: true }); temporary = undefined })
-it('actual scope transaction backs up only changed metadata, initializes v1 once and does not convert later friends', async () => {
+it.each([false, true])('actual scoped transaction initializes v1 once and preserves later friends; aliased program path=%s', async aliased => {
   temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-directory-upgrade-'))
   const data = path.join(temporary, 'data'), admin = path.join(data, 'admin'), agent = path.join(data, 'agent')
   await fs.mkdir(admin, { recursive: true }); await fs.mkdir(agent)
@@ -55,9 +55,12 @@ it('actual scope transaction backs up only changed metadata, initializes v1 once
   const description = await describeMigration(path.join(home, 'crabot-admin'), admin, null, 'v1')
   expect(description.scope.writes).toEqual(['admin/SCHEMA_VERSION', 'admin/friend-permission-configs.json', 'admin/session-configs.json'].map(value => path.normalize(value)).sort())
   let calls = 0
+  const alias = path.join(temporary, 'product-alias')
+  if (aliased) await fs.symlink(home, alias, process.platform === 'win32' ? 'junction' : 'dir')
   const run = async (script: string, directory: string, context: any) => {
     calls++
-    await promisify(execFile)(process.execPath, [script, '--data-dir=' + directory], { env: { ...process.env, CRABOT_MIGRATION_PLAN: context.plan, CRABOT_MIGRATION_PLAN_SHA256: context.planSha256 }, timeout: 10000 })
+    const entry = aliased ? path.join(alias, path.relative(home, script)) : script
+    await promisify(execFile)(process.execPath, ['--preserve-symlinks-main', entry, '--data-dir=' + directory], { env: { ...process.env, CRABOT_MIGRATION_PLAN: context.plan, CRABOT_MIGRATION_PLAN_SHA256: context.planSha256 }, timeout: 10000 })
     return { exitCode: 0 }
   }
   const result = await executeMigration(description, run)
