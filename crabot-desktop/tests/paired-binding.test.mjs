@@ -70,7 +70,7 @@ for (const scenario of ['private-removal-on-original', 'malformed-removal-host',
   }
   const ordinaryStartup = scenario === 'installed-program-not-rescanned'
   const missingWindowsInstaller = process.platform === 'win32' && scenario === 'detached-pair'
-  if (missingWindowsInstaller) assert.match(failureMessage, /Crabot 启动失败[\s\S]*ENOENT[\s\S]*\.desktop-install-payload\.json[\s\S]*日志/)
+  if (missingWindowsInstaller) assert.match(failureMessage, /CRABOT 启动失败[\s\S]*ENOENT[\s\S]*\.desktop-install-payload\.json[\s\S]*日志/)
   assert.deepEqual(evidence, { external_core_executed: ordinaryStartup, repair_shown: !ordinaryStartup && !missingWindowsInstaller, removal_shown: ['removal', 'private-removal-on-original', 'malformed-removal-host'].includes(scenario), data_entries: ordinaryStartup ? ['desktop-profile'] : [], business_mm_started: false, actual_packaged_binary: false })
   console.log('CRABOT_GUI_BINDING_REJECTION ' + JSON.stringify({ scenario, ...evidence }))
 })
