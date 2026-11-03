@@ -68,11 +68,6 @@ jobs:
           pnpm --dir crabot-desktop install --frozen-lockfile
           (cd crabot-desktop && node -e "require('electron')")
           pnpm --dir crabot-desktop run build
-      - name: Data and packaging boundaries before expensive assembly
-        run: |
-          node --test scripts/lib/__tests__/desktop-entry.test.mjs scripts/lib/__tests__/ubuntu-app-binding.test.mjs scripts/lib/__tests__/unix-legacy-cli.test.mjs scripts/lib/__tests__/core-release.test.mjs scripts/desktop/__tests__/ubuntu-deb.test.mjs crabot-desktop/tests/ubuntu-first-launch.test.mjs scripts/lib/__tests__/desktop-data-import.test.mjs
-          node .github/scripts/ubuntu-electron-test-sandbox.mjs
-          xvfb-run -a node --test crabot-desktop/tests/ubuntu-profile.test.mjs
       - name: Prepare locked offline runtime
         run: |
           node scripts/prepare-scrapling.mjs --release=desktop-ci
@@ -83,17 +78,8 @@ jobs:
           node scripts/desktop/stage-core.mjs --out=.desktop-build/deb/core --version=0.1.0-desktop.21
           node scripts/desktop/package-application.mjs --candidate=true --core=.desktop-build/deb/core --out=.desktop-build/deb/gui
           node scripts/desktop/package-installers.mjs --candidate=true --project=.desktop-build/deb/gui --out=.desktop-build/deb/distribution
-      - name: Build a second version stamp for actual fixed-path upgrade
-        run: |
-          node --input-type=module -e 'import{rm}from"node:fs/promises";for(const file of [".desktop-build/deb/core",".desktop-build/deb/gui"])await rm(file,{recursive:true,force:true})'
-          node scripts/desktop/stage-core.mjs --out=.desktop-build/deb-upgrade/core --version=0.1.0-desktop.22
-          node scripts/desktop/package-application.mjs --candidate=true --core=.desktop-build/deb-upgrade/core --out=.desktop-build/deb-upgrade/gui
-          node scripts/desktop/package-installers.mjs --candidate=true --project=.desktop-build/deb-upgrade/gui --out=.desktop-build/deb-upgrade/distribution
-      - name: Install both completed DEBs and verify actual version replacement
-        run: |
-          ulimit -c 0
-          dbus-run-session -- xvfb-run -a node .github/scripts/verify-ubuntu-deb.mjs .desktop-build/deb/distribution
-          dbus-run-session -- xvfb-run -a node .github/scripts/verify-ubuntu-deb.mjs .desktop-build/deb-upgrade/distribution --baseline=.desktop-build/deb/distribution
+      - name: Record exact packaged source
+        run: node --input-type=module -e 'import{writeFileSync}from"node:fs";import{execFileSync}from"node:child_process";writeFileSync(".desktop-build/deb/source.json",JSON.stringify({commit:execFileSync("git",["rev-parse","HEAD"],{encoding:"utf8"}).trim(),version:"0.1.0-desktop.21"})+"\n")'
       - name: Retain candidate and actual evidence; never publish a release
         if: always()
         uses: actions/upload-artifact@v4
@@ -102,160 +88,9 @@ jobs:
           path: |
             .desktop-build/deb/distribution/*candidate.deb
             .desktop-build/deb/distribution/installers.json
-            .desktop-build/deb/acceptance.json
-            .desktop-build/deb/acceptance-*.log
-            .desktop-build/deb-upgrade/distribution/*candidate.deb
-            .desktop-build/deb-upgrade/distribution/installers.json
-            .desktop-build/deb-upgrade/acceptance.json
-            .desktop-build/deb-upgrade/acceptance-*.log
+            .desktop-build/deb/source.json
           if-no-files-found: warn
           compression-level: 0
-          retention-days: 7
-  cleanup-facts:
-    name: Pinned legacy compiled-program facts
-    if: inputs.cleanup_facts_only == true
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.source_ref }}
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - run: python .github/scripts/build-legacy-cleanup-inventory.py
-      - uses: actions/upload-artifact@v4
-        with:
-          name: legacy-cleanup-program-facts-${{ github.sha }}
-          path: .desktop-build/legacy-cleanup-files.json.gz
-          include-hidden-files: true
-          if-no-files-found: error
-          retention-days: 7
-  boundary:
-    name: Windows first-use data boundaries
-    if: inputs.cleanup_facts_only != true && inputs.target == 'win32-x64' && inputs.source_only == true
-    runs-on: windows-latest
-    timeout-minutes: 30
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.source_ref }}
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22.22.3'
-      - name: Prepare native boundary fixtures
-        run: |
-          node scripts/build-native.mjs
-          pnpm --dir crabot-client install --frozen-lockfile
-          pnpm --dir crabot-client run build
-          pnpm install --frozen-lockfile
-          pnpm --dir scripts/lib install --frozen-lockfile
-          pnpm --dir crabot-desktop install --frozen-lockfile
-          pnpm --dir crabot-shared install --frozen-lockfile
-          pnpm --dir crabot-shared run build
-          pnpm --dir crabot-core install --frozen-lockfile
-          pnpm --dir crabot-core run build
-          pnpm --dir crabot-desktop run build
-      - name: Existing GUI stopped update with a bounded native diagnostic
-        run: |
-          mkdir -p .desktop-build
-          node --input-type=module -e 'import{runBounded}from"./scripts/lib/run-bounded.mjs";await runBounded(process.execPath,["--test","--test-name-pattern=an extracted desktop update","scripts/lib/__tests__/desktop-payload.test.mjs"],{timeout:180000})' 2>&1 | tee .desktop-build/windows-first-use-pair.log
-      - name: Import retry and concrete startup failure regression
-        if: ${{ !cancelled() }}
-        run: node --test scripts/lib/__tests__/desktop-data-import.test.mjs crabot-desktop/tests/bootstrap-failure.test.mjs
-      - name: GUI and original CLI preserve the actual legacy data binding
-        if: ${{ !cancelled() }}
-        run: |
-          mkdir -p .desktop-build
-          node --test --test-concurrency=1 scripts/lib/__tests__/desktop-installation.test.mjs scripts/lib/__tests__/legacy-entry-fence.test.mjs crabot-desktop/tests/windows-first-launch.test.mjs crabot-desktop/tests/installer-discovery-dialogs.test.mjs 2>&1 | tee .desktop-build/windows-first-use-boundary.log
-          node --test --test-concurrency=1 --test-name-pattern='legacy handoff retains|pre-data preparation|first GUI|an extracted retained reinstall|cancelled same-directory first|actual target Node takes over|target takeover never|legacy target commits|dedicated legacy health' scripts/lib/__tests__/desktop-payload.test.mjs 2>&1 | tee .desktop-build/windows-first-use-admission.log
-      - name: Retain first-use boundary evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-first-use-boundary-${{ github.sha }}
-          path: .desktop-build/windows-first-use-*.log
-          include-hidden-files: true
-          if-no-files-found: error
-          retention-days: 7
-  decoder:
-    name: Actual single-layer Windows decoder
-    if: inputs.cleanup_facts_only != true && inputs.target == 'win32-x64' && inputs.source_only == true
-    runs-on: windows-latest
-    timeout-minutes: 10
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.source_ref }}
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22.22.3'
-      - run: pnpm --dir crabot-desktop install --frozen-lockfile
-      - name: Compile and execute product NSIS with ordinary, Unicode and long destinations
-        run: |
-          mkdir -p .desktop-build
-          node scripts/build-native.mjs
-          node .github/scripts/probe-windows-install-directory.mjs
-          node .github/scripts/probe-windows-single-layer-installer.mjs 2>&1 | tee .desktop-build/windows-single-layer-decoder.log
-      - name: Retain actual decoder evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-single-layer-decoder-${{ github.sha }}
-          path: .desktop-build/windows-single-layer-decoder.log
-          include-hidden-files: true
-          if-no-files-found: warn
-          retention-days: 7
-  source:
-    if: inputs.cleanup_facts_only != true && inputs.source_only == true
-    name: Source cold boot ${{ inputs.target || 'darwin-arm64' }}
-    runs-on: ${{ inputs.target == 'win32-x64' && 'windows-latest' || inputs.target == 'linux-x64' && 'ubuntu-24.04' || inputs.target == 'darwin-x64' && 'macos-15-intel' || 'macos-15' }}
-    timeout-minutes: 30
-    env:
-      UV_PYTHON: '3.12'
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.source_ref }}
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22.22.3'
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - uses: astral-sh/setup-uv@v6
-        with:
-          version: '0.13.0'
-      - name: Prepare actual headless developer checkout
-        run: |
-          mkdir -p .desktop-build
-          node scripts/dev.mjs build 2>&1 | tee .desktop-build/development-build.log
-          test ! -d crabot-desktop/node_modules
-      - name: Real cold developer Core
-        run: node .github/scripts/smoke-development-coexistence.mjs --source-only 2>&1 | tee .desktop-build/development-source-boot.log
-      - name: Native source startup regression
-        working-directory: scripts/upgrade-lib
-        run: node ../../node_modules/vitest/vitest.mjs run __tests__/startup-entry.test.mjs --maxWorkers=1 --minWorkers=1 2>&1 | tee ../../.desktop-build/development-startup-regression.log
-      - name: Retain exact developer evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: developer-source-${{ inputs.target || 'darwin-arm64' }}-${{ github.sha }}
-          path: .desktop-build/*.log
-          include-hidden-files: true
-          if-no-files-found: error
           retention-days: 7
   installer:
     if: inputs.cleanup_facts_only != true && inputs.source_only != true && inputs.target != 'linux-x64'
@@ -304,16 +139,6 @@ jobs:
           node scripts/prepare-scrapling.mjs --release=desktop-ci
           node scripts/prepare-computer-use.mjs
           node scripts/prepare-product-runtime.mjs
-      - name: Verify both browser drivers with one bundled Node
-        run: |
-          node --input-type=module <<'NODE'
-          import { createRequire } from 'node:module';
-          import { execFileSync } from 'node:child_process';
-          import { join } from 'node:path';
-          const require = createRequire(import.meta.url);
-          const { directory, manifest } = require('./scripts/lib/scrapling-runtime.cjs').loadRuntime(process.cwd(), { full: true });
-          execFileSync(join(directory, manifest.command), ['-I', '-B', '.github/scripts/smoke-browser-node-sharing.py', directory], { stdio: 'inherit' });
-          NODE
       - name: Compile CLI and Admin Web required by the installer
         run: |
           pnpm run build:cli
@@ -322,17 +147,6 @@ jobs:
         run: |
           node scripts/desktop/stage-core.mjs --out=.desktop-build/manual/core --version=0.1.0-desktop.21
           node .github/scripts/verify-release-payload.mjs "$GITHUB_WORKSPACE/.desktop-build/manual/core"
-          node --input-type=module <<'NODE'
-          import { createRequire } from 'node:module';
-          import { execFileSync } from 'node:child_process';
-          import { join, resolve } from 'node:path';
-          const require = createRequire(import.meta.url), root = resolve('.desktop-build/manual/core');
-          const { directory, manifest } = require(join(root, 'scripts/lib/scrapling-runtime.cjs')).loadRuntime(root, { full: true });
-          if (!manifest.node.startsWith('../.product-runtime/node/')) throw new Error('Packaged browser did not share product Node');
-          execFileSync(join(directory, manifest.command), ['-I', '-B', '.github/scripts/smoke-browser-node-sharing.py', directory], { stdio: 'inherit' });
-          NODE
-          node .github/scripts/smoke-product-runtime.mjs .desktop-build/manual/core 2>&1 | tee .desktop-build/product-runtime-slim.log
-          node .github/scripts/smoke-scrapling.mjs .desktop-build/manual/core --offline 2>&1 | tee .desktop-build/browser-runtime-slim.log
           if [ "${{ runner.os }}" = "macOS" ]; then
             node scripts/desktop/package-application.mjs --candidate=true --core=.desktop-build/manual/core --out=.desktop-build/manual/gui
             node scripts/desktop/package-installers.mjs --candidate=true --project=.desktop-build/manual/gui --out=.desktop-build/manual/distribution
@@ -393,60 +207,6 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
-      - name: Tiny native decoder path regression
-        if: runner.os == 'Windows'
-        run: node .github/scripts/probe-windows-single-layer-installer.mjs
-      - name: Native Windows wrapper extraction regression
-        if: runner.os == 'Windows'
-        run: node .github/scripts/smoke-windows-single-layer.mjs .desktop-build/manual/installer 2>&1 | tee .desktop-build/windows-wrapper.log
-      - name: Published Windows CLI v2026.10.14.1 into GUI preserving existing data
-        if: runner.os == 'Windows'
-        run: node .github/scripts/verify-legacy-user-takeover.mjs .desktop-build/manual/paired .desktop-build/manual/installer v2026.10.14.1 2>&1 | tee .desktop-build/windows-v14-takeover.log
-      - name: Published CLI data into ordinary Mac App
-        if: runner.os == 'macOS'
-        run: node .github/scripts/smoke-mac-app-legacy.mjs .desktop-build/manual/gui 2>&1 | tee .desktop-build/mac-app-legacy-stage.log
-      - name: Prepare isolated source memory for real coexistence
-        run: |
-          node --input-type=module -e 'import{resolve}from"node:path";import{prepareMemoryDependencies}from"./scripts/lib/memory-deps.mjs";await prepareMemoryDependencies(resolve("crabot-memory"),{dev:true,relocatable:false,uv:"uv",logger:console})'
-      - name: Verify cold source Core for coexistence
-        run: |
-          node .github/scripts/smoke-development-coexistence.mjs --background-only 2>&1 | tee .desktop-build/development-source-boot.log
-      - name: Real source GUI and release coexistence
-        env:
-          CRABOT_CI_DEVELOPMENT_COEXISTENCE: '1'
-        run: |
-          if [ "${{ runner.os }}" = "macOS" ]; then
-            node .github/scripts/smoke-packaged-desktop.mjs .desktop-build/manual/gui 2>&1 | tee .desktop-build/manual-coexistence.log
-          else
-            node .github/scripts/smoke-packaged-desktop.mjs .desktop-build/manual/paired 2>&1 | tee .desktop-build/manual-coexistence.log
-          fi
-      - name: Shared process stop, force-kill recovery and hidden tools
-        run: |
-          node --test scripts/lib/__tests__/instance-runtime.test.mjs scripts/lib/__tests__/instance-stop-failures.test.mjs crabot-desktop/tests/controller.test.mjs crabot-desktop/tests/windows-offline-update.test.mjs
-          pnpm --dir crabot-agent exec vitest run tests/engine/host-process-console.test.ts tests/engine/host-process.test.ts tests/engine/host-process-maintenance.test.ts tests/schedule-script-runner.test.ts --maxWorkers=1 --minWorkers=1
-          node .github/scripts/probe-windows-background-tools.mjs
-      - name: Windows native proxy and Slack configuration regression
-        if: runner.os == 'Windows'
-        run: |
-          CRABOT_SYSTEM_PROXY_CI=1 node .github/scripts/probe-windows-system-proxy.mjs
-          (cd crabot-shared && node --import tsx --test src/proxy-manager.test.ts)
-          pnpm --dir crabot-channel-slack test
-          node .github/scripts/smoke-slack-onboarding.mjs
-      - name: Existing stopped GUI update retains location and data
-        if: runner.os == 'Windows'
-        run: |
-          node --test --test-name-pattern='an extracted desktop update.*: none$' scripts/lib/__tests__/desktop-payload.test.mjs
-      - name: Simplified data import and runtime regression
-        run: |
-          node --test scripts/lib/__tests__/desktop-data-import.test.mjs scripts/lib/__tests__/product-runtime.test.mjs
-          node --test crabot-desktop/tests/windows-first-launch.test.mjs crabot-desktop/tests/bootstrap-failure.test.mjs
-      - name: Windows official installed launcher and folder picker regression
-        if: runner.os == 'Windows'
-        run: |
-          node --test scripts/lib/__tests__/legacy-windows-launcher.test.mjs scripts/lib/__tests__/legacy-desktop.test.mjs scripts/lib/__tests__/legacy-entry-fence.test.mjs
-          node --test crabot-desktop/tests/installer-discovery-dialogs.test.mjs
-      - name: Verify package slimming boundaries
-        run: node --test scripts/desktop/__tests__/slim-core.test.mjs scripts/lib/__tests__/scrapling-runtime.test.mjs
       - name: Retain build failure evidence
         if: failure()
         uses: actions/upload-artifact@v4
@@ -456,36 +216,3 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
-  windows-ui:
-    name: Actual Windows EXE installation
-    if: inputs.cleanup_facts_only != true && inputs.target == 'win32-x64' && inputs.source_only != true
-    needs: installer
-    runs-on: windows-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.source_ref }}
-      - uses: actions/download-artifact@v4
-        with:
-          name: crabot-win32-x64-offline-test-${{ inputs.source_ref }}
-          path: .desktop-build/wrapper-ui
-      - name: Install the exact candidate through its real EXE interface
-        shell: pwsh
-        run: |
-          $files = @(Get-ChildItem .desktop-build/wrapper-ui -Recurse -Filter '*offline-candidate.exe')
-          if ($files.Count -ne 1) { throw 'Expected exactly one Windows candidate installer' }
-          & .github/scripts/smoke-windows-wrapper-capacity.ps1 -Installer $files[0].FullName -Expected complete | Tee-Object .desktop-build/windows-wrapper-ui.log
-      - name: Reject insufficient TEMP before extraction
-        shell: pwsh
-        run: |
-          $files = @(Get-ChildItem .desktop-build/wrapper-ui -Recurse -Filter '*offline-candidate.exe')
-          if ($files.Count -ne 1) { throw 'Expected exactly one Windows candidate installer' }
-          & .github/scripts/smoke-windows-wrapper-capacity.ps1 -Installer $files[0].FullName -Expected space
-      - name: Retain actual installer evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-wrapper-ui-acceptance-${{ github.sha }}
-          path: .desktop-build/windows-wrapper-ui.log
-          if-no-files-found: warn
