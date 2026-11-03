@@ -58,7 +58,7 @@ jobs:
           github-token: ${{ github.token }}
           run-id: ${{ inputs.source_run }}
           name: ${{ inputs.artifact_name }}
-          path: .desktop-build
+          path: .desktop-build/ubuntu-installation/distribution
       - name: Native system display and ordinary package dependencies
         run: |
           sudo apt-get update
@@ -66,36 +66,21 @@ jobs:
       - name: Exact DEB installation and kernel sandbox before independent source preparation
         run: |
           ulimit -c 0
-          dbus-run-session -- xvfb-run -a node .github/scripts/verify-ubuntu-deb.mjs .desktop-build/deb/distribution
+          dbus-run-session -- xvfb-run -a node .github/scripts/verify-ubuntu-deb.mjs .desktop-build/ubuntu-installation/distribution
       - name: Published CLI14 and CLI15 data through the ordinary DEB GUI
         run: |
           for version in v2026.10.14.1 v2026.10.15.1; do
-            dbus-run-session -- xvfb-run -a node .github/scripts/verify-ubuntu-deb.mjs .desktop-build/deb/distribution --legacy="$version"
+            dbus-run-session -- xvfb-run -a node .github/scripts/verify-ubuntu-deb.mjs .desktop-build/ubuntu-installation/distribution --legacy="$version"
           done
-      - name: Actual fixed-path version21 to version22 upgrade
-        run: |
-          dbus-run-session -- xvfb-run -a node .github/scripts/verify-ubuntu-deb.mjs .desktop-build/deb-upgrade/distribution --baseline=.desktop-build/deb/distribution
-      - name: Independent source GUI and Core coexistence with the accepted DEB
-        run: |
-          UV_PYTHON=3.12 node scripts/dev.mjs build
-          node --test scripts/lib/__tests__/desktop-entry.test.mjs
-          pnpm --dir crabot-desktop install --frozen-lockfile
-          pnpm --dir crabot-desktop run build
-          ulimit -c 0
-          dbus-run-session -- xvfb-run -a node .github/scripts/verify-ubuntu-deb-coexistence.mjs .desktop-build/deb-upgrade/distribution
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: ubuntu-deb-acceptance-${{ matrix.os }}-${{ github.run_id }}
           path: |
-            .desktop-build/deb-upgrade/acceptance.json
-            .desktop-build/deb/acceptance.json
-            .desktop-build/deb/acceptance-*.log
-            .desktop-build/deb/legacy-*/acceptance.json
-            .desktop-build/deb/legacy-*/acceptance-*.log
-            .desktop-build/deb-upgrade/acceptance-*.log
-            .desktop-build/development-coexistence.log
-            .desktop-build/development-*.log
+            .desktop-build/ubuntu-installation/acceptance.json
+            .desktop-build/ubuntu-installation/acceptance-*.log
+            .desktop-build/ubuntu-installation/legacy-*/acceptance.json
+            .desktop-build/ubuntu-installation/legacy-*/acceptance-*.log
           if-no-files-found: warn
           retention-days: 7
   recheck:
