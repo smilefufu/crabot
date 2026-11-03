@@ -377,6 +377,16 @@ jobs:
         run: |
           node scripts/desktop/package-installers.mjs --candidate=true "--project=.desktop-build/安装 候选/gui" --out=.desktop-build/platform-installers 2>&1 | tee .desktop-build/installers.log
           node .github/scripts/verify-installer-candidates.mjs .desktop-build/platform-installers 2>&1 | tee .desktop-build/installer-verification.log
+      - name: Retain the actual DEB for independent installation acceptance
+        if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ubuntu-deb-installation-candidate
+          path: |
+            .desktop-build/platform-installers/*candidate.deb
+            .desktop-build/platform-installers/installers.json
+          compression-level: 0
+          retention-days: 1
       - name: Boot actual packaged app with native session and CLI on Linux
         timeout-minutes: 10
         if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
@@ -386,51 +396,21 @@ jobs:
         if: runner.os != 'Linux' && steps.scope.outputs.full_runtime == 'true'
         run: node .github/scripts/smoke-packaged-desktop.mjs ".desktop-build/安装 候选/gui" 2>&1 | tee .desktop-build/packaged-boot.log
       - name: Signed complete-archive intake with the actual bundled Python
-        if: steps.scope.outputs.full_runtime == 'true'
+        if: runner.os != 'Linux' && steps.scope.outputs.full_runtime == 'true'
         timeout-minutes: 6
         run: node .github/scripts/test-paired-release-intake.mjs ".desktop-build/安装 候选/core" 2>&1 | tee .desktop-build/signed-release-intake.log
-      - name: Load same-commit Ubuntu24 native bootstrap
-        if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
-        uses: actions/download-artifact@v4
-        with:
-          name: ubuntu-native-bootstrap
-          path: .desktop-build/ubuntu-bootstrap
       - name: Build paired offline GUI and Core candidate
-        if: steps.scope.outputs.full_runtime == 'true'
+        if: runner.os != 'Linux' && steps.scope.outputs.full_runtime == 'true'
         timeout-minutes: 10
         run: node scripts/desktop/package-application.mjs --candidate=true --layout=paired --native-bootstrap=.desktop-build/ubuntu-bootstrap "--core=.desktop-build/安装 候选/core" "--out=.desktop-build/安装 候选/paired" 2>&1 | tee .desktop-build/paired-package.log
       - name: Verify actual complete GUI and Core signed archive
-        if: steps.scope.outputs.full_runtime == 'true'
+        if: runner.os != 'Linux' && steps.scope.outputs.full_runtime == 'true'
         timeout-minutes: 10
         run: node .github/scripts/verify-complete-paired-release.mjs ".desktop-build/安装 候选/core" ".desktop-build/安装 候选/paired/offline" 2>&1 | tee .desktop-build/complete-paired-release.log
       - name: Build independent offline installer host
-        if: steps.scope.outputs.full_runtime == 'true'
+        if: runner.os != 'Linux' && steps.scope.outputs.full_runtime == 'true'
         timeout-minutes: 20
         run: node scripts/desktop/package-offline-installer.mjs --candidate=true --distribute=${{ runner.os != 'Linux' }} --native-bootstrap=.desktop-build/ubuntu-bootstrap "--paired=.desktop-build/安装 候选/paired" "--out=.desktop-build/安装 候选/installer" 2>&1 | tee .desktop-build/offline-installer.log
-      - name: Verify native installer backend and payload without business startup on Linux
-        if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
-        timeout-minutes: 6
-        run: xvfb-run -a node .github/scripts/verify-offline-installer-host.mjs ".desktop-build/安装 候选/installer" 2>&1 | tee .desktop-build/installer-host-probe.log
-      - name: Stage temporary Linux program payload for Ubuntu24 installation acceptance
-        if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
-        timeout-minutes: 8
-        run: |
-          node --input-type=module <<'NODE'
-          import { statfsSync } from 'node:fs'
-          import { execFileSync } from 'node:child_process'
-          const size = Number(execFileSync('du', ['--apparent-size', '-sk', '.desktop-build/安装 候选/installer/ubuntu-native'], { encoding: 'utf8' }).split(/\s+/)[0]) * 1024
-          const disk = statfsSync('.desktop-build')
-          if (!Number.isSafeInteger(size) || size <= 0 || disk.bavail * disk.bsize < size + 1024 ** 3) throw new Error('Insufficient CI space to transfer candidate safely')
-          NODE
-          tar -czf .desktop-build/ubuntu-native-candidate.tar.gz -C ".desktop-build/安装 候选/installer" ubuntu-native installer-location.json
-      - name: Transfer only the immutable candidate to the disposable Ubuntu24 test VM
-        if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: ubuntu-native-installation-candidate
-          path: .desktop-build/ubuntu-native-candidate.tar.gz
-          compression-level: 0
-          retention-days: 1
       - name: Verify actual installer ASAR without business startup on macOS and Windows
         if: runner.os != 'Linux' && steps.scope.outputs.full_runtime == 'true'
         timeout-minutes: 6
@@ -452,10 +432,6 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
-      - name: Published legacy Ubuntu user archives through actual backend and ordinary Main
-        if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
-        timeout-minutes: 30
-        run: dbus-run-session -- xvfb-run -a node .github/scripts/verify-legacy-user-takeover.mjs ".desktop-build/安装 候选/paired" ".desktop-build/安装 候选/installer" 2>&1 | tee .desktop-build/legacy-user-stage.log
       - name: Published legacy v2026.10.14.1 through actual installer and ordinary Main
         if: runner.os != 'Linux' && steps.scope.outputs.full_runtime == 'true'
         timeout-minutes: 30
@@ -466,36 +442,23 @@ jobs:
         run: node .github/scripts/verify-legacy-user-takeover.mjs ".desktop-build/安装 候选/paired" ".desktop-build/安装 候选/installer" v2026.10.15.1 2>&1 | tee .desktop-build/legacy-user-stage-v2026.10.15.1.log
       # One batch includes cold boot, warm reattach and retained-repair boot.
       # Keep each product deadline unchanged; the Windows batch reached its third real ready state at 1200.7s.
-      - name: Boot actual offline-prepared pair on Linux
-        if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
-        timeout-minutes: 20
-        run: xvfb-run -a node .github/scripts/smoke-packaged-desktop.mjs ".desktop-build/安装 候选/paired" 2>&1 | tee .desktop-build/paired-boot.log
       - name: Boot actual offline-prepared pair on macOS and Windows
         if: runner.os != 'Linux' && steps.scope.outputs.full_runtime == 'true'
         timeout-minutes: ${{ matrix.target == 'darwin-x64' && 35 || runner.os == 'Windows' && 40 || 20 }}
         run: node .github/scripts/smoke-packaged-desktop.mjs ".desktop-build/安装 候选/paired" 2>&1 | tee .desktop-build/paired-boot.log
       - name: Signed paired update reaches ordinary target GUI and Core health
-        if: steps.scope.outputs.full_runtime == 'true'
+        if: runner.os != 'Linux' && steps.scope.outputs.full_runtime == 'true'
         timeout-minutes: ${{ matrix.target == 'darwin-x64' && 60 || runner.os == 'Windows' && 45 || 35 }}
         env:
           CRABOT_PAIRED_ACCEPTANCE_ID: ${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.target }}
         run: |
-          if [[ "$RUNNER_OS" == Linux ]]; then
-            xvfb-run -a node .github/scripts/verify-paired-update-host.mjs ".desktop-build/安装 候选/paired" 2>&1 | tee .desktop-build/paired-update-host.log
-          else
-            node .github/scripts/verify-paired-update-host.mjs ".desktop-build/安装 候选/paired" 2>&1 | tee .desktop-build/paired-update-host.log
-          fi
+          node .github/scripts/verify-paired-update-host.mjs ".desktop-build/安装 候选/paired" 2>&1 | tee .desktop-build/paired-update-host.log
           node .github/scripts/check-paired-update-report.mjs .desktop-build/paired-update-host.json "$CRABOT_PAIRED_ACCEPTANCE_ID"
       # Intel completed the full removal at 15.6 minutes; allow the remaining real reinstall and health checks.
       - name: Ordinary Main complete uninstall and retained reinstall
-        if: steps.scope.outputs.full_runtime == 'true'
+        if: runner.os != 'Linux' && steps.scope.outputs.full_runtime == 'true'
         timeout-minutes: ${{ matrix.target == 'darwin-x64' && 40 || runner.os == 'Windows' && 30 || 20 }}
-        run: |
-          if [[ "$RUNNER_OS" == Linux ]]; then
-            dbus-run-session -- xvfb-run -a node .github/scripts/verify-uninstall-reinstall.mjs ".desktop-build/安装 候选/paired" 2>&1 | tee .desktop-build/uninstall-reinstall-stage.log
-          else
-            node .github/scripts/verify-uninstall-reinstall.mjs ".desktop-build/安装 候选/paired" 2>&1 | tee .desktop-build/uninstall-reinstall-stage.log
-          fi
+        run: node .github/scripts/verify-uninstall-reinstall.mjs ".desktop-build/安装 候选/paired" 2>&1 | tee .desktop-build/uninstall-reinstall-stage.log
       - name: Ordinary CLI archive and actual upgrade command
         if: steps.scope.outputs.full_runtime == 'true'
         run: |
@@ -581,25 +544,31 @@ jobs:
         if: steps.scope.outputs.full_runtime == 'true'
         uses: actions/download-artifact@v4
         with:
-          name: ubuntu-native-installation-candidate
-          path: .desktop-build
+          name: ubuntu-deb-installation-candidate
+          path: .desktop-build/ubuntu-installation/distribution
       - name: Prepare isolated desktop test libraries
         if: steps.scope.outputs.full_runtime == 'true'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libgtk-4-1 libjson-glib-1.0-0 libgtk-3-0t64 libnss3 libxss1 libasound2t64 libgbm1 xvfb xauth dbus-x11
-          mkdir -p .desktop-build/ubuntu-installation
-          tar -xzf .desktop-build/ubuntu-native-candidate.tar.gz -C .desktop-build/ubuntu-installation
-      - name: Exercise actual user backend, test authorization, GUI and MCP sandbox
+          sudo apt-get install -y --no-install-recommends apparmor-utils libgtk-3-0t64 libnss3 libxss1 libasound2t64 libgbm1 xvfb xauth xdotool dbus-x11 zstd
+      - name: Exercise standard DEB first use, legacy CLI import, overwrite, removal and sandbox
         if: steps.scope.outputs.full_runtime == 'true'
         timeout-minutes: 14
         run: |
           ulimit -c 0
-          dbus-run-session -- xvfb-run -a node .github/scripts/accept-ubuntu-offline-installer.mjs .desktop-build/ubuntu-installation
+          for legacy in fresh v2026.10.14.1 v2026.10.15.1; do
+            args=()
+            if [ "$legacy" != fresh ]; then args+=("--legacy=$legacy"); fi
+            dbus-run-session -- xvfb-run -a node .github/scripts/verify-ubuntu-deb.mjs .desktop-build/ubuntu-installation/distribution "${args[@]}"
+          done
       - uses: actions/upload-artifact@v4
         if: always() && steps.scope.outputs.full_runtime == 'true'
         with:
           name: ubuntu-installation-report
-          path: .desktop-build/ubuntu-installation-report.json
+          path: |
+            .desktop-build/ubuntu-installation/acceptance*.json
+            .desktop-build/ubuntu-installation/acceptance*.log
+            .desktop-build/ubuntu-installation/legacy-*/acceptance*.json
+            .desktop-build/ubuntu-installation/legacy-*/acceptance*.log
           if-no-files-found: ignore
           retention-days: 3
