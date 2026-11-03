@@ -10,7 +10,7 @@ import { promisify } from 'node:util'
 import { createRequire } from 'node:module'
 
 const exec = promisify(execFile)
-const source = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
+const source = await fs.realpath(resolve(dirname(fileURLToPath(import.meta.url)), '../..'))
 const root = await fs.realpath(resolve(process.argv[2] ?? source))
 const require = createRequire(import.meta.url)
 const product = require(join(root, 'scripts/lib/product-runtime.cjs'))
@@ -36,7 +36,9 @@ try {
   if (process.platform === 'darwin') {
     const cua = require(join(root, 'scripts/lib/computer-use-runtime.cjs')).loadRuntime(root, { full: true })
     report.desktop_control_arch = await run('/usr/bin/lipo', ['-archs', cua.command])
-    assert.equal(report.desktop_control_arch, process.arch === 'arm64' ? 'arm64' : 'x86_64')
+    const expectedArch = process.arch === 'arm64' ? 'arm64' : 'x86_64'
+    if (root === source) assert.ok(report.desktop_control_arch.split(/\s+/).includes(expectedArch))
+    else assert.equal(report.desktop_control_arch, expectedArch)
     await run('/usr/bin/codesign', ['--verify', '--deep', '--strict', cua.app])
   }
   report.node = await run(runtime.executables.node, ['--version'])

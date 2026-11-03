@@ -8,6 +8,8 @@
 
 ### Ubuntu 标准 DEB：安装/升级与源码共存通过，CI收尾中
 
+- 2026-11-03用户明确要求继续完成下一版发版，Windows候选包不等于完成。当前修正仅CI：Linux完整打包补齐DEB构建依赖；Mac源码准备阶段允许已校验上游通用架构，封装成品仍严格要求目标单架构及原签名验证。原生CI已分别复现缺少dh_apparmor和两种Mac架构误拒绝；87项定向回归通过，原生完整结果待核实，不改产品设计或现场部署。
+
 - 按逐项许可使用标准DEB、系统固定目录和包管理器覆盖；新GUI默认XDG数据位置、首启可改，已有绑定保留。按用户要求合入main界面优化`f9113364`。旧GTK GUI/自启动入口迁移、成功后询问清理旧程序及GNOME/Wayland真人项仍未完成；[PR233](https://github.com/smilefufu/crabot/pull/233)正式待审，不自行合并、不发版、不改现场部署或真实数据。
 - Linux Electron一行参数兼容已获单项许可并实现：完整受信程序/源码路径、原两个开关、用户/PID代际/握手保持。源码`a75d472d`的同一新包在[Ubuntu24/26终验41532885769](https://github.com/smilefufu/crabot/actions/runs/41532885769)通过初装、内核沙箱、已发布CLI14/15加合成数据接入及旧密码实际登录、21→22固定覆盖、真实源码GUI认证与独立启停。21→22是同源码版本号夹具；Ubuntu24截图首次超时原样重跑一次通过，根因未定位。22版DEB下载911471650字节，SHA256 `ee8274fabf5cadb0b04a8529a7a7605891db016ee4fab586c1b6261796cf2f18`。
 - 含main界面的`50ec04e0`已在[41543135859](https://github.com/smilefufu/crabot/actions/runs/41543135859)完成新DEB构建、Ubuntu24实际初装/固定覆盖和源码冷启动；不代替当前新增CI修正后的完整包验收。Web481项/类型检查、CLI编译通过；Core/Admin/Agent/迁移权限组246项通过、1项跳过。Admin全量既有2项静态失败曾在独立main复现；两个发布载荷专用入口未用其打包Python runner验收，不算全仓通过。

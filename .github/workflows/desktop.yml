@@ -136,7 +136,7 @@ jobs:
           node .github/scripts/desktop-runtime-scope.mjs
       - name: Linux build prerequisites
         if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
-        run: sudo apt-get update && sudo apt-get install -y build-essential libcurl4-openssl-dev libexpat1-dev zlib1g-dev libjson-glib-dev libgtk-4-dev
+        run: sudo apt-get update && sudo apt-get install -y build-essential libcurl4-openssl-dev libexpat1-dev zlib1g-dev libjson-glib-dev libgtk-4-dev dh-apparmor debhelper zstd
       - name: Prepare isolated build directory
         run: mkdir -p .desktop-build
       - name: Compile same-source helper for actual paired-layout verification
