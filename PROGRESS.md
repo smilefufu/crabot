@@ -5,6 +5,8 @@
 - 2026-11-03 21:03（上海时间）Docker 内部盘耗尽，EMQX Mnesia 写入 `enospc`，随后重启/挂载失败；手机因 MQTT 断线暂停采集。2026-11-04 按用户授权仅清理未使用构建缓存，Docker 报告 16.47GB，虚拟盘可用由约 1.4GiB 增至 13.1GiB（98%→76%），启动原 MQTT 容器。
 - 恢复后节点/管理 API healthy，原 HTTP 认证器仍启用，手机及 connector MQTT 均已连接；观察到 40 条消息入库及一条自然发消息任务完成回执。17 个既有容器身份/镜像/挂载、所有数据卷核对无变化。EMQX 启动自行处理了损坏的 `LATEST.LOG`；不能据此承诺全部历史消息无损，未重放旧死信。恢复证据：`/private/tmp/wechat-mqtt-recovery-20261104/`。
 
+- 最小预防配置已落地：Docker 原生构建缓存 GC 从 20GB 调为 8GB，按用户授权重启 Docker 后实际策略为 8GiB；EMQX 容器日志限制为 `10m × 3`，复用原数据卷，EMQX 文件日志仍关闭。仅调整原生配置，未增加外部维护服务；GC 管构建缓存，不是 Docker 总盘硬限额。手机与 connector 均已重连、待发送队列为 0；UO 保存关服后恢复，Minecraft 及其他常驻服务恢复，原身份/镜像/挂载核对通过。重启中断部分评测容器，调度器已继续创建新容器，未手动重跑旧评测。配置提交 `wechat-connector@ebca4ff`；重启证据：`/private/tmp/wechat-native-limits-evidence-20261104/`。
+
 ### Mac 首启遗漏修正（R3/R4）
 
 - PR231同步main并移除已过时GTK/Ubuntu探针、旧打包版本及重复Core辅助实现，仅补Mac正常主窗口接入进度、取消/错误重试和删除已安装App的重复全量扫描；继续使用main既有入口/版本校验，安装更新的完整核验保持。按已确认R3/R4实施；本机TypeScript编译、116项定向回归（含真实Electron单窗口页面、5项旧数据接入）通过，旧数据接入完整程序扫描计数为0；尚未进入已发布desktop21，也未做完整DMG人工安装验收。
