@@ -56,13 +56,12 @@ int wmain(int argc, wchar_t** argv) {
       }
       std::vector<std::filesystem::path> programs{std::filesystem::path(root) / L"program\\gui\\Crabot.exe",
         std::filesystem::path(root) / L"bin\\crabot.exe"};
-      for (const auto& directory : {std::filesystem::path(root) / L"app\\releases", std::filesystem::path(root) / L"releases"}) {
+      for (const auto& directory : {std::filesystem::path(root) / L"app\\releases"}) {
         std::error_code error;
         if (!std::filesystem::exists(directory, error)) { if (error) throw 1; continue; }
         for (const auto& item : std::filesystem::directory_iterator(directory)) {
           if (item.is_symlink() || !item.is_directory()) continue;
-          programs.push_back(item.path() / (directory.filename() == L"releases" && directory.parent_path().filename() == L"app"
-            ? L"Crabot.exe" : L".product-runtime\\node\\node.exe"));
+          programs.push_back(item.path() / L"Crabot.exe");
         }
       }
       for (const auto& file : programs) {

@@ -192,3 +192,20 @@ test('fresh installation uses an empty preservation list and extracts every runt
   await f.extract()
   assert.equal((await fs.stat(path.join(f.installed, f.runtime, 'tail.exe'))).isFile(), true)
 })
+
+test('retained historical Node runtime cannot block replacement of fixed programs', { skip: !windows }, async t => {
+  const f = await fixture(t)
+  const directory = path.join(f.installed, 'releases/old-core/.product-runtime/node')
+  await fs.mkdir(directory, { recursive: true })
+  const node = path.join(directory, 'node.exe'); await fs.copyFile(process.execPath, node)
+  const child = spawn(node, ['-e', 'setInterval(()=>{},1000)'], { windowsHide: true, stdio: 'ignore' })
+  try {
+    await wait(500); assert.equal(child.exitCode, null)
+    const result = spawnSync(helper, [f.installed, '--check-programs'], { windowsHide: true, encoding: 'utf8' })
+    assert.equal(result.status, 0, result.stdout + result.stderr)
+    assert.equal(child.exitCode, null)
+  } finally {
+    if (child.exitCode === null) child.kill()
+    if (child.exitCode === null) await new Promise(resolve => child.once('exit', resolve))
+  }
+})
