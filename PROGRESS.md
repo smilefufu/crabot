@@ -1,10 +1,9 @@
 # Crabot 项目进度
 
-### 微信 MQTT 磁盘故障：已恢复，自维护 Spec 待确认
+### 微信 MQTT 磁盘故障：已恢复
 
 - 2026-11-03 21:03（上海时间）Docker 内部盘耗尽，EMQX Mnesia 写入 `enospc`，随后重启/挂载失败；手机因 MQTT 断线暂停采集。2026-11-04 按用户授权仅清理未使用构建缓存，Docker 报告 16.47GB，虚拟盘可用由约 1.4GiB 增至 13.1GiB（98%→76%），启动原 MQTT 容器。
 - 恢复后节点/管理 API healthy，原 HTTP 认证器仍启用，手机及 connector MQTT 均已连接；观察到 40 条消息入库及一条自然发消息任务完成回执。17 个既有容器身份/镜像/挂载、所有数据卷核对无变化。EMQX 启动自行处理了损坏的 `LATEST.LOG`；不能据此承诺全部历史消息无损，未重放旧死信。恢复证据：`/private/tmp/wechat-mqtt-recovery-20261104/`。
-- 已整理[自维护 Spec](crabot-docs/superpowers/specs/2026-11-04-wechat-mqtt-maintenance-design.md)：宿主独立巡检、提前受限清理旧构建缓存、本地告警、异常退出限次拉起与暂停边界。待书面确认后实施；本轮未安装自动维护、改 Docker daemon 或修改业务协议。
 
 ### Mac 首启遗漏修正（R3/R4）
 
