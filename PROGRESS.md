@@ -11,6 +11,11 @@
 
 - PR231同步main并移除已过时GTK/Ubuntu探针、旧打包版本及重复Core辅助实现，仅补Mac正常主窗口接入进度、取消/错误重试和删除已安装App的重复全量扫描；继续使用main既有入口/版本校验，安装更新的完整核验保持。按已确认R3/R4实施；本机TypeScript编译、116项定向回归（含真实Electron单窗口页面、5项旧数据接入）通过，旧数据接入完整程序扫描计数为0；尚未进入已发布desktop21，也未做完整DMG人工安装验收。
 
+### Slack Bot 提及群成员：局部修复，未发布
+
+- 按既有显式提及契约，补齐发送工具对 `mentions`、真实平台 ID 来源及 Slack 前置提及位置的说明；修正 Agent 将身份解析失败静默丢弃后仍发送成功的问题。缺少本渠道身份或查询失败时，在投递前返回错误；已知平台 ID 不再依赖 Admin 查询。普通名字不自动查人，原群、Bot 身份及渠道渲染方式保持。
+- 旧实现先复现 5 项缺口；修正后 Agent 投递／工具面／等待人类／语音相关 149 项通过，Slack 全量 117 项通过、5 项 Windows 专属跳过，Agent 类型检查与 Slack 构建通过。发送工具→Agent→Slack Channel 串联及真实 SDK 本地 HTTP 检查覆盖原生 `<@用户ID>`、可见 blocks、通知文本及失败不冒充成功；真实 Slack 客户端显示尚未验收，未发布安装包或部署。
+
 ### Slack Markdown 与完整媒体：已合入，未部署
 
 - 依据已确认的 [Markdown Spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-11-03-slack-markdown-adaptation-design.md) 和 [媒体 Spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-11-03-slack-media-adaptation-design.md)，文字使用原生 Markdown，表格／代码按结构分片且缓存保留原文；图片、多图选择及音视频／文档等附件支持按需获取和回传，保持原 Session、群 @过滤及路径授权。

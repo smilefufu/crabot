@@ -1015,6 +1015,17 @@ describe('buildManagerToolFace', () => {
     }
   })
 
+  it('模型可见的发送 schema 明确要求真实提及身份，不把正文 @名字当作真实提及', () => {
+    const send = buildManagerToolFace(makeDeps()).find(tool => tool.name === 'send_message')!
+    const schema = send.inputSchema as { properties: Record<string, any> }
+    expect(schema.properties.content.description).toContain('mentions')
+    expect(schema.properties.mentions.description).toContain('必须')
+    const fields = schema.properties.mentions.items.properties
+    expect(fields.platform_user_id.description).toContain('from_id')
+    expect(fields.platform_user_id.description).toContain('list_group_members')
+    expect(fields.at_name.description).toContain('Slack')
+  })
+
   it('三个投递工具的 inputSchema 都要求声明 post_send_action', () => {
     const tools = buildManagerToolFace(makeDeps({ isSystemThread: true }))
 

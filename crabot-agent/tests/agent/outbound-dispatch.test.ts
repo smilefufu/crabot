@@ -211,7 +211,7 @@ describe('dispatchOutboundMessage', () => {
     ])
   })
 
-  it('mention friend_id 在当前 channel 无 identity → 跳过该 mention（不挂全 entry）', async () => {
+  it('mention friend_id 在当前 channel 无 identity → 拒绝发送，不能丢掉真实提及后报成功', async () => {
     const captured: Array<{ method: string; payload: unknown }> = []
     const deps: OutboundDispatchDeps = {
       authorizeFile: async () => {},
@@ -241,14 +241,43 @@ describe('dispatchOutboundMessage', () => {
 
     const entry = makeEntry({
       channel_id: 'feishu-001',
-      mentions: [{ friend_id: 'f-only-wx', at_name: '@X' }],
+      mentions: [{ platform_user_id: 'UVALID' }, { friend_id: 'f-only-wx', at_name: '@X' }],
     })
 
-    await dispatchOutboundMessage(entry, deps)
-    const sendCall = captured.find((c) => c.method === 'send_message')
-    const sendPayload = sendCall!.payload as { features?: unknown }
-    // mention 全空 → features 不出现
-    expect(sendPayload.features).toBeUndefined()
+    await expect(dispatchOutboundMessage(entry, deps)).rejects.toThrow('mention 缺少本渠道平台身份')
+    expect(captured.some(c => c.method === 'send_message')).toBe(false)
+  })
+
+  it('直接使用平台用户 ID 时无需 Admin 可用，保留真实提及', async () => {
+    const call = vi.fn(async () => ({ platform_message_id: 'm-direct', sent_at: '' }))
+    const getAdminPort = vi.fn(async () => { throw new Error('admin unavailable') })
+    const deps: OutboundDispatchDeps = {
+      rpcClient: { call } as never, moduleId: 'm',
+      resolveChannelPort: async () => 19009, getAdminPort,
+    }
+    await dispatchOutboundMessage(makeEntry({ channel_id: 'slack-test', mentions: [{ platform_user_id: 'UFUFU', at_name: '@fufu' }] }), deps)
+    expect(getAdminPort).not.toHaveBeenCalled()
+    expect(call).toHaveBeenCalledWith(19009, 'send_message', expect.objectContaining({
+      features: { mentions: [{ platform_user_id: 'UFUFU', at_name: '@fufu' }] },
+    }), 'm')
+  })
+
+  it.each(['lookup failed', 'missing id'])('提及解析失败 (%s) 时不投递正文、不触发成功回调', async failure => {
+    const call = vi.fn(async (_port: number, method: string) => {
+      if (method === 'get_friend') throw new Error('friend lookup failed')
+      return { platform_message_id: 'must-not-send', sent_at: '' }
+    })
+    const onDispatched = vi.fn()
+    const deps: OutboundDispatchDeps = {
+      rpcClient: { call } as never, moduleId: 'm', onDispatched,
+      resolveChannelPort: async () => 19009, getAdminPort: async () => 19001,
+    }
+    const mention = failure === 'lookup failed' ? { friend_id: 'friend-fufu' } : { at_name: '@fufu' }
+    await expect(dispatchOutboundMessage(makeEntry({ mentions: [mention] }), deps)).rejects.toThrow(
+      failure === 'lookup failed' ? 'friend lookup failed' : 'mention 必须指定 friend_id 或 platform_user_id',
+    )
+    expect(call.mock.calls.some(args => args[1] === 'send_message')).toBe(false)
+    expect(onDispatched).not.toHaveBeenCalled()
   })
 
   it('quote_message_id → features.quote_message_id', async () => {

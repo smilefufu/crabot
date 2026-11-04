@@ -174,7 +174,7 @@ function buildMessageContent(
 /**
  * 把 entry.mentions（friend_id 或 platform_user_id 形态）解析成 channel 期望的 platform_user_id 列表。
  * - 直传 platform_user_id：原样保留
- * - 仅 friend_id：调 admin get_friend 反查；找不到当前 channel 的 identity 时丢弃该 mention
+ * - 仅 friend_id：调 admin get_friend 反查；无法解析本渠道身份时拒绝发送，不能静默丢失提及
  *
  * 返回 undefined 表示无 mentions（避免在 features 里塞空数组）。
  */
@@ -183,33 +183,27 @@ async function resolvePlatformMentions(
   deps: OutboundDispatchDeps,
 ): Promise<PlatformMention[] | undefined> {
   if (!entry.mentions || entry.mentions.length === 0) return undefined
-  const adminPort = await deps.getAdminPort()
-  const resolved = await Promise.all(
+  let adminPort: Promise<number> | undefined
+  return Promise.all(
     entry.mentions.map(async ({ friend_id, platform_user_id, at_name }) => {
       if (platform_user_id) {
         return { platform_user_id, ...(at_name !== undefined ? { at_name } : {}) }
       }
-      if (!friend_id) return null
-      try {
-        const fResult = await deps.rpcClient.call<
-          { friend_id: string },
-          { friend: Friend }
-        >(adminPort, 'get_friend', { friend_id }, deps.moduleId)
-        const identity = fResult.friend.channel_identities.find(
-          (ci) => ci.channel_id === entry.channel_id,
-        )
-        if (!identity) return null
-        return {
-          platform_user_id: identity.platform_user_id,
-          ...(at_name !== undefined ? { at_name } : {}),
-        }
-      } catch {
-        return null
+      if (!friend_id) throw new Error('mention 必须指定 friend_id 或 platform_user_id')
+      const fResult = await deps.rpcClient.call<
+        { friend_id: string },
+        { friend: Friend }
+      >(await (adminPort ??= deps.getAdminPort()), 'get_friend', { friend_id }, deps.moduleId)
+      const identity = fResult.friend.channel_identities.find(
+        (ci) => ci.channel_id === entry.channel_id,
+      )
+      if (!identity?.platform_user_id) throw new Error('mention 缺少本渠道平台身份，请通过 list_group_members 查询 platform_user_id')
+      return {
+        platform_user_id: identity.platform_user_id,
+        ...(at_name !== undefined ? { at_name } : {}),
       }
     }),
   )
-  const filtered = resolved.filter((m): m is PlatformMention => m !== null)
-  return filtered.length > 0 ? filtered : undefined
 }
 
 // ============================================================================

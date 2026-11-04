@@ -418,7 +418,7 @@ const SEND_MASTER_PRIVATE_SCHEMA = {
 const SEND_MESSAGE_SCHEMA = {
   channel_id: z.string().describe('Channel 模块实例 ID'),
   session_id: z.string().describe('目标 Session ID'),
-  content: z.string().describe('消息内容（给人类看的自然语言；禁止塞 audit/criterion/`/清除目标` 等内部黑话）'),
+  content: z.string().describe('消息内容（给人类看的自然语言；禁止塞 audit/criterion/`/清除目标` 等内部黑话）。需要真正 @成员时必须同时填写 mentions，仅在正文写 @名字 不会产生真实提及。'),
   intent: z.enum(['info', 'ask_human']).optional().describe('意图：info=进度告知 / 最终交付（默认，单向，不等回复）；ask_human=阻塞等人类同步回复'),
   content_type: z.enum(['text', 'image', 'file']).optional().describe('消息类型，默认 text'),
   media_url: z.string().optional().describe('媒体 URL（网络地址，与 file_path 二选一）'),
@@ -426,9 +426,9 @@ const SEND_MESSAGE_SCHEMA = {
   filename: z.string().optional().describe('文件名（可选）'),
   mentions: z.array(z.object({
     friend_id: z.string().optional().describe('熟人 ID（与 platform_user_id 二选一）'),
-    platform_user_id: z.string().optional().describe('平台用户 ID（如飞书 open_id，从 list_contacts 获取）。有此字段时跳过熟人查找，可直接 @ 非熟人群成员'),
-    at_name: z.string().optional().describe('你在 content 正文里写的 @标记文本（如 "@徐倩"）。提供后系统在正文里做内联高亮替换；不提供则在消息末尾追加 @ 通知'),
-  })).optional().describe('@提及列表。每项提供 friend_id（熟人 ID）或 platform_user_id（平台 ID，从 list_contacts 获取）之一，加可选的 at_name'),
+    platform_user_id: z.string().optional().describe('目标渠道的真实用户 ID（如 Slack U…、飞书 open_id）。可取目标成员入站消息的 from_id，或通过 list_group_members / list_contacts 查询；不可填写显示名或编造 ID。有此字段时跳过熟人查找，可直接 @ 非熟人群成员。'),
+    at_name: z.string().optional().describe('正文中对应此人的 @标记文本（如 "@徐倩"）。内联替换取决于渠道支持；Slack 将真实提及放在正文前。此字段不能替代 friend_id 或 platform_user_id。'),
+  })).optional().describe('需要真正 @成员时必须填写的提及列表，不能只在 content 中写 @名字。每项提供 friend_id（真实熟人 ID）或 platform_user_id（目标渠道真实用户 ID）之一，加可选的 at_name。'),
   quote_message_id: z.string().optional().describe('引用回复的平台消息 ID'),
 }
 
