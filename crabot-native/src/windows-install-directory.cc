@@ -1,5 +1,6 @@
 // Installer-only mkdir: establish the same new private root as the existing
 // desktop preparer. Existing nonempty installations and their ACLs stay intact.
+#define NOMINMAX
 #include <windows.h>
 #include <sddl.h>
 #include <aclapi.h>
@@ -8,6 +9,7 @@
 #include <vector>
 #include <cstdio>
 #include <filesystem>
+#include "windows-program-overlay.h"
 
 int wmain(int argc, wchar_t** argv) {
   HANDLE token = nullptr;
@@ -16,7 +18,8 @@ int wmain(int argc, wchar_t** argv) {
   int result = 1;
   const char* stage = "arguments";
   try {
-    if (argc != 2 && !(argc == 3 && std::wstring(argv[2]) == L"--check-programs")) throw 1;
+    const bool overlay = argc >= 5 && argc <= 7 && std::wstring(argv[2]) == L"--prepare-overlay";
+    if (argc != 2 && !(argc == 3 && std::wstring(argv[2]) == L"--check-programs") && !overlay) throw 1;
     stage = "resolve-path";
     std::vector<wchar_t> full(32768);
     DWORD length = GetFullPathNameW(argv[1], static_cast<DWORD>(full.size()), full.data(), nullptr);
@@ -25,8 +28,23 @@ int wmain(int argc, wchar_t** argv) {
     while (root.size() > 3 && root.back() == L'\\') root.pop_back();
     if (root.size() <= 3 || root[1] != L':' || root[2] != L'\\') throw 1;
     root = L"\\\\?\\" + root;
+    if (overlay) {
+      bool silent = false; HWND parent = nullptr;
+      for (int index = 5; index < argc; index++) {
+        const std::wstring option(argv[index]);
+        if (option == L"--silent") silent = true;
+        else if (option.rfind(L"--parent=", 0) == 0) {
+          size_t used = 0; const auto value = std::stoull(option.substr(9), &used);
+          if (used != option.size() - 9) throw 1;
+          parent = reinterpret_cast<HWND>(static_cast<uintptr_t>(value));
+          if (parent && !IsWindow(parent)) throw 1;
+        } else throw 1;
+      }
+      return WindowsOverlay::Run(root, argv[3], argv[4], silent, parent);
+    }
     if (argc == 3) {
-      // Observe only this installation's known executable files. A real sharing
+      // Observe this installation's GUI/CLI entries. Runtime executable
+      // occupancy is handled separately, only when its component changes. A real sharing
       // violation is actionable; no global process/handle enumeration is needed.
       stage = "program-files";
       for (const auto& part : {L"program", L"program\\gui", L"program\\core"}) {
@@ -37,14 +55,13 @@ int wmain(int argc, wchar_t** argv) {
         }
       }
       std::vector<std::filesystem::path> programs{std::filesystem::path(root) / L"program\\gui\\Crabot.exe",
-        std::filesystem::path(root) / L"program\\core\\.product-runtime\\node\\node.exe", std::filesystem::path(root) / L"bin\\crabot.exe"};
-      for (const auto& directory : {std::filesystem::path(root) / L"app\\releases", std::filesystem::path(root) / L"releases"}) {
+        std::filesystem::path(root) / L"bin\\crabot.exe"};
+      for (const auto& directory : {std::filesystem::path(root) / L"app\\releases"}) {
         std::error_code error;
         if (!std::filesystem::exists(directory, error)) { if (error) throw 1; continue; }
         for (const auto& item : std::filesystem::directory_iterator(directory)) {
           if (item.is_symlink() || !item.is_directory()) continue;
-          programs.push_back(item.path() / (directory.filename() == L"releases" && directory.parent_path().filename() == L"app"
-            ? L"Crabot.exe" : L".product-runtime\\node\\node.exe"));
+          programs.push_back(item.path() / L"Crabot.exe");
         }
       }
       for (const auto& file : programs) {
