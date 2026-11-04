@@ -6,10 +6,11 @@
 !define CRABOT_GUI "$%CRABOT_WINDOWS_GUI%"
 !define CRABOT_DECODER "$%CRABOT_WINDOWS_DECODER%"
 !define CRABOT_DIRECTORY_HELPER "$%CRABOT_WINDOWS_DIRECTORY_HELPER%"
+!define CRABOT_FILE_TABLE "$%CRABOT_WINDOWS_FILE_TABLE%"
 !macroundef extractUsing7za
 !macro extractUsing7za FILE
   DetailPrint "正在解包程序到 $INSTDIR"
-  nsExec::ExecToLog '"$PLUGINSDIR\7za.exe" x -y -bb1 -bsp0 "-o$INSTDIR" "${FILE}"'
+  nsExec::ExecToLog '"$PLUGINSDIR\7za.exe" x -y -bb1 -bsp0 -spd -scsUTF-8 "-x@$PLUGINSDIR\preserved-files.txt" "-o$INSTDIR" "${FILE}"'
   Pop $0
   ${If} $0 != 0
     SetErrorLevel 1
@@ -20,6 +21,7 @@ RequestExecutionLevel user
 InstallDir "$PROFILE\Crabot"
 InstallDirRegKey HKCU "Software\Crabot\Desktop" "InstallLocation"
 Var ExistingDesktopRoot
+Var OverlayMode
 !define MUI_FINISHPAGE_RUN
 !define MUI_FINISHPAGE_RUN_FUNCTION OpenCrabot
 !define MUI_FINISHPAGE_RUN_TEXT "打开 Crabot"
@@ -94,6 +96,7 @@ Section "安装 Crabot"
   InitPluginsDir
   File /oname=$PLUGINSDIR\7za.exe "${CRABOT_DECODER}"
   File /oname=$PLUGINSDIR\directory.exe "${CRABOT_DIRECTORY_HELPER}"
+  File /oname=$PLUGINSDIR\program-files.tsv "${CRABOT_FILE_TABLE}"
   nsExec::ExecToStack '"$PLUGINSDIR\directory.exe" "$INSTDIR"'
   Pop $0
   Pop $1
@@ -124,13 +127,26 @@ Section "安装 Crabot"
   SetErrorLevel 1
   Abort "所选位置已有无法识别的 program 文件夹，未删除或覆盖。请选择其它程序位置。"
   KnownProgram:
-  ClearErrors
-  RMDir /r "\\?\$INSTDIR\program\gui"
-  RMDir /r "\\?\$INSTDIR\program\core"
-  IfErrors 0 ProgramReady
-  SetErrorLevel 1
-  Abort "无法替换程序目录，请退出本安装后重新运行安装包。用户数据未改动。"
   ProgramReady:
+  StrCpy $OverlayMode ""
+  IfSilent 0 PrepareOverlay
+  StrCpy $OverlayMode "--silent"
+  PrepareOverlay:
+  DetailPrint "正在比较运行环境并检查需要替换的文件"
+  nsExec::ExecToStack '"$PLUGINSDIR\directory.exe" "$INSTDIR" --prepare-overlay "$PLUGINSDIR\program-files.tsv" "$PLUGINSDIR\preserved-files.txt" --parent=$HWNDPARENT $OverlayMode'
+  Pop $0
+  Pop $1
+  StrCmp $0 0 OverlayReady
+  StrCmp $0 2 OverlayInUse
+  StrCmp $0 3 OverlayCancelled
+  SetErrorLevel 1
+  Abort "无法准备程序覆盖。用户数据未改动。错误：$1"
+  OverlayInUse:
+  MessageBox MB_RETRYCANCEL|MB_ICONINFORMATION "需要替换的程序文件仍被使用。请关闭对应程序后重试。尚未替换程序。$\r$\n$1" /SD IDCANCEL IDRETRY CheckRunning
+  OverlayCancelled:
+  SetErrorLevel 1
+  Abort "已取消安装，尚未替换程序，原数据保留。"
+  OverlayReady:
   WriteRegStr HKCU "Software\Crabot\Desktop" "InstallLocation" "$INSTDIR"
   SetOutPath "$INSTDIR"
   !insertmacro extractEmbeddedAppPackage

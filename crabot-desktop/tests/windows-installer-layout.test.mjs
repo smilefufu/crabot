@@ -14,14 +14,22 @@ test('Windows packaging contains one final program tree and no Electron installe
   await fs.writeFile(path.join(coreRoot, 'bin/crabot.exe'), 'native CLI bytes')
   await fs.writeFile(path.join(coreRoot, 'runtime.bin'), 'one runtime copy')
   await fs.writeFile(path.join(guiRoot, 'Crabot.exe'), 'actual user GUI bytes')
+  await fs.writeFile(path.join(coreRoot, 'core-files.json'), JSON.stringify({ schema_version: 1, files: {
+    'bin/crabot.exe': { type: 'file', sha256: 'a'.repeat(64) }, 'runtime.bin': { type: 'file', sha256: 'b'.repeat(64) },
+  } }))
+  for (const name of ['core-release.json', 'desktop-host.json']) await fs.writeFile(path.join(coreRoot, name), '{}')
   const selection = { schema_version: 1, version: '1.2.3', gui_id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', core_id: 'b'.repeat(64) }
-  const record = { schema_version: 1, platform: 'win32', arch: 'x64', selection, gui: {} }
+  const record = { schema_version: 1, platform: 'win32', arch: 'x64', selection, gui: { 'Crabot.exe': { type: 'file', sha256: 'c'.repeat(64) } } }
   await packageWindowsInstaller({ root, output, source, payload: { directory, coreRoot, guiRoot, record }, distribute: false })
   const files = (await fs.readdir(path.join(output, 'programs'), { recursive: true, withFileTypes: true })).filter(entry => entry.isFile())
-  assert.equal(files.length, 5)
+  assert.equal(files.length, 8)
   assert.equal(await fs.readFile(path.join(output, 'programs/program/gui/Crabot.exe'), 'utf8'), 'actual user GUI bytes')
   assert.equal(await fs.readFile(path.join(output, 'programs/program/core/runtime.bin'), 'utf8'), 'one runtime copy')
   assert.equal(await fs.readFile(path.join(output, 'programs/bin/crabot.exe'), 'utf8'), 'native CLI bytes')
+  const plan = await fs.readFile(path.join(output, 'program-files.tsv'), 'utf8')
+  assert.match(plan, /program\/core\/core-files\.json\n/)
+  assert.match(plan, /program\/gui\/Crabot\.exe\n/)
+  assert.doesNotMatch(plan, /data\//)
   const location = JSON.parse(await fs.readFile(path.join(output, 'installer-location.json'), 'utf8'))
   assert.equal(location.bootstrap, 'windows-first-launch')
   assert.equal(path.resolve(output, location.executable), path.join(output, 'programs/program/gui/Crabot.exe'))
@@ -36,8 +44,9 @@ test('Windows install section replaces only fixed programs and launches GUI afte
   assert.match(section, /SetOutPath "\$INSTDIR"/)
   assert.doesNotMatch(section, /ExecWait|--install-root|StrCpy \$INSTDIR|taskkill|Stop-Process|migrate/i)
   const removals = section.split('\n').filter(line => /^\s*RMDir/.test(line))
-  assert.equal(removals.length, 2)
-  for (const line of removals) assert.match(line, /program\\(?:gui|core)"$/)
+  assert.equal(removals.length, 0, 'never delete the whole runtime before overlay preparation')
+  assert.match(section, /--prepare-overlay/)
+  assert.match(source, /-x@\$PLUGINSDIR\\preserved-files\.txt/)
   assert.match(section, /finish-fixed-install\.mjs/)
   assert.match(section, /--check-programs/)
   assert.match(source, /7za\.exe.*-o\$INSTDIR/)
