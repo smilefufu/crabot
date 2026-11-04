@@ -12,7 +12,7 @@ export function assembly(root, external = false) {
   const { buildManagerToolFace } = require('./dist/manager/tools/tool-face.js')
   const { createManagerToolFaceState, serializedToolSetBytes } = require('./dist/manager/tools/tool-catalog.js')
   const { createCrabMemoryServer } = require('./dist/mcp/crab-memory.js')
-  const state = createManagerToolFaceState('progressive')
+  const state = createManagerToolFaceState()
   const transport = { rpcClient: { call: forbidden }, moduleId: 'fixture', getMemoryPort: forbidden }
   const externalMcpTools = external ? ['blue','green','red','orange','violet','black','white'].map(color => ({
     name: `mcp__archive__read_${color}`, description: `读取 ${color} 文档的正文。Read the ${color} document.`,

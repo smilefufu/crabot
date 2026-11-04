@@ -3,7 +3,6 @@ import type { ToolDefinition } from '../../engine/types.js'
 import { sha256CanonicalJson } from 'crabot-shared'
 
 export type ManagerToolProfile = 'normal' | 'daily_reflection' | 'memory_graph_rebuild'
-export type ManagerToolLoadingMode = 'full' | 'shadow' | 'progressive'
 
 export const MANAGER_TOOL_CATALOG_REVISION = 'manager-tools-v3-families'
 
@@ -48,7 +47,7 @@ export const MEMORY_GRAPH_REBUILD_CORE_NAMES = [
 export interface ManagerToolFaceState {
   authorizationContext?: import('./tool-face.js').ToolFaceDeps
   readonly loadedNames: Set<string>
-  readonly mode?: ManagerToolLoadingMode
+  readonly mode?: 'progressive'
   /** Raw connector definitions consumed at the last turn boundary; stable references identify an unchanged snapshot. */
   externalMcpTools?: ReadonlyArray<ToolDefinition>
   catalog?: ManagerToolCatalog
@@ -58,8 +57,8 @@ export interface ManagerToolFaceState {
   searches?: number
 }
 
-export function createManagerToolFaceState(mode: ManagerToolLoadingMode = 'progressive'): ManagerToolFaceState {
-  return { loadedNames: new Set(), mode }
+export function createManagerToolFaceState(): ManagerToolFaceState {
+  return { loadedNames: new Set(), mode: 'progressive' }
 }
 
 export interface LoadToolFamilyInput {
@@ -349,7 +348,7 @@ export class ManagerToolCatalog {
     const loaded: string[] = []
     const already_visible: string[] = []
     for (const tool of members) {
-      if (this.coreNames.includes(tool.name) || state.loadedNames.has(tool.name) || state.mode === 'full' || state.mode === 'shadow') {
+      if (this.coreNames.includes(tool.name) || state.loadedNames.has(tool.name)) {
         already_visible.push(tool.name)
       } else loaded.push(tool.name)
     }
@@ -402,17 +401,8 @@ export class ManagerToolCatalog {
       return tool
     })
     const seen = new Set(visible.map((tool) => tool.name))
-    // All modes mark the identical core boundary for adapters with explicit cache support.
+    // Keep the fixed core boundary stable for adapters with explicit cache support.
     visible[visible.length - 1] = { ...visible[visible.length - 1], cacheBreakpoint: true }
-    if (state.mode === 'full' || state.mode === 'shadow') {
-      for (const tool of this.byName.values()) {
-        if (this.isAllowed(tool.name) && tool.name !== 'search_tools' && !seen.has(tool.name)) {
-          visible.push(tool)
-          seen.add(tool.name)
-        }
-      }
-      return visible
-    }
     for (const name of state.loadedNames) {
       const tool = this.byName.get(name)
       if (tool && this.isAllowed(name) && !seen.has(name)) {
@@ -460,7 +450,7 @@ export class ManagerToolCatalog {
     let budgetReached = false
     for (const item of selected) {
       const name = item.document.tool.name
-      if (state.mode === 'full' || state.mode === 'shadow' || state.loadedNames.has(name)) {
+      if (state.loadedNames.has(name)) {
         alreadyVisible.push(name)
         continue
       }

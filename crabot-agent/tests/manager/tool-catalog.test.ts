@@ -161,11 +161,12 @@ describe('ManagerToolCatalog', () => {
     expect(second.search(createManagerToolFaceState(), 'needle', 3).loaded).toEqual(['mcp__test__allowed'])
   })
 
-  it('full 搜索只报告有界的 already_visible，不增加 loaded set', () => {
+  it('搜索只将已加载的匹配项报告为 already_visible', () => {
     const catalog = new ManagerToolCatalog(Array.from({ length: 9 }, (_, i) => tool(`mcp__test__lookup_${i}`, 'lookup')), 'normal')
-    const state = createManagerToolFaceState('full')
+    const state = createManagerToolFaceState()
+    expect(catalog.search(state, 'lookup', 3).loaded).toEqual(['mcp__test__lookup_0', 'mcp__test__lookup_1', 'mcp__test__lookup_2'])
     expect(catalog.search(state, 'lookup', 3)).toMatchObject({ status: 'already_visible', loaded: [], alreadyVisible: ['mcp__test__lookup_0', 'mcp__test__lookup_1', 'mcp__test__lookup_2'] })
-    expect(state.loadedNames.size).toBe(0)
+    expect(state.loadedNames.size).toBe(3)
   })
 
   it('projects the fixed normal core and appends loaded tools without reordering', () => {

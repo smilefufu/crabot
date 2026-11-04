@@ -612,7 +612,7 @@ describe('Manager restart continuation', () => {
       permissions,
       expect.any(Object),
       expect.objectContaining({ kind: 'human_messages', friend }),
-      expect.objectContaining({ mode: 'full', loadedNames: expect.any(Set) }),
+      expect.objectContaining({ mode: 'progressive', loadedNames: expect.any(Set) }),
     )
     expect(trace.getManagerEpisode(initial!.episodeId)?.trigger.type).toBe('human_message')
     expect(trace.getManagerEpisode(initial!.episodeId)?.status).toBe('completed')
