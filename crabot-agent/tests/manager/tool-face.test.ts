@@ -1022,6 +1022,83 @@ describe('buildManagerToolFace', () => {
     }
   })
 
+  it.each([true, false])('Slack 群带图入站经真实 Manager 工具到下一次模型请求；files:read=%s', async readable => {
+    const fs = await import('node:fs/promises')
+    const http = await import('node:http')
+    vi.doMock('../../../crabot-channel-slack/src/slack-client.js', () => ({ SlackClient: vi.fn(), platformError: () => { throw new Error('unexpected SDK error') } }))
+    const { SlackChannel } = await import('../../../crabot-channel-slack/src/slack-channel.js')
+    const { formatChannelMessageLine } = await import('../../src/prompt-manager.js')
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jh5sAAAAASUVORK5CYII=', 'base64')
+    const downloaded: string[] = []
+    const server = http.createServer((req, res) => {
+      downloaded.push(req.headers.authorization || '')
+      res.statusCode = readable ? 200 : 403
+      res.end(readable ? png : undefined)
+    })
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    const dir = await fs.mkdtemp(join(tmpdir(), 'slack-manager-media-'))
+    const originalFetch = globalThis.fetch
+    const download = vi.spyOn(globalThis, 'fetch').mockImplementation((url, init) => {
+      expect(String(url)).toBe('https://files.slack.com/image.png')
+      return originalFetch(`http://127.0.0.1:${(server.address() as { port: number }).port}/image.png`, { ...init, dispatcher: undefined } as RequestInit)
+    })
+    const api = { connected: true, start: vi.fn(), stop: vi.fn(), call: vi.fn(async (method: string) => {
+      if (method === 'conversations.info') return { channel: { id: 'CGROUP', is_member: true } }
+      if (method === 'users.info') return { user: { id: 'U007', profile: { display_name: '007' } } }
+      if (method === 'files.info') {
+        return { file: { id: 'FIMAGE', name: 'report.png', mimetype: 'image/png', url_private: 'https://files.slack.com/image.png' } }
+      }
+      if (method === 'chat.postMessage') return { ts: String(Date.now() / 1000) }
+      throw new Error(`unexpected API ${method}`)
+    }) }
+    const channel = new SlackChannel({ module_id: 'slack-verify', port: 0, data_dir: dir, env: { SLACK_BOT_TOKEN: 'xoxb-fixture', SLACK_APP_TOKEN: 'xapp-fixture' } }, api as never)
+    ;(channel as any).identity = { team_id: 'T1', user_id: 'UBOT', app_id: 'A1' }
+    const events: any[] = []
+    ;(channel as any).rpcClient.publishEvent = vi.fn(async event => { events.push(event) })
+    try {
+      const event = { type: 'message', subtype: 'file_share', channel: 'CGROUP', user: 'U007', ts: String(Date.now() / 1000), text: '<@UBOT> 人物出现重复',
+        files: [{ id: 'FIMAGE', name: 'report.png', mimetype: 'image/png' }],
+      }
+      await channel.receive({ team_id: 'T1', api_app_id: 'A1', event_id: 'E-LEAN', event: { ...event, type: 'app_mention', files: undefined } })
+      await channel.receive({ team_id: 'T1', api_app_id: 'A1', event_id: 'E-FULL', event })
+      expect(events.filter(event => event.type === 'channel.message_received')).toHaveLength(1)
+      const incoming = events.find(event => event.type === 'channel.message_received').payload.message
+      const prompt = formatChannelMessageLine(incoming, { timezone: 'Asia/Shanghai', identity: 'normal' })
+      expect(prompt).toContain('from_id="U007"')
+      expect(prompt).toContain('fetch_image')
+      const state = createManagerToolFaceState()
+      const deps = makeDeps({ faceState: state, managerTarget: { channel_id: 'slack-verify', session_id: incoming.session.session_id, type: 'group' }, messagingDeps: makeMessagingDeps({
+        rpcClient: { call: vi.fn(async (_port, method, params) => (channel as any).methodHandlers.get(method)(params)) } as never,
+      }) })
+      let turn = 0
+      const adapter: LLMAdapter = { updateConfig() {}, async *stream(params) {
+        turn++
+        if (turn === 1) yield* chunksFromContent([{ type: 'tool_use', id: 'load', name: 'load_tool_family', input: { family: 'messaging' } }], 'tool_use')
+        else if (turn === 2) yield* chunksFromContent([{ type: 'tool_use', id: 'image', name: 'fetch_image', input: { channel_id: 'slack-verify', session_id: incoming.session.session_id, platform_message_id: incoming.platform_message_id, attachment_id: 'FIMAGE' } }], 'tool_use')
+        else if (turn === 3) {
+          const results = params.messages.flatMap(message => 'toolResults' in message ? message.toolResults : [])
+          const image = results.find(result => result.tool_use_id === 'image')!
+          if (readable) expect(image.images).toEqual([{ media_type: 'image/png', data: png.toString('base64') }])
+          else { expect(image.images).toBeUndefined(); expect(image.content).toContain('files:read') }
+          yield* chunksFromContent([{ type: 'tool_use', id: 'send', name: 'send_message', input: { channel_id: 'slack-verify', session_id: incoming.session.session_id, content: '测试结果', mentions: [{ platform_user_id: incoming.sender.platform_user_id }], post_send_action: 'none' } }], 'tool_use')
+        } else yield* chunksFromContent([{ type: 'text', text: 'done' }], 'end_turn')
+      } }
+      const result = await runEngine({ prompt, adapter, options: { model: 'fixture', systemPrompt: 'fixture', supportsVision: true, maxTurns: 4, tools: () => buildManagerToolFace(deps) } })
+      expect(result.outcome).toBe('completed')
+      expect(turn).toBe(4)
+      expect(downloaded).toEqual(['Bearer xoxb-fixture'])
+      const sent = api.call.mock.calls.find(([method]) => method === 'chat.postMessage') as unknown as [string, { blocks: unknown[] }]
+      expect(sent[1].blocks[0]).toEqual({ type: 'section', text: { type: 'mrkdwn', text: '<@U007>' } })
+    } finally {
+      ;(channel as any).media.stop()
+      download.mockRestore()
+      vi.doUnmock('../../../crabot-channel-slack/src/slack-client.js')
+      server.closeAllConnections()
+      await new Promise<void>(resolve => server.close(() => resolve()))
+      await fs.rm(dir, { recursive: true, force: true })
+    }
+  })
+
   it('模型可见的发送 schema 明确要求真实提及身份，不把正文 @名字当作真实提及', () => {
     const send = buildManagerToolFace(makeDeps()).find(tool => tool.name === 'send_message')!
     const schema = send.inputSchema as { properties: Record<string, any> }

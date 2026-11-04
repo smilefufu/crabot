@@ -174,7 +174,8 @@ export class SlackChannel extends ModuleBase {
     return this.serial(async () => {
       const e = body.event
       if (body.team_id !== this.identity.team_id || body.api_app_id !== this.identity.app_id) return
-      if (!e || !['message', 'app_mention'].includes(e.type || '') || !e.channel || !e.user || !e.ts || !/^\d+\.\d+$/.test(e.ts) || e.user === this.identity.user_id || e.user === 'USLACKBOT' || e.bot_id || e.hidden) return
+      // message.* is the complete subscribed payload; app_mention snapshots must not consume its dedupe key.
+      if (!e || e.type !== 'message' || !e.channel || !e.user || !e.ts || !/^\d+\.\d+$/.test(e.ts) || e.user === this.identity.user_id || e.user === 'USLACKBOT' || e.bot_id || e.hidden) return
       if (e.subtype && !['file_share', 'thread_broadcast'].includes(e.subtype)) return
       const key = `${e.channel}:${e.ts}`
       const cutoff = Date.now() - 6 * 3600000

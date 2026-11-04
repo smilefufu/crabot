@@ -44,6 +44,15 @@ describe('Slack ordinary conversation routing', () => {
     expect(await s.rpc('get_capabilities')).toMatchObject({ supported_message_types: ['text', 'image', 'file'], supports_image_fetch: true, supports_media_fetch: true, supports_file_path: true })
     expect(await s.rpc('fetch_image', { session_id: incoming.session.session_id, platform_message_id: incoming.platform_message_id, attachment_id: 'F_OTHER', quality: 'hd' })).toMatchObject({ status: 'failed' })
   })
+  it('preserves image references when a lean app_mention arrives before the full file_share message', async () => {
+    const s = setup(), original = s.message('C1', '<@B1> 人物出现重复')
+    await s.receive({ ...original, type: 'app_mention' }, 'lean-mention')
+    await s.receive({ ...original, subtype: 'file_share', files: [{ id: 'F1', name: 'report.jpg', mimetype: 'image/jpeg' }] }, 'full-message')
+    const incoming = s.events.filter(e => e.type === 'channel.message_received')
+    expect(incoming).toHaveLength(1)
+    expect(incoming[0].payload.message.content.image_quality).toBeDefined()
+    expect(incoming[0].payload.message.content.text).toContain('attachment_id=F1')
+  })
   it('admits DMs and real group mentions; thread history grants no exception', async () => {
     const s = setup()
     await s.receive(s.message('D1', 'hi'), 'dm')

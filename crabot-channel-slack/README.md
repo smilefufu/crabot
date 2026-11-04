@@ -14,7 +14,7 @@ CLI 仅在接入阶段运行。交接前确认 CLI/hook 完全退出，完成后
 
 1. 在 [Slack Apps](https://api.slack.com/apps) 创建内部 App，开启 Socket Mode。创建 App-Level Token，授权 `connections:write`，得到 `xapp-…`。
 2. 添加 Bot scopes：`chat:write`、`channels:history`、`groups:history`、`channels:read`、`groups:read`、`im:history`、`im:read`、`im:write`、`users:read`、`files:read`、`files:write`；安装到自己的 workspace，取得 `xoxb-…` Bot Token。增改 scopes 后重新安装授权。
-3. Event Subscriptions 订阅 Bot events：`message.channels`、`message.groups`、`message.im`。不能仅订阅 `app_mention`，否则关闭 @过滤后也收不到普通群消息；额外订阅它会按 conversation + ts 去重。
+3. Event Subscriptions 订阅 Bot events：`message.channels`、`message.groups`、`message.im`。不能仅订阅 `app_mention`，否则关闭 @过滤后也收不到普通群消息；完整消息以 `message.*` 为权威；额外订阅的 `app_mention` 只 ACK，不作为入站消息或占用去重位置，避免精简事件先到时丢失附件。
 4. App Home 开启 Messages Tab 并允许用户向 App 发消息；邀请 Bot 加入目标群，私有群也须邀请。
 5. Admin 的 Channel 页选择 Slack，新建实例，填写两种 Token，启动。Master/Friend 身份在 Admin 绑定真实 Slack user ID，Channel 不自动认主。
 6. 在 DM 发一条文本，在群 @Bot 发一条文本，确认 Admin 授权、Agent 接纳和 Slack 目标中实际回复。Socket 连接成功或 ACK 只说明平台传输已接收；两个 Token 都有效也不证明属于同一个 App。入站会同时核对 workspace 与 App，Token 配错可能已连接却不能收消息。
