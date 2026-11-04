@@ -28,7 +28,9 @@ export class RequestManagerToolScope {
   private raw(name: string, source: RequestPermissionSource, recheck?: () => Promise<RequestPermissionSource>, input?: Record<string, unknown>): ToolDefinition | undefined {
     const faceState: NonNullable<ToolFaceDeps['faceState']> = { mode: 'progressive', loadedNames: new Set() }
     buildManagerToolFace({ ...this.deps.raw(source, recheck, input ? { name, input } : undefined), faceState, decorateTool: undefined })
-    return faceState.catalog!.project({ ...faceState, mode: 'full' }, faceState.searchTool).find(tool => tool.name === name)
+    if (name === 'search_tools') return faceState.searchTool
+    if (name === 'load_tool_family') return faceState.familyTool
+    return faceState.catalog!.get(name)
   }
   private async check(name: string, input: Record<string, unknown>, source: RequestPermissionSource): Promise<PermissionDecision> {
     const { request } = this.deps.context

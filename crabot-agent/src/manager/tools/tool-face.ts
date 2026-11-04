@@ -590,7 +590,7 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
   const currentPrincipal = () => currentDeps().workerContext().principalPermissions
   const authorizeExternal: ToolFaceDeps['authorizeExternalMcpTool'] = tool => currentDeps().authorizeExternalMcpTool?.(tool) ?? Promise.resolve(false)
   const selectedProfile = deps.faceState?.catalog?.profile ?? deps.profile ?? (deps.isBuiltinDailyReflection ? 'daily_reflection' : 'normal')
-  const externalMcpTools = deps.faceState && (deps.faceState.mode ?? 'progressive') === 'progressive' && selectedProfile === 'normal'
+  const externalMcpTools = deps.faceState && selectedProfile === 'normal'
     ? deps.externalMcpTools ?? [] : []
   if (deps.faceState?.catalog) {
     const state = deps.faceState

@@ -119,8 +119,8 @@ describe('Manager MCP production authorization wiring', () => {
     return { ...target, type: 'group' }
   }
 
-  function face(permissions?: ResolvedPermissions, identity?: ScheduleIdentity, human?: HumanPrincipal, mode: 'full' | 'shadow' | 'progressive' = 'progressive') {
-    const state = createManagerToolFaceState(mode)
+  function face(permissions?: ResolvedPermissions, identity?: ScheduleIdentity, human?: HumanPrincipal) {
+    const state = createManagerToolFaceState()
     const tools = () => deps.toolFace(key, false, identity, human, permissions, undefined, undefined, state)
     const search = async (name: string) => {
       const result = await tools().find(tool => tool.name === 'search_tools')!.call({ query: name, limit: 1 }, {} as never)
@@ -262,10 +262,13 @@ describe('Manager MCP production authorization wiring', () => {
     expect(execute).not.toHaveBeenCalled()
   })
 
-  it.each(['full', 'shadow'] as const)('%s never exposes or executes external MCP even when its switch is on', async (mode) => {
-    const permissions = await deps.onScheduleWake!({ key, targetSession: target, creatorFriendId: 'master-friend' })
-    const episode = face(permissions!, { targetSession: target, creatorFriendId: 'master-friend' }, undefined, mode)
-    await episode.expectHidden(mcpName)
+  it.each(['full', 'shadow'])('旧 %s 模式环境不能改变授权 MCP 的渐进发现', async mode => {
+    vi.stubEnv('CRABOT_MANAGER_TOOL_LOADING_MODE', mode)
+    grantPrivate()
+    const episode = await scheduled({ targetSession: target, creatorFriendId: 'creator' })
+    expect(episode.tools().some(tool => tool.name === mcpName)).toBe(false)
+    expect(await episode.search(mcpName)).toMatchObject({ status: 'loaded', loaded: [mcpName] })
+    expect(episode.tools().some(tool => tool.name === mcpName)).toBe(true)
     expect(execute).not.toHaveBeenCalled()
   })
 
@@ -296,7 +299,6 @@ describe('Manager MCP production authorization wiring', () => {
     const result = tool.call({}, {} as never)
     await entered
     vi.stubEnv('CRABOT_MANAGER_MCP_ENABLED', '0')
-    vi.stubEnv('CRABOT_MANAGER_TOOL_LOADING_MODE', 'full')
     await episode.expectHidden(mcpName)
     finish()
     expect(await result).toMatchObject({ output: 'once', isError: false })

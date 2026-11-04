@@ -54,7 +54,6 @@ import {
   managerToolProfileForSchedule,
   MANAGER_TOOL_CATALOG_REVISION,
   type ManagerToolFaceState,
-  type ManagerToolLoadingMode,
   type ManagerToolProfile,
 } from './tools/tool-catalog.js'
 import { resolveSenderIdentity } from '../utils/sender-identity.js'
@@ -969,7 +968,7 @@ export class ManagerLoop {
     this.inspectedVoiceWorker = undefined
     this.currentToolProfile = toolProfile
     this.mailbox.setActiveProfile(toolProfile)
-    this.currentToolFaceState = createManagerToolFaceState(managerToolLoadingModeForKey(this.deps.key))
+    this.currentToolFaceState = createManagerToolFaceState()
     this.needsSpawnRecheck = false
     this.spawnRecheckInjected = false
     this.spawnRecheckOutcomeRecorded = false
@@ -1934,7 +1933,7 @@ export class ManagerLoop {
   private observeAdapter(episodeId: string, adapter: LLMAdapter, purpose: 'inference' | 'compaction'): LLMAdapter {
     const writer = this.deps.traceWriter
     if (!writer) return adapter
-    const mode = this.currentToolFaceState?.mode ?? 'full'
+    const mode = this.currentToolFaceState?.mode ?? 'progressive'
     const profile = managerToolProfileForWake(this.effectiveWakeForCurrentEpisode())
     return {
       traceIdentity: adapter.traceIdentity,
@@ -1984,9 +1983,6 @@ export class ManagerLoop {
     if (!writer || this.currentTraceId !== episodeId || this.tracedLlmResponses.has(event.responseId)) return
     const state = this.currentToolFaceState
     const visible = state?.catalog?.project(state, state.searchTool)
-    const shadowCore = state?.mode === 'shadow'
-      ? state.catalog?.project({ ...createManagerToolFaceState(), familyTool: state.familyTool }, state.searchTool)
-      : undefined
     writer.appendSpan(episodeId, {
       span_id: this.llmSpanId(episodeId, event.responseId),
       parent_span_id: `root-${episodeId}`,
@@ -2010,8 +2006,6 @@ export class ManagerLoop {
           search_count: state.searches ?? 0,
           family_load_count: state.familyLoads ?? 0,
           connector_generation: state.externalMcpTools?.[0]?.traceMetadata?.connector_generation,
-          ...(shadowCore ? { shadow_core_count: shadowCore.length, shadow_core_schema_bytes: serializedToolSetBytes(shadowCore),
-            shadow_candidate_count: state.catalog.candidateCount } : {}),
         } : {}),
         ...(event.usage ? { usage: event.usage } : {}),
         ...(event.diagnostics ? {
@@ -2641,17 +2635,6 @@ function summarizeManagerToolInput(name: string, input: Record<string, unknown>,
 export function managerToolProfileForWake(wake: WakeEvent | undefined): ManagerToolProfile {
   if (wake?.kind === 'worker_event' && wake.dailyReflection) return 'daily_reflection'
   return managerToolProfileForSchedule(wake?.kind === 'schedule' ? wake : undefined)
-}
-
-export function managerToolLoadingModeForKey(key: string): ManagerToolLoadingMode {
-  const configured = process.env.CRABOT_MANAGER_TOOL_LOADING_MODE
-  const mode: ManagerToolLoadingMode = configured === 'full' || configured === 'shadow' || configured === 'progressive'
-    ? configured
-    : 'full'
-  const rawCohort = process.env.CRABOT_MANAGER_TOOL_LOADING_KEYS?.trim()
-  if (!rawCohort) return mode
-  const cohort = new Set(rawCohort.split(',').map((item) => item.trim()).filter(Boolean))
-  return cohort.has(key) ? mode : 'full'
 }
 
 function isBuiltinDailyReflectionWake(wake: WakeEvent | undefined): boolean {

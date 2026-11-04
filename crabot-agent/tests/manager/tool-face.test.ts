@@ -126,16 +126,24 @@ function makeDeps(overrides: Partial<ToolFaceDeps> = {}): ToolFaceDeps {
   }
 }
 
+function loadedBuiltinTools(deps: ToolFaceDeps): ToolDefinition[] {
+  const state = createManagerToolFaceState()
+  const current = { ...deps, faceState: state }
+  buildManagerToolFace(current)
+  for (const family of ['memory', 'messaging', 'worker', 'schedule', 'crabot']) state.catalog!.loadFamily(state, family)
+  return buildManagerToolFace(current)
+}
+
 function memoryToolNames(tools: ToolDefinition[]): string[] {
   return tools.map((t) => t.name).filter((n) => n.startsWith('mcp__crab-memory__'))
 }
 
 describe('主体授权与角色能力分开执行', () => {
-  it.each(['full', 'shadow', 'progressive'] as const)('messaging=false 在 %s 工具面只允许当前可信对话回复，不能通过同名 session 或文件附件扩大授权', async mode => {
+  it('messaging=false 只允许当前可信对话回复，不能通过同名 session 或文件附件扩大授权', async () => {
     const rpc = vi.fn(async (_port: number, method: string) => method === 'get_capabilities'
       ? {} : { platform_message_id: 'fixture', sent_at: '2026-10-10' })
     const principal = { ...BUILTIN_WORKER_PERMISSIONS, tool_access: { ...BUILTIN_WORKER_PERMISSIONS.tool_access, messaging: false, file_io: false } }
-    const deps = makeDeps({ faceState: createManagerToolFaceState(mode), candidatePermissions: principal,
+    const deps = makeDeps({ faceState: createManagerToolFaceState(), candidatePermissions: principal,
       managerTarget: { channel_id: 'ch-1', session_id: 'sess-1', type: 'private' },
       messagingDeps: makeMessagingDeps({ rpcClient: { call: rpc } as never }),
     })
@@ -186,12 +194,15 @@ describe('主体授权与角色能力分开执行', () => {
     const callAdmin = vi.fn(async () => ({ config: null, resolved: null }))
     const target = { channel_id: 'ch-1', session_id: 'sess-1', type: 'private' as const }
     let principal = { ...BUILTIN_WORKER_PERMISSIONS, tool_access: { ...BUILTIN_WORKER_PERMISSIONS.tool_access, memory: true } }
-    const state = createManagerToolFaceState('full')
+    const state = createManagerToolFaceState()
     const deps = () => makeDeps({ faceState: state, callAdmin, workerContext: () => ({ managerKey: MANAGER_KEY,
       reportTo: target, targetSession: target, creatorFriendId: 'self', principalPermissions: principal }),
       memoryServer: createCrabMemoryServer({ moduleId: 'fixture', getMemoryPort: async () => 1,
         rpcClient: { callSensitive: memoryRpc, call: memoryRpc } as never }, { accessContext: { actor_kind: 'conversation', memory_enabled: true }, visibility: 'internal', scopes: [], isMasterPrivate: false }),
     })
+    buildManagerToolFace(deps())
+    state.catalog!.loadFamily(state, 'crabot')
+    state.catalog!.loadFamily(state, 'memory')
     const tools = buildManagerToolFace(deps())
     const get = tools.find(tool => tool.name === 'get_friend_permissions')!
     expect((await get.call({ friend_id: 'self' }, {})).isError).toBe(false)
@@ -225,49 +236,45 @@ describe('每日反思保留历史 inbox 的人工迁移边界', () => {
     ['set_memory_links', { id: 'legacy', links: [] }, 'update_long_term'],
   ] as const
 
-  async function face(call: ReturnType<typeof vi.fn>, mode: 'full' | 'progressive', daily = true) {
+  async function face(call: ReturnType<typeof vi.fn>, daily = true) {
     const deps = makeDeps({
       isBuiltinDailyReflection: daily,
-      faceState: createManagerToolFaceState(mode),
+      faceState: createManagerToolFaceState(),
       candidatePermissions: { tool_access: { memory: true }, cli_access: {} } as ResolvedPermissions,
       memoryServer: createCrabMemoryServer({
         rpcClient: { callSensitive: call, call } as never, moduleId: 'manager-test', getMemoryPort: async () => 19100,
       }, { accessContext: { actor_kind: 'conversation', memory_enabled: true }, visibility: 'internal', scopes: [], isMasterPrivate: false }),
     })
     const initial = buildManagerToolFace(deps)
-    if (mode === 'progressive') {
-      await initial.find(t => t.name === 'load_tool_family')!.call({ family: 'memory' }, {} as never)
-    }
+    await initial.find(t => t.name === 'load_tool_family')!.call({ family: 'memory' }, {} as never)
     return buildManagerToolFace(deps)
   }
 
-  for (const mode of ['full', 'progressive'] as const) {
-    it(`${mode}: continuation query filters normal inbox before RPC pagination`, async () => {
-      const call = vi.fn(async () => ({ items: [], total: 0 }))
-      const tools = await face(call, mode)
-      const list = tools.find(t => t.name === 'mcp__crab-memory__list_entries')!
-      expect((await list.call({ status: 'inbox', sort: 'ingestion_time_asc', offset: 20 }, {} as never)).isError).toBe(false)
-      expect(call).toHaveBeenCalledWith(19100, 'list_entries',
-        expect.objectContaining({ status: 'inbox', reviewable_only: true, offset: 20 }), 'manager-test', expect.any(Object))
-    })
+  it('continuation query filters normal inbox before RPC pagination', async () => {
+    const call = vi.fn(async () => ({ items: [], total: 0 }))
+    const tools = await face(call)
+    const list = tools.find(t => t.name === 'mcp__crab-memory__list_entries')!
+    expect((await list.call({ status: 'inbox', sort: 'ingestion_time_asc', offset: 20 }, {} as never)).isError).toBe(false)
+    expect(call).toHaveBeenCalledWith(19100, 'list_entries',
+      expect.objectContaining({ status: 'inbox', reviewable_only: true, offset: 20 }), 'manager-test', expect.any(Object))
+  })
 
-    it.each(writes)(`${mode}: %s 不得修改缺少生命周期字段的历史候选`, async (name, input) => {
-      const call = vi.fn(async (_port, method) => method === 'get_memory'
-        ? { id: 'legacy', status: 'inbox', frontmatter: {}, body: 'original' }
-        : { status: 'ok' })
-      const tools = await face(call, mode)
-      const result = await tools.find(t => t.name === `mcp__crab-memory__${name}`)!.call(input, {} as never)
-      expect(result.isError).toBe(true)
-      expect(result.output).toContain('历史 inbox')
-      expect(call.mock.calls.map(c => c[1])).toEqual(['get_memory'])
-    })
-  }
+  it.each(writes)('%s 不得修改缺少生命周期字段的历史候选', async (name, input) => {
+    const call = vi.fn(async (_port, method) => method === 'get_memory'
+      ? { id: 'legacy', status: 'inbox', frontmatter: {}, body: 'original' }
+      : { status: 'ok' })
+    const tools = await face(call)
+    const result = await tools.find(t => t.name === `mcp__crab-memory__${name}`)!.call(input, {} as never)
+    expect(result.isError).toBe(true)
+    expect(result.output).toContain('历史 inbox')
+    expect(call.mock.calls.map(c => c[1])).toEqual(['get_memory'])
+  })
 
   it.each([{ reviewable_only: false }, { reviewable_only: null }, { reviewable_only: 'true' },
     { ingestion_time_start: '2026-08-02' }, { ingestion_time_end: '2026-09-18' }])(
     'continuation query rejects a daily inbox override without calling Memory: %j', async extra => {
       const call = vi.fn()
-      const tools = await face(call, 'progressive')
+      const tools = await face(call)
       const result = await tools.find(t => t.name === 'mcp__crab-memory__list_entries')!.call({ status: 'inbox', ...extra }, {} as never)
       expect(result.isError).toBe(true)
       expect(call).not.toHaveBeenCalled()
@@ -276,7 +283,7 @@ describe('每日反思保留历史 inbox 的人工迁移边界', () => {
   it.each([[false, 'inbox'], [true, 'confirmed'], [true, 'trash']] as const)(
     'continuation query preserves other list scopes: daily=%s status=%s', async (daily, status) => {
       const call = vi.fn(async () => ({ items: [], total: 0 }))
-      const tools = await face(call, 'progressive', daily)
+      const tools = await face(call, daily)
       await tools.find(t => t.name === 'mcp__crab-memory__list_entries')!.call({ status, ingestion_time_start: '2026-08-02' }, {} as never)
       expect(call).toHaveBeenCalledWith(19100, 'list_entries', { access_context: { actor_kind: 'conversation', memory_enabled: true }, status, ingestion_time_start: '2026-08-02' }, 'manager-test', expect.any(Object))
     })
@@ -285,7 +292,7 @@ describe('每日反思保留历史 inbox 的人工迁移边界', () => {
     const call = vi.fn(async (_port, m) => m === 'get_memory'
       ? { id: 'legacy', status: 'inbox', frontmatter: { inbox_entered_at: '2026-09-20T00:00:00Z' } }
       : { status: 'ok' })
-    const tools = await face(call, 'progressive')
+    const tools = await face(call)
     const result = await tools.find(t => t.name === `mcp__crab-memory__${name}`)!.call(input, {} as never)
     expect(result.isError).toBe(false)
     expect(call.mock.calls.map(c => c[1])).toEqual(['get_memory', method])
@@ -293,7 +300,7 @@ describe('每日反思保留历史 inbox 的人工迁移边界', () => {
 
   it('普通主控的人工操作不套用每日反思限制', async () => {
     const call = vi.fn(async () => ({ status: 'ok' }))
-    const tools = await face(call, 'progressive', false)
+    const tools = await face(call, false)
     await tools.find(t => t.name === 'mcp__crab-memory__delete_memory')!.call({ id: 'legacy' }, {} as never)
     expect(call.mock.calls.map(c => c[1])).toEqual(['delete_memory'])
   })
@@ -301,7 +308,7 @@ describe('每日反思保留历史 inbox 的人工迁移边界', () => {
   it.each(['confirmed', 'trash'])('%s 缺少 inbox_entered_at 不被误当历史 inbox', async status => {
     const call = vi.fn(async (_port, method) => method === 'get_memory'
       ? { id: 'legacy', status, frontmatter: {} } : { status: 'ok' })
-    const tools = await face(call, 'progressive')
+    const tools = await face(call)
     const result = await tools.find(t => t.name === 'mcp__crab-memory__delete_memory')!.call({ id: 'legacy' }, {} as never)
     expect(result.isError).toBe(false)
     expect(call.mock.calls.map(c => c[1])).toEqual(['get_memory', 'delete_memory'])
@@ -313,7 +320,7 @@ describe('每日反思保留历史 inbox 的人工迁移边界', () => {
     { id: 'legacy', status: 'inbox' },
   ])('无法核实目标状态时不执行写入：%j', async detail => {
     const call = vi.fn(async () => detail)
-    const tools = await face(call, 'progressive')
+    const tools = await face(call)
     const result = await tools.find(t => t.name === 'mcp__crab-memory__delete_memory')!.call({ id: 'legacy' }, {} as never)
     expect(result.isError).toBe(true)
     expect(call.mock.calls.map(c => c[1])).toEqual(['get_memory'])
@@ -323,7 +330,7 @@ describe('每日反思保留历史 inbox 的人工迁移边界', () => {
     let enteredAt: string | undefined = '2026-09-20T00:00:00Z'
     const call = vi.fn(async (_port, method) => method === 'get_memory'
       ? { id: 'legacy', status: 'inbox', frontmatter: { inbox_entered_at: enteredAt } } : { status: 'ok' })
-    const tools = await face(call, 'progressive')
+    const tools = await face(call)
     const update = tools.find(t => t.name === 'mcp__crab-memory__update_long_term')!
     expect((await update.call({ id: 'legacy', patch: { body: 'one' } }, {} as never)).isError).toBe(false)
     enteredAt = undefined
@@ -342,7 +349,7 @@ describe('每日反思保留历史 inbox 的人工迁移边界', () => {
       entry.status = method === 'delete_memory' ? 'trash' : 'confirmed'
       return { status: 'ok' }
     })
-    const tools = await face(call, 'progressive')
+    const tools = await face(call)
     let requests = 0
     const adapter: LLMAdapter = {
       updateConfig() {},
@@ -380,10 +387,10 @@ describe('buildManagerToolFace', () => {
     canCreate: true, resolvePermissions: async () => permissions,
   }
 
-  it.each(['full', 'progressive'] as const)('%s 普通首次改板直接执行，不以自省指南作为前置条件', async (mode) => {
+  it('普通首次改板直接执行，不以自省指南作为前置条件', async () => {
     const objective = { objective_id: 'fixture', title: 'fixture', completion_criteria: ['done'], work_items: [], updated_at: '2026-09-17T00:00:00Z' }
     const store = { createObjective: vi.fn(async () => ({ value: objective, board: { objectives: [objective], archive: [] } })) }
-    const faceState = createManagerToolFaceState(mode)
+    const faceState = createManagerToolFaceState()
     faceState.loadedNames.add('change_workboard')
     const deps = makeDeps({ faceState, workboard: { managerKey: MANAGER_KEY, store: store as never } })
     const firstFace = buildManagerToolFace(deps)
@@ -397,7 +404,7 @@ describe('buildManagerToolFace', () => {
     expect(first.output).not.toContain('guidance_provided')
     expect(store.createObjective).toHaveBeenCalledOnce()
     expect(store.createObjective).toHaveBeenCalledWith(MANAGER_KEY, input.objective)
-    const nextState = createManagerToolFaceState(mode)
+    const nextState = createManagerToolFaceState()
     nextState.loadedNames.add('change_workboard')
     const nextFace = buildManagerToolFace({ ...deps, faceState: nextState })
     expect(JSON.parse((await nextFace.find(tool => tool.name === 'change_workboard')!.call(input, {} as never)).output))
@@ -426,22 +433,22 @@ describe('buildManagerToolFace', () => {
     expect(tools.map(tool => tool.name)).toContain('get_execution_capabilities')
   })
 
-  it('移除决策写入后为 60 项内置与 62 项 full，各模式核心字节一致', () => {
+  it('显式加载完整内置族后保持核心字节和权限边界', () => {
     const deps = makeDeps({ schedule, candidatePermissions: permissions })
     expect(buildManagerToolFace(deps)).toHaveLength(60)
-    const full = buildManagerToolFace({ ...deps, faceState: createManagerToolFaceState('full') })
+    const loaded = loadedBuiltinTools(deps)
     const core = buildManagerToolFace({ ...deps, faceState: createManagerToolFaceState() })
-    expect(full).toHaveLength(62)
+    expect(loaded).toHaveLength(62)
     expect(core.map((tool) => tool.name)).toEqual([...NORMAL_MANAGER_CORE_NAMES])
     const wire = (tools: ToolDefinition[]) => JSON.stringify(tools.map((tool) => ({ name: tool.name, description: tool.description, input_schema: tool.inputSchema })))
-    expect(wire(full.slice(0, NORMAL_MANAGER_CORE_NAMES.length))).toBe(wire(core))
+    expect(wire(loaded.slice(0, NORMAL_MANAGER_CORE_NAMES.length))).toBe(wire(core))
     expect(Buffer.byteLength(wire(core))).toBeLessThanOrEqual(22 * 1024)
     const restricted = buildManagerToolFace({ ...deps, candidatePermissions: undefined, faceState: createManagerToolFaceState() })
     expect(wire(restricted)).toBe(wire(core))
   })
 
-  it.each(['full', 'shadow', 'progressive'] as const)('已移除的决策写工具在 %s 模式的旧加载记录、搜索及降级中都不可执行', async (mode) => {
-    const state = createManagerToolFaceState(mode)
+  it('已移除的决策写工具在旧加载记录、搜索及降级中都不可执行', async () => {
+    const state = createManagerToolFaceState()
     state.loadedNames.add('manage_decision_doc')
     const deps = makeDeps({ faceState: state, candidatePermissions: permissions })
     const tools = buildManagerToolFace(deps)
@@ -525,7 +532,7 @@ describe('buildManagerToolFace', () => {
     vi.stubGlobal('fetch', fetchMock)
     try {
       const deps = makeDeps({ schedule, candidatePermissions: permissions })
-      const full = buildManagerToolFace({ ...deps, faceState: createManagerToolFaceState('full') })
+      const loaded = loadedBuiltinTools(deps)
       const state = createManagerToolFaceState()
       const core = buildManagerToolFace({ ...deps, faceState: state })
       await core.find(tool => tool.name === 'load_tool_family')!.call({ family: 'schedule' }, {})
@@ -533,7 +540,7 @@ describe('buildManagerToolFace', () => {
       const adapter = createAdapter({ endpoint: 'https://example.test/v1', apikey: 'test-key', format })
       // This SDK version captures node-fetch at import time, not globalThis.fetch.
       if (format === 'anthropic') vi.spyOn((adapter as any).client, 'fetch').mockImplementation(fetchMock)
-      for (const tools of [full, core, expanded]) {
+      for (const tools of [loaded, core, expanded]) {
         await callNonStreaming(adapter, { model: 'fixture', systemPrompt: 'Stable Manager instructions', messages: [createUserMessage('fixture')], tools, maxTokens: 64 })
       }
       expect(bodies.map(body => body.tools.length)).toEqual([62, 15, 21])
@@ -549,7 +556,7 @@ describe('buildManagerToolFace', () => {
       expect(JSON.stringify(bodies)).not.toMatch(/cacheBreakpoint|traceMetadata|additional_tools|prompt_cache_options/)
       const bytes = bodies.map(body => Buffer.byteLength(JSON.stringify(body.tools)))
       expect(bytes[1]).toBeLessThan(bytes[0])
-      console.info('manager-tool-wire-bytes', { format, full: bytes[0], core: bytes[1], with_schedule: bytes[2], request_bytes: requestBytes })
+      console.info('manager-tool-wire-bytes', { format, loaded: bytes[0], core: bytes[1], with_schedule: bytes[2], request_bytes: requestBytes })
     } finally {
       vi.unstubAllGlobals()
     }
@@ -1039,9 +1046,9 @@ describe('buildManagerToolFace', () => {
     }
   })
 
-  it.each(['full', 'progressive'] as const)('%s 的语音工具面区分当前回复与跨渠道投递', async mode => {
+  it('语音工具面区分当前回复与跨渠道投递', async () => {
     const call = vi.fn(async (_port, method) => method === 'get_capabilities' ? {} : { platform_message_id: 'sent', sent_at: new Date().toISOString() })
-    const tools = buildManagerToolFace(makeDeps({ faceState: createManagerToolFaceState(mode), voice: true, managerTarget: { channel_id: 'ch-1', session_id: 'sess-1' },
+    const tools = buildManagerToolFace(makeDeps({ faceState: createManagerToolFaceState(), voice: true, managerTarget: { channel_id: 'ch-1', session_id: 'sess-1' },
       messagingDeps: makeMessagingDeps({ rpcClient: { call } as never }) }))
     const send = tools.find(tool => tool.name === 'send_message')!
     expect(send.description).toContain('当前语音会话的回复使用 <voice_reply>')
@@ -1052,8 +1059,8 @@ describe('buildManagerToolFace', () => {
     expect(remote.isError).not.toBe(true); expect(call.mock.calls.some(c => c[1] === 'send_message')).toBe(true)
   })
 
-  it.each(['full', 'progressive'] as const)('%s 的 send_message 说明与 Manager 无 intent 的接口一致', (mode) => {
-    const tools = buildManagerToolFace(makeDeps({ faceState: createManagerToolFaceState(mode) }))
+  it('send_message 说明与 Manager 无 intent 的接口一致', () => {
+    const tools = buildManagerToolFace(makeDeps({ faceState: createManagerToolFaceState() }))
     const sendMessage = tools.find((tool) => tool.name === 'send_message')!
     expect(sendMessage.description).not.toMatch(/intent|ask_human|waiting_human|forced.summary|audit|engine 不让我 end_turn/)
     expect(sendMessage.description).toContain('普通 assistant text')

@@ -429,6 +429,10 @@ describe('manager bootstrap（P5 Task 1）', () => {
     let triggered = false
     const managerLLM: LLMAdapter = {
       async *stream(params: LLMStreamParams) {
+        if (!params.tools.some(tool => tool.name === 'query_worker')) {
+          yield* chunksFromContent([{ type: 'tool_use', id: 'load-worker', name: 'load_tool_family', input: { family: 'worker' } }], 'tool_use')
+          return
+        }
         if (!triggered) {
           triggered = true
           // 从真实 LLMStreamParams.tools 里取生产链路上真正会喂给 LLM 的那个 query_worker
@@ -518,6 +522,10 @@ describe('manager bootstrap（P5 Task 1）', () => {
     const stack = buildManagerStack(makeDeps({
       managerAdapter: () => ({
         async *stream(params: LLMStreamParams) {
+          if (episode === 0 && !params.tools.some(tool => tool.name === 'list_sessions')) {
+            yield* chunksFromContent([{ type: 'tool_use', id: 'load-messaging', name: 'load_tool_family', input: { family: 'messaging' } }], 'tool_use')
+            return
+          }
           episode += 1
           if (episode === 1) {
             const list = params.tools.find((tool) => tool.name === 'list_sessions')!
@@ -572,8 +580,11 @@ describe('manager bootstrap（P5 Task 1）', () => {
     const stack = buildManagerStack(makeDeps({
       managerAdapter: () => ({
         async *stream(params: LLMStreamParams) {
-          const wake = params.messages.at(-1)?.content
-          const key = typeof wake === 'string' && wake.includes('登记') ? 'source' : 'other'
+          const key = JSON.stringify(params.messages).includes('登记目标会话') ? 'source' : 'other'
+          if (key === 'source' && !params.tools.some(tool => tool.name === 'list_sessions')) {
+            yield* chunksFromContent([{ type: 'tool_use', id: 'load-messaging', name: 'load_tool_family', input: { family: 'messaging' } }], 'tool_use')
+            return
+          }
           if (!seenKeys.has(key)) {
             seenKeys.add(key)
             if (key === 'source') {
@@ -621,6 +632,12 @@ describe('manager bootstrap（P5 Task 1）', () => {
     let done = false
     return {
       async *stream(params: LLMStreamParams) {
+        if (!params.tools.some(tool => tool.name === 'mcp__crab-memory__search_memory')) {
+          const last = params.messages.at(-1)
+          if (last && 'toolResults' in last) yield* chunksFromContent([], 'end_turn')
+          else yield* chunksFromContent([{ type: 'tool_use', id: `load-memory-${params.messages.length}`, name: 'load_tool_family', input: { family: 'memory' } }], 'tool_use')
+          return
+        }
         if (!done) {
           done = true
           const tool = params.tools.find((t) => t.name === 'mcp__crab-memory__search_memory')
@@ -741,6 +758,10 @@ describe('manager bootstrap（P5 Task 1）', () => {
     const adapter: LLMAdapter = {
       async *stream(params) {
         if (JSON.stringify(params.messages).includes('管理员已更新任务板')) {
+          if (!params.tools.some(tool => tool.name === 'mcp__crab-memory__search_memory')) {
+            yield* chunksFromContent([{ type: 'tool_use', id: 'load-memory', name: 'load_tool_family', input: { family: 'memory' } }], 'tool_use')
+            return
+          }
           const tool = params.tools.find((candidate) => candidate.name === 'mcp__crab-memory__search_memory')
           expect(tool, '任务板系统更新应保留 Memory 工具').toBeDefined()
           await tool!.call({ query: '当前偏好', level: 'short_term', limit: 5 }, {} as never)
@@ -1058,7 +1079,11 @@ describe('manager bootstrap（P5 Task 1）', () => {
     script = { async *stream(params) {
       const list = params.tools.find(tool => tool.name === 'list_schedules')
       if (list) output = (await list.call({}, {} as never)).output
-      yield* chunksFromContent(list ? [] : [{ type: 'tool_use', id: 'load-schedules', name: 'search_tools', input: { query: 'list_schedules' } }], list ? 'end_turn' : 'tool_use')
+      const last = params.messages.at(-1)
+      if (!list && last && 'toolResults' in last) {
+        output = last.toolResults[0].content
+        yield* chunksFromContent([], 'end_turn')
+      } else yield* chunksFromContent(list ? [] : [{ type: 'tool_use', id: `load-schedules-${params.messages.length}`, name: 'load_tool_family', input: { family: 'schedule' } }], list ? 'end_turn' : 'tool_use')
     }, updateConfig() {} }
     try {
       await stack.registry.routeMediaNotification({ channelId: 'wechat', sessionId: 'sess-boot', text: '后台任务完成' })
@@ -1102,7 +1127,7 @@ describe('manager bootstrap（P5 Task 1）', () => {
       managerAdapter: () => ({ async *stream(params) {
         requests.push({ ...params, messages: structuredClone(params.messages) })
         const step = requests.length
-        yield* chunksFromContent(step === 1 ? [{ type: 'tool_use', id: 'load-image-tool', name: 'search_tools', input: { query: 'fetch_image' } }]
+        yield* chunksFromContent(step === 1 ? [{ type: 'tool_use', id: 'load-image-tool', name: 'load_tool_family', input: { family: 'messaging' } }]
           : step === 2 ? [{ type: 'tool_use', id: 'read-hd', name: 'fetch_image', input: {
             channel_id: 'wechat', session_id: 'sess-boot', platform_message_id: 'picture',
           } }] : [], step < 3 ? 'tool_use' : 'end_turn')

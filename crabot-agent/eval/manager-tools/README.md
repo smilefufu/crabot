@@ -1,6 +1,6 @@
 # Manager 工具加载评估
 
-只读本地 JSONL，不连接 Provider、不执行工具、不修改线上开关。运行时保持默认 `full`，外部 MCP 默认关闭。
+只读本地 JSONL，不连接 Provider、不执行工具、不修改线上开关。保留历史 full/shadow 标签用于旧记录分析；运行时已退役这两种模式，只采用渐进加载。外部 MCP 的独立开关与权限不变。
 
 ```sh
 node eval/manager-tools/report.mjs --start 2026-09-12T00:00:00Z --end 2026-09-19T00:00:00Z --rates rates.json traces-oldest.jsonl traces-latest.jsonl
@@ -41,12 +41,9 @@ node eval/manager-tools/report.mjs --start 2026-09-12T00:00:00Z --end 2026-09-19
 }
 ```
 
-## 发布顺序
+## 当前运行与历史记录
 
-1. 独立发布只包含自省退役/合并的 55 工具语义基线，至少观察 72 小时。它是独立代码版本，不是第四个加载模式。
-2. 加载器版本默认 `full`：普通 56 项。`shadow` 保持相同 prompt/工具面、仅观测，至少 7 日。
-3. 使用 `CRABOT_MANAGER_TOOL_LOADING_MODE=progressive` 和显式的 `CRABOT_MANAGER_TOOL_LOADING_KEYS` 逗号分隔完整键启用指定会话。未列出的键保持 full；同一评估窗口不切组。只有刻意全量运行时才省略 keys。
-4. 内置工具验收后，按 spec 权限范围单独设置 `CRABOT_MANAGER_MCP_ENABLED=1`。这不是 MCP 权限授予入口，full/shadow 不开放外部 MCP。
-5. 回退：下一 episode 设置 full 并关闭 MCP；保持同一 prompt/cache key 和核心顺序。在途 MCP 按原 timeout 收口，不重发。加载器自身故障回滚代码到 55 工具版本。
-
-这些环境变量是内部临时发布控制，不是 Admin 配置。单进程中修改环境只用于测试；线上须通过既有部署入口发布环境，不能靠编辑外部 shell 环境热改运行中进程。
+- Manager 首轮使用固定核心，其余能力按族加载或外部 MCP 搜索；不再读取旧模式和 ManagerKey cohort 环境变量。
+- full/shadow 旧记录仍可由本报表读取，不新增该模式运行，也不把旧模式成绩称为当前配置基线。
+- 新评测应先核对实际首请求核心及下一轮追加行为，不能仅凭启动环境或接口存在判断已启用渐进加载。
+- Manager 外部 MCP 仍受独立发布开关和既有授权约束；本次不改变此边界。
