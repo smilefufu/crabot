@@ -16,7 +16,7 @@ export interface SlackChannelInit {
   module_id: string; port: number; data_dir: string; env: Record<string, string | undefined>
 }
 const CAPABILITIES = {
-  supported_message_types: ['text', 'image', 'file'], supported_features: ['mention'], supports_history_query: true,
+  supported_message_types: ['text', 'image', 'file'], supported_features: ['mention', 'reaction'], supports_history_query: true,
   supports_platform_user_query: true, max_message_length: 4000, max_file_size: MAX_FILE_BYTES, supports_file_path: true,
   supports_media_fetch: true, supports_image_fetch: true,
   supports_list_contacts: true, supports_list_groups: true, supports_list_group_members: true,
@@ -43,6 +43,12 @@ export class SlackChannel extends ModuleBase {
     this.media = new SlackMedia({ dir: init.data_dir, token: this.settings.value.credentials.bot_token, api: this.api, channelId: init.module_id,
       session: id => this.store.session(id), publish: async event => { if (this.accepting) await this.rpcClient.publishEvent(event, this.init.module_id) } })
     this.registerMethod('get_capabilities', () => structuredClone(CAPABILITIES))
+    this.registerMethod<{ session_id: string; platform_message_id: string; kind: 'acknowledged' }, { added: boolean }>('add_reaction', p => this.serial(async () => {
+      const session = this.store.session(p.session_id)
+      if (p.kind !== 'acknowledged' || typeof p.platform_message_id !== 'string' || !/^\d+\.\d+$/.test(p.platform_message_id)) throw new RpcError('INVALID_ARGUMENT', 'Slack reaction kind 或消息 ts 无效')
+      await this.api.call('reactions.add', { channel: session.platform_session_id, timestamp: p.platform_message_id, name: 'eyes' })
+      return { added: true }
+    }))
     this.registerMethod<FetchImageParams, unknown>('fetch_image', p => this.media.fetchImage(p))
     this.registerMethod<{ handle: string }, unknown>('fetch_media', p => this.media.fetchMedia(p.handle))
     this.registerMethod('get_config', () => this.configResult())
@@ -133,6 +139,7 @@ export class SlackChannel extends ModuleBase {
       this.identity = { team_id: auth.team_id, user_id: auth.user_id, app_id: bot.bot.app_id }
       const scopes = auth.response_metadata?.scopes
       const missing = scopes ? ['files:read', 'files:write'].filter(scope => !scopes.includes(scope)) : undefined
+      if (!scopes || !scopes.includes('reactions:write')) console.warn(`[Slack] reaction 权限${scopes ? '缺少' : '尚未确认'} reactions:write；在原 App https://api.slack.com/apps/${this.identity.app_id}/oauth 补充后 Reinstall to Workspace，Token 变化时在 Admin 更新并重启；文字与媒体服务保留。`)
       if (!missing || missing.length) console.warn(`[Slack] 媒体权限${missing ? '缺少 ' + missing.join(',') : '尚未确认'}；在原 App https://api.slack.com/apps/${this.identity.app_id}/oauth 补充 files:read/files:write，Reinstall to Workspace 后按需在 Admin 更新 Bot Token 并重启；文字服务保留。`)
       const file = path.join(this.init.data_dir, 'installation.json')
       if (fs.existsSync(file)) {

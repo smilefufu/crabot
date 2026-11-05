@@ -71,3 +71,29 @@ describe('Slack official SDK boundary',()=>{
     expect(state.call).toHaveBeenCalledOnce()
   })
 })
+
+describe('Slack reaction API results', () => {
+  it('treats already_reacted as success only for reactions.add', async () => {
+    const client = new SlackClient('xoxb-secret', 'xapp-secret')
+    state.call.mockRejectedValueOnce({ data: { error: 'already_reacted' } }).mockRejectedValueOnce({ data: { error: 'already_reacted' } })
+    await expect(client.call('reactions.add', { channel: 'C1', timestamp: '1.000001', name: 'eyes' })).resolves.toEqual({ ok: true })
+    await expect(client.call('chat.postMessage')).rejects.toMatchObject({ code: 'CHANNEL_SEND_FAILED' })
+  })
+  it.each([
+    [{ data: { error: 'message_not_found' } }, 'NOT_FOUND'],
+    [{ data: { error: 'not_in_channel' } }, 'PERMISSION_DENIED'],
+    [{ data: { error: 'invalid_auth' } }, 'UNAUTHORIZED'],
+    [{ code: 'slack_webapi_rate_limited_error', retryAfter: 7 }, 'RATE_LIMITED'],
+    [new Error('ECONNRESET xoxb-secret'), 'CHANNEL_SEND_FAILED'],
+  ])('maps reaction errors without exposing raw secrets: %s', async (error, code) => {
+    const client = new SlackClient('xoxb-secret', 'xapp-secret')
+    state.call.mockRejectedValueOnce(error)
+    await expect(client.call('reactions.add')).rejects.toMatchObject({ code, message: expect.not.stringMatching(/ECONNRESET|xoxb-secret/) })
+    expect(state.call).toHaveBeenCalledOnce()
+  })
+  it('explains missing reaction authorization while retaining the exact needed scope', async () => {
+    const client = new SlackClient('xoxb-secret', 'xapp-secret')
+    state.call.mockRejectedValueOnce({ data: { error: 'missing_scope', needed: 'reactions:write' } })
+    await expect(client.call('reactions.add')).rejects.toMatchObject({ code: 'PERMISSION_DENIED', details: { missing_scope: 'reactions:write' }, message: expect.stringMatching(/reactions:write.*Reinstall to Workspace/) })
+  })
+})

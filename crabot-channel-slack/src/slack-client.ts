@@ -42,10 +42,14 @@ export class SlackClient implements SlackApi {
     try { return await this.web.apiCall(method, args) as SlackResult }
     catch (error) {
       let fallback = 'SERVICE_UNAVAILABLE'
-      if (method === 'chat.postMessage') fallback = 'CHANNEL_SEND_FAILED'
+      if (method === 'chat.postMessage' || method === 'reactions.add') fallback = 'CHANNEL_SEND_FAILED'
+      const reason = (error as { data?: { error?: string } })?.data?.error
+      if (method === 'reactions.add' && reason === 'already_reacted') return { ok: true }
+      if (method === 'reactions.add' && reason === 'message_not_found') throw new RpcError('NOT_FOUND', 'Slack 目标消息不存在或不可见')
       if (method === 'users.info') fallback = 'CHANNEL_PLATFORM_USER_QUERY_UNAVAILABLE'
       if (method === 'conversations.open') fallback = 'CHANNEL_PRIVATE_SESSION_UNAVAILABLE'
       const mapped = platformError(error, fallback)
+      if (method === 'reactions.add' && reason === 'missing_scope') throw new RpcError(mapped.code, 'Slack reaction 权限不足；请在原 App OAuth & Permissions 补 reactions:write，Reinstall to Workspace 后按需在 Admin 更新 Bot Token 并重启；无需重建渠道', mapped.details)
       if (method.startsWith('files.') && mapped.code === 'PERMISSION_DENIED') throw new RpcError(mapped.code, 'Slack 媒体权限不足；请在原 App OAuth & Permissions 补 files:read/files:write，Reinstall to Workspace 后在 Admin 更新 Bot Token 并重启；无需重建渠道', mapped.details)
       throw mapped
     }

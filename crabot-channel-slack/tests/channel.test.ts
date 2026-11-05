@@ -356,3 +356,57 @@ describe('Existing outbound mention ABI',()=>{
     expect(result.sent_at).toBe(sent.platform_timestamp)
   })
 })
+
+describe('Slack acknowledged reaction alignment', () => {
+  it.each(['D1', 'C1', 'G1'])('reacts to the original message in %s without changing session or publishing messages', async conversation => {
+    const s = setup(), original = s.message(conversation, conversation === 'D1' ? 'hi' : '<@B1> hi', { thread_ts: '100.000001' })
+    await s.receive(original)
+    const incoming = s.events.find(e => e.type === 'channel.message_received').payload.message
+    const eventCount = s.events.length
+    s.api.call.mockClear()
+    expect((await s.rpc('get_capabilities')).supported_features).toContain('reaction')
+    await expect(s.rpc('add_reaction', { session_id: incoming.session.session_id, platform_message_id: original.ts, kind: 'acknowledged' })).resolves.toEqual({ added: true })
+    expect(s.api.call).toHaveBeenCalledOnce()
+    expect(s.api.call).toHaveBeenCalledWith('reactions.add', { channel: conversation, timestamp: original.ts, name: 'eyes' })
+    expect(s.events).toHaveLength(eventCount)
+    expect(await s.rpc('get_message', { session_id: incoming.session.session_id, platform_message_id: original.ts })).toMatchObject({ platform_message_id: original.ts, features: { thread_id: '100.000001' } })
+  })
+  it('uses platform timestamps even when the target is absent from the local message cache', async () => {
+    const s = setup()
+    await s.receive(s.message('D1', 'hi'))
+    const id = (await s.rpc('get_sessions')).items[0].id
+    const timestamp = '1793850000.123456'
+    s.api.call.mockClear()
+    await expect(s.rpc('add_reaction', { session_id: id, platform_message_id: timestamp, kind: 'acknowledged' })).resolves.toEqual({ added: true })
+    expect(s.api.call).toHaveBeenCalledWith('reactions.add', { channel: 'D1', timestamp, name: 'eyes' })
+    s.api.call.mockClear()
+    for (const params of [
+      { session_id: 'missing', platform_message_id: timestamp, kind: 'acknowledged' },
+      { session_id: id, platform_message_id: timestamp, kind: 'done' },
+      { session_id: id, platform_message_id: 'not-ts', kind: 'acknowledged' },
+    ]) await expect(s.rpc('add_reaction', params)).rejects.toMatchObject({ code: params.session_id === 'missing' ? 'NOT_FOUND' : 'INVALID_ARGUMENT' })
+    expect(s.api.call).not.toHaveBeenCalled()
+    await (s.channel as any).onStop()
+    await expect(s.rpc('add_reaction', { session_id: id, platform_message_id: timestamp, kind: 'acknowledged' })).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+    expect(s.api.call).not.toHaveBeenCalled()
+  })
+  it('returns reaction failure honestly and continues to send normal replies', async () => {
+    const s = setup()
+    await s.receive(s.message('D1', 'hi'))
+    const id = (await s.rpc('get_sessions')).items[0].id
+    s.api.call.mockRejectedValueOnce(new RpcError('PERMISSION_DENIED', 'missing reactions:write'))
+    await expect(s.rpc('add_reaction', { session_id: id, platform_message_id: '1793850000.123456', kind: 'acknowledged' })).rejects.toMatchObject({ code: 'PERMISSION_DENIED' })
+    await expect(s.rpc('send_message', { session_id: id, content: { type: 'text', text: 'reply' } })).resolves.toHaveProperty('platform_message_id')
+  })
+  it.each([undefined, [], ['reactions:write', 'files:read', 'files:write']])('reports reaction scopes without blocking startup: %s', async scopes => {
+    const s = setup(), warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    s.api.call.mockImplementation(async method => method === 'auth.test' ? { team_id: 'T1', user_id: 'B1', bot_id: 'BB1', ...(scopes ? { response_metadata: { scopes } } : {}) } : { bot: { app_id: 'A1' } } as any)
+    try {
+      await (s.channel as any).onStart()
+      expect(s.api.start).toHaveBeenCalledOnce()
+      const reactionWarnings = warn.mock.calls.flat().filter(text => String(text).includes('reaction'))
+      expect(reactionWarnings).toHaveLength(scopes?.includes('reactions:write') ? 0 : 1)
+      if (!scopes?.includes('reactions:write')) expect(reactionWarnings[0]).toMatch(/reactions:write.*Reinstall to Workspace/)
+    } finally { await (s.channel as any).onStop(); warn.mockRestore() }
+  })
+})
