@@ -555,7 +555,6 @@ export class ContextManager {
             systemPrompt: profile.summarySystemPrompt,
             tools: [],
             model,
-            maxTokens: Math.max(1, Math.min(4096, Math.floor(this.maxContextTokens * 0.1))),
             onRequestLifecycle: args.onRequestLifecycle,
             ...(signal ? { signal } : {}),
           })
@@ -734,8 +733,6 @@ export class ContextManager {
     onRequestLifecycle?: import('./llm-adapter-types.js').LLMStreamParams['onRequestLifecycle'],
   ): Promise<string> {
     const ceiling = Math.floor(this.maxContextTokens * SUMMARY_INPUT_BUDGET_RATIO / this.tokenEstimateRatio)
-    const outputTokens = Math.max(1, Math.min(2048, Math.floor(ceiling / 8)))
-    const outputChars = outputTokens * CHARS_PER_TOKEN
     let summary = ''
     for (let position = 0; position < source.length;) {
       const render = (fragment: string) => this.buildSummaryPrompt(summary || undefined, [createUserMessage(fragment)], profile)
@@ -747,11 +744,11 @@ export class ContextManager {
         const fragment = source.slice(position, position + length)
         try {
           const response = await callNonStreaming(adapter, { messages: [createUserMessage(render(fragment))],
-            systemPrompt: profile.summarySystemPrompt, tools: [], model, maxTokens: outputTokens, onRequestLifecycle,
+            systemPrompt: profile.summarySystemPrompt, tools: [], model, onRequestLifecycle,
             ...(signal ? { signal } : {}) })
           const text = response.content.filter((b): b is { type: 'text'; text: string } => b.type === 'text').map(b => b.text).join('')
           if (response.stopReason !== 'max_tokens' && text.trim().length > 0
-            && text.length <= outputChars && text.length < summary.length + fragment.length) {
+            && text.length < summary.length + fragment.length) {
             summary = text
             position += length
             accepted = true
@@ -761,7 +758,7 @@ export class ContextManager {
           if (signal?.aborted || isAbortError(error) || !isContextWindowError(error, true)) throw error
         }
       }
-      if (!accepted) return boundText(source, Math.min(outputChars, Math.floor(source.length / 2)))
+      if (!accepted) return boundText(source, Math.floor(source.length / 2))
     }
     return summary
   }

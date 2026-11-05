@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { ContextManager, createManagerCompactionProfile, type CompactionState } from '../../src/engine/context-manager.js'
+import { ContextManager, createBuiltinCompactionProfile, createManagerCompactionProfile, type CompactionState } from '../../src/engine/context-manager.js'
 import type { LLMAdapter, LLMStreamParams } from '../../src/engine/llm-adapter.js'
 import { createAssistantMessage, createToolResultMessage, createUserMessage } from '../../src/engine/types.js'
 import { checkToolMessageIntegrity } from '../../src/engine/tool-message-integrity.js'
@@ -33,6 +33,57 @@ function fixture(mode: 'valid' | 'empty' | 'truncated' | 'inflated' | 'overflow'
 }
 
 describe('context overflow recovery', () => {
+  it.each([createBuiltinCompactionProfile, createManagerCompactionProfile])(
+    'leaves ordinary summary output uncapped for profile %# and saves only visible text', async createProfile => {
+      const manager = new ContextManager({ maxContextTokens: 120_000 })
+      const requests: LLMStreamParams[] = []
+      const adapter: LLMAdapter = {
+        updateConfig() {},
+        async *stream(params) {
+          requests.push(params)
+          yield* chunksFromContent([
+            { type: 'raw_reasoning', data: { reasoning_content: 'thinking '.repeat(5000) } },
+            { type: 'text', text: 'Completed evidence review; continue implementation.' },
+          ], 'end_turn')
+        },
+      }
+      const result = await manager.compactIncrementally({
+        state: stateOf([createUserMessage('evidence '.repeat(2000))]),
+        profile: createProfile(), adapter, model: 'test',
+        target: { kind: 'fit_hard_cap', hardCapTokens: 96_000, force: true },
+      })
+      expect(result.failedReason).toBeUndefined()
+      expect(requests).toHaveLength(1)
+      expect(requests[0].maxTokens).toBeUndefined()
+      expect(result.state.previousSummary).toBe('Completed evidence review; continue implementation.')
+      expect(JSON.stringify(result.messages)).not.toContain('thinking')
+    },
+  )
+
+  it('accepts a complete recovery summary beyond the old character cap without counting thinking', async () => {
+    const f = fixture()
+    const requests: LLMStreamParams[] = []
+    const summary = 'retained evidence '.repeat(600)
+    const adapter: LLMAdapter = {
+      updateConfig() {},
+      async *stream(params) {
+        requests.push(params)
+        yield* chunksFromContent([
+          { type: 'raw_reasoning', data: { reasoning_content: 'thinking '.repeat(5000) } },
+          { type: 'text', text: summary },
+        ], 'end_turn')
+      },
+    }
+    const result = await f.compact(stateOf([createUserMessage('evidence '.repeat(15_000))]), { adapter })
+    expect(result.failedReason).toBeUndefined()
+    expect(requests.length).toBeGreaterThan(1)
+    expect(requests.every(request => request.maxTokens === undefined)).toBe(true)
+    expect(result.state.previousSummary).toBe(summary)
+    expect(JSON.stringify(result.messages)).not.toContain('内容已省略')
+    expect(JSON.stringify(result.messages)).not.toContain('thinking')
+    expect(f.manager.estimateCompactionStateTokens(result.state, f.profile)).toBeLessThanOrEqual(hardCapTokens)
+  })
+
   it('keeps shrinking on repeated Provider overflow without repeating a completed tool', async () => {
     const f = fixture()
     const write = vi.fn(async () => ({ output: 'written '.repeat(1000), isError: false }))
@@ -81,7 +132,7 @@ describe('context overflow recovery', () => {
       const input = f.manager.estimateStaticPromptTokens(request.systemPrompt, request.tools)
         + f.manager.estimateTotalTokens(request.messages)
       expect(input).toBeLessThanOrEqual(hardCapTokens)
-      expect(request.maxTokens).toBeGreaterThan(0)
+      expect(request.maxTokens).toBeUndefined()
     }
     expect(f.manager.estimateCompactionStateTokens(result.state, f.profile)).toBeLessThanOrEqual(hardCapTokens)
   })
