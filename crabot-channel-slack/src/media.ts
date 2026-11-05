@@ -1,7 +1,7 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
-import { MediaHandleStore, MediaFetchManager, MediaCleaner, RpcError, type FetchImageParams, type FetchImageResult, type MediaHandleRecord, type MessageContent, type Event } from 'crabot-shared'
+import { MediaHandleStore, MediaFetchManager, MediaCleaner, RpcError, type FetchImageParams, type FetchImageResult, type MediaHandleRecord, type MediaItem, type MessageContent, type Event } from 'crabot-shared'
 import type { SlackApi, SlackFile, SlackHistoryMessage } from './types.js'
 import { platformError } from './slack-client.js'
 import { MediaTransport, MAX_FILE_BYTES, MAX_IMAGE_BYTES, type Downloaded } from './media-transport.js'
@@ -76,6 +76,22 @@ export class SlackMedia {
     this.changes = work.catch(() => {})
     return work
   }
+  async projectIncoming(sessionId: string, conversationId: string, ts: string, raw: Pick<SlackHistoryMessage, 'text' | 'files'>): Promise<MessageContent> {
+    const content = await this.project(sessionId, conversationId, ts, raw)
+    if (content.type !== 'image') return content
+    const media: MediaItem[] = [], failures: string[] = []
+    const ref = this.references.get(this.key(sessionId, ts))!
+    for (const file of ref.files.filter(image)) {
+      if (!file.id) { failures.push(`[图片下载失败: ${label(file)}；平台未提供文件 ID]`); continue }
+      const result = await this.fetchImage({ session_id: sessionId, platform_message_id: ts, attachment_id: file.id, quality: 'hd' })
+      if (result.status === 'ready') {
+        media.push({ media_url: result.file_path, filename: label(file), mime_type: result.mime_type, size: result.size })
+      } else failures.push(`[图片下载失败: ${label(file)}；${result.status === 'failed' ? result.error : '图片尚未就绪'}]`)
+    }
+    const { image_quality: _quality, ...base } = content
+    return { ...base, text: [content.text, ...failures].filter(Boolean).join('\n'),
+      ...(media.length ? { type: 'image', status: 'ready', media, media_url: media[0].media_url } : { type: 'text' }) }
+  }
   private async projectMessage(sessionId: string, conversationId: string, ts: string, raw: Pick<SlackHistoryMessage, 'text' | 'files'>): Promise<MessageContent> {
     await this.init()
     if (!raw.files?.length) return { type: 'text', text: raw.text || '' }
@@ -92,7 +108,7 @@ export class SlackMedia {
       const credential = { session_id: sessionId, conversation_id: conversationId, platform_message_id: ts, file_id: file.id }
       const handle = this.handles.findByCredential(credential) ?? await this.handles.put({ kind: 'file', session_id: sessionId, filename: label(file), mime_type: file.mimetype, size: file.size, credential })
       if (files.length === 1) firstHandle = handle
-      descriptions.push(`[${image(file) ? '图片' : '文件'}: ${prefix}；handle=${handle}${image(file) ? '；内容未附带，使用 fetch_image 按需读取' : '；未下载，使用 fetch_media'}${problem ? `；${problem}` : ''}]`)
+      descriptions.push(`[${image(file) ? '图片' : '文件'}: ${prefix}；handle=${handle}${problem ? `；${problem}` : ''}]`)
     }
     this.references.set(this.key(sessionId, ts), { sessionId, conversationId, ts, files })
     await this.save()

@@ -54,6 +54,61 @@ it('advertises every file type without eagerly downloading or exposing private U
   expect(JSON.stringify(content)).not.toContain('https://')
   expect(api.call).not.toHaveBeenCalled()
 })
+it('incoming mixed media downloads only readable images in order; history stays lazy and file handles remain', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'slack-media-')); dirs.push(dir)
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jh5sAAAAASUVORK5CYII=', 'base64')
+  const files = [
+    { id: 'F1', name: 'one.png', mimetype: 'image/png', url_private: 'https://files.slack.com/one' },
+    { id: 'F2', name: 'denied.png', mimetype: 'image/png' },
+    { id: 'F3', name: 'document.pdf', mimetype: 'application/pdf' },
+    { id: 'F4', name: 'four.png', mimetype: 'image/png', url_private: 'https://files.slack.com/four' },
+    { name: 'missing-id.png', mimetype: 'image/png' },
+  ]
+  const api: any = { call: vi.fn(async (method, args) => {
+    if (method === 'conversations.info') return { channel: { id: 'C1', is_member: true } }
+    if (args.file === 'F2') throw new RpcError('PERMISSION_DENIED', '文件不可读')
+    return { file: files.find(f => f.id === args.file) }
+  }) }
+  const media = new SlackMedia({ dir, token: 'secret', api, channelId: 'slack-test', session: () => ({ platform_session_id: 'C1' }), publish: vi.fn() })
+  const download = vi.spyOn(media.transport, 'download').mockImplementation(async (_url, filename) => {
+    const filePath = path.join(dir, filename); fs.writeFileSync(filePath, png)
+    return { filePath, size: png.length }
+  })
+  try {
+    const history = await media.project('s', 'C1', '100.001', { text: '原说明', files })
+    expect(history).toMatchObject({ type: 'image', image_quality: 'unknown' })
+    expect(download).not.toHaveBeenCalled()
+    const incoming = await media.projectIncoming('s', 'C1', '100.001', { text: '原说明', files })
+    expect(incoming).toMatchObject({ type: 'image', status: 'ready' })
+    expect(incoming).not.toHaveProperty('image_quality')
+    expect(incoming.media?.map(m => m.filename)).toEqual(['one.png', 'four.png'])
+    expect(download.mock.calls.map(c => c[1])).toEqual(['one.png', 'four.png'])
+    expect(incoming.text).toContain('原说明')
+    expect(incoming.text).toContain('文件不可读')
+    expect(incoming.text).toContain('平台未提供文件 ID')
+    expect(incoming.text).toContain('document.pdf')
+    expect(incoming.text?.match(/handle=fm_/g)).toHaveLength(4)
+    expect(incoming.text).not.toMatch(/fetch_image|fetch_media|https:/)
+  } finally { media.stop() }
+})
+
+it('incoming download failure preserves metadata and does not claim ready images', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'slack-media-')); dirs.push(dir)
+  const file = { id: 'F1', name: 'one.png', mimetype: 'image/png', url_private: 'https://files.slack.com/one' }
+  const api: any = { call: vi.fn(async method => method === 'conversations.info' ? { channel: { id: 'C1', is_member: true } } : { file }) }
+  const media = new SlackMedia({ dir, token: 'secret', api, channelId: 'slack-test', session: () => ({ platform_session_id: 'C1' }), publish: vi.fn() })
+  vi.spyOn(media.transport, 'download').mockRejectedValue(new RpcError('SERVICE_UNAVAILABLE', '下载已取消'))
+  try {
+    const incoming = await media.projectIncoming('s', 'C1', '100.001', { text: '原说明', files: [file] })
+    expect(incoming).toMatchObject({ type: 'text' })
+    expect(incoming).not.toHaveProperty('media')
+    expect(incoming).not.toHaveProperty('image_quality')
+    expect(incoming.text).toContain('原说明')
+    expect(incoming.text).toContain('图片下载失败')
+    expect(incoming.text).toContain('下载已取消')
+  } finally { media.stop() }
+})
+
 it('accepts an exact 100 MiB source and rejects one byte more before uploading', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'slack-media-')); dirs.push(dir)
   const filename = path.join(dir, 'boundary.bin'), fd = fs.openSync(filename, 'w')
