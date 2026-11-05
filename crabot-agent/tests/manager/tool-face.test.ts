@@ -544,6 +544,17 @@ describe('buildManagerToolFace', () => {
         await callNonStreaming(adapter, { model: 'fixture', systemPrompt: 'Stable Manager instructions', messages: [createUserMessage('fixture')], tools, maxTokens: 64 })
       }
       expect(bodies.map(body => body.tools.length)).toEqual([62, 15, 21])
+      const initialTools = bodies[1].tools.map((tool: any) => tool.function ?? tool)
+      const sendDescription = initialTools.find((tool: any) => tool.name === 'send_message').description
+      expect(sendDescription).toContain('mentions')
+      expect(sendDescription).toContain('platform_user_id')
+      expect(sendDescription).toContain('from_id')
+      expect(sendDescription).toContain('list_group_members')
+      const loadingDescription = initialTools.find((tool: any) => tool.name === 'load_tool_family').description
+      expect(loadingDescription).toContain('fetch_image')
+      expect(loadingDescription).toContain('fetch_media')
+      expect(loadingDescription).toContain('messaging')
+      expect(loadingDescription).toContain('实际调用结果')
       expect(JSON.stringify(bodies[0].tools.slice(0, NORMAL_MANAGER_CORE_NAMES.length))).toBe(JSON.stringify(bodies[1].tools))
       expect(JSON.stringify(bodies[2].tools.slice(0, NORMAL_MANAGER_CORE_NAMES.length))).toBe(JSON.stringify(bodies[1].tools))
       if (format === 'anthropic') {
