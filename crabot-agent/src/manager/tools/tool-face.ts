@@ -253,7 +253,6 @@ function messagingToolToDefinition(tool: MessagingTool, deps: ToolFaceDeps): Too
     description = deps.voice
       ? '向指定会话发送文本、媒体 URL 或本地文件。当前语音会话的回复使用 <voice_reply>...</voice_reply>，本工具用于其它渠道的消息投递；标签外的普通 assistant text 留作内部记录。只发送人类需要知道的进展、结果或问题，不外发内部系统提醒。已成功投递的内容不重复发送；没有后续工作或需要等待人类回复时，结束本回合，无需再发送收尾消息。'
       : '向指定会话发送文本、媒体 URL 或本地文件。人类只能看到成功投递的消息；普通 assistant text 留作内部记录，不代表已经回复。只发送人类需要知道的进展、结果或问题，不外发内部系统提醒。已成功投递的内容不重复发送；没有后续工作或需要等待人类回复时，结束本回合，无需再发送收尾消息。'
-    description += '\n需要真正 @成员时，必须在 mentions 中提供目标渠道的真实 platform_user_id（可直接取该成员入站消息的 from_id）或 friend_id；仅在 content 写 @名字不会产生真实提及。不知道 ID 时，先用 load_tool_family 加载 messaging，再通过 list_group_members 或 list_contacts 查询，不把显示名当 ID。'
   }
 
   return defineTool({
@@ -517,7 +516,7 @@ function buildSearchToolsTool(catalog: ManagerToolCatalog, state: ManagerToolFac
 function buildLoadToolFamilyTool(catalog: ManagerToolCatalog, state: ManagerToolFaceState): ToolDefinition {
   return defineTool({
     name: 'load_tool_family',
-    description: '完整加载当前权限和场景可用的工具族，下轮可调用；已可见项直接调用。当前工具列表仅是已加载部分；需要读取渠道图片或文件时，先加载 family="messaging"，再调用 fetch_image 或 fetch_media。未显示工具或历史失败不代表当前渠道不支持；是否读取失败以本次实际调用结果为准。族加载成功且 complete=true 表示当前可用工具已看全；family=mcp 的 listed 仅列服务目录，具体工具按返回的服务族加载。加载不授予执行权限。',
+    description: '完整加载当前权限和场景可用的工具族，下轮可调用；已可见项直接调用。族加载成功且 complete=true 表示当前可用工具已看全；family=mcp 的 listed 仅列服务目录，具体工具按返回的服务族加载。加载不授予执行权限。',
     inputSchema: {
       type: 'object', additionalProperties: false,
       properties: { family: { type: 'string', minLength: 1, maxLength: 128,
