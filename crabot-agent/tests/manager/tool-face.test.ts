@@ -1065,7 +1065,7 @@ describe('buildManagerToolFace', () => {
       const incoming = events.find(event => event.type === 'channel.message_received').payload.message
       const prompt = formatChannelMessageLine(incoming, { timezone: 'Asia/Shanghai', identity: 'normal' })
       expect(prompt).toContain('from_id="U007"')
-      expect(prompt).toContain('fetch_image')
+      expect(prompt).not.toContain('fetch_image')
       const state = createManagerToolFaceState()
       const deps = makeDeps({ faceState: state, managerTarget: { channel_id: 'slack-verify', session_id: incoming.session.session_id, type: 'group' }, messagingDeps: makeMessagingDeps({
         rpcClient: { call: vi.fn(async (_port, method, params) => (channel as any).methodHandlers.get(method)(params)) } as never,
@@ -1086,7 +1086,7 @@ describe('buildManagerToolFace', () => {
       const result = await runEngine({ prompt, adapter, options: { model: 'fixture', systemPrompt: 'fixture', supportsVision: true, maxTurns: 4, tools: () => buildManagerToolFace(deps) } })
       expect(result.outcome).toBe('completed')
       expect(turn).toBe(4)
-      expect(downloaded).toEqual(['Bearer xoxb-fixture'])
+      expect(downloaded).toEqual(Array(readable ? 1 : 2).fill('Bearer xoxb-fixture'))
       const sent = api.call.mock.calls.find(([method]) => method === 'chat.postMessage') as unknown as [string, { blocks: unknown[] }]
       expect(sent[1].blocks[0]).toEqual({ type: 'section', text: { type: 'mrkdwn', text: '<@U007>' } })
     } finally {

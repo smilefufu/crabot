@@ -1112,6 +1112,94 @@ describe('manager bootstrap（P5 Task 1）', () => {
     } finally { await stack.dispose() }
   })
 
+  it.each(['private', 'group'] as const)('Slack %s 新图经真实下载和主控装配，首个 Provider 请求直接包含像素', async sessionType => {
+    const http = await import('node:http')
+    const { normalizeMessagesForOpenAI } = await import('../../src/engine/openai-adapter.js')
+    vi.doMock('../../../crabot-channel-slack/src/slack-client.js', () => ({ SlackClient: vi.fn(), platformError: () => { throw new Error('unexpected SDK error') } }))
+    const { SlackChannel } = await import('../../../crabot-channel-slack/src/slack-channel.js')
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jh5sAAAAASUVORK5CYII=', 'base64')
+    const authorization: string[] = []
+    const server = http.createServer((req, res) => { authorization.push(req.headers.authorization || ''); res.end(png) })
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    const originalFetch = globalThis.fetch
+    const download = vi.spyOn(globalThis, 'fetch').mockImplementation((url, init) => {
+      expect(String(url)).toBe('https://files.slack.com/image.png')
+      return originalFetch(`http://127.0.0.1:${(server.address() as { port: number }).port}/image.png`, { ...init, dispatcher: undefined } as RequestInit)
+    })
+    const requests: LLMStreamParams[] = []
+    const stack = buildManagerStack(makeDeps({ managerSupportsVision: () => true,
+      managerAdapter: () => ({ async *stream(params) {
+        requests.push({ ...params, messages: structuredClone(params.messages) })
+        yield* chunksFromContent([], 'end_turn')
+      }, updateConfig() {} }),
+    }))
+    const conversation = sessionType === 'private' ? 'DGROUP' : 'CGROUP'
+    const api = { connected: true, start: vi.fn(), stop: vi.fn(), call: vi.fn(async (method: string) => {
+      if (method === 'conversations.info') return { channel: { id: conversation, is_im: sessionType === 'private', is_member: true } }
+      if (method === 'users.info') return { user: { id: 'U007', name: '007' } }
+      if (method === 'files.info') return { file: { id: 'FIMAGE', name: 'report.png', mimetype: 'image/png', url_private: 'https://files.slack.com/image.png' } }
+      throw new Error(`unexpected Slack call ${method}`)
+    }) }
+    const channel = new SlackChannel({ module_id: 'slack-test', port: 0, data_dir: join(tmpRoot, 'slack'), env: { SLACK_BOT_TOKEN: 'xoxb-fixture', SLACK_APP_TOKEN: 'xapp-fixture' } }, api as never)
+    ;(channel as any).identity = { team_id: 'T1', app_id: 'A1', user_id: 'UBOT' }
+    ;(channel as any).rpcClient.publishEvent = vi.fn(async event => {
+      if (event.type === 'channel.message_received') {
+        const message = event.payload.message
+        await stack.registry.routeHumanMessages('slack-test', message.session.session_id, [message], FRIEND_A)
+      }
+    })
+    await stack.principals.init()
+    try {
+      await channel.receive({ team_id: 'T1', api_app_id: 'A1', event: { type: 'message', subtype: 'file_share', channel: conversation, user: 'U007', ts: String(Date.now() / 1000),
+        text: '<@UBOT> 看图', files: [{ id: 'FIMAGE', name: 'report.png', mimetype: 'image/png' }] } })
+      expect(requests.length).toBeGreaterThan(0)
+      const wire = normalizeMessagesForOpenAI(requests[0].messages)
+      expect(JSON.stringify(wire)).toContain(`data:image/png;base64,${png.toString('base64')}`)
+      expect(authorization).toEqual(['Bearer xoxb-fixture'])
+      expect(JSON.stringify(requests[0].messages)).not.toContain('按需调用 fetch_image')
+      expect(requests.flatMap(r => r.messages).some(m => m.role === 'assistant' && m.content.some(b => b.type === 'tool_use'))).toBe(false)
+    } finally {
+      await stack.dispose()
+      ;(channel as any).media.stop()
+      download.mockRestore()
+      vi.doUnmock('../../../crabot-channel-slack/src/slack-client.js')
+      server.closeAllConnections()
+      await new Promise<void>(resolve => server.close(() => resolve()))
+    }
+  })
+
+  it.each(['private', 'group'] as const)('%s 同渠道从按需图片切换到飞书式就绪图片，首请求直接含像素且不调用取图工具', async sessionType => {
+    const bytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jh5sAAAAASUVORK5CYII=', 'base64')
+    const imagePath = join(tmpRoot, 'ready.png')
+    await fs.writeFile(imagePath, bytes)
+    const requests: LLMStreamParams[] = []
+    const messagingDeps = makeMessagingDeps()
+    const rpc = vi.fn(async () => ({ supports_image_fetch: true }))
+    messagingDeps.rpcClient = { call: rpc } as never
+    const stack = buildManagerStack(makeDeps({ messagingDeps, managerSupportsVision: () => true,
+      managerAdapter: () => ({ async *stream(params) {
+        requests.push({ ...params, messages: structuredClone(params.messages) })
+        yield* chunksFromContent([], 'end_turn')
+      }, updateConfig() {} }),
+    }))
+    await stack.principals.init()
+    try {
+      const message = sessionType === 'group' ? groupMessage('看图') : makeChannelMessage('看图')
+      await stack.registry.routeHumanMessages('wechat', 'sess-boot', [{ ...message, platform_message_id: 'old-image', content: {
+        type: 'image', text: '旧按需图片', image_quality: 'unknown',
+      } }], FRIEND_A)
+      requests.length = 0
+      await stack.registry.routeHumanMessages('wechat', 'sess-boot', [{ ...message, platform_message_id: 'ready-image', content: {
+        type: 'image', text: '新就绪图片', status: 'ready', media: [{ media_url: imagePath, filename: 'ready.png', mime_type: 'image/png', size: bytes.length }],
+      } }], FRIEND_A)
+      const images = requests[0].messages.flatMap(m => 'content' in m && Array.isArray(m.content) ? m.content.filter(b => b.type === 'image') : [])
+      expect(images).toHaveLength(1)
+      expect(Buffer.from((images[0] as any).source.data, 'base64')).toEqual(bytes)
+      expect(rpc.mock.calls.some((call: any[]) => call[1] === 'fetch_image')).toBe(false)
+      expect(requests.flatMap(r => r.messages).some(m => m.role === 'assistant' && m.content.some(b => b.type === 'tool_use'))).toBe(false)
+    } finally { await stack.dispose() }
+  })
+
   it.each(['private', 'group'] as const)('微信 %s Manager 按需取图后，下一次模型请求包含原始高清图片', async (sessionType) => {
     const sharp = (await import('sharp')).default
     const bytes = await sharp({ create: { width: 1600, height: 2400, channels: 3, background: '#abcdef' } }).png().toBuffer()

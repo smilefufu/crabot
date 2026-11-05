@@ -8,6 +8,7 @@ import type { ToolFaceDeps } from './tools/tool-face.js'
 import { ConversationRequestAuthority } from './conversation-request-authority.js'
 import { findVoiceDelivery } from './voice-output.js'
 import { voiceOutputPort } from './voice-output-port.js'
+import { collectInboundImages } from './image-vision.js'
 import { createHash } from 'node:crypto'
 import { requestObservation, persistObservation, executionObservation, readObservation, observationFile } from '../permissions/execution-observation.js'
 /**
@@ -845,8 +846,10 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         } catch { /* no unverified voice exception */ }
       }
       const wake = envelope?.wake
-      if ((wake?.kind === 'human_messages' || wake?.kind === 'attention_flush')
-        && wake.messages.some(message => message.content.image_quality !== undefined)) imagePolicies.set(channelId, true)
+      if (wake?.kind === 'human_messages' || wake?.kind === 'attention_flush') {
+        if (wake.messages.some(message => collectInboundImages(message).length > 0)) imagePolicies.set(channelId, false)
+        else if (wake.messages.some(message => message.content.image_quality !== undefined)) imagePolicies.set(channelId, true)
+      }
       if (key !== SYSTEM_TASKS_MANAGER_KEY && imagePolicies.get(channelId) === undefined
         && (await sessionStore.load(key)).imageRefs?.length) {
         try {

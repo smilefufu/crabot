@@ -200,7 +200,8 @@ export class SlackChannel extends ModuleBase {
       if (u.is_bot || u.is_app_user || u.deleted) { this.markSeen(key); return }
       const value = this.store.upsert(conversation, conversation.is_im ? displayName(u) : conversation.name || e.channel, e.user)
       await this.sessionChanged(value.created ? 'created' : 'updated', value.session)
-      const content = await this.media.project(value.session.id, e.channel, e.ts, e)
+      const content = await this.media.projectIncoming(value.session.id, e.channel, e.ts, e)
+      if (!this.accepting) return
       if (!content.text) { this.markSeen(key); return }
       const message: ChannelMessage = {
         platform_message_id: e.ts, session: { session_id: value.session.id, channel_id: this.init.module_id, type: value.session.type },

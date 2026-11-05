@@ -30,6 +30,38 @@ function setup(dir = fs.mkdtempSync(path.join(os.tmpdir(), 'slack-test-'))) {
   return { channel, api, events, rpc, receive, message, dir }
 }
 describe('Slack ordinary conversation routing', () => {
+  it('does not publish a late incoming message after shutdown cancels its image download', async () => {
+    const s = setup()
+    let finish!: (content: any) => void
+    const project = vi.spyOn((s.channel as any).media, 'projectIncoming').mockImplementation(() => new Promise(resolve => { finish = resolve }))
+    const receiving = s.receive(s.message('C1', '<@B1> 看图', { files: [{ id: 'F1', name: 'report.png', mimetype: 'image/png' }] }))
+    await vi.waitFor(() => expect(project).toHaveBeenCalledOnce())
+    const stopping = (s.channel as any).onStop()
+    finish({ type: 'text', text: '图片下载已取消' })
+    await Promise.all([receiving, stopping])
+    expect(s.events.filter(e => e.type === 'channel.message_received')).toHaveLength(0)
+  })
+  it('downloads incoming images into ready media without requiring an Agent fetch tool', async () => {
+    const s = setup()
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jh5sAAAAASUVORK5CYII=', 'base64')
+    const filePath = path.join(s.dir, 'downloaded.png')
+    fs.writeFileSync(filePath, png)
+    const media = (s.channel as any).media
+    const download = vi.spyOn(media.transport, 'download').mockResolvedValue({ filePath, size: png.length })
+    s.api.call.mockImplementation(async (method: string, args: any) => {
+      if (method === 'conversations.info') return { channel: { id: args.channel, is_member: true } } as any
+      if (method === 'users.info') return { user: { id: args.user, name: '007' } } as any
+      if (method === 'files.info') return { file: { id: args.file, name: 'report.png', mimetype: 'image/png', url_private: 'https://files.slack.com/private' } } as any
+      throw new Error(`unexpected method ${method}`)
+    })
+    await s.receive(s.message('C1', '<@B1> 人物重复', { subtype: 'file_share', files: [{ id: 'F1', name: 'report.png', mimetype: 'image/png' }] }))
+    const incoming = s.events.find(e => e.type === 'channel.message_received').payload.message
+    expect(download).toHaveBeenCalledOnce()
+    expect(incoming.content).toMatchObject({ type: 'image', status: 'ready', media: [{ media_url: filePath, mime_type: 'image/png', size: png.length }] })
+    expect(incoming.content).not.toHaveProperty('image_quality')
+    expect(incoming.content.text).toContain('人物重复')
+    expect(incoming.content.text).not.toMatch(/fetch_image|fetch_media|https:/)
+  })
   it('admits media-only DMs with all attachment references and advertises actual media endpoints', async () => {
     const s = setup()
     await s.receive(s.message('D1', '', { subtype: 'file_share', files: [
@@ -37,7 +69,9 @@ describe('Slack ordinary conversation routing', () => {
       { id: 'F2', name: 'video.mp4', mimetype: 'video/mp4' },
     ] }))
     const incoming = s.events.find(e => e.type === 'channel.message_received').payload.message
-    expect(incoming.content).toMatchObject({ type: 'image', image_quality: 'unknown' })
+    expect(incoming.content).toMatchObject({ type: 'text' })
+    expect(incoming.content.text).toContain('图片下载失败')
+    expect(incoming.content).not.toHaveProperty('media')
     expect(incoming.content.text).toContain('attachment_id=F1')
     expect(incoming.content.text).toContain('attachment_id=F2')
     expect(incoming.content.text.match(/handle=fm_/g)).toHaveLength(2)
@@ -50,7 +84,8 @@ describe('Slack ordinary conversation routing', () => {
     await s.receive({ ...original, subtype: 'file_share', files: [{ id: 'F1', name: 'report.jpg', mimetype: 'image/jpeg' }] }, 'full-message')
     const incoming = s.events.filter(e => e.type === 'channel.message_received')
     expect(incoming).toHaveLength(1)
-    expect(incoming[0].payload.message.content.image_quality).toBeDefined()
+    expect(incoming[0].payload.message.content.text).toContain('图片下载失败')
+    expect(incoming[0].payload.message.content).not.toHaveProperty('image_quality')
     expect(incoming[0].payload.message.content.text).toContain('attachment_id=F1')
   })
   it('admits DMs and real group mentions; thread history grants no exception', async () => {
