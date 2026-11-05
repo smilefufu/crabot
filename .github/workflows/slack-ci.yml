@@ -46,6 +46,7 @@ jobs:
           pnpm --dir crabot-agent exec vitest run tests/engine/query-loop.test.ts tests/mcp/fetch-image.test.ts tests/agent/outbound-dispatch.test.ts tests/mcp/crab-messaging-get-message-media.test.ts tests/mcp/crab-messaging-fetch-media.test.ts tests/mcp/crab-messaging-tool-set.test.ts --maxWorkers=2 --minWorkers=1
           pnpm --dir crabot-agent exec vitest run tests/manager/bootstrap.test.ts -t 'Slack .*新图|同渠道从按需图片切换' --maxWorkers=1 --minWorkers=1
           pnpm --dir crabot-agent exec vitest run tests/manager/image-vision.test.ts tests/manager/group-image-projection.test.ts --maxWorkers=1 --minWorkers=1
+          pnpm --dir crabot-agent exec vitest run tests/inbound/process-direct-batch.test.ts tests/inbound/process-group-lane-batch.test.ts -t 'reaction|已读回应' --maxWorkers=1 --minWorkers=1
           pnpm --dir crabot-channel-wechat exec vitest run tests/wechat-image-fetch.test.ts
       - name: Official Slack CLI project hooks
         if: ${{ !cancelled() }}
