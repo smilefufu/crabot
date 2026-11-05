@@ -1632,6 +1632,7 @@ describe('按需微信高清图保真', () => {
     const { createImageReader } = await import('../../src/mcp/fetch-image.js')
     const original = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==', 'base64')
     const filesRead: string[] = []
+    let imageDownloads = 0
     let origin = ''
     const fixture = await mediaServer('custom', async (req, res) => {
       const body: Buffer[] = []; for await (const piece of req) body.push(piece)
@@ -1643,7 +1644,7 @@ describe('按需微信高清图保真', () => {
         filesRead.push(params.get('file')!)
         return send({ ok: true, file: { id: params.get('file'), name: 'screen.png', mimetype: 'image/png', url_private_download: origin + '/image' } })
       }
-      if (req.url === '/image') { res.setHeader('content-type', 'image/png'); res.end(original); return }
+      if (req.url === '/image') { imageDownloads++; res.setHeader('content-type', 'image/png'); res.end(original); return }
       res.writeHead(404); res.end()
     })
     origin = fixture.origin
@@ -1660,6 +1661,11 @@ describe('按需微信高清图保真', () => {
         files: ['F1', 'F2'].map(id => ({ id, name: id + '.png', mimetype: 'image/png' })) } })
       const incoming = events.find(event => event.type === 'channel.message_received').payload.message
       expect(incoming.content.text).toContain('attachment_id=F2')
+      expect(incoming.content.status).toBe('ready')
+      expect(incoming.content.media).toHaveLength(2)
+      expect(incoming.content.image_quality).toBeUndefined()
+      expect(filesRead).toEqual(['F1', 'F2'])
+      expect(imageDownloads).toBe(2)
       const reader = createImageReader({ moduleId: 'agent', resolveChannelPort: async () => 1,
         rpcClient: { call: async (_port: number, method: string, params: unknown) => (channel as any).methodHandlers.get(method)(params) } } as never)
       const args = { channel_id: 'slack-test', session_id: incoming.session.session_id, platform_message_id: ts, attachment_id: 'F2' }
@@ -1673,7 +1679,8 @@ describe('按需微信高清图保真', () => {
         } })] }) })
       const toolResult = requests[1].messages.flatMap(m => 'toolResults' in m ? m.toolResults : []).find(r => r.tool_use_id === 'slack-image')
       expect(toolResult?.images).toEqual([{ media_type: 'image/png', data: original.toString('base64') }])
-      expect(filesRead).toEqual(['F2'])
+      expect(filesRead).toEqual(['F1', 'F2', 'F2'])
+      expect(imageDownloads).toBe(2)
     } finally {
       ;(channel as any).media.stop(); await client.stop(); await fixture.close(); await fs.rm(dir, { recursive: true, force: true })
     }
