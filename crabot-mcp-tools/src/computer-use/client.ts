@@ -11,7 +11,7 @@ export function requestComputerUse(endpoint: string, request: ComputerUseRequest
     signal?.addEventListener('abort', abort, { once: true })
     if (signal?.aborted) abort()
     socket.setEncoding('utf8')
-    socket.on('connect', () => socket.end(`${JSON.stringify(request)}\n`))
+    socket.on('connect', () => socket.write(`${JSON.stringify(request)}\n`))
     socket.on('data', chunk => { chunks.push(chunk.toString()); bytes += Buffer.byteLength(chunk); if (bytes > 24 * 1024 * 1024) socket.destroy(new Error('COMPUTER_USE_BRIDGE_LIMIT')) })
     socket.on('error', fail)
     socket.on('close', () => {

@@ -19,17 +19,26 @@ export function createComputerUseBridge(coordinator: ComputerUseCoordinator, aut
     socket.setEncoding('utf8')
     socket.setTimeout(65_000, () => socket.destroy())
     let data = ''
-    socket.on('data', chunk => { data += chunk; if (Buffer.byteLength(data) > 1_000_000) socket.destroy() })
-    socket.on('end', () => { void (async () => {
-      try {
-        const request: ComputerUseRequest = JSON.parse(data)
-        if (!request || typeof request.token !== 'string' || !['call', 'list'].includes(request.method)
-          || !await authorize(request.token, request.method, request.name)) throw new Error('COMPUTER_USE_FORBIDDEN')
-        const result = request.method === 'list' ? { tools: await coordinator.tools() }
-          : await coordinator.call(request.token, request.name ?? '', request.args ?? {}, controller.signal)
-        socket.end(JSON.stringify({ result }))
-      } catch (error) { socket.end(JSON.stringify({ error: error instanceof Error ? error.message : 'COMPUTER_USE_FAILED' })) }
-    })() })
+    let received = false
+    socket.on('data', chunk => {
+      if (received) return
+      data += chunk
+      if (Buffer.byteLength(data) > 1_000_000) { socket.destroy(); return }
+      const newline = data.indexOf('\n')
+      if (newline === -1) return
+      // Windows pipes cannot use a client half-close as the request boundary.
+      received = true
+      void (async () => {
+        try {
+          const request: ComputerUseRequest = JSON.parse(data.slice(0, newline))
+          if (!request || typeof request.token !== 'string' || !['call', 'list'].includes(request.method)
+            || !await authorize(request.token, request.method, request.name)) throw new Error('COMPUTER_USE_FORBIDDEN')
+          const result = request.method === 'list' ? { tools: await coordinator.tools() }
+            : await coordinator.call(request.token, request.name ?? '', request.args ?? {}, controller.signal)
+          socket.end(JSON.stringify({ result }))
+        } catch (error) { socket.end(JSON.stringify({ error: error instanceof Error ? error.message : 'COMPUTER_USE_FAILED' })) }
+      })()
+    })
   })
   return { server, close: () => { server.close(); for (const socket of clients) socket.destroy() } }
 }

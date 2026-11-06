@@ -1,5 +1,10 @@
 # Crabot 项目进度
 
+### Computer-use Windows 管道修复（2026-11-06，未发包／部署）
+
+- 按用户确认的最小修法，客户端发送已有换行结尾的 JSON 后保持连接，服务端收到完整行立即鉴权／处理，每连接只处理一次；不再把客户端关闭作为请求结束。保留现有身份、取消、unknown 隔离及请求／响应限额，未改变 Cua Driver 或工具面。
+- 原实现先复现等待关闭／提前半关闭等 4 项失败；新增 11 项 IPC 回归，Windows x64 Node（ARM VM／SYSTEM）、Mac ARM、Mac x64 Node（Rosetta）与 Linux x64 容器均编译并通过 MCP 包全部 47 项测试。四组 Node 22.22.3 均经真实 stdio 初始化、连续 20 次工具发现、80 KB 中文／emoji 回包及鉴权拒绝验证；Driver 为受控 fixture，不代表真实系统桌面动作验收或用户真机已恢复。
+
 ### Slack reaction 对齐飞书：原设计遗漏修复（2026-11-05，未部署）
 
 - 按用户纠正原位修改原 Slack Spec 和正式协议，删除另立的 reaction Spec。补齐共同 acknowledged RPC：首次包含输入的主处理 LLM 请求成功后由框架在原消息加 👀，线程使用消息自身 ts；不加模型工具／提示词或改变主控时序。新 App 补 reactions:write，旧 App 原位重新授权；缺权限不阻断文字／媒体服务。
