@@ -6,6 +6,7 @@
 - 中性host-process支持Linux预委派cgroup v2工具聚合预算；exec前入组，覆盖文件helper、Bash前后台与子孙进程。保留原始exit/signal、内核资源事件、scope身份与清理是否确认；超额只返回工具失败/unknown，不重放或加资源。后台/Schedule沿各自原owner、trigger、通知及恢复语义收口。
 - 最终20个定向测试文件170项通过；共享库和Agent类型构建通过。已用未修改main复现2个资源回归失败；另2个旧角色提示词文案断言在main同样失败，单列不改。另经用户单独批准在一次性、断网的2CPU/4GiB Linux profile完成9项原生验收：Python可见24核但pytest实际2worker、内存/任务超限、共享总预算、setsid、前后台/重启收口、非root不能改上限/迁组及文件helper均通过；控制PID不变且后续工具仍可调用，验后容器/组已清空。镜像amd64在Docker Desktop ARM宿主兼容运行；准备错误及完整证据单列保留。
 - 未启用的部署保留原硬隔离状态；不宣称macOS/Windows已有聚合硬限制，不改生产/冻结评测权限、分数或运行新付费Actor。
+- Review回归已复现并修复：单条受保护Shell清理unknown仅保留该条状态/资源回执/日志，继续其余实体启动对账；连续两次恢复覆盖pending通知、alive Shell和stalled Agent，不因scope目录缺失假定已清空或回退PID。4文件42项定向回归通过。
 
 ### Computer-use Windows 管道修复（2026-11-06，未发包／部署）
 

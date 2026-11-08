@@ -339,7 +339,10 @@ export class BgEntityRegistry {
           const resource_result = await finishResourceScope(rec.resource_scope, null, null)
           const message = resourceFailure(resource_result) ?? 'Protected tool interrupted by Agent restart; not replayed; partial side effects may remain.'
           await fs.appendFile(rec.log_file, `\n${message}\n`)
-          if (resource_result.cleanup !== 'complete') throw new Error(message)
+          if (resource_result.cleanup !== 'complete') {
+            await this.update(rec.entity_id, { resource_result } as Partial<BgShellRegistryRecord>)
+            continue
+          }
           await this.update(rec.entity_id, { status: 'failed', exit_code: -1, ended_at: new Date().toISOString(), resource_result } as Partial<BgShellRegistryRecord>)
           const updated = await this.get(rec.entity_id)
           if (updated?.type === 'shell') addDeadShell(updated)
