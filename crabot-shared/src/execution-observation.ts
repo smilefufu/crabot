@@ -15,5 +15,13 @@ export interface ExecutionObservation {
   mcp_servers: string[]
   skills: string[]
   native_tools: null
+  resources?: ExecutionResources
   constraints: string[]
+}
+
+export interface ExecutionResources {
+  declared: { cpu: number | null; memory_bytes: number | null }
+  observed: { visible_cpu_count: number; cpu_quota: number | null; memory_bytes: number | null }
+  effective: { cpu_count: number; memory_bytes: number | null }
+  protection: 'unprotected' | 'cgroup_v2' | 'unavailable'
 }

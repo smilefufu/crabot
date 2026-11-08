@@ -1,6 +1,8 @@
 import { execFile, spawn, type ChildProcess, type StdioOptions } from 'node:child_process'
 import { buildChildEnv } from '../core/runtime-env'
 import { getDataRootDir } from '../core/data-paths'
+import { resourceChildEnv } from './tool-resources'
+import { prepareToolScope, scopedArgv, bindToolScope, finishResourceScope, finishToolResources, terminateToolScope, terminateToolScopeAndWait, resourceFailure, toolScopeForChild, stopResourceScope, type ToolResourceResult } from './tool-resource-scope'
 import { assertWorkspaceExecutionAllowed } from 'crabot-shared'
 
 export interface HostProcessLimits {
@@ -36,7 +38,7 @@ export interface HostProcessRunSpec extends HostProcessLaunchSpec {
   readonly captureStdout?: boolean
 }
 
-export type HostProcessOutcomeKind = 'exit' | 'spawn_error' | 'aborted' | 'timed_out' | 'output_limit'
+export type HostProcessOutcomeKind = 'exit' | 'spawn_error' | 'aborted' | 'timed_out' | 'output_limit' | 'resource_limit'
 
 export interface HostProcessOutcome {
   readonly kind: HostProcessOutcomeKind
@@ -47,6 +49,7 @@ export interface HostProcessOutcome {
   readonly stdoutBytes: number
   readonly stderrBytes: number
   readonly message?: string
+  readonly resources?: ToolResourceResult
 }
 
 const DEFAULT_KILL_GRACE_MS = 500
@@ -57,14 +60,28 @@ const DEFAULT_KILL_GRACE_MS = 500
  */
 export function launchHostProcess(spec: HostProcessLaunchSpec): ChildProcess {
   assertWorkspaceExecutionAllowed(getDataRootDir())
-  const [file, ...args] = spec.argv
-  const child = spawn(file, args, {
-    cwd: spec.cwd,
-    env: spec.env ?? buildChildEnv(),
-    stdio: spec.stdio ?? ['pipe', 'pipe', 'pipe'],
-    detached: spec.detached ?? process.platform !== 'win32',
-    windowsHide: true,
-  })
+  const requestedStdio = spec.stdio ?? ['pipe', 'pipe', 'pipe']
+  if (process.env.CRABOT_TOOL_CGROUP_ROOT && (!Array.isArray(requestedStdio) || requestedStdio.length !== 3)) {
+    throw new Error('RESOURCE_PROTECTION_UNAVAILABLE: protected tools require three explicit stdio channels')
+  }
+  const scope = prepareToolScope()
+  const [file, ...args] = scope ? scopedArgv(scope, spec.argv) : spec.argv
+  let child: ChildProcess
+  try {
+    child = spawn(file, args, {
+      cwd: spec.cwd,
+      env: resourceChildEnv(spec.env ?? buildChildEnv()),
+      stdio: scope ? [...(requestedStdio as Array<'pipe' | 'ignore' | number>), 'pipe'] : requestedStdio as StdioOptions,
+      detached: spec.detached ?? process.platform !== 'win32',
+      windowsHide: true,
+    })
+  } catch (error) {
+    if (scope) void finishResourceScope(scope, null, null, false).then(result => {
+      if (result.cleanup !== 'complete') console.error('[tool-resource]', result.message)
+    })
+    throw error
+  }
+  if (scope) bindToolScope(child, scope)
   child.on('error', () => {
     // runHostProcess / the owning background entity adds its own settlement handler.
   })
@@ -73,6 +90,7 @@ export function launchHostProcess(spec: HostProcessLaunchSpec): ChildProcess {
 
 /** Terminate the whole controlled process tree. Calling this repeatedly is harmless. */
 export function terminateHostProcessTree(pid: number, graceMs = DEFAULT_KILL_GRACE_MS): void {
+  if (terminateToolScope(pid)) return
   if (process.platform === 'win32') {
     execFile('taskkill', ['/F', '/T', '/PID', String(pid)], { env: buildChildEnv(), windowsHide: true }, () => {
       // A process can race us to exit; there is no further local recovery action.
@@ -126,6 +144,7 @@ function isDirectProcessAlive(pid: number): boolean {
 
 /** Terminate a controlled tree and wait until its process group has gone away. */
 export async function terminateHostProcessTreeAndWait(pid: number, graceMs = DEFAULT_KILL_GRACE_MS): Promise<void> {
+  if (await terminateToolScopeAndWait(pid)) return
   if (process.platform === 'win32') {
     await new Promise<void>((resolve) => {
       execFile('taskkill', ['/F', '/T', '/PID', String(pid)], { env: buildChildEnv(), windowsHide: true }, () => resolve())
@@ -149,6 +168,7 @@ export async function terminateHostProcessTreeAndWait(pid: number, graceMs = DEF
 }
 
 async function terminateDirectProcessAndWait(pid: number, graceMs: number): Promise<void> {
+  if (await terminateToolScopeAndWait(pid)) return
   if (process.platform === 'win32') {
     await new Promise<void>((resolve) => {
       execFile('taskkill', ['/F', '/T', '/PID', String(pid)], { env: buildChildEnv(), windowsHide: true }, () => resolve())
@@ -250,9 +270,20 @@ export function runHostProcess(spec: HostProcessRunSpec): Promise<HostProcessOut
       if (terminal !== undefined) return
       terminal = reason
       if (child.pid !== undefined) {
-        termination = spec.detached === false
-          ? terminateDirectProcessAndWait(child.pid, killGraceMs)
-          : terminateHostProcessTreeAndWait(child.pid, killGraceMs)
+        const scope = toolScopeForChild(child)
+        if (scope) {
+          termination = stopResourceScope(scope).then(resources => {
+            if (resources.cleanup !== 'complete') finish({
+              kind: 'resource_limit', exitCode: child.exitCode, signal: child.signalCode,
+              stdout: stdout.finish(), stderr: stderr.finish(), stdoutBytes: stdout.bytes(), stderrBytes: stderr.bytes(),
+              resources, message: resourceFailure(resources),
+            })
+          })
+        } else if (spec.detached === false) {
+          termination = terminateDirectProcessAndWait(child.pid, killGraceMs)
+        } else {
+          termination = terminateHostProcessTreeAndWait(child.pid, killGraceMs)
+        }
       }
     }
 
@@ -278,19 +309,26 @@ export function runHostProcess(spec: HostProcessRunSpec): Promise<HostProcessOut
       if (!stderr.push(chunk)) requestTermination('output_limit')
     })
     child.on('error', (error) => {
-      finish({
+      void finishToolResources(child, null, null).then(resources => finish({
         kind: 'spawn_error', exitCode: null, signal: null, stdout: stdout.finish(), stderr: stderr.finish(),
         stdoutBytes: stdout.bytes(), stderrBytes: stderr.bytes(),
         message: error instanceof Error ? error.message : String(error),
-      })
+        ...(resources ? { resources } : {}),
+      }))
     })
     child.on('close', (exitCode, signal) => {
       void (async () => {
         await termination
+        const resources = await finishToolResources(child, exitCode, signal)
+        const resourceError = resourceFailure(resources)
+        let kind: HostProcessOutcomeKind = terminal ?? 'exit'
+        if (resourceError) kind = 'resource_limit'
+        if (beforeStdinError || resources?.status === 'not_started') kind = 'spawn_error'
         finish({
-          kind: beforeStdinError ? 'spawn_error' : terminal ?? 'exit', exitCode, signal,
+          kind, exitCode, signal,
           stdout: stdout.finish(), stderr: stderr.finish(), stdoutBytes: stdout.bytes(), stderrBytes: stderr.bytes(),
-          ...(beforeStdinError ? { message: beforeStdinError } : {}),
+          ...(resources ? { resources } : {}),
+          ...(beforeStdinError || resourceError ? { message: beforeStdinError ?? resourceError } : {}),
         })
       })()
     })
@@ -304,9 +342,7 @@ export function runHostProcess(spec: HostProcessRunSpec): Promise<HostProcessOut
     }).catch((error) => {
       beforeStdinError = error instanceof Error ? error.message : String(error)
       if (child.pid !== undefined) {
-        termination = spec.detached === false
-          ? terminateDirectProcessAndWait(child.pid, killGraceMs)
-          : terminateHostProcessTreeAndWait(child.pid, killGraceMs)
+        requestTermination('aborted')
       }
     })
   })

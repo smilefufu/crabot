@@ -1,3 +1,4 @@
+import type { ToolResourceScope, ToolResourceResult } from '../tool-resource-scope.js'
 /**
  * Background entity 抽象：bg shell 和 bg sub-agent 共用同一组类型。
  * Spec: crabot-docs/superpowers/specs/2026-05-01-long-running-agent-design.md §6.1
@@ -42,6 +43,9 @@ interface BgEntityBase {
 
 export interface BgShellRegistryRecord extends BgEntityBase {
   readonly type: 'shell'
+  readonly resource_scope?: ToolResourceScope
+  resource_result?: ToolResourceResult
+  stop_requested_at?: string
   readonly command: string
   readonly log_file: string
   readonly pid: number

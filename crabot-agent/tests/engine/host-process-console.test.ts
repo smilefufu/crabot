@@ -13,7 +13,7 @@ it('background host tools request no Windows console while preserving argv, cwd,
   calls.spawn.mockReturnValue(new EventEmitter())
   launchHostProcess({ argv: ['powershell.exe', '-NonInteractive', '-Command', 'test'], cwd: '/fixture/project' })
   expect(calls.spawn).toHaveBeenCalledWith('powershell.exe', ['-NonInteractive', '-Command', 'test'], {
-    cwd: '/fixture/project', env: { TASK_ENV: 'preserved' }, stdio: ['pipe', 'pipe', 'pipe'], detached: false, windowsHide: true,
+    cwd: '/fixture/project', env: { TASK_ENV: 'preserved', PYTEST_XDIST_AUTO_NUM_WORKERS: expect.any(String) }, stdio: ['pipe', 'pipe', 'pipe'], detached: false, windowsHide: true,
   })
 })
 it('Windows controlled-tree termination does not create a taskkill terminal', async () => {

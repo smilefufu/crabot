@@ -1,3 +1,4 @@
+import { executionResourceContext } from '../engine/tool-resources.js'
 /**
  * Subagent prompt 拼装器
  *
@@ -78,5 +79,6 @@ export function assembleSubAgentPrompt(
     `- Caller: ${ctx.callerLabel}`,
   )
 
+  sections.push(executionResourceContext())
   return sections.join('\n')
 }

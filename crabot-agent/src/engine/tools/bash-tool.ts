@@ -1,3 +1,4 @@
+import { resourceFailure } from '../tool-resource-scope.js'
 import { randomUUID } from 'crypto'
 import * as fsp from 'fs/promises'
 import * as path from 'path'
@@ -179,7 +180,7 @@ async function execCommand(
       isError: true,
     }
   }
-  if (outcome.kind === 'spawn_error') {
+  if (outcome.kind === 'spawn_error' || outcome.kind === 'resource_limit') {
     return { output: await formatBashToolExecutionError(outcome.message ?? 'spawn failed', outcome.stdout, outcome.stderr), isError: true }
   }
   if (outcome.exitCode === null) {
@@ -219,7 +220,7 @@ async function runForegroundWithGrace(
 
   switch (result.kind) {
     case 'aborted':
-      return { output: 'Command execution result is unknown: command aborted', isError: true }
+      return { output: resourceFailure(result.resources) ?? 'Command execution result is unknown: command aborted', isError: true }
     case 'spawn_error':
       return { output: result.message, isError: true }
     case 'background': {
@@ -231,6 +232,8 @@ async function runForegroundWithGrace(
       }
     }
     case 'inline': {
+      const failure = resourceFailure(result.resources)
+      if (failure) return { output: await formatBashToolExecutionError(failure, result.stdout, result.stderr), isError: true }
       return {
         output: await formatBashToolOutput(result.exitCode, result.stdout, result.stderr),
         isError: false,
