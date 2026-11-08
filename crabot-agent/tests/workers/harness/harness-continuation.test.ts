@@ -323,6 +323,24 @@ it.each(['resume', 'handoff'] as const)('project identity, shared files and auth
 })
 
 describe('current permission updates keep the logical Worker', () => {
+  it.each(['builtin', 'claude-code', 'codex'] as const)('%s does not apply the same permission change again after host restart', async impl => {
+    let current = { ...structuredClone(BUILTIN_WORKER_PERMISSIONS), storage: { scope: 'all' as const, access: 'readwrite' as const } }
+    const resolvePermissions = async () => current
+    const { harness, adaptersMap } = await makeHarness({ resolvePermissions, assertExecutionPolicy })
+    const adapter = new FakeAdapter({ implId: impl, caps: { revive: true }, onStateChange: harness.handleStateChange })
+    adaptersMap.set(impl, adapter)
+    await harness.spawnWorker(spawnParams({ impl, principal_permissions: current }))
+    current = { ...current, tool_access: { ...current.tool_access, mcp_skill: false } }
+    await harness.refreshPermissions()
+    const delivered = adapter.sendInputCalls.length, resumed = adapter.resumeCalls.length, stopped = adapter.killCalls.length
+    const restored = await makeHarness({ resolvePermissions, assertExecutionPolicy })
+    restored.adaptersMap.set(impl, adapter)
+    await restored.harness.refreshPermissions()
+    expect(adapter.sendInputCalls).toHaveLength(delivered)
+    expect(adapter.resumeCalls).toHaveLength(resumed)
+    expect(adapter.killCalls).toHaveLength(stopped)
+  })
+
   it.each(['claude-code', 'codex'] as const)('%s stops before reprovisioning and does not revive a closed task', async impl => {
     let current = { ...structuredClone(BUILTIN_WORKER_PERMISSIONS), storage: { scope: 'all' as const, access: 'readwrite' as const } }
     const capabilities = vi.fn(async (_context: unknown) => ({ skills: [], mcp_servers: [] }))
