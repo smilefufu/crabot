@@ -470,8 +470,8 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     resolvePermissions: async (_worker, context) => {
       const target = context.target_session
       if (!target || context.manager_key !== `${target.channel_id}::${target.session_id}`) return null
-      return deps.principalResolver.resolvePermissions({ channelId: target.channel_id, sessionId: target.session_id,
-        sessionType: target.type, ...(target.type === 'private' && context.creator_friend_id ? { senderFriendId: context.creator_friend_id } : {}) })
+      return applyGroupScopeFallback(await deps.principalResolver.resolvePermissions({ channelId: target.channel_id, sessionId: target.session_id,
+        sessionType: target.type, ...(target.type === 'private' && context.creator_friend_id ? { senderFriendId: context.creator_friend_id } : {}) }), target.type, target.session_id)
     },
     requestGuard: () => requestGuard,
     adapters,

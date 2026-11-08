@@ -19,6 +19,7 @@ import { buildManagerStack, reconcileManagerStack, type BootstrapDeps } from '..
 import { LedgerStore } from '../../src/workers/harness/ledger-store.js'
 import { NativeActivityStore } from '../../src/workers/harness/native-activity-store.js'
 import { InputDeliveryStore } from '../../src/workers/harness/input-delivery-store.js'
+import { WorkerContextStore } from '../../src/workers/harness/context-store.js'
 import { QueryReceiptStore } from '../../src/workers/harness/query-receipt-store.js'
 import { WorkerControlOperationStore } from '../../src/workers/harness/worker-control-operation-store.js'
 import { BuiltinWorkerAdapter } from '../../src/workers/builtin/adapter.js'
@@ -187,6 +188,25 @@ describe('manager bootstrap（P5 Task 1）', () => {
       ...overrides,
     }
   }
+
+  it('keeps the group Memory fallback when refreshing an unchanged Worker authority', async () => {
+    const permissions = (await makePrincipalResolver().resolvePermissions({ channelId: 'wechat', sessionId: 'sess-boot', sessionType: 'group' }))!
+    permissions.memory_scopes = []
+    const stack = buildManagerStack(makeDeps({ principalResolver: { ...makePrincipalResolver(), resolvePermissions: async () => structuredClone(permissions) } }))
+    const key = 'wechat::sess-boot' as ManagerKey
+    const worker = makeLedgerWorker({ workerId: 'w-group-permissions', impl: 'builtin', spawnedBySession: key })
+    await stack.ledger.upsertWorker(key, worker.worker_id, () => worker)
+    await new WorkerContextStore(join(dataRoot, 'agent', 'workers')).write(worker.worker_id, {
+      manager_key: key, target_session: { channel_id: 'wechat', session_id: 'sess-boot', type: 'group' },
+      principal_permissions: { ...structuredClone(permissions), memory_scopes: ['sess-boot'] },
+    })
+    const send = vi.spyOn(stack.harness, 'sendToWorker').mockResolvedValue(undefined)
+    try {
+      await stack.harness.refreshPermissions()
+      expect(send).not.toHaveBeenCalled()
+      expect((await stack.harness.currentWorkerPermissions(worker.worker_id))?.memory_scopes).toEqual(['sess-boot'])
+    } finally { await stack.dispose() }
+  })
 
   it('permission saves notify the same private Manager without new human input or another Worker', async () => {
     const permissions = await makePrincipalResolver().resolvePermissions({ channelId: 'wechat', sessionId: 'sess-boot', sessionType: 'private', senderFriendId: FRIEND_A.id })
