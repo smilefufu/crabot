@@ -1,3 +1,4 @@
+import { executionResourceContext } from '../engine/tool-resources.js'
 import { guidanceCatalog } from '../guidance/catalog.js'
 /** Builtin Worker owns its complete prompt; model selection belongs to runtime configuration. */
 export interface BuiltinWorkerPromptOptions {
@@ -29,5 +30,6 @@ export function assembleBuiltinWorkerPrompt(options: BuiltinWorkerPromptOptions)
       '<workspace-agents-md>', options.workspaceInstructions, '</workspace-agents-md>',
     ].join('\n'))
   }
+  parts.push(executionResourceContext())
   return parts.join('\n\n')
 }

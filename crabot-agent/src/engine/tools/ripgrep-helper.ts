@@ -105,6 +105,7 @@ export function runRipgrep(
     onStdoutChunk: (chunk) => stdoutPrefix.push(chunk),
     limits: { timeoutMs, stdoutBytes: maxBytes, stderrBytes: 64 * 1024 },
   }).then((outcome) => {
+    if (outcome.kind === 'resource_limit') throw new Error(outcome.message ?? 'Tool resource result is unknown')
     if (outcome.kind === 'spawn_error') throw new Error(`ripgrep spawn failed: ${outcome.message ?? 'unknown error'}`)
     const signalCode = outcome.signal ? 128 + (signalNumber(outcome.signal) ?? 0) : 0
     return {

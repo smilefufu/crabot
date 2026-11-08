@@ -123,7 +123,7 @@ export class LocalHostToolExecutor {
     if (outcome.kind !== 'exit' || outcome.exitCode !== 0) {
       const detail = outcome.kind === 'exit'
         ? `helper exited with code ${outcome.exitCode ?? 'null'}${outcome.signal ? ` (${outcome.signal})` : ''}`
-        : outcome.kind
+        : outcome.message ?? outcome.kind
       if (outcome.stderr) console.error(`[local-host-tool] ${operation} ${callId}: ${detail}: ${outcome.stderr}`)
       return uncertainFailure(operation, detail)
     }

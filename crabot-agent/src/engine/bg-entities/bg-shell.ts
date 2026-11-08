@@ -1,3 +1,4 @@
+import { finishToolResources, toolScopeForChild, stopResourceScope, resourceFailure, type ToolResourceResult } from '../tool-resource-scope.js'
 /**
  * spawnPersistentShell — detached child_process spawn with disk log + BgEntityRegistry.
  *
@@ -168,6 +169,7 @@ export async function spawnPersistentShell(opts: SpawnPersistentShellOpts): Prom
 }
 
 async function startPersistentShell(opts: SpawnPersistentShellOpts): Promise<string> {
+  const spawnedAtMs = Date.now()
   const entity_id = `shell_${randomBytes(6).toString('hex')}`
   const logsDir = getBgEntitiesLogsDir()
 
@@ -220,9 +222,8 @@ async function startPersistentShell(opts: SpawnPersistentShellOpts): Promise<str
   })
 
   // Close our copy of the fd — child holds its own reference via stdio inheritance.
-  await logFd.close()
-
   if (!child.pid) {
+    await logFd.close()
     throw new Error('[bg-shell] Failed to spawn child process: no pid returned')
   }
 
@@ -234,9 +235,13 @@ async function startPersistentShell(opts: SpawnPersistentShellOpts): Promise<str
     const runtimeMs = exitedAt - spawnedAtMs
     void registeredPromise
       .then(async () => {
-        const observedStatus: 'completed' | 'failed' = exitCode === 0 ? 'completed' : 'failed'
+        const resources = await finishToolResources(child)
+        const failure = resourceFailure(resources)
+        if (failure) await fs.promises.appendFile(logFile, `\n${failure}\n`)
+        const observedStatus: 'completed' | 'failed' = exitCode === 0 && !failure ? 'completed' : 'failed'
         const updated = await opts.registry.update(entity_id, {
           status: observedStatus,
+          ...(resources ? { resource_result: resources } : {}),
           exit_code: exitCode,
           ended_at: new Date(exitedAt).toISOString(),
         } as Partial<BgShellRegistryRecord>)
@@ -276,13 +281,14 @@ async function startPersistentShell(opts: SpawnPersistentShellOpts): Promise<str
   // Unref so the host process event loop can exit without waiting for the child.
   child.unref()
 
-  const spawnedAtMs = Date.now()
+  await logFd.close()
   const processStartedAt = await readProcStartTime(child.pid)
   const now = new Date(spawnedAtMs).toISOString()
 
   const record: BgShellRegistryRecord = {
     entity_id,
     type: 'shell',
+    ...(toolScopeForChild(child) ? { resource_scope: toolScopeForChild(child) } : {}),
     status: 'running',
     command: opts.command,
     log_file: logFile,
@@ -337,9 +343,9 @@ export interface RunShellWithGraceOpts {
 }
 
 export type RunShellWithGraceResult =
-  | { kind: 'inline'; exitCode: number; status: 'completed' | 'failed'; stdout: string; stderr: string }
+  | { kind: 'inline'; exitCode: number; status: 'completed' | 'failed'; stdout: string; stderr: string; resources?: ToolResourceResult }
   | { kind: 'background'; entity_id: string }
-  | { kind: 'aborted' }
+  | { kind: 'aborted'; resources?: ToolResourceResult }
   | { kind: 'spawn_error'; message: string }
 
 async function unlinkQuiet(file: string): Promise<void> {
@@ -399,7 +405,7 @@ async function startShellWithGrace(opts: RunShellWithGraceOpts): Promise<RunShel
   })
 
   type Outcome =
-    | { kind: 'exit'; exitCode: number }
+    | { kind: 'exit'; exitCode: number; resources?: ToolResourceResult }
     | { kind: 'grace' }
     | { kind: 'abort' }
     | { kind: 'spawnerr'; message: string }
@@ -472,9 +478,13 @@ async function startShellWithGrace(opts: RunShellWithGraceOpts): Promise<RunShel
     const runtimeMs = exitedAt - spawnedAtMs
     await registeredPromise
     try {
-      const observedStatus: 'completed' | 'failed' = exitCode === 0 ? 'completed' : 'failed'
+      const resources = await finishToolResources(child)
+      const failure = resourceFailure(resources)
+      if (failure) await fs.promises.appendFile(logFile, `\n${failure}\n`)
+      const observedStatus: 'completed' | 'failed' = exitCode === 0 && !failure ? 'completed' : 'failed'
       const updated = await opts.registry.update(entity_id, {
         status: observedStatus,
+        ...(resources ? { resource_result: resources } : {}),
         exit_code: exitCode,
         ended_at: new Date(exitedAt).toISOString(),
       } as Partial<BgShellRegistryRecord>)
@@ -524,12 +534,10 @@ async function startShellWithGrace(opts: RunShellWithGraceOpts): Promise<RunShel
     }
   })
 
-  await logFd.close()
-
   child.on('exit', (code) => {
     const exitCode = code ?? -1
     if (!backgrounded) {
-      resolveRace({ kind: 'exit', exitCode })
+      void finishToolResources(child).then(resources => resolveRace({ kind: 'exit', exitCode, ...(resources ? { resources } : {}) }))
       return
     }
     // promotion 后退出：等注册完成 → 原子更新 terminal+pending → span + onShellExit
@@ -539,19 +547,23 @@ async function startShellWithGrace(opts: RunShellWithGraceOpts): Promise<RunShel
   })
 
   child.unref()
+  await logFd.close()
 
   const outcome = await racePromise
   cleanupListeners()
 
   if (outcome.kind === 'abort') {
-    if (child.pid) killShellTree(child.pid)
+    const scope = toolScopeForChild(child)
+    const resources = scope ? await stopResourceScope(scope) : undefined
+    if (!scope && child.pid) killShellTree(child.pid)
+    if (resources?.cleanup === 'unknown') return { kind: 'aborted', resources } // Retain logs for the unconfirmed execution.
     await unlinkQuiet(logFile)
     await unlinkQuiet(exitcodeFile)
     await unlinkQuiet(stdoutFile)
     await unlinkQuiet(stderrFile)
     await unlinkQuiet(stdoutFifo)
     await unlinkQuiet(stderrFifo)
-    return { kind: 'aborted' }
+    return { kind: 'aborted', ...(resources ? { resources } : {}) }
   }
 
   if (outcome.kind === 'spawnerr') {
@@ -574,8 +586,8 @@ async function startShellWithGrace(opts: RunShellWithGraceOpts): Promise<RunShel
     await unlinkQuiet(stderrFile)
     await unlinkQuiet(stdoutFifo)
     await unlinkQuiet(stderrFifo)
-    const status: 'completed' | 'failed' = outcome.exitCode === 0 ? 'completed' : 'failed'
-    return { kind: 'inline', exitCode: outcome.exitCode, status, stdout, stderr }
+    const status: 'completed' | 'failed' = outcome.exitCode === 0 && !resourceFailure(outcome.resources) ? 'completed' : 'failed'
+    return { kind: 'inline', exitCode: outcome.exitCode, status, stdout, stderr, ...(outcome.resources ? { resources: outcome.resources } : {}) }
   }
 
   // outcome.kind === 'grace'：转后台 → 注册 bgRegistry（命令不中断）。
@@ -592,6 +604,7 @@ async function startShellWithGrace(opts: RunShellWithGraceOpts): Promise<RunShel
   const record: BgShellRegistryRecord = {
     entity_id,
     type: 'shell',
+    ...(toolScopeForChild(child) ? { resource_scope: toolScopeForChild(child) } : {}),
     status: 'running',
     command: opts.command,
     log_file: logFile,

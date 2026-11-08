@@ -1070,10 +1070,11 @@ export interface ScheduleScriptExecutionDetails {
   ended_at?: string
   exit_code?: number
   signal?: string
-  failure_kind?: 'spawn_error' | 'nonzero_exit' | 'signal' | 'timeout' | 'output_limit' | 'aborted' | 'recovery'
+  failure_kind?: 'spawn_error' | 'nonzero_exit' | 'signal' | 'timeout' | 'output_limit' | 'aborted' | 'recovery' | 'resource_limit'
   stdout_bytes: number
   stderr_bytes: number
   output_tail?: string
+  resource_result?: import('./engine/tool-resource-scope.js').ToolResourceResult
 }
 
 export interface ScheduleResultDeliveryDetails {

@@ -208,4 +208,48 @@ describe('ScheduleScriptRunner', () => {
     )).toBe('123e4567-e89b-12d3-a456-426614174000')
     expect(() => parseScheduleScriptLauncherNonce('bash -s')).toThrow('schedule script launcher nonce unavailable')
   })
+  it('does not classify a resource-limited zero exit as successful or change its delivery target', async () => {
+    const f = await fixture(undefined, { runProcess: async spec => {
+      await spec.beforeStdin?.({ pid: 777 } as import('node:child_process').ChildProcess)
+      return { kind: 'resource_limit', exitCode: 0, signal: null, stdout: '', stderr: '', stdoutBytes: 0, stderrBytes: 0,
+        resources: { status: 'limit', exit_code: 0, signal: null, memory_events: {}, pids_events: { max: 1 }, memory_peak_bytes: 0, cleanup: 'complete' } }
+    } })
+    const targetSession = { channel_id: 'telegram', session_id: 'private-1', type: 'private' as const }
+    await f.runner.admit({ scheduleId: 's-resource', triggerId: 't-resource', scheduleName: 'resource', source: 'fixture', sourceSha256: 'original-source',
+      timeoutSeconds: 2, deliverResult: true, targetSession })
+    await waitUntil(async () => (await fs.readdir(f.markerDir)).length === 0)
+    expect(f.deliver).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'failed', targetSession, sourceSha256: 'original-source', exitCode: 0 }))
+    expect(f.traceStore.getTraces(10, 0).traces[0].spans[0].details).toMatchObject({ outcome: 'failed', failure_kind: 'resource_limit', resource_result: { cleanup: 'complete' } })
+  })
+
+  it.each([null, 0, { version: 0 }])('retains unverifiable scope %j without signalling a PID or claiming recovery', async resource_scope => {
+    const terminateProcess = vi.fn().mockResolvedValue(undefined)
+    const f = await fixture(undefined, { terminateProcess })
+    await fs.mkdir(f.markerDir, { recursive: true })
+    const marker = { schema_version: 1, schedule_id: 's', trigger_id: 't', source_sha256: 'original', pid: 101,
+      process_start_identity: 'old', created_at: new Date().toISOString(), resource_scope }
+    await fs.writeFile(path.join(f.markerDir, 'unknown.json'), JSON.stringify(marker))
+    await f.runner.recover()
+    expect(terminateProcess).not.toHaveBeenCalled()
+    expect(await fs.readdir(f.markerDir)).toEqual(['unknown.json'])
+    expect(f.traceStore.getTraces(10, 0).traces).toHaveLength(0)
+  })
+
+  it('retains marker and overlap admission when resource cleanup is unknown', async () => {
+    let executions = 0
+    const f = await fixture(undefined, { runProcess: async spec => {
+      executions++
+      await spec.beforeStdin?.({ pid: 777 } as import('node:child_process').ChildProcess)
+      return { kind: 'resource_limit', exitCode: null, signal: null, stdout: '', stderr: '', stdoutBytes: 0, stderrBytes: 0,
+        resources: { status: 'unknown', exit_code: null, signal: null, memory_events: {}, pids_events: {}, memory_peak_bytes: null, cleanup: 'unknown' } }
+    } })
+    const run = { scheduleId: 's-unknown', triggerId: 't-unknown', scheduleName: 'unknown', source: 'fixture', sourceSha256: 'original',
+      timeoutSeconds: 2, deliverResult: true, targetSession: { channel_id: 'telegram', session_id: 'private-1', type: 'private' as const } }
+    await f.runner.admit(run)
+    await waitUntil(() => f.deliver.mock.calls.length === 1)
+    await f.runner.admit({ ...run, triggerId: 'next-trigger' })
+    expect(executions).toBe(1)
+    expect(await fs.readdir(f.markerDir)).toEqual(['t-unknown.json'])
+  })
+
 })
