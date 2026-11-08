@@ -7,7 +7,7 @@ export type RequestOperationDecision =
   | { allowed: true; source: Pick<RequestPermissionSource, 'kind' | 'subject_id'> }
   | { allowed: false; reason: string }
 
-/** Applies the same complete operation to a fixed source ceiling and its current authority. */
+/** Keeps the original source identity; permissions always come from its current authority. */
 export class RequestPermissionGate {
   private readonly ceilings: ResolveRequestPermissionSourcesResult
   constructor(
@@ -39,8 +39,6 @@ export class RequestPermissionGate {
     for (const kind of ['group', 'friend'] as const) {
       const ceiling = this.ceilings[kind]
       if (!ceiling) continue
-      const original = await check(structuredClone(ceiling)); remember(original)
-      if (!original.allowed) continue
       let current: RequestPermissionSource | null
       try { current = structuredClone(await this.resolveCurrent(kind)) }
       catch { unavailable = true; continue }

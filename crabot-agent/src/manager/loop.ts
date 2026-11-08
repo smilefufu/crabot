@@ -135,6 +135,7 @@ export type WakeEvent =
     }
   | { readonly kind: 'worker_event'; readonly event: HarnessEvent; readonly dailyReflection?: { runId: string; scheduleId: string; targetSession: { channel_id: string; session_id: string; type: 'private' | 'group' } } }
   | { readonly kind: 'media_notification'; readonly text: string }
+  | { readonly kind: 'permission_update'; readonly configRevision: number }
   | { readonly kind: 'voice_delivery'; readonly results: ReadonlyArray<import('./voice-output.js').VoicePendingResult> }
   | { readonly kind: 'voice_management'; readonly result: import('crabot-shared').VoiceAgentManagementResult }
   | {
@@ -276,6 +277,7 @@ export interface ManagerLoopDeps {
    * promptInputs "每轮重算"的更细粒度热更不同(那两个是 per-turn,这两个是 per-episode)。
    */
   readonly adapter: () => LLMAdapter
+  readonly prepareTools?: (wakeEvent?: WakeEvent) => Promise<void>
   readonly observeTools?: (key: ManagerKey, episodeId: string, tools: ReadonlyArray<ToolDefinition>) => Promise<void>
   readonly model: () => string
   /**
@@ -2421,6 +2423,7 @@ export class ManagerLoop {
       supportsVision: this.deps.supportsVision?.() ?? false,
       systemPrompt,
       tools,
+      prepareTools: () => this.deps.prepareTools?.(this.effectiveWakeForCurrentEpisode()) ?? Promise.resolve(),
       createTextConsumer: this.voiceOutput ? () => this.voiceOutput!.consumer() : undefined,
       model,
       maxTurns: this.deps.maxTurns,
@@ -2693,6 +2696,8 @@ export function managerTriggerFromWake(envelope: TimedWakeEnvelope | undefined, 
       return { type: 'system', summary: `语音结果投递${mergedNote}` }
     case 'voice_management':
       return { type: 'system', summary: `语音登记结果${mergedNote}` }
+    case 'permission_update':
+      return { type: 'system', summary: `原主体权限更新${mergedNote}` }
     case 'media_notification':
       return { type: 'worker_event', summary: `媒体下载完成${mergedNote}` }
     default: {
@@ -3117,6 +3122,8 @@ function renderWakeEvent(event: WakeEvent, envelope: TimedWakeEnvelope, quotedMe
       return (event.results.some(item => item.status !== 'completed') ? VOICE_PENDING_RESULTS_PROMPT + '\n' : '') + JSON.stringify({ voice_delivery_results: event.results })
     case 'voice_management':
       return VOICE_MANAGEMENT_RESULT_PROMPT + '\n' + JSON.stringify(event.result)
+    case 'permission_update':
+      return '[宿主权限更新] 原授权主体的当前权限已变化。核对当前工具，继续原事项中尚未完成的工作。没有新的人类指令；不要重做已完成或结果未知的操作，也不要重复已交付的消息。已有请求与 Worker 继续使用原绑定，不新建替代任务。'
     case 'media_notification':
       return `[媒体下载完成]\n${event.text}`
     case 'schedule':

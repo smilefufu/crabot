@@ -17,7 +17,7 @@ export interface BoundWorkerRequest {
   request: ConversationRequestRecord
   source: TrustedHumanInput
 }
-function workerSource(source: RequestPermissionSource): RequestPermissionSource {
+export function workerRequestSource(source: RequestPermissionSource): RequestPermissionSource {
   return { ...source, resolved: { ...narrowWorkerPermissions(BUILTIN_WORKER_PERMISSIONS, source.resolved), cli_access: workerCliExecutionPermissions(source.resolved).cli_access } }
 }
 
@@ -54,11 +54,18 @@ export class WorkerRequestGuard {
     if (!bound) throw new Error('Worker has no request binding')
     if (bound.worker.task.status === 'closed') throw new Error('Worker is closed')
     const authority = new ConversationRequestAuthority(this.requests, bound.worker.manager_key, bound.request.request_id, bound.worker.origin.request!.execution_scope, this.resolveCurrent)
-    return authority.run(source => checkCompleteOperation(workerSource(source)), async frame => {
+    return authority.run(source => checkCompleteOperation(workerRequestSource(source)), async frame => {
       const current = await this.load(workerId)
       if (!current || current.worker.task.status === 'closed' || !isDeepStrictEqual(current.worker.origin.request, bound.worker.origin.request)) throw new Error('Worker request changed or closed')
-      return execute({ ...frame, ceiling: workerSource(frame.ceiling), current: workerSource(frame.current) })
+      return execute({ ...frame, ceiling: workerRequestSource(frame.ceiling), current: workerRequestSource(frame.current) })
     })
+  }
+  async currentSources(workerId: string): Promise<RequestPermissionSource[]> {
+    const bound = await this.load(workerId)
+    if (!bound || bound.worker.task.status === 'closed') throw new Error('CAPABILITY_UNKNOWN: Worker source unavailable or closed')
+    const authority = new ConversationRequestAuthority(this.requests, bound.worker.manager_key, bound.request.request_id,
+      bound.worker.origin.request!.execution_scope, this.resolveCurrent)
+    return (await authority.currentSources()).map(workerRequestSource)
   }
   async authorizeControl(workerId: string, caller: ConversationRequestAuthority, checkCompleteOperation: (source: RequestPermissionSource) => Promise<PermissionDecision>): Promise<void> {
     const found = await this.ledger.findWorker(workerId)

@@ -75,9 +75,9 @@ describe('Worker request guard never borrows a neighbouring speaker or legacy sn
     const oldMaster = await caller('master'); people.get('master')!.permission = 'normal'
     await expect(guard.authorizeControl('w-owner', oldMaster, async () => allowed)).rejects.toThrow(/PERMISSION_DENIED/)
   })
-  it('later role grants never promote an old peer source into Master control', async () => {
+  it('applies a real Master grant to the same original friend without borrowing another identity', async () => {
     const peer = await caller('peer'); people.get('peer')!.permission = 'master'
-    await expect(guard.authorizeControl('w-owner', peer, async () => allowed)).rejects.toThrow(/PERMISSION_DENIED/)
+    await expect(guard.authorizeControl('w-owner', peer, async () => allowed)).resolves.toBeUndefined()
     await expect(guard.authorizeControl('w-owner', await caller('peer', 'new-master-message'), async () => allowed)).resolves.toBeUndefined()
   })
   it('keeps public group collaboration while personal internals require the isolated context', async () => {
@@ -286,6 +286,27 @@ describe('Worker request guard never borrows a neighbouring speaker or legacy sn
     })
     return { scope, write, bash, output, disable: () => { configured = false } }
   }
+  it('refreshes the same Worker candidates after a grant and rejects its old tool after revocation', async () => {
+    const original = current.getMockImplementation()!
+    let shell = false
+    current.mockImplementation(async (kind, source) => {
+      const actor = await original(kind, source)
+      return actor ? { ...actor, resolved: { ...actor.resolved, tool_access: { ...actor.resolved.tool_access, shell } } } : null
+    })
+    const { scope, bash } = await resourceTools()
+    await scope.refresh()
+    expect(scope.tools().some(tool => tool.name === 'Bash')).toBe(false)
+    shell = true
+    await scope.refresh()
+    const tool = scope.tools().find(tool => tool.name === 'Bash')!
+    expect(tool).toBeDefined()
+    expect((await tool.call({ command: 'fixture' })).isError).toBe(false)
+    shell = false
+    expect((await tool.call({ command: 'fixture' })).isError).toBe(true)
+    expect(bash).toHaveBeenCalledOnce()
+    expect((await guard.load('w-owner'))!.worker.worker_id).toBe('w-owner')
+  })
+
   it('uses actual current tool closures and preserves read-A/write-B without splicing permissions', async () => {
     const { scope, write } = await resourceTools(), tool = scope.tools().find(tool => tool.name === 'Write')!
     expect((await tool.call({ file_path: path.join(root, 'b/result'), content: 'own result' })).isError).toBe(false)

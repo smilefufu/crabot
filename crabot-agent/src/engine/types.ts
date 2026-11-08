@@ -505,6 +505,8 @@ export interface EngineOptions {
   readonly configChangedSignal?: AbortSignal
   readonly configGeneration?: () => number
   readonly onConfigChanged?: () => Promise<LLMConfigSwap | void>
+  /** Refresh host authorization before resolving this turn’s tool candidates. */
+  readonly prepareTools?: () => void | Promise<void>
   /** 已组装本轮 messages、即将调用 Provider 前的内部准入观察点。 */
   readonly onBeforeLlmCall?: (tools: ReadonlyArray<ToolDefinition>) => void | Promise<void>
   /**

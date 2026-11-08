@@ -4,7 +4,7 @@ import path from 'node:path'
 import { canonicalizeJson } from 'crabot-shared'
 import { durableAtomicWriteFile, durableRemoveFile } from './durable-file.js'
 
-export type ConfigDomain = 'models' | 'image' | 'mcp' | 'skills' | 'subagents' | 'worker_implementations' | 'behavior'
+export type ConfigDomain = 'models' | 'image' | 'mcp' | 'skills' | 'subagents' | 'worker_implementations' | 'behavior' | 'permissions'
 
 export interface CoreAgentConfigRevisionRecord {
   schema_version: 1
@@ -96,6 +96,7 @@ const CONFIG_DOMAINS = new Set<ConfigDomain>([
   'subagents',
   'worker_implementations',
   'behavior',
+  'permissions',
 ])
 
 function assertDomains(domains: ConfigDomain[]): void {

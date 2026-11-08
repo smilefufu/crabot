@@ -98,7 +98,7 @@ export function createConversationRequestLoop(context: RequestRunContext, deps: 
       }
     } })
     return {
-      ...(source.message.features.voice && actor.kind === 'friend' && actor.is_master && request.permission_sources.friend?.is_master && host.coreRuntimeBearer ? {
+      ...(source.message.features.voice && actor.kind === 'friend' && actor.is_master && host.coreRuntimeBearer ? {
         voiceManagement: {
           context: { request_id: request.request_id, source: requestSourceFor(source), turn_id: source.message.features.voice.turn_id, delivery: request.delivery.kind },
           call: async (input: import('crabot-shared').VoiceAgentActionParams): Promise<import('crabot-shared').VoiceAgentManagementResult> => {
@@ -112,6 +112,7 @@ export function createConversationRequestLoop(context: RequestRunContext, deps: 
       } : {}),
       harness: deps.harness, requestGuard: deps.guard, requestAuthorization: 'request',
       workerRequestControl: { scope: 'request', authority: async () => context.authority },
+      resolveWorkerPermissions: workerId => deps.harness.currentWorkerPermissions(workerId),
       readExecutionObservation: (workerId, incarnationId, impl) => readObservation(observationFile(path.join(host.dataRoot, 'agent', 'workers'), workerId, incarnationId),
         executionObservation({ role: 'worker', impl, source: 'legacy', state: 'legacy_unknown', worker_id: workerId, incarnation_id: incarnationId, constraints: ['无该化身记录，历史工具未知。'] })),
       workerImplSnapshot: host.workerImplSnapshot, describeExecutionTools: host.describeExecutionTools,
@@ -180,26 +181,25 @@ export function createConversationRequestLoop(context: RequestRunContext, deps: 
     }
     // Preserve configured query/label scopes without changing Memory's coarse visibility policy.
     if (name.startsWith('mcp__crab-memory__')) {
-      const memoryTarget = request.permission_sources.friend?.resolved.tool_access.memory
-        ? request.permission_sources.friend : request.permission_sources.group
-      if (memoryTarget.is_master && !actor.is_master) return denied('PERMISSION_DENIED', 'Master记忆来源未获授权')
-      const ceiling = request.permission_sources[actor.kind]!
-      const before = requestMemoryScopes(ceiling, target.session_id), now = requestMemoryScopes(actor, target.session_id)
-      if (before.length > 0 && now.length > 0 && !before.some(scope => now.includes(scope))) return denied('PERMISSION_DENIED', 'Memory配置范围已变化，原请求没有可沿用的查询范围')
       if (request.delivery.kind === 'requester_private' && !PRIVATE_MEMORY_READS.has(name.replace('mcp__crab-memory__', ''))
         && !(actor.is_master && ['mcp__crab-memory__store_memory', 'mcp__crab-memory__quick_capture'].includes(name))) return denied('PERMISSION_DENIED', '私发上下文只允许新建私人记忆')
     }
     return allowed
   } })
   // The union below is used ONLY by catalog visibility; every actual tool is decorated.
-  const candidate = structuredClone(request.permission_sources.group.resolved)
-  for (const actor of [request.permission_sources.group, request.permission_sources.friend]) if (actor) {
-    for (const entry of Object.keys(candidate.tool_access) as Array<keyof typeof candidate.tool_access>) candidate.tool_access[entry] ||= actor.resolved.tool_access[entry]
-    for (const domain of Object.keys(candidate.cli_access) as Array<keyof typeof candidate.cli_access>) {
-      if (actor.resolved.cli_access[domain] === 'write' || candidate.cli_access[domain] === 'none') candidate.cli_access[domain] = actor.resolved.cli_access[domain]
+  let actors = [request.permission_sources.group, ...(request.permission_sources.friend ? [request.permission_sources.friend] : [])]
+  const candidatePermissions = () => {
+    const candidate = structuredClone(actors[0].resolved)
+    for (const actor of actors) {
+      for (const entry of Object.keys(candidate.tool_access) as Array<keyof typeof candidate.tool_access>) candidate.tool_access[entry] ||= actor.resolved.tool_access[entry]
+      for (const domain of Object.keys(candidate.cli_access) as Array<keyof typeof candidate.cli_access>) {
+        if (actor.resolved.cli_access[domain] === 'write' || candidate.cli_access[domain] === 'none') candidate.cli_access[domain] = actor.resolved.cli_access[domain]
+      }
     }
+    return candidate
   }
   loop = new ManagerLoop({ key, managerKey: () => key, isSystemThread: false, store: context.store,
+    prepareTools: async () => { actors = await context.authority.currentSources() },
     policy: deps.policy, adapter: host.managerAdapter, model: host.managerModel,
     observeTools: async (_key, episodeId, tools) => persistObservation(path.join(deps.root, request.request_id, 'execution-observation.json'),
       requestObservation(tools, { role: 'manager', impl: 'manager', source: 'manager_request', constraints: [`episode=${episodeId}`] })),
@@ -207,12 +207,13 @@ export function createConversationRequestLoop(context: RequestRunContext, deps: 
     thinking: host.managerThinking, contextWindowTokens: host.managerContextWindowTokens,
     // No automatic quoted-message/history prefetch across the request boundary.
     toolFace: (_wake, faceState) => {
-      const base = raw(request.permission_sources.group)
+      const base = raw(actors[0])
+      const friendActor = actors.find(actor => actor.kind === 'friend')
       const candidates = new Map<string, NonNullable<ToolFaceDeps['externalMcpTools']>[number]>()
-      for (const actor of [request.permission_sources.group, request.permission_sources.friend]) if (actor) for (const tool of raw(actor).externalMcpTools ?? []) candidates.set(tool.name, tool)
+      for (const actor of actors) for (const tool of raw(actor).externalMcpTools ?? []) candidates.set(tool.name, tool)
       return buildManagerToolFace({ ...base,
-        ...(request.permission_sources.friend ? { voiceManagement: raw(request.permission_sources.friend).voiceManagement } : {}),
-        faceState, candidatePermissions: candidate, externalMcpTools: [...candidates.values()], decorateTool: scope.decorate })
+        ...(friendActor ? { voiceManagement: raw(friendActor).voiceManagement } : {}),
+        faceState, candidatePermissions: candidatePermissions(), externalMcpTools: [...candidates.values()], decorateTool: scope.decorate })
     },
     promptInputs: () => ({ isGroup: true, requestAuthorization: 'request',
       dialogProfile: JSON.stringify({ request_id: request.request_id, source: requestSourceFor(source), original_message: source.message, selection: request.selection, delivery: request.delivery }),

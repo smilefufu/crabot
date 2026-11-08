@@ -32,7 +32,9 @@ import { recordEngineLlmResponse, recordEngineToolLifecycle, recordSubAgentTurn 
 export interface SpawnPersistentAgentOpts {
   /** Only builtin direct children enable multi-burst execution and child-bound tools. */
   readonly createExecution?: (entityId: string, signal: AbortSignal) => {
-    tools: ReadonlyArray<ToolDefinition>
+    tools: import('../types.js').Resolvable<ReadonlyArray<ToolDefinition>>
+    prepareTools?: EngineOptions['prepareTools']
+    getResolvedPermissions?: EngineOptions['getResolvedPermissions']
     observeTools?: EngineOptions['onBeforeLlmCall']
     drainExternalInputs: NonNullable<EngineOptions['drainExternalInputs']>
     hasPendingExternalInputs: NonNullable<EngineOptions['hasPendingExternalInputs']>
@@ -242,7 +244,9 @@ async function startPersistentAgent(opts: SpawnPersistentAgentOpts): Promise<str
           adapter: opts.adapter,
           options: {
             systemPrompt: opts.systemPrompt,
-            tools: [...(execution?.tools ?? opts.tools)],
+            tools: execution?.tools ?? opts.tools,
+            prepareTools: execution?.prepareTools,
+            getResolvedPermissions: execution?.getResolvedPermissions,
             ...(execution ? {
               drainExternalInputs: execution.drainExternalInputs,
               hasPendingExternalInputs: execution.hasPendingExternalInputs,

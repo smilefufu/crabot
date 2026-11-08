@@ -48,6 +48,7 @@ function makeMemoryServer() {
 /** 测试的显式会话权限，不用解析失败模拟默认允许。 */
 function makePrincipalResolver(): PrincipalResolverDeps {
   return {
+    getFriend: async id => ({ ...FRIEND_A, id }),
     resolvePermissions: async () => ({
       tool_access: { memory: true, messaging: true, task: true, mcp_skill: true, file_io: true,
         browser: true, shell: true, remote_exec: false, desktop: false },
@@ -186,6 +187,28 @@ describe('manager bootstrap（P5 Task 1）', () => {
       ...overrides,
     }
   }
+
+  it('permission saves notify the same private Manager without new human input or another Worker', async () => {
+    const permissions = await makePrincipalResolver().resolvePermissions({ channelId: 'wechat', sessionId: 'sess-boot', sessionType: 'private', senderFriendId: FRIEND_A.id })
+    permissions!.tool_access.shell = false
+    const calls: LLMStreamParams[] = []
+    const stack = buildManagerStack(makeDeps({ principalResolver: { ...makePrincipalResolver(), resolvePermissions: async () => structuredClone(permissions) },
+      managerAdapter: () => ({ updateConfig() {}, async *stream(params) { calls.push({ ...params, messages: structuredClone(params.messages) }); yield* chunksFromContent([], 'end_turn') } }),
+    }))
+    await stack.principals.init()
+    try {
+      await stack.registry.routeHumanMessages('wechat', 'sess-boot', [makeChannelMessage('权限开放后继续原事项')], FRIEND_A)
+      permissions!.tool_access.shell = true
+      await stack.refreshPermissions(2)
+      await vi.waitFor(() => expect(calls).toHaveLength(2))
+      expect(JSON.stringify(calls[1].messages)).toContain('[宿主权限更新]')
+      expect(stack.principals.get('wechat::sess-boot')?.principal.friend?.id).toBe(FRIEND_A.id)
+      expect(stack.principals.get('wechat::sess-boot')?.permissions?.tool_access.shell).toBe(true)
+      expect(await stack.ledger.listAllWorkers()).toEqual([])
+      await stack.refreshPermissions(2)
+      expect(calls).toHaveLength(2)
+    } finally { await stack.dispose() }
+  })
 
   it('discovers wire 7 and assembles the voice reply prompt and streaming output together', async () => {
     const requests: LLMStreamParams[] = []
@@ -1642,6 +1665,8 @@ describe('manager bootstrap（P5 Task 1）', () => {
         if (calls.length === 1) await gate
         active--
       })
+      // This scheduler fixture intentionally has no executable Worker records.
+      vi.spyOn(stack.harness, 'refreshPermissions').mockResolvedValue(undefined)
       const first = stack.startContinuationReconciliation()
       let second: Promise<void> | undefined
       try {

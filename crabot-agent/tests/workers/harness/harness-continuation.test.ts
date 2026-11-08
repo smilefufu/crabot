@@ -1,4 +1,3 @@
-import { BUILTIN_WORKER_PERMISSIONS } from '../../../src/workers/builtin/runtime.js'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { promises as fs } from 'fs'
 import { tmpdir } from 'os'
@@ -321,6 +320,71 @@ it.each(['resume', 'handoff'] as const)('project identity, shared files and auth
   const contextAfter = JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'context.json'), 'utf8'))
   expect(contextAfter.principal_permissions).toEqual(contextBefore.principal_permissions)
   expect(await fs.readFile(join(project, 'result.txt'), 'utf8')).toBe('shared result')
+})
+
+describe('current permission updates keep the logical Worker', () => {
+  it.each(['claude-code', 'codex'] as const)('%s stops before reprovisioning and does not revive a closed task', async impl => {
+    let current = { ...structuredClone(BUILTIN_WORKER_PERMISSIONS), storage: { scope: 'all' as const, access: 'readwrite' as const } }
+    const capabilities = vi.fn(async (_context: unknown) => ({ skills: [], mcp_servers: [] }))
+    const { harness, adaptersMap } = await makeHarness({ resolvePermissions: async () => current, capabilityBundle: capabilities, assertExecutionPolicy })
+    const adapter = new FakeAdapter({ implId: impl, caps: { revive: true }, onStateChange: harness.handleStateChange })
+    adaptersMap.set(impl, adapter)
+    const worker = await harness.spawnWorker(spawnParams({ impl, principal_permissions: current }))
+    const origin = structuredClone(worker.origin), reportTo = structuredClone(worker.report_to)
+    current = { ...current, tool_access: { ...current.tool_access, shell: false } }
+    await harness.refreshPermissions()
+    expect(adapter.killCalls).toHaveLength(1)
+    expect(adapter.resumeCalls).toHaveLength(0)
+    expect((await harness.findWorker(worker.worker_id))!.worker.task.status).not.toBe('closed')
+    current = { ...current, tool_access: { ...current.tool_access, shell: true, mcp_skill: false } }
+    await harness.refreshPermissions()
+    expect(adapter.resumeCalls).toHaveLength(1)
+    expect(adapter.provisionCalls).toHaveLength(2)
+    expect(capabilities.mock.calls.at(-1)![0]).toMatchObject({ worker_id: worker.worker_id, principal_permissions: current })
+    const updated = (await harness.findWorker(worker.worker_id))!.worker
+    expect(updated.origin).toEqual(origin); expect(updated.report_to).toEqual(reportTo)
+    expect(updated.incarnations).toHaveLength(2)
+    await harness.refreshPermissions()
+    expect(adapter.resumeCalls).toHaveLength(1)
+    await harness.killWorker(worker.worker_id)
+    current = { ...current, tool_access: { ...current.tool_access, mcp_skill: true } }
+    await harness.refreshPermissions()
+    expect(adapter.resumeCalls).toHaveLength(1)
+  })
+
+  it.each(['claude-code', 'codex'] as const)('%s stops on authority failure and resumes after host restart with the same permissions', async impl => {
+    const current = { ...structuredClone(BUILTIN_WORKER_PERMISSIONS), storage: { scope: 'all' as const, access: 'readwrite' as const } }
+    let unavailable = false
+    const resolvePermissions = async () => { if (unavailable) throw new Error('authority unavailable'); return current }
+    const { harness, adaptersMap } = await makeHarness({ resolvePermissions, assertExecutionPolicy })
+    const adapter = new FakeAdapter({ implId: impl, caps: { revive: true }, onStateChange: harness.handleStateChange })
+    adaptersMap.set(impl, adapter)
+    const worker = await harness.spawnWorker(spawnParams({ impl, principal_permissions: current }))
+    unavailable = true
+    await harness.refreshPermissions()
+    expect(adapter.killCalls).toHaveLength(1); expect(adapter.resumeCalls).toHaveLength(0)
+    unavailable = false
+    const restored = await makeHarness({ resolvePermissions, assertExecutionPolicy })
+    restored.adaptersMap.set(impl, adapter)
+    await restored.harness.refreshPermissions()
+    expect(adapter.resumeCalls).toHaveLength(1)
+    expect((await restored.harness.findWorker(worker.worker_id))!.worker.origin).toEqual(worker.origin)
+  })
+
+  it.each(['claude-code', 'codex'] as const)('%s cannot start a replacement while carrier stop is unconfirmed', async impl => {
+    let current = { ...structuredClone(BUILTIN_WORKER_PERMISSIONS), storage: { scope: 'all' as const, access: 'readwrite' as const } }
+    const { harness, adaptersMap } = await makeHarness({ resolvePermissions: async () => current, assertExecutionPolicy })
+    const adapter = new FakeAdapter({ implId: impl, caps: { revive: true }, onStateChange: harness.handleStateChange })
+    adaptersMap.set(impl, adapter)
+    const worker = await harness.spawnWorker(spawnParams({ impl, principal_permissions: current }))
+    vi.spyOn(adapter, 'kill').mockResolvedValue(undefined)
+    current = { ...current, tool_access: { ...current.tool_access, mcp_skill: false } }
+    await harness.refreshPermissions()
+    expect(adapter.kill).toHaveBeenCalledOnce()
+    expect(adapter.resumeCalls).toHaveLength(0)
+    expect(adapter.provisionCalls).toHaveLength(1)
+    expect((await harness.findWorker(worker.worker_id))!.worker.incarnations).toHaveLength(1)
+  })
 })
 
 describe('WorkerHarness — 透明接续：revive (capabilities().revive === true)', () => {

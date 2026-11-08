@@ -45,6 +45,8 @@ import {
 } from './tool-catalog.js'
 
 export interface ToolFaceDeps {
+  readonly preparePermissions?: () => Promise<void>
+  readonly resolveWorkerPermissions?: (workerId: string) => Promise<import('../../types.js').ResolvedPermissions | null>
   readonly voiceManagement?: VoiceManagementPort
   /** Host request boundary applied before catalog projection, including MCP refresh. */
   readonly decorateTool?: (tool: ToolDefinition) => ToolDefinition
@@ -685,7 +687,11 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
         return access === 'read' || access === 'write' ? allowed : denied('PERMISSION_DENIED', '查询其他主体需要 permission 域读取授权')
       } }
     }
-    const tool = authorizeTool(original, policy)
+    const currentPolicy = policy
+    const tool = authorizeTool(original, { ...currentPolicy, async check(input) {
+      await currentDeps().preparePermissions?.()
+      return currentPolicy.check(input)
+    } })
     if (!dailyProfile || !deps.dailyReflection || tool.name !== 'send_daily_reflection_summary') return tool
     return { ...tool, async call(input, context) {
       const result = await tool.call(input, context)

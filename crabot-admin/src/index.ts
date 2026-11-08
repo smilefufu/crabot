@@ -4551,6 +4551,10 @@ export class AdminModule extends ModuleBase {
   }
 
   private async handleUpdateFriend(params: UpdateFriendParams): Promise<{ friend: Friend }> {
+    return this.commitPermissionChange(() => this.applyUpdateFriend(params))
+  }
+
+  private async applyUpdateFriend(params: UpdateFriendParams): Promise<{ friend: Friend }> {
     let existing = this.friends.get(params.friend_id)
     if (!existing) {
       throw new Error('Friend not found')
@@ -4589,13 +4593,16 @@ export class AdminModule extends ModuleBase {
       updated_at: generateTimestamp(),
     }
 
-    this.friends.set(friend.id, friend)
-    await this.saveData()
-
+    const next = new Map(this.friends).set(friend.id, friend)
+    await this.persistPermissionStore(this.friendsFilePath, Array.from(next.values()), () => { this.friends.set(friend.id, friend) })
     return { friend }
   }
 
   private async handleDeleteFriend(params: { friend_id: FriendId }): Promise<{ deleted: true }> {
+    return this.commitPermissionChange(() => this.applyDeleteFriend(params))
+  }
+
+  private async applyDeleteFriend(params: { friend_id: FriendId }): Promise<{ deleted: true }> {
     let friend = this.friends.get(params.friend_id)
     if (!friend) {
       throw new Error('Friend not found')
@@ -10291,29 +10298,56 @@ export class AdminModule extends ModuleBase {
     return { template }
   }
 
+  private async commitPermissionChange<T>(apply: () => Promise<T>): Promise<T> {
+    let result!: T
+    await this.configMutationCoordinator.mutateComputed(['permissions'], () => this.readCoreAgentSemanticSnapshot(),
+      async () => { result = await apply() }, true, { journalAwareNoop: true })
+    return result
+  }
+
   private async handleCreatePermissionTemplate(params: CreatePermissionTemplateParams): Promise<{ template: PermissionTemplate }> {
-    const template = this.permissionTemplateManager.create(params)
-    await this.saveData()
-    return { template }
+    return this.commitPermissionChange(() => this.applyCreatePermissionTemplate(params))
+  }
+
+  private async applyCreatePermissionTemplate(params: CreatePermissionTemplateParams): Promise<{ template: PermissionTemplate }> {
+    return this.mutatePermissionTemplates(manager => ({ template: manager.create(params) }))
   }
 
   private async handleUpdatePermissionTemplate(params: UpdatePermissionTemplateParams): Promise<{ template: PermissionTemplate }> {
+    return this.commitPermissionChange(() => this.applyUpdatePermissionTemplate(params))
+  }
+
+  private async applyUpdatePermissionTemplate(params: UpdatePermissionTemplateParams): Promise<{ template: PermissionTemplate }> {
     const { template_id, ...rest } = params
-    const template = this.permissionTemplateManager.update(template_id, rest)
-    await this.saveData()
-    return { template }
+    return this.mutatePermissionTemplates(manager => ({ template: manager.update(template_id, rest) }))
   }
 
   private async handleDeletePermissionTemplate(params: { template_id: string }): Promise<{ deleted: true }> {
-    const isInUse = (templateId: string) => {
-      for (const friend of this.friends.values()) {
-        if (friend.permission_template_id === templateId) return true
-      }
-      return false
-    }
-    this.permissionTemplateManager.delete(params.template_id, isInUse)
-    await this.saveData()
-    return { deleted: true }
+    return this.commitPermissionChange(() => this.applyDeletePermissionTemplate(params))
+  }
+
+  private async applyDeletePermissionTemplate(params: { template_id: string }): Promise<{ deleted: true }> {
+    return this.mutatePermissionTemplates(manager => {
+      manager.delete(params.template_id, templateId => Array.from(this.friends.values()).some(friend => friend.permission_template_id === templateId))
+      return { deleted: true as const }
+    })
+  }
+
+  private async mutatePermissionTemplates<T>(mutate: (manager: PermissionTemplateManager) => T): Promise<T> {
+    const next = new PermissionTemplateManager()
+    next.loadFromArray(this.permissionTemplateManager.toArray())
+    const result = mutate(next)
+    await this.persistPermissionStore(this.templatesFilePath, next.toArray(), () => { this.permissionTemplateManager = next })
+    return result
+  }
+
+  private async persistPermissionStore(file: string, data: unknown, commit: () => void): Promise<void> {
+    if (!this.dataLoaded) throw new RpcError('SERVICE_UNAVAILABLE', 'Permission store is not ready')
+    while (this.saveDataLock) await this.saveDataLock.catch(() => {})
+    const promise = this.atomicWriteFile(file, JSON.stringify(data, null, 2))
+    this.saveDataLock = promise
+    try { await promise; commit() }
+    finally { if (this.saveDataLock === promise) this.saveDataLock = null }
   }
 
   private normalizeFriendPermissionConfig(friend: Friend, config: FriendPermissionConfig): FriendPermissionConfig {
@@ -10530,6 +10564,13 @@ export class AdminModule extends ModuleBase {
     friendId: FriendId,
     config: UpdateFriendPermissionBody['config'],
   ): Promise<{ config: FriendPermissionConfig | null }> {
+    return this.commitPermissionChange(() => this.applyUpdateFriendPermission(friendId, config))
+  }
+
+  private async applyUpdateFriendPermission(
+    friendId: FriendId,
+    config: UpdateFriendPermissionBody['config'],
+  ): Promise<{ config: FriendPermissionConfig | null }> {
     const friend = this.friends.get(friendId)
     if (!friend) {
       throw new Error('Friend not found')
@@ -10538,18 +10579,18 @@ export class AdminModule extends ModuleBase {
       throw new Error('Cannot update master friend permissions')
     }
 
+    const nextConfigs = new Map(this.friendPermissionConfigs)
+    const nextStorage = new Map(this.friendStorageOverrides)
+    const persist = () => this.persistPermissionStore(this.friendPermissionConfigsFilePath,
+      serializeFriendPermissionRecords(nextConfigs, nextStorage), () => {
+        if (nextConfigs.has(friendId)) this.friendPermissionConfigs.set(friendId, nextConfigs.get(friendId)!)
+        else this.friendPermissionConfigs.delete(friendId)
+        this.friendStorageOverrides.delete(friendId)
+      })
     if (config === null) {
-      const previous = this.friendPermissionConfigs.get(friendId), storage = this.friendStorageOverrides.get(friendId)
-      this.friendPermissionConfigs.delete(friendId)
-      this.friendStorageOverrides.delete(friendId)
-      try { await this.saveData() }
-      catch (error) {
-        if (this.friends.has(friendId) && !this.friendPermissionConfigs.has(friendId) && !this.friendStorageOverrides.has(friendId)) {
-          if (previous) this.friendPermissionConfigs.set(friendId, previous)
-          if (storage) this.friendStorageOverrides.set(friendId, storage)
-        }
-        throw error
-      }
+      nextConfigs.delete(friendId)
+      nextStorage.delete(friendId)
+      await persist()
       return { config: null }
     }
     try { parseFriendPermissionRecords([{ friend_id: friendId, config: { ...config, updated_at: generateTimestamp() } }]) }
@@ -10566,9 +10607,9 @@ export class AdminModule extends ModuleBase {
       updated_at: generateTimestamp(),
     })
 
-    this.friendPermissionConfigs.set(friendId, nextConfig)
-    this.friendStorageOverrides.delete(friendId)
-    await this.saveData()
+    nextConfigs.set(friendId, nextConfig)
+    nextStorage.delete(friendId)
+    await persist()
     return { config: nextConfig }
   }
 
@@ -10590,6 +10631,10 @@ export class AdminModule extends ModuleBase {
   }
 
   private async handleUpdateGroupSessionConfig(params: UpdateGroupSessionConfigParams): Promise<UpdateGroupSessionConfigResult> {
+    return this.commitPermissionChange(() => this.applyUpdateGroupSessionConfig(params))
+  }
+
+  private async applyUpdateGroupSessionConfig(params: UpdateGroupSessionConfigParams): Promise<UpdateGroupSessionConfigResult> {
     const target = await this.resolveGroupPermissionTarget(params)
     const previous = this.sessionConfigs.get(groupSessionConfigKey(target.channel_id, target.session_id))
     const parsed = parseGroupSessionConfig(params.config)
@@ -10601,6 +10646,10 @@ export class AdminModule extends ModuleBase {
   }
 
   private async handleDeleteGroupSessionConfig(params: DeleteGroupSessionConfigParams): Promise<DeleteGroupSessionConfigResult> {
+    return this.commitPermissionChange(() => this.applyDeleteGroupSessionConfig(params))
+  }
+
+  private async applyDeleteGroupSessionConfig(params: DeleteGroupSessionConfigParams): Promise<DeleteGroupSessionConfigResult> {
     const target = await this.resolveGroupPermissionTarget(params)
     await this.persistGroupSessionConfig(target, null)
     this.publishAdminEvent('admin.session_config_updated', { ...target, config: null })

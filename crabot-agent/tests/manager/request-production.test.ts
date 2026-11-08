@@ -488,6 +488,8 @@ describe('production isolated request tool closure', () => {
     const caps = JSON.parse(results.workerCaps.output)
     expect(caps.request).toMatchObject({ binding: { request_id: record.request_id, execution_scope: 'request' }, source: { sender_friend_id: 'f-owner', session_type: 'group' } })
     expect(caps.request.permission_sources.friend.subject_id).toBe('f-owner')
+    expect(caps.request_sources.map((source: any) => source.subject_id)).toEqual([key, 'f-owner'])
+    expect(caps.request_sources.every((source: any) => source.capabilities.authorization.source === 'worker_current')).toBe(true)
     expect(caps.execution.implementations[0].observation.state).toBe('legacy_unknown')
   })
 

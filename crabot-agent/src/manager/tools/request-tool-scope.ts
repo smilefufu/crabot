@@ -47,9 +47,8 @@ export class RequestManagerToolScope {
   }
   private async bounded(frame: RequestOperationFrame): Promise<RequestPermissionSource> {
     const permissions = await boundedRequestPermissions(frame.ceiling, frame.current)
-    const before = requestMemoryScopes(frame.ceiling, frame.source.message.session.session_id), now = requestMemoryScopes(frame.current, frame.source.message.session.session_id)
-    permissions.memory_scopes = before.length === 0 ? now : now.length === 0 ? before : before.filter(scope => now.includes(scope))
-    return { ...frame.current, is_master: frame.ceiling.is_master && frame.current.is_master, resolved: permissions }
+    permissions.memory_scopes = requestMemoryScopes(frame.current, frame.source.message.session.session_id)
+    return { ...frame.current, resolved: permissions }
   }
   private reason(error: unknown): string {
     const message = error instanceof Error ? error.message : ''

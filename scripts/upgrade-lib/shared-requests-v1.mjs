@@ -79,7 +79,7 @@ export async function validateRequestVersions(agent, entries = null) {
       if (value.request && value.schema_version !== 2 || value.schema_version !== undefined && value.schema_version !== 2) throw new Error('Unsupported Worker context')
       continue
     }
-    if (expected !== undefined && !(entries && name === 'event.json' ? [1, 2, 3] : [expected]).includes(JSON.parse(await fs.readFile(filename, 'utf8'))?.[field])) throw new Error(`Unsupported request state: ${entry.name}`)
+    if (expected !== undefined && !(entries && name === 'event.json' ? [1, 2, 3, 4] : [expected]).includes(JSON.parse(await fs.readFile(filename, 'utf8'))?.[field])) throw new Error(`Unsupported request state: ${entry.name}`)
   }
 }
 export async function validateBindings(crabotHome, backup, entries = null) {
