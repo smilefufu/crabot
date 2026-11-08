@@ -24,9 +24,11 @@ export interface RequestRunContext {
   authority: ConversationRequestAuthority
   onSuccessfulOriginDelivery?: (target: { channel_id: string; session_id: string }) => void
   voiceReplyContext?: VoiceReplyContext
+  assertCanContinue?: () => Promise<void>
 }
 interface Dependencies {
   canRun?(): boolean
+  allWorkersClosed?(request: ConversationRequestRecord): Promise<boolean>
   isRetired?(request: ConversationRequestRecord): boolean
   onSettled?(key: ManagerKey): void
   createLoop(context: RequestRunContext): ManagerLoop
@@ -140,13 +142,14 @@ export class ConversationRequestRunner {
   async refreshPermissions(configRevision: number): Promise<void> {
     if (this.closing || this.deps.canRun?.() === false) return
     const ids = await fs.readdir(this.root).catch(error => { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error })
+    const recoveries: Array<{ key: ManagerKey; requestId: string }> = []
     for (const id of ids) {
       if (!/^[a-f0-9]{64}$/.test(id)) continue
       try {
         const owner = JSON.parse(await fs.readFile(path.join(this.root, id, 'owner.json'), 'utf8'))
         const fixed = await this.requests.get(owner.manager_key, id)
         if (!fixed || owner.schema_version !== 1 || owner.request_id !== id || owner.source_sha256 !== fixed.record.source_sha256) throw new Error('Invalid request owner')
-        if (fixed.record.status !== 'open' || this.deps.isRetired?.(fixed.record)) continue
+        if (fixed.record.status !== 'open' || this.deps.isRetired?.(fixed.record) || await this.deps.allWorkersClosed?.(fixed.record)) continue
         const authority = new ConversationRequestAuthority(this.requests, owner.manager_key, id, 'request', this.deps.resolveCurrent)
         const current = sha256CanonicalJson(await authority.currentSources())
         let previous = this.appliedPermissionHashes.get(id)
@@ -165,10 +168,13 @@ export class ConversationRequestRunner {
         if (current !== previous) await this.routeEvent(owner.manager_key, id, { kind: 'permission_update', ts: new Date().toISOString(), seq: 0,
           config_revision: configRevision, authority_sha256: current }, undefined, true)
         this.appliedPermissionHashes.set(id, current)
+        if (await new ManagerSessionStore(path.join(this.root, id, 'session')).loadCheckpoint(owner.manager_key)) recoveries.push({ key: owner.manager_key, requestId: id })
         if (this.eventRequests.has(id)) void this.drain(owner.manager_key, id).catch(() => { /* Durable event remains pending. */ })
       } catch (error) { console.warn('[request-runner] Permission update remains pending:', id, error instanceof Error ? error.message : String(error)) }
     }
-    if (!this.permissionRecovery) this.permissionRecovery = this.recoverPending()
+    if (!this.permissionRecovery) this.permissionRecovery = (async () => {
+      for (const item of recoveries) await this.recover(item.key, item.requestId)
+    })()
       .catch(error => console.warn('[request-runner] Permission recovery pending:', error))
       .finally(() => { this.permissionRecovery = undefined })
   }
@@ -265,6 +271,11 @@ export class ConversationRequestRunner {
       const store = new ManagerSessionStore(path.join(directory, 'session'))
       const checkpoint = await store.loadCheckpoint(key)
       if (item.phase === 'admitted' && !checkpoint) return // Unknown outcome is a barrier, never replay.
+      if (item.event.kind === 'permission_update' && await this.deps.allWorkersClosed?.(fixed.record)) {
+        item.phase = 'settled'; item.consumed = true
+        await this.persistEvent(file, item)
+        continue
+      }
       if (item.phase === 'queued') {
         if (checkpoint) throw new Error('Unadmitted private event checkpoint')
         await store.save(await canonical.load(key))
@@ -280,7 +291,12 @@ export class ConversationRequestRunner {
         },
       } : undefined
       const loop = this.deps.createLoop({ source: structuredClone(fixed.source), request: structuredClone(fixed.record), store,
-        authority: new ConversationRequestAuthority(this.requests, key, requestId, 'request', this.deps.resolveCurrent) })
+        authority: new ConversationRequestAuthority(this.requests, key, requestId, 'request', this.deps.resolveCurrent),
+        ...(item.event.kind === 'permission_update' ? { assertCanContinue: async () => {
+          const current = await this.requests.get(key, requestId)
+          if (!current || current.record.status !== 'open' || await this.deps.allWorkersClosed?.(current.record)) throw new Error('REQUEST_CLOSED: 原任务已关闭，权限通知不能重新派活')
+        } } : {}),
+      })
       try {
         const result = checkpoint ? await loop.resume(checkpoint) : await loop.wakeUp({
           wake: item.event.kind === 'permission_update' ? { kind: 'permission_update', configRevision: item.event.config_revision } : item.event.kind === 'voice_management' ? { kind: 'voice_management', result: structuredClone(item.event.result) } : item.event.kind === 'voice_delivery' ? { kind: 'voice_delivery', results: [structuredClone(item.event.result)] } : { kind: 'worker_event', event: structuredClone(item.event) }, received_at: item.received_at, timezone: this.deps.timezone(),

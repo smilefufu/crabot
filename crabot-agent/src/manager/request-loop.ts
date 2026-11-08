@@ -157,6 +157,7 @@ export function createConversationRequestLoop(context: RequestRunContext, deps: 
   }
   const scope = new RequestManagerToolScope({ context, raw, checkOperation: async (name, input, actor) => {
     if (deps.canRun?.() === false || host.isClosing?.()) return denied('CAPABILITY_UNKNOWN', '运行时正在关闭')
+    await context.assertCanContinue?.()
     if ((VOICE_TOOL_NAMES as readonly string[]).includes(name) && (actor.kind !== 'friend' || !actor.is_master)) return denied('PERMISSION_DENIED', '当前请求不提供此工具')
     if (name === 'send_message' && request.delivery.kind === 'requester_private') {
       if (typeof input.channel_id !== 'string' || typeof input.session_id !== 'string') return denied('PERMISSION_DENIED', '私发目标未核实')

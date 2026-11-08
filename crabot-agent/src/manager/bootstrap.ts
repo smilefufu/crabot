@@ -742,6 +742,15 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
   let voiceManagementHost: VoiceManagementHost
   requestRunner = new ConversationRequestRunner(requestRuntimeRoot, conversationRequests, {
     isRetired: deps.isRequestRetired,
+    allWorkersClosed: async request => {
+      if (!request.worker_ids.length) return false
+      for (const id of request.worker_ids) {
+        const found = await ledger.findWorker(id)
+        if (!found || found.managerKey !== request.manager_key || found.worker.origin.request?.request_id !== request.request_id
+          || found.worker.task.status !== 'closed') return false
+      }
+      return true
+    },
     validateVoiceManagement: (key, requestId, result) => voiceManagementHost.validate(key, requestId, result),
     canRun: () => candidatesReady && !candidatesClosing && !deps.isClosing?.() && !maintenancePending(),
     timezone: deps.timezone ?? (() => 'Asia/Shanghai'),

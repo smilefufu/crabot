@@ -52,7 +52,7 @@ export class RequestManagerToolScope {
   }
   private reason(error: unknown): string {
     const message = error instanceof Error ? error.message : ''
-    return message.startsWith('CAPABILITY_UNKNOWN') ? 'CAPABILITY_UNKNOWN' : message.includes('closed') ? 'REQUEST_CLOSED' : 'PERMISSION_DENIED'
+    return message.startsWith('CAPABILITY_UNKNOWN') ? 'CAPABILITY_UNKNOWN' : message.startsWith('REQUEST_CLOSED') || message.includes('closed') ? 'REQUEST_CLOSED' : 'PERMISSION_DENIED'
   }
   private async capabilityPlans(name: string, args: Record<string, unknown>, callContext: ToolCallContext): Promise<ToolCallResult> {
     const request_sources: RequestExecutionCapabilities['request_sources'] = []

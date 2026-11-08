@@ -88,6 +88,59 @@ describe('production isolated request tool closure', () => {
   function tool(params: LLMStreamParams, name: string) { const result = params.tools.find(item => item.name === name); expect(result, name).toBeDefined(); return result! }
   const context = { toolUseId: 'fixture-tool', signal: new AbortController().signal } as never
 
+  async function closeBoundWorker() {
+    await stack.ledger.upsertWorker(key, 'w-personal', worker => ({ ...worker!, task: { ...worker!.task, status: 'closed',
+      closed: { at: new Date().toISOString(), by: 'manager_stop' } } }))
+  }
+
+  it('permission changes do not wake a request whose associated Workers have all closed', async () => {
+    const result = await execute('origin'), record = (await stack.conversationRequests.get(key, result.request_id))!.record
+    await bindPersonalWorker(record)
+    await closeBoundWorker()
+    const before = calls.length
+    friend.resolved.tool_access.shell = true
+    await stack.refreshPermissions(2)
+    await stack.requestRunner.dispose()
+    expect(calls).toHaveLength(before)
+    expect((await stack.ledger.findWorker('w-personal'))!.worker.task.status).toBe('closed')
+  })
+
+  it('a queued permission notice is consumed without running after the original Workers close', async () => {
+    const result = await execute('origin'), record = (await stack.conversationRequests.get(key, result.request_id))!.record
+    await bindPersonalWorker(record)
+    const runner = stack.requestRunner as any, canRun = runner.deps.canRun
+    runner.deps.canRun = () => false
+    await runner.routeEvent(key, result.request_id, { kind: 'permission_update', ts: new Date().toISOString(), seq: 0,
+      config_revision: 2, authority_sha256: '2'.repeat(64) })
+    await closeBoundWorker()
+    const before = calls.length
+    runner.deps.canRun = canRun
+    await stack.requestRunner.recoverPending()
+    expect(calls).toHaveLength(before)
+    const directory = path.join(root, 'agent/conversation-requests', result.request_id, 'events')
+    const ids = await fs.readdir(directory)
+    const event = JSON.parse(await fs.readFile(path.join(directory, ids[0], 'event.json'), 'utf8'))
+    expect(event).toMatchObject({ phase: 'settled', consumed: true })
+  })
+
+  it('closing the last Worker during a permission-notice turn prevents a replacement spawn', async () => {
+    const result = await execute('origin'), record = (await stack.conversationRequests.get(key, result.request_id))!.record
+    await bindPersonalWorker(record)
+    let step = 0
+    inspect = async params => {
+      if (step++ === 0) { planned = { name: 'load_tool_family', input: { family: 'worker' } }; return }
+      await closeBoundWorker()
+      results.closed = await tool(params, 'spawn_worker').call({ title: 'replacement', prompt: 'must never run', impl: 'builtin' }, context)
+    }
+    friend.resolved.tool_access.shell = true
+    await stack.requestRunner.refreshPermissions(2)
+    await vi.waitFor(() => expect(results.closed?.isError).toBe(true))
+    await stack.requestRunner.dispose()
+    expect(results.closed.output).toContain('REQUEST_CLOSED')
+    expect(await stack.ledger.listAllWorkers()).toHaveLength(1)
+    expect((await stack.ledger.findWorker('w-personal'))!.worker.task.status).toBe('closed')
+  })
+
   it.each([false, true])('loads voice only inside the original Master request and rechecks after loading (revoked=%s)', async revoke => {
     const original = rpc.getMockImplementation()!
     rpc.mockImplementation(async (...args) => args[1] === 'voice_agent_action'
