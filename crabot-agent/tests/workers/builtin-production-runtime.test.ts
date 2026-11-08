@@ -381,7 +381,10 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     // Load-only: do not initialize, seed, or mutate the live provider store.
     await (manager as any).loadData()
     const global = manager.getGlobalConfig()
-    const connection = await manager.buildConnectionInfo(global.default_llm_provider_id!, global.default_llm_model_id!)
+    const providerId = process.env.CRABOT_ACCEPTANCE_PROVIDER_ID
+    const modelId = process.env.CRABOT_ACCEPTANCE_MODEL_ID
+    if (Boolean(providerId) !== Boolean(modelId)) throw new Error('Acceptance provider and model overrides must be supplied together')
+    const connection = await manager.buildConnectionInfo(providerId ?? global.default_llm_provider_id!, modelId ?? global.default_llm_model_id!)
     await verifyPermissionRefresh('group', connection)
   }, 180000)
 
