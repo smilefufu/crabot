@@ -1,5 +1,11 @@
 # Crabot 项目进度
 
+### Cordis Channel 独立验证（2026-11-10，设计待逐项确认）
+
+- 已从主仓 main `de3aab77` 建立独立 worktree 和 `research/cordis-validation` 分支；原部署目录和文档仓 WIP 保留。
+- [首轮 spec](crabot-docs/superpowers/specs/2026-11-10-cordis-channel-validation-design.md) 建议以 Telegram polling、模拟平台和临时数据验证业务复用、同进程通信、生命周期及完整离线插件包。D1 至 D4 尚未许可，未开始实现、修改正式协议或部署。
+- 历史 13 项 Cordis 探针仅为机制研究；原临时文件已清理，不作为本分支测试结果。后续重新留存可复现证据。
+
 ### 权限实时生效（2026-11-09，定向验收通过，未部署）
 
 - 按用户确认原位更新权限／群请求 Spec 和正式协议，修复 Manager、请求、Worker、child、CLI 与目录沿用创建权限的问题：固定原主体，执行前核验当前配置，保存后原上下文继续，不要求新消息或新任务。保留历史观察、投递目标和 unknown 副作用屏障；关闭／完成任务不复活。
