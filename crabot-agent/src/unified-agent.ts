@@ -1511,17 +1511,8 @@ export class UnifiedAgent extends ModuleBase {
    * （`initializeManagerStack`）算好塞进闭包，"改了配置下次起化身生效"就退化成"agent
    * 重启才生效"，进程重启后的 revive 也会拿不到配置（spec 决策 2）。
    *
-   * **但权限恰恰相反：它必须是 spawn 那一刻的快照，只能从入参 `ctx` 读**（见
-   * `resolveWorkerPrincipalPermissions`）。两者都经过这个工厂，语义却是反的，别混：
-   *
-   * | | 来源 | 变更何时生效 | 为什么 |
-   * |---|---|---|---|
-   * | LLM 运行配置（model/人格/skills/MCP） | `this.agentConfig` **现取** | 下次起化身 | 它是**实例配置**：用户在 admin 改了就该用新的（spec 决策 2） |
-   * | 发起人权限档位 | `ctx.principal_permissions` **spawn 时固定** | 永不（新 worker 才有新档位） | 它是**身份属性**：这个 worker 以谁的名义执行，在 spawn 那一刻就定死了 |
-   *
-   * 判据很简单：换了值之后，"这个 worker 还是同一个 worker 吗"——换 model 是；换成另一个
-   * 人的权限不是。把权限也做成现取，就是 PR #59 review 揪出的那条越权
-   * （worker 的档位随"该会话最近说话的人"漂移）。
+   * 授权主体始终沿原 Worker 绑定；该主体的权限配置与 tools/MCP 一样刷新。
+   * 创建快照保留历史事实，每轮通过宿主当前解析装配工具，不能取群内最近发言者的权限。
    *
    * 缺 `powerful` slot 时**抛错，不降级**：harness 会把这次 spawn 如实落成一条 failed 台账
    * 加一条 `spawn_failed` 事件，manager 的 `spawn_worker` 拿到错误文本。静默降级只会让
@@ -1561,6 +1552,7 @@ export class UnifiedAgent extends ModuleBase {
         if (!id) throw new Error('CAPABILITY_UNKNOWN: 缺少执行化身身份')
         await persistObservation(observationFile(path.join(getAgentDataDir(), 'workers'), ctx.worker_id, id),
           requestObservation(tools, { role: 'worker', impl: 'builtin', source: 'builtin_request', worker_id: ctx.worker_id, incarnation_id: id,
+            authorization_revision: sha256CanonicalJson(current.request_runtime?.ceilings ?? current.principal_permissions ?? null),
             child_profiles: tools.some(tool => tool.name === 'delegate_task') ? (this.agentConfig?.subagents ?? []).map(profile => profile.name) : [],
             skills: this.requestWorkerSkills(current).map(skill => skill.name),
             constraints: ['主体身份固定，权限使用当前配置；Worker 不提供记忆、人类投递、换工作目录或 goal 管理；主体开启标志不增加角色职责。'],

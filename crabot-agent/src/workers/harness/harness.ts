@@ -996,7 +996,7 @@ export class WorkerHarness {
   private readonly inputOwnershipRevisions = new Map<string, number>()
   private permissionRefreshPending = false
   private permissionRefreshInFlight?: Promise<void>
-  private readonly appliedPermissions = new Map<string, ResolvedPermissions | null | ReadonlyArray<RequestPermissionSource>>()
+  private readonly sessionPermissionRevisions = new Map<string, string | null>()
   private readonly permissionStops = new Map<string, WorkerControlOperation>()
   private sweepInFlight = false
   private sweepTimer?: ReturnType<typeof setInterval>
@@ -1118,10 +1118,11 @@ export class WorkerHarness {
       .catch((error) => console.error(`[WorkerHarness] native activity collection failed for ${h.worker_id}#${h.seq}:`, error))
   }
 
-  private async recordCliProvision(workerId: string, incarnationId: string, impl: WorkerImplId, caps: CapabilityBundle): Promise<void> {
+  private async recordCliProvision(workerId: string, incarnationId: string, impl: WorkerImplId, caps: CapabilityBundle, permissions: ResolvedPermissions | null | undefined): Promise<void> {
     if (impl === 'builtin' || !this.deps.assertExecutionPolicy) return
     const facts = { skills: caps.skills.map(skill => skill.name), mcp_servers: caps.mcp_servers.map(server => server.name),
-      constraints: ['仅记录 Crabot provision 的 MCP/Skill；原生工具、实际服务连接及宿主状态未知。'] }
+      constraints: ['仅记录 Crabot provision 的 MCP/Skill；原生工具、实际服务连接及宿主状态未知。'],
+      authorization_revision: sha256CanonicalJson(permissions ?? null) }
     const observation = executionObservation({ role: 'worker', impl, source: 'cli_provision', state: 'assembled',
       worker_id: workerId, incarnation_id: incarnationId, observed_at: this.deps.now(), tools: null, ...facts,
       revision: createHash('sha256').update(JSON.stringify({ policy_version: 1, impl, ...facts })).digest('hex') })
@@ -1473,7 +1474,7 @@ export class WorkerHarness {
           : EMPTY_CAPABILITY_BUNDLE
         if (beforeProvision) await beforeProvision()
         await adapter.provision(workspace, caps)
-        await this.recordCliProvision(workerId, incarnationId, impl, caps)
+        await this.recordCliProvision(workerId, incarnationId, impl, caps, context.principal_permissions)
         // builtin 注入:调用方显式传了就用它;没传(manager 的 spawn_worker 工具就不可能传——
         // LLMAdapter / tools 是运行时对象,不可能来自 LLM 入参)则回退到装配层注入的工厂,
         // 与 handoffIncarnation 走同一个工厂。目标实现不是 builtin 时不调工厂:CLI adapter
@@ -1599,6 +1600,7 @@ export class WorkerHarness {
         inbox.hold('input_pending')
       }
 
+      if (!p.origin.request) this.sessionPermissionRevisions.set(workerId, sha256CanonicalJson(p.principal_permissions ?? null))
       await this.noteWorkspaceUse(workspace.workspace_id, now)
       await this.appendEvent(workerId, 1, 'lifecycle_changed', { change: 'spawned', impl }, spawned?.task.status)
       const uiSnapshot = await this.prepareUiSnapshot(spawnedHandle, p.managerKey, initialInput?.report, now)
@@ -2664,7 +2666,7 @@ export class WorkerHarness {
       let handle
       try {
         await targetAdapter.provision(workspace, caps)
-        await this.recordCliProvision(worker.worker_id, incarnationId, targetImpl, caps)
+        await this.recordCliProvision(worker.worker_id, incarnationId, targetImpl, caps, auth.principal_permissions)
         const expiredAfterProvision = this.expiredInboxDelivery(item, legacy.seq)
         if (expiredAfterProvision) {
           if (admission) void admission.dispose().catch(() => {})
@@ -3226,12 +3228,13 @@ export class WorkerHarness {
     }
     let newHandle
     try {
-      if (this.deps.capabilityBundle && mainline.impl !== 'builtin') {
-        const caps = await this.deps.capabilityBundle({ worker_id: worker.worker_id, impl: mainline.impl,
-          principal_permissions: await this.currentWorkerPermissions(worker.worker_id, mainline.impl) ?? undefined })
+      if (mainline.impl !== 'builtin') {
+        const permissions = await this.currentWorkerPermissions(worker.worker_id, mainline.impl)
+        const caps = this.deps.capabilityBundle ? await this.deps.capabilityBundle({ worker_id: worker.worker_id, impl: mainline.impl,
+          principal_permissions: permissions ?? undefined }) : EMPTY_CAPABILITY_BUNDLE
         await adapter.provision(boundWorkspace, caps)
-        await this.recordCliProvision(worker.worker_id, incarnationId, mainline.impl, caps)
-      } else await this.inheritCliObservation(worker.worker_id, mainline.incarnation_id, incarnationId, mainline.impl)
+        await this.recordCliProvision(worker.worker_id, incarnationId, mainline.impl, caps, permissions)
+      }
       if (item?.authorize) await item.authorize()
       await this.assertWorkerExecutionPolicy(worker.worker_id, mainline.impl)
       const returnedHandle = await adapter.resume(prevRef, appendWorkspaceGitObservation(text, workspaceGit), {
@@ -3563,7 +3566,7 @@ export class WorkerHarness {
       if (deadlineItem?.authorize) await deadlineItem.authorize()
       await this.assertWorkerExecutionPolicy(worker.worker_id, targetImpl)
       await newAdapter.provision(workspace, caps)
-      await this.recordCliProvision(worker.worker_id, targetIncarnationId, targetImpl, caps)
+      await this.recordCliProvision(worker.worker_id, targetIncarnationId, targetImpl, caps, principalPermissions)
       const expiredBeforeSpawn = this.expiredInboxDelivery(deadlineItem, source.seq)
       if (expiredBeforeSpawn) {
         if (admission) void admission.dispose().catch(() => {})
@@ -3958,7 +3961,7 @@ export class WorkerHarness {
     if (!this.permissionRefreshPending || this.deps.isClosing?.()) return
     this.permissionRefreshPending = false
     for (const { worker } of await this.deps.ledger.listAllWorkers()) {
-      if (worker.task.status === 'closed') continue
+      if (worker.task.status === 'closed' || worker.task.status === 'halted' && worker.task.halt?.halt_reason === 'worker_finalized') continue
       let authorizationKnown = false
       try {
         const context = await this.contextStore.read(worker.worker_id)
@@ -3977,16 +3980,18 @@ export class WorkerHarness {
           ? (sources.find(source => executionAdmission(mainline.impl, source.resolved).status === 'allowed') ?? sources[0])?.resolved ?? null
           : await this.currentWorkerPermissions(worker.worker_id)
         authorizationKnown = true
-        const state = sources ?? permissions
-        const original = bound
-          ? [bound.request.permission_sources.group, ...(bound.worker.origin.request!.execution_scope === 'request' && bound.request.permission_sources.friend ? [bound.request.permission_sources.friend] : [])].map(workerRequestSource)
-          : context.principal_permissions ?? null
-        const previous = this.appliedPermissions.has(worker.worker_id) ? this.appliedPermissions.get(worker.worker_id) : original
-        if (isDeepStrictEqual(previous, state) && !this.permissionStops.has(worker.worker_id)) continue
+        const revision = sha256CanonicalJson(mainline.impl === 'builtin' ? sources ?? permissions : permissions)
+        let previous = this.sessionPermissionRevisions.get(worker.worker_id)
+        if (previous === undefined && mainline.incarnation_id) {
+          const observation = await readObservation(observationFile(this.deps.workersDir, worker.worker_id, mainline.incarnation_id),
+            executionObservation({ role: 'worker', impl: mainline.impl, source: mainline.impl === 'builtin' ? 'builtin_request' : 'cli_provision', worker_id: worker.worker_id, incarnation_id: mainline.incarnation_id }))
+          previous = observation.authorization_revision
+        }
+        if (previous === revision && !this.permissionStops.has(worker.worker_id)) continue
         if (mainline.impl !== 'builtin') {
           if (!await this.stopForPermissionUpdate(worker.worker_id)) { this.permissionRefreshPending = true; continue }
           if (executionAdmission(mainline.impl, permissions).status !== 'allowed') {
-            this.appliedPermissions.set(worker.worker_id, structuredClone(state))
+            this.sessionPermissionRevisions.set(worker.worker_id, revision)
             this.permissionStops.delete(worker.worker_id)
             continue
           }
@@ -3995,8 +4000,8 @@ export class WorkerHarness {
         if (!current || current.worker.task.status === 'closed') continue
         await this.sendToWorker(worker.worker_id,
           '<permission-notification>原授权主体的权限配置已更新。核对当前工具，继续本任务尚未完成的事项；不要重做已完成或结果未知的操作。</permission-notification>',
-          { dedupeKey: `permissions:${sha256CanonicalJson(state)}` })
-        this.appliedPermissions.set(worker.worker_id, structuredClone(state))
+          { dedupeKey: `permissions:${revision}` })
+        this.sessionPermissionRevisions.set(worker.worker_id, revision)
         this.permissionStops.delete(worker.worker_id)
       } catch (error) {
         if (!authorizationKnown) {
@@ -4045,11 +4050,11 @@ export class WorkerHarness {
       if (!this.deps.resolvePermissions) return context.principal_permissions ?? null
       if (context.manager_key !== found.managerKey || context.creator_friend_id !== found.worker.origin.creator_friend_id) throw new Error('CAPABILITY_UNKNOWN: Worker subject mismatch')
       const current = await this.deps.resolvePermissions(found.worker, context)
-      if (!current) this.appliedPermissions.set(workerId, null)
+      if (!current) this.sessionPermissionRevisions.set(workerId, null)
       return current
     } catch (error) {
       if (impl === 'builtin' || error instanceof Error && error.message.startsWith('CAPABILITY_UNKNOWN')) {
-        this.appliedPermissions.set(workerId, null)
+        this.sessionPermissionRevisions.set(workerId, null)
         this.permissionRefreshPending = true
       }
       throw error

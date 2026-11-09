@@ -370,7 +370,20 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     const turns = modelRequests.mock.calls.length
     await stack.harness.refreshPermissions()
     expect(modelRequests.mock.calls.length).toBe(turns)
-    await stack.adapters.get('builtin')!.dispose()
+    const ordinaryRpc = vi.mocked(runtime.rpcClient.call).getMockImplementation()!
+    const sensitiveRpc = vi.mocked(runtime.rpcClient.callSensitive).getMockImplementation()!
+    await stack.dispose()
+    const restored = boot(connection ? makeConfig({ modelConfig: { powerful: connection } }) : undefined).internals as any
+    vi.mocked(restored.rpcClient.call).mockImplementation(ordinaryRpc)
+    vi.mocked(restored.rpcClient.callSensitive).mockImplementation(sensitiveRpc)
+    const restoredStack = restored.managerStack as ManagerStack
+    ;(restoredStack.harness as any).deps.onEvent = async () => ({ consumed: true })
+    ;(restoredStack.harness as any).deps.onOperationNotification = async () => ({ consumed: true })
+    await restoredStack.harness.refreshPermissions()
+    await restoredStack.harness.refreshPermissions()
+    expect(modelRequests.mock.calls.length).toBe(turns)
+    expect((await restoredStack.harness.findWorker(worker.worker_id))!.worker.incarnations).toHaveLength(1)
+    await restoredStack.dispose()
   }
 
   it.each(['group', 'friend'] as const)('applies a %s permission hint to the same waiting request and Worker without another human message', kind => verifyPermissionRefresh(kind))

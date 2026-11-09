@@ -9,6 +9,7 @@ export interface ExecutionObservation {
   subagent_id?: string
   observed_at: string | null
   revision: string | null
+  authorization_revision?: string
   source: 'execution_plan' | 'manager_request' | 'builtin_request' | 'cli_provision' | 'legacy'
   tools: string[] | null
   child_profiles: string[]

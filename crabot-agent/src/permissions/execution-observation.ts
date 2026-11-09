@@ -16,7 +16,8 @@ export function requestObservation(tools: readonly ToolDefinition[], input: Pick
     role: tool.authorization!.role, entry: tool.authorization!.entry }))
   const mcpServers = [...new Set(tools.flatMap(tool => typeof tool.traceMetadata?.mcp_server === 'string' ? [tool.traceMetadata.mcp_server] : /^mcp__(.+?)__/.exec(tool.name)?.[1] ?? []))]
   const facts = { role: input.role, impl: input.impl, definitions, child_profiles: input.child_profiles ?? [],
-    skills: input.skills ?? [], constraints: input.constraints ?? [], mcp_servers: mcpServers }
+    skills: input.skills ?? [], constraints: input.constraints ?? [], mcp_servers: mcpServers,
+    ...(input.authorization_revision ? { authorization_revision: input.authorization_revision } : {}) }
   return executionObservation({ ...input, state: 'assembled', observed_at: new Date().toISOString(),
     revision: createHash('sha256').update(JSON.stringify({ policy_version: 1, ...facts })).digest('hex'),
     tools: tools.map(tool => tool.name),
@@ -54,6 +55,7 @@ export async function readObservation(file: string, fallback: ExecutionObservati
     || (fallback.incarnation_id !== undefined && value.incarnation_id !== fallback.incarnation_id) || value.subagent_id !== fallback.subagent_id
     || typeof value.observed_at !== 'string' || !Number.isFinite(Date.parse(value.observed_at))
     || typeof value.revision !== 'string' || !/^[a-f0-9]{64}$/.test(value.revision)
+    || (value.authorization_revision !== undefined && (typeof value.authorization_revision !== 'string' || !/^[a-f0-9]{64}$/.test(value.authorization_revision)))
     || value.native_tools !== null
     || !(value.tools === null || (Array.isArray(value.tools) && value.tools.every(item => typeof item === 'string')))
     || ![value.child_profiles, value.mcp_servers, value.skills, value.constraints].every(list => Array.isArray(list) && list.every(item => typeof item === 'string'))

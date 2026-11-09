@@ -20,6 +20,8 @@ import { LedgerStore } from '../../src/workers/harness/ledger-store.js'
 import { NativeActivityStore } from '../../src/workers/harness/native-activity-store.js'
 import { InputDeliveryStore } from '../../src/workers/harness/input-delivery-store.js'
 import { WorkerContextStore } from '../../src/workers/harness/context-store.js'
+import { sha256CanonicalJson } from 'crabot-shared'
+import { observationFile, persistObservation, requestObservation } from '../../src/permissions/execution-observation.js'
 import { QueryReceiptStore } from '../../src/workers/harness/query-receipt-store.js'
 import { WorkerControlOperationStore } from '../../src/workers/harness/worker-control-operation-store.js'
 import { BuiltinWorkerAdapter } from '../../src/workers/builtin/adapter.js'
@@ -200,6 +202,11 @@ describe('manager bootstrap（P5 Task 1）', () => {
       manager_key: key, target_session: { channel_id: 'wechat', session_id: 'sess-boot', type: 'group' },
       principal_permissions: { ...structuredClone(permissions), memory_scopes: ['sess-boot'] },
     })
+    worker.incarnations[0].incarnation_id = 'fixture-config'
+    await stack.ledger.upsertWorker(key, worker.worker_id, () => worker)
+    await persistObservation(observationFile(join(dataRoot, 'agent', 'workers'), worker.worker_id, 'fixture-config'),
+      requestObservation([], { role: 'worker', impl: 'builtin', source: 'builtin_request', worker_id: worker.worker_id,
+        incarnation_id: 'fixture-config', authorization_revision: sha256CanonicalJson({ ...permissions, memory_scopes: ['sess-boot'] }) }))
     const send = vi.spyOn(stack.harness, 'sendToWorker').mockResolvedValue(undefined)
     try {
       await stack.harness.refreshPermissions()

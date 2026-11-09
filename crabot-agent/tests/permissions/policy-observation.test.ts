@@ -79,3 +79,17 @@ it('missing host declarations fail assembly and observation revisions include pr
   expect(requestObservation([tool], { ...input, child_profiles: ['code_writer'] }).revision).not.toBe(initial)
   expect(requestObservation([tool], { ...input, constraints: ['fixture'] }).revision).not.toBe(initial)
 })
+
+it('session permission configuration participates in assembly revision and older observations remain readable', async () => {
+  const { root } = await fixture(), file = path.join(root, 'session-config.json')
+  const input = { role: 'worker' as const, impl: 'builtin' as const, source: 'builtin_request' as const }
+  const first = requestObservation([], { ...input, authorization_revision: 'a'.repeat(64) })
+  const changed = requestObservation([], { ...input, authorization_revision: 'b'.repeat(64) })
+  expect(first.revision).not.toBe(changed.revision)
+  await persistObservation(file, first)
+  expect((await readObservation(file, executionObservation(input))).authorization_revision).toBe('a'.repeat(64))
+  await persistObservation(file, requestObservation([], input))
+  expect((await readObservation(file, executionObservation(input))).authorization_revision).toBeUndefined()
+  await persistObservation(file, { ...first, authorization_revision: 'invalid' })
+  await expect(readObservation(file, executionObservation(input))).rejects.toThrow('Corrupt execution observation')
+})
