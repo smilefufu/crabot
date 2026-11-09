@@ -109,7 +109,7 @@ describe('worker MCP server permission filter', () => {
 })
 
 describe('UnifiedAgent worker capability production wiring', () => {
-  it('真实装配经 spawn/handoff 把当前 MCP 配置按固定 principal 快照送到目标 provision', async () => {
+  it('真实装配经 spawn/handoff 按原主体当前权限把 MCP 配置送到目标 provision', async () => {
     const dataDir = await useTmpDataDir('worker-mcp-capability-')
     const config = makeAgentConfig({
       configured: true,
@@ -155,9 +155,17 @@ describe('UnifiedAgent worker capability production wiring', () => {
       }
 
       const lowPrincipal = permissions({ mcp_skill: false, desktop: true })
+      const allowedPrincipal = permissions({ mcp_skill: true, desktop: true })
+      vi.spyOn(agent as any, 'issueAgentCliCredential').mockResolvedValue({ token: 'fixture-only', expires_at: '2099-01-01T00:00:00Z' })
+      const resolve = vi.spyOn(agent as any, 'resolvePrincipalPermissions').mockImplementation(async (friendId, sessionId, sessionType, channelId) => {
+        expect({ friendId, sessionId, sessionType, channelId }).toEqual({ friendId: 'owner', sessionId: 'mcp-allowed', sessionType: 'private', channelId: 'test' })
+        return allowedPrincipal
+      })
       await internals.managerStack.harness.spawnWorker({
         ...common,
         managerKey: (`test::${'mcp-low'}` as ManagerKey),
+        origin: { ...common.origin, creator_friend_id: 'owner' },
+        target_session: { channel_id: 'test', session_id: 'mcp-low', type: 'private' },
         impl: 'claude-code',
         principal_permissions: lowPrincipal,
       })
@@ -176,10 +184,11 @@ describe('UnifiedAgent worker capability production wiring', () => {
         expect.objectContaining({ name: 'crabot-workspace-git' }),
       ])
 
-      const allowedPrincipal = permissions({ mcp_skill: true, desktop: true })
       const builtinWorker = await internals.managerStack.harness.spawnWorker({
         ...common,
         managerKey: (`test::${'mcp-allowed'}` as ManagerKey),
+        origin: { ...common.origin, creator_friend_id: 'owner' },
+        target_session: { channel_id: 'test', session_id: 'mcp-allowed', type: 'private' },
         impl: 'builtin',
         principal_permissions: allowedPrincipal,
       })
@@ -197,10 +206,12 @@ describe('UnifiedAgent worker capability production wiring', () => {
         expect.objectContaining({ name: 'crabot-workspace-git' }),
       ])
       expect(codex.spawnCalls[0].principal_permissions).toEqual(allowedPrincipal)
+      expect(resolve).toHaveBeenCalled()
     } finally {
       internals.attentionScheduler.stopAll()
       await internals.managerStack.dispose()
       await dataDir.restore()
+      vi.restoreAllMocks()
     }
   })
 })

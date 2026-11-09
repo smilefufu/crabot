@@ -165,7 +165,8 @@ describe('Manager restart continuation', () => {
     const original = registry(adapter, { contextWindowTokens: () => 100_000 })
     const loop = original.getOrCreate(KEY)
     const failed = await loop.wakeUp({ received_at: '2026-09-21T12:00:00.000Z', timezone: 'Asia/Shanghai',
-      wake: { kind: 'schedule', scheduleId: 'original-schedule', title: 'schedule', description: 'UNASSEMBLED_INSTRUCTION' } })
+      wake: { kind: 'schedule', scheduleId: 'original-schedule', triggerId: 'original-trigger', scheduleName: 'schedule', title: 'schedule', description: 'UNASSEMBLED_INSTRUCTION',
+        targetSession: { channel_id: 'feishu', session_id: 'restart-test', type: 'private' } } })
     expect(failed.contextRecoveryRequired).toBe(true)
     const checkpoint = await store.loadCheckpoint(KEY)
     expect(checkpoint?.hasEngineMessages).toBe(false)
@@ -709,7 +710,8 @@ describe('Manager restart continuation', () => {
     }, updateConfig() {} }, { contextWindowTokens: () => 100000, toolFace: () => [page] })
     if (source === 'human') void old.routeHumanMessages('feishu', 'restart-test', [message('original', 'Original long request')])
     else void old.getOrCreate(KEY).wakeUp({ received_at: '2026-09-06T14:05:00Z', timezone: 'Asia/Shanghai',
-      wake: { kind: 'schedule', scheduleId: 'long-review', title: 'Original long request', description: 'read all pages' } })
+      wake: { kind: 'schedule', scheduleId: 'long-review', triggerId: 'long-trigger', scheduleName: 'long review', title: 'Original long request', description: 'read all pages',
+        targetSession: { channel_id: 'feishu', session_id: 'restart-test', type: 'private' } } })
     const checkpoint = await checkpointWhere(value => paused && value.state.foldedCount > 0)
     expect(checkpoint.state.rollingSummary).toBeUndefined()
     expect(checkpoint.state.recent.some(item => item.id.startsWith('compaction:'))).toBe(true)

@@ -3,7 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import AdminModule from './index.js'
-import { PermissionTemplateManager } from './permission-template-manager.js'
+import { CoreAgentConfigMutationCoordinator } from './core-agent-config-revision-store.js'
 import { createToolAccessConfig } from './types.js'
 import { groupSessionConfigKey, loadGroupSessionConfigs, parseGroupSessionConfig, serializeGroupSessionConfigs } from './group-session-config.js'
 
@@ -76,15 +76,21 @@ describe('group session permission persistence', () => {
   })
 
   it('legacy backup templates cannot replace the immutable narrow group default', async () => {
-    const templates = new PermissionTemplateManager()
-    templates.initSystemTemplates()
-    const admin = Object.create(AdminModule.prototype) as any
-    admin.permissionTemplateManager = templates
+    const admin = new AdminModule({ moduleId: 'group-template-fixture', moduleType: 'admin', version: 'test', protocolVersion: '0.1.0', port: 0 }, { data_dir: directory, web_port: 0 }) as any
+    admin.dataLoaded = true
+    admin.permissionTemplateManager.initSystemTemplates()
+    admin.readCoreAgentSemanticSnapshot = () => ({ fixture: 'unchanged-runtime-config' })
+    admin.configMutationCoordinator = new CoreAgentConfigMutationCoordinator(directory, {
+      readSemanticSnapshot: admin.readCoreAgentSemanticSnapshot, publishInvalidation: async () => {},
+    })
+    await admin.configMutationCoordinator.initialize()
     const deps = admin.buildCrabotImportDeps('unused-test-archive', 'overwrite')
-    const previous = structuredClone(templates.get('group_default')!)
+    const previous = structuredClone(admin.permissionTemplateManager.get('group_default')!)
     expect(await deps.upsertTemplate({ ...previous, is_system: false, tool_access: createToolAccessConfig(true) })).toBe('skipped')
-    expect(templates.get('group_default')).toEqual(previous)
+    expect(admin.permissionTemplateManager.get('group_default')).toEqual(previous)
     expect(await deps.upsertTemplate({ ...previous, id: 'custom', is_system: false })).toBe('imported')
+    expect(JSON.parse(await fs.readFile(admin.templatesFilePath, 'utf8'))).toContainEqual({ ...previous, id: 'custom', is_system: false })
+    expect(admin.permissionTemplateManager.get('group_default')).toEqual(previous)
   })
 
   it('keeps unset fields unset and preserves explicit CLI denials', () => {

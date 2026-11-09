@@ -42,14 +42,18 @@ describe('Request authority checks the fixed ceiling and current full operation 
     await expect(authority('group').run(file(path.join(directory, 'b/item'), true), execute)).rejects.toThrow(/PERMISSION_DENIED/)
     expect(execute).toHaveBeenCalledTimes(1)
   })
-  it('refuses field-splicing and later widening while allowing a still valid unrelated source', async () => {
-    const execute = vi.fn(async () => 'unexpected')
+  it('refuses field-splicing, applies same-subject grants and revocations, and preserves history', async () => {
+    const execute = vi.fn(async () => 'authorized')
+    const saved = (await store.get(key, requestId))!.record.permission_sources
     await expect(authority().run(file(path.join(directory, 'a/item'), true), execute)).rejects.toThrow(/PERMISSION_DENIED/)
-    personal.resolved.storage = { workspace_path: directory, access: 'readwrite' }
-    await expect(authority().run(file(path.join(directory, 'outside'), true), execute)).rejects.toThrow(/PERMISSION_DENIED/)
-    personal.resolved.tool_access.file_io = false
-    expect(await authority().run(file(path.join(directory, 'a/item'), false), async () => 'still public')).toBe('still public')
     expect(execute).not.toHaveBeenCalled()
+    personal.resolved.storage = { workspace_path: directory, access: 'readwrite' }
+    expect(await authority().run(file(path.join(directory, 'outside'), true), execute)).toBe('authorized')
+    expect((await store.get(key, requestId))!.record.permission_sources).toEqual(saved)
+    personal.resolved.tool_access.file_io = false
+    await expect(authority().run(file(path.join(directory, 'outside'), true), execute)).rejects.toThrow(/PERMISSION_DENIED/)
+    expect(await authority().run(file(path.join(directory, 'a/item'), false), async () => 'still public')).toBe('still public')
+    expect(execute).toHaveBeenCalledTimes(1)
   })
   it('rechecks real current Master, ownership and lookup availability on every action', async () => {
     const onlyMaster = async (source: RequestPermissionSource) => source.is_master ? allowed : denied('PERMISSION_DENIED', 'Master required')

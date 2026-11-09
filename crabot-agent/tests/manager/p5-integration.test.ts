@@ -347,16 +347,21 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
     )
     const spawnSpy = vi.spyOn(stack.harness, 'spawnWorker').mockResolvedValue(makeLedgerWorker({ workerId: 'w-spawned', managerKey: SYSTEM_TASKS_MANAGER_KEY }))
     const routeSpy = vi.spyOn(stack.registry, 'admitSchedule')
+    const permissions = {
+      tool_access: {
+        memory: true, messaging: true, task: true, mcp_skill: true,
+        file_io: true, browser: true, shell: true, remote_exec: false, desktop: false,
+      },
+      cli_access: { schedule: 'write' },
+      storage: null,
+      memory_scopes: [],
+    }
     ;(stack.registry as unknown as { deps: { onScheduleWake: () => Promise<unknown> } })
-      .deps.onScheduleWake = async () => ({
-        tool_access: {
-          memory: true, messaging: true, task: true, mcp_skill: true,
-          file_io: true, browser: true, shell: true, remote_exec: false, desktop: false,
-        },
-        cli_access: { schedule: 'write' },
-        storage: null,
-        memory_scopes: [],
-      })
+      .deps.onScheduleWake = async () => permissions
+    vi.spyOn(agent as any, 'resolvePrincipalPermissions').mockImplementation(async (friendId, sessionId, sessionType, channelId) => {
+      expect({ friendId, sessionId, sessionType, channelId }).toEqual({ friendId: 'friend-42', sessionId: 'system-tasks', sessionType: 'private', channelId: 'admin-web' })
+      return permissions
+    })
 
     const accepted = await rpc('trigger_schedule', {
       schedule_id: 'sc-sys',

@@ -34,6 +34,7 @@ it('real old metadata upgrade and Admin reload dispatch into an existing project
     expect(result.ok).toBe(true)
     await admin.loadData()
     const principal = admin.buildResolvedFriendPermissions(admin.friends.get('owner'))
+    let currentPrincipal = principal
     expect(principal.storage).toEqual({ scope: 'all', access: 'readwrite' })
     expect(principal.tool_access).toEqual(template.tool_access)
     const agent = Object.create(UnifiedAgent.prototype) as any
@@ -44,11 +45,14 @@ it('real old metadata upgrade and Admin reload dispatch into an existing project
     vi.stubEnv('WORKER_WORKSPACES_DIR', path.join(data, 'workspaces'))
     stack = buildManagerStack({ dataRoot: data, now: () => new Date().toISOString(), managerAdapter: () => ({ async *stream() { throw new Error('No model call expected') }, updateConfig() {} }), managerModel: () => 'fixture',
       messagingDeps: {} as never, memoryServerFor: () => createCrabMemoryServer({ rpcClient: {} as never, moduleId: 'fixture', getMemoryPort: async () => 1 }, { accessContext: { actor_kind: 'conversation', memory_enabled: false }, visibility: 'internal', scopes: [], isMasterPrivate: false }),
-      callAdmin: async () => ({} as never), principalResolver: {} as never, builtinSpawnDefaults: context => ({ adapter: {} as never, model: 'fixture', systemPrompt: '', tools: () => agent.buildBuiltinWorkerTools(context) }) })
+      callAdmin: async () => ({} as never), principalResolver: { resolvePermissions: vi.fn(async target => {
+        expect(target).toEqual({ channelId: 'fixture', sessionId: 'session', sessionType: 'private', senderFriendId: 'owner' })
+        return currentPrincipal
+      }) } as never, builtinSpawnDefaults: context => ({ adapter: {} as never, model: 'fixture', systemPrompt: '', tools: () => agent.buildBuiltinWorkerTools(context) }) })
     stack.adapters.set('builtin', carrier)
     // Manager notification delivery is outside this file-access test; no model turn is started.
     vi.spyOn(stack.registry, 'routeWorkerEvent').mockResolvedValue(undefined)
-    const params = { managerKey: 'fixture::session' as const, title: 'Existing project', prompt: 'Create file', origin: { trigger_type: 'message' as const, creator_friend_id: 'owner' }, report_to: { channel_id: 'fixture', session_id: 'session' }, workspace: project, principal_permissions: principal }
+    const params = { managerKey: 'fixture::session' as const, title: 'Existing project', prompt: 'Create file', origin: { trigger_type: 'message' as const, creator_friend_id: 'owner' }, report_to: { channel_id: 'fixture', session_id: 'session' }, target_session: { channel_id: 'fixture', session_id: 'session', type: 'private' as const }, workspace: project, principal_permissions: principal }
     const worker = await stack.harness.spawnWorker(params)
     expect(worker.incarnations[0].workspace).toBe(project)
     const tools = (spec!.builtin!.tools as () => any[])(), file = path.join(project, 'actual-result.txt')
@@ -56,7 +60,8 @@ it('real old metadata upgrade and Admin reload dispatch into an existing project
     expect((await tools.find(tool => tool.name === 'Read').call({ file_path: file }, {})).output).toContain('Old project remains usable')
     expect(await fs.readFile(file, 'utf8')).toBe('Old project remains usable')
     const calls = vi.mocked(carrier.spawn).mock.calls.length
-    await expect(stack.harness.spawnWorker({ ...params, principal_permissions: { ...principal, storage: { workspace_path: limited, access: 'readwrite' } } })).rejects.toThrow('PERMISSION_DENIED')
+    currentPrincipal = { ...principal, storage: { workspace_path: limited, access: 'readwrite' } }
+    await expect(stack.harness.spawnWorker({ ...params, principal_permissions: currentPrincipal })).rejects.toThrow('PERMISSION_DENIED')
     expect(vi.mocked(carrier.spawn).mock.calls).toHaveLength(calls)
     expect(await fs.readFile(file, 'utf8')).toBe('Old project remains usable')
     await fs.unlink(path.join(adminData, 'friend-permission-configs.json'))

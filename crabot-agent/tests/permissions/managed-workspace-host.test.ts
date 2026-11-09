@@ -22,7 +22,7 @@ let root: string, ledger: LedgerStore, contexts: WorkerContextStore, workspaces:
 let harness: WorkerHarness, adapter: WorkerAdapter, lastSpec: SpawnSpec
 const params = () => ({ managerKey: key, title: 'task result', prompt: 'make result',
   origin: { trigger_type: 'message' as const, creator_friend_id: 'owner' },
-  report_to: { channel_id: 'fixture', session_id: 'session' }, principal_permissions: principal() })
+  report_to: { channel_id: 'fixture', session_id: 'session' }, target_session: { channel_id: 'fixture', session_id: 'session', type: 'private' as const }, principal_permissions: principal() })
 beforeEach(async () => {
   root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'managed-host-')))
   ledger = new LedgerStore(path.join(root, 'ledgers'))
@@ -113,7 +113,10 @@ describe('host task ownership and compatibility', () => {
       agentHandler: { createBuiltinBgToolOptions: () => undefined }, mcpConnector: { getAllTools: () => [] }, knownSecrets: [] })
     vi.stubEnv('WORKER_WORKSPACES_DIR', path.join(root, 'configured-workspaces'))
     const stack = buildManagerStack({ dataRoot: root, now: () => new Date().toISOString(), managerAdapter: () => ({ async *stream() { yield* chunksFromContent([{ type: 'text', text: 'fixture' }], 'end_turn') }, updateConfig() {} }), managerModel: () => 'fixture',
-      messagingDeps: {} as never, memoryServerFor: () => createCrabMemoryServer({ rpcClient: { call: vi.fn(), callSensitive: vi.fn() } as never, moduleId: 'fixture', getMemoryPort: async () => 1 }, { accessContext: { actor_kind: 'conversation', memory_enabled: false }, visibility: 'internal', scopes: [], isMasterPrivate: false }), callAdmin: async () => ({} as never), principalResolver: {} as never,
+      messagingDeps: {} as never, memoryServerFor: () => createCrabMemoryServer({ rpcClient: { call: vi.fn(), callSensitive: vi.fn() } as never, moduleId: 'fixture', getMemoryPort: async () => 1 }, { accessContext: { actor_kind: 'conversation', memory_enabled: false }, visibility: 'internal', scopes: [], isMasterPrivate: false }), callAdmin: async () => ({} as never), principalResolver: { resolvePermissions: vi.fn(async target => {
+        expect(target).toEqual({ channelId: 'fixture', sessionId: 'session', sessionType: 'private', senderFriendId: 'owner' })
+        return principal()
+      }) } as never,
       builtinSpawnDefaults: ctx => ({ adapter: {} as never, model: 'fixture', systemPrompt: '', tools: () => agent.buildBuiltinWorkerTools(ctx) }) })
     stack.adapters.set('builtin', adapter)
     try {
@@ -126,7 +129,7 @@ describe('host task ownership and compatibility', () => {
       expect((await tools.find(tool => tool.name === 'Read').call({ file_path: file }, {})).output).toContain('task result')
       const savedContexts = new WorkerContextStore(path.join(root, 'agent', 'workers'))
       await savedContexts.write(worker.worker_id, { ...await savedContexts.read(worker.worker_id), creator_friend_id: 'another' })
-      expect((await write.call({ file_path: file, content: 'must not write' }, {})).isError).toBe(true)
+      await expect(write.call({ file_path: file, content: 'must not write' }, {})).rejects.toThrow('CAPABILITY_UNKNOWN: Worker subject mismatch')
       expect(await fs.readFile(file, 'utf8')).toBe('task result')
       expect(tools.some(tool => tool.category === 'messaging' || tool.category === 'memory')).toBe(false)
     } finally { await stack.dispose() }

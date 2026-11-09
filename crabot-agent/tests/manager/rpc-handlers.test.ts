@@ -743,7 +743,9 @@ describe('trigger_schedule 端到端(真实 manager 栈 + mock LLM)', () => {
     const params = spawnSpy.mock.calls[0][0]
     expect(params.origin.creator_friend_id).toBe('friend-7')
     // 解析是以调度的 creator 名义发起的，档位也是那一份
-    expect(calls.map((c) => c.senderFriendId)).toEqual(['f-lastspeaker', 'friend-7', 'friend-7'])
+    expect(calls[0].senderFriendId).toBe('f-lastspeaker')
+    expect(calls.slice(1).length).toBeGreaterThanOrEqual(2)
+    expect(calls.slice(1).every(call => call.senderFriendId === 'friend-7')).toBe(true)
     expect(params.principal_permissions?.memory_scopes).toEqual(['scope-of-friend-7'])
     const admissions = await Promise.all(routeSpy.mock.results.map(result => result.value))
     await Promise.all(admissions.map(admission => admission.completion))

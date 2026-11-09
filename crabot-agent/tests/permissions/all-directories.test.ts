@@ -25,14 +25,17 @@ it('all allows actual external file operations while null, readonly and closed e
   expect((await checkFileAccess({ ...all, tool_access: { ...all.tool_access, file_io: false } }, file, root, false)).allowed).toBe(false)
   expect(await fs.readFile(file, 'utf8')).toBe('actual external result')
 })
-it('all intersects only the same source, preserves old null and canonical directory restrictions', async () => {
+it('uses the current directory scope of the same source without changing its creation snapshot', async () => {
   const narrow = path.join(root, 'project'); await fs.mkdir(narrow)
   const all = { scope: 'all' as const, access: 'readwrite' as const }, read = { scope: 'all' as const, access: 'read' as const }
   expect((await boundedRequestPermissions(source(all), source(read))).storage).toEqual(read)
   for (const pair of [[all, { workspace_path: narrow, access: 'read' }], [{ workspace_path: narrow, access: 'read' }, all]] as const) {
-    expect((await boundedRequestPermissions(source(pair[0]), source(pair[1]))).storage).toEqual({ workspace_path: narrow, access: 'read' })
+    const original = source(pair[0]), saved = structuredClone(original)
+    expect((await boundedRequestPermissions(original, source(pair[1]))).storage).toEqual(pair[1])
+    expect(original).toEqual(saved)
   }
-  expect((await boundedRequestPermissions(source(null), source(all))).storage).toBeNull()
+  expect((await boundedRequestPermissions(source(null), source(all))).storage).toEqual(all)
+  expect((await boundedRequestPermissions(source(all), source(null))).storage).toBeNull()
   await expect(boundedRequestPermissions(source(all), { ...source(all), subject_id: 'other' })).rejects.toThrow('different')
 })
 it('explicit full-host scope admits native CLI on Windows but does not grant missing switches', () => {
