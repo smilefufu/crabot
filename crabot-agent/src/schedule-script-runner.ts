@@ -6,6 +6,7 @@ import path from 'node:path'
 import { buildChildEnv } from './core/runtime-env.js'
 import type { TraceStore } from './core/trace-store.js'
 import { runHostProcess, terminateHostProcessTreeAndWait, type HostProcessOutcome } from './engine/host-process.js'
+import { toolScopeForChild, finishResourceScope, type ToolResourceScope } from './engine/tool-resource-scope.js'
 import { BASH_NOT_FOUND_MESSAGE, resolveBashPath } from './utils/resolve-bash-path.js'
 import { buildScrubbedChildEnv } from './workers/connections/secret-env.js'
 
@@ -65,6 +66,7 @@ interface ScheduleScriptActiveMarker {
   source_sha256: string
   pid: number
   process_start_identity: string
+  resource_scope?: ToolResourceScope
   created_at: string
 }
 
@@ -135,12 +137,13 @@ function appendTail(current: Buffer, chunk: Buffer): Buffer {
 
 function classifyOutcome(outcome: HostProcessOutcome): {
   status: 'succeeded' | 'failed' | 'interrupted'
-  failureKind?: 'spawn_error' | 'nonzero_exit' | 'signal' | 'timeout' | 'output_limit' | 'aborted'
+  failureKind?: 'spawn_error' | 'nonzero_exit' | 'signal' | 'timeout' | 'output_limit' | 'aborted' | 'resource_limit'
 } {
   if (outcome.kind === 'aborted') return { status: 'interrupted', failureKind: 'aborted' }
   if (outcome.kind === 'spawn_error') return { status: 'failed', failureKind: 'spawn_error' }
   if (outcome.kind === 'timed_out') return { status: 'failed', failureKind: 'timeout' }
   if (outcome.kind === 'output_limit') return { status: 'failed', failureKind: 'output_limit' }
+  if (outcome.kind === 'resource_limit') return { status: 'failed', failureKind: 'resource_limit' }
   if (outcome.signal) return { status: 'failed', failureKind: 'signal' }
   if (outcome.exitCode !== 0) return { status: 'failed', failureKind: 'nonzero_exit' }
   return { status: 'succeeded' }
@@ -239,6 +242,7 @@ export class ScheduleScriptRunner {
       else resolveAdmission()
     }
 
+    let resourceCleanupUnknown = false
     const nonce = randomUUID()
     const processRun = (this.deps.runProcess ?? runHostProcess)({
       argv: [
@@ -272,6 +276,7 @@ export class ScheduleScriptRunner {
             source_sha256: run.sourceSha256,
             pid: child.pid,
             process_start_identity: identity,
+            ...(toolScopeForChild(child) ? { resource_scope: toolScopeForChild(child) } : {}),
             created_at: new Date().toISOString(),
           })
           admissionAccepted = true
@@ -284,6 +289,7 @@ export class ScheduleScriptRunner {
     })
 
     const completion = processRun.then(async (outcome) => {
+      resourceCleanupUnknown = outcome.resources?.cleanup === 'unknown'
       if (!admissionSettled) settleAdmission(new Error('Schedule script admission failed'))
       const endedAt = new Date().toISOString()
       const classified = classifyOutcome(outcome)
@@ -293,6 +299,7 @@ export class ScheduleScriptRunner {
         ...(outcome.exitCode === null ? {} : { exit_code: outcome.exitCode }),
         ...(outcome.signal ? { signal: outcome.signal } : {}),
         ...(classified.failureKind ? { failure_kind: classified.failureKind } : {}),
+        ...(outcome.resources ? { resource_result: outcome.resources } : {}),
         stdout_bytes: outcome.stdoutBytes,
         stderr_bytes: outcome.stderrBytes,
         ...(run.deliverResult ? { output_tail: outputTail.toString('utf8') } : {}),
@@ -335,8 +342,8 @@ export class ScheduleScriptRunner {
         this.deps.traceStore.appendTraceOutcome(trace.trace_id, { summary: traceSummary })
       }
     }).finally(async () => {
-      this.active.delete(run.scheduleId)
-      if (markerPath) {
+      if (!resourceCleanupUnknown) this.active.delete(run.scheduleId)
+      if (markerPath && !resourceCleanupUnknown) {
         await fs.unlink(markerPath).catch(() => {
           console.warn(`[ScheduleScriptRunner] failed to remove active marker for trigger ${run.triggerId}`)
         })
@@ -373,7 +380,13 @@ export class ScheduleScriptRunner {
       const deliverySpan = trace?.spans.find((span) => span.type === 'schedule_result_delivery' && span.status === 'running')
 
       if (!executionSpan || executionSpan.status === 'running') {
-        try {
+        if (marker.resource_scope !== undefined) {
+          const result = await finishResourceScope(marker.resource_scope, null, null)
+          if (result.cleanup !== 'complete') {
+            console.warn(`[ScheduleScriptRunner] resource cleanup unknown for trigger ${marker.trigger_id}; marker retained`)
+            continue
+          }
+        } else try {
           const actual = await (this.deps.readProcessIdentity ?? readProcessStartIdentity)(marker.pid)
           if (actual === marker.process_start_identity) {
             await (this.deps.terminateProcess ?? terminateHostProcessTreeAndWait)(marker.pid)

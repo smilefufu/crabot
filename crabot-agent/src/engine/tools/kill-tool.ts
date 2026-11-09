@@ -1,3 +1,4 @@
+import { stopResourceScope, resourceFailure } from '../tool-resource-scope.js'
 /**
  * Kill tool — terminate a background entity.
  *
@@ -33,6 +34,13 @@ async function killShell(
   // Cross-platform: POSIX sends SIGTERM (+ SIGKILL after 3s) to the process
   // group; Windows runs `taskkill /F /T /PID` to forcefully terminate the
   // whole child tree in one call.
+  if (record.resource_scope !== undefined) {
+    await deps.registry.update(entityId, { stop_requested_at: new Date().toISOString() })
+    const resource_result = await stopResourceScope(record.resource_scope)
+    if (resource_result.cleanup !== 'complete') return { output: resourceFailure(resource_result) ?? 'Tool stop is unknown', isError: true }
+    await deps.registry.update(entityId, { status: 'killed', exit_code: resource_result.exit_code, ended_at: new Date().toISOString(), resource_result })
+    return { output: `Resource group stopped and verified empty: ${entityId}`, isError: false }
+  }
   killShellTree(record.pgid)
 
   await deps.registry.update(entityId, {

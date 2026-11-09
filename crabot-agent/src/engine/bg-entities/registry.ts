@@ -1,3 +1,4 @@
+import { finishResourceScope, resourceFailure } from '../tool-resource-scope.js'
 /**
  * BgEntityRegistry — disk-backed registry for background entities.
  * Atomic writes via tmp-file + rename; in-process AsyncMutex for serialization.
@@ -123,7 +124,7 @@ export class BgEntityRegistry {
   }
 
   private shellFingerprint(record: BgShellRegistryRecord): string {
-    const { status, exit_code, ended_at, last_activity_at, exit_notification, ...stable } = record
+    const { status, exit_code, ended_at, last_activity_at, exit_notification, resource_result, stop_requested_at, ...stable } = record
     return sha256CanonicalJson(stable)
   }
 
@@ -207,6 +208,7 @@ export class BgEntityRegistry {
       }
 
       const next = { ...existing, ...patch } as BgEntityRecord
+      if (next.type === 'shell' && next.stop_requested_at && next.status !== 'running' && next.resource_result?.cleanup === 'complete') next.status = 'killed'
       if (next.type === 'agent' && isWorkerOwnedBuiltinAgent(next) && existing.status === 'running' && next.status !== 'running') {
         if (next.stop_requested_at) next.status = 'killed'
         else if (!next.exit_notification) {
@@ -333,6 +335,19 @@ export class BgEntityRegistry {
       if (rec.status !== 'running') continue
 
       if (rec.type === 'shell') {
+        if (rec.resource_scope !== undefined) {
+          const resource_result = await finishResourceScope(rec.resource_scope, null, null)
+          const message = resourceFailure(resource_result) ?? 'Protected tool interrupted by Agent restart; not replayed; partial side effects may remain.'
+          await fs.appendFile(rec.log_file, `\n${message}\n`)
+          if (resource_result.cleanup !== 'complete') {
+            await this.update(rec.entity_id, { resource_result } as Partial<BgShellRegistryRecord>)
+            continue
+          }
+          await this.update(rec.entity_id, { status: 'failed', exit_code: -1, ended_at: new Date().toISOString(), resource_result } as Partial<BgShellRegistryRecord>)
+          const updated = await this.get(rec.entity_id)
+          if (updated?.type === 'shell') addDeadShell(updated)
+          continue
+        }
         const reaped = await this.reapShellIfDead(rec)
         if (reaped) {
           const updated = await this.get(rec.entity_id)

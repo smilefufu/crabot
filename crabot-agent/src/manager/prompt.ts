@@ -1,3 +1,4 @@
+import { executionResourceContext } from '../engine/tool-resources.js'
 import type { ManagerKey } from './types.js'
 import { assembleDailyReflectionPrompt } from './daily-reflection-prompt.js'
 import { splitManagerKey } from './principal.js'
@@ -127,5 +128,6 @@ export function assembleManagerSystemPrompt(inputs: PromptInputs): string {
   if (inputs.dialogProfile) parts.push('## 对话对象档案\n\n' + inputs.dialogProfile)
   if (voice) parts.push(VOICE_REPLY_PROMPT)
   if (voice && requestMode === 'shared') parts.push(VOICE_MANAGEMENT_REQUEST_PROMPT)
+  parts.push(executionResourceContext())
   return parts.join('\n\n')
 }
