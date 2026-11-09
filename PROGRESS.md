@@ -3,7 +3,7 @@
 ### Cordis Channel 独立验证（2026-11-10，设计待逐项确认）
 
 - 已从主仓 main `de3aab77` 建立独立 worktree 和 `research/cordis-validation` 分支；原部署目录和文档仓 WIP 保留。
-- [首轮 spec](crabot-docs/superpowers/specs/2026-11-10-cordis-channel-validation-design.md) 建议以 Telegram polling、模拟平台和临时数据验证业务复用、同进程通信、生命周期及完整离线插件包。D1 至 D4 尚未许可，未开始实现、修改正式协议或部署。
+- [首轮 spec](crabot-docs/superpowers/specs/2026-11-10-cordis-channel-validation-design.md) 已按用户选择改为飞书及仅扫码配置，扫码完成边界待澄清；使用模拟平台与临时数据。D2 业务分离尚未确认，D3 停用规则与 D4 分发方式先讨论，未开始实现、修改正式协议或部署。
 - 历史 13 项 Cordis 探针仅为机制研究；原临时文件已清理，不作为本分支测试结果。后续重新留存可复现证据。
 
 ### 权限实时生效（2026-11-09，定向验收通过，未部署）
