@@ -7,6 +7,7 @@ import { ConfirmModal } from '../../components/Common/ConfirmModal'
 import { useToast } from '../../contexts/ToastContext'
 import { ChatMessageItem, type MessageState } from './ChatMessageItem'
 import { MessageContextMenu } from './MessageContextMenu'
+import { ChatActivity, type PendingChatRequest } from './ChatActivity'
 import { createRequestId, ClientError } from 'crabot-client'
 import { ChatSnapshotController, useServerScope, getServerScope } from '../../services/server-state'
 
@@ -51,6 +52,7 @@ export const Chat: React.FC = () => {
   const [unreadCount, setUnreadCount] = useState(0)
   const [attachments, setAttachments] = useState<File[]>([])
   const [isSending, setIsSending] = useState(false)
+  const [waitingRequests, setWaitingRequests] = useState<Map<string, PendingChatRequest>>(new Map())
   const [showSettings, setShowSettings] = useState(false)
   // 消息引用：胶囊数据
   const [quote, setQuote] = useState<{ role: 'user' | 'assistant'; text: string } | null>(null)
@@ -134,11 +136,31 @@ export const Chat: React.FC = () => {
     setShowScrollButton(false)
   }, [])
 
+  const settleWaiting = useCallback((requestIds: readonly string[]) => {
+    setWaitingRequests(previous => {
+      if (!requestIds.some(id => previous.has(id))) return previous
+      const next = new Map(previous)
+      requestIds.forEach(id => next.delete(id))
+      return next
+    })
+  }, [])
+
+  const updateWaiting = (requestId: string, phase: PendingChatRequest['phase']) => {
+    setWaitingRequests(previous => {
+      const request = previous.get(requestId)
+      // 回复可能先于发送 HTTP 返回：已收起的提示不能重新出现。
+      if (!request || (phase === 'waiting' && request.phase !== 'sending')) return previous
+      return new Map(previous).set(requestId, { ...request, phase, sentAt: phase === 'waiting' ? Date.now() : request.sentAt })
+    })
+  }
+
   const refreshSnapshot = useCallback(async (known: readonly MessageState[] = messagesRef.current) => {
     setSyncStatus('syncing')
     try {
       const snapshot = await snapshotController.refresh(known, PAGE_SIZE)
       if (!snapshot) return
+      settleWaiting(snapshot.messages.filter(message => message.role === 'assistant')
+        .flatMap(message => message.request_ids ?? (message.request_id ? [message.request_id] : [])))
       const chronological = [...snapshot.messages].sort((a, b) => a.timestamp.localeCompare(b.timestamp))
       const view = chronological.map(message => ({ ...message, status: 'completed' as const }))
       messagesRef.current = view
@@ -155,11 +177,12 @@ export const Chat: React.FC = () => {
       })
       setSyncStatus(snapshot.incomplete ? 'partial' : 'synced')
     } catch { setSyncStatus('error') }
-  }, [snapshotController])
+  }, [snapshotController, settleWaiting])
 
   useEffect(() => {
     messagesRef.current = []
     setMessages([]); setTaskStatuses(new Map())
+    setWaitingRequests(new Map())
     setLoadingMore(false); isLoadingHistoryRef.current = false
     initialPositionedRef.current = false; setUnreadCount(0); setShowScrollButton(false)
     void refreshSnapshot()
@@ -194,6 +217,12 @@ export const Chat: React.FC = () => {
     }
     initialPositionedRef.current = true
   }, [messages])
+
+  useEffect(() => {
+    if (isNearBottomRef.current && !isLoadingHistoryRef.current && waitingRequests.size > 0) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    }
+  }, [waitingRequests])
 
   // 自动滚动到底部（仅用户在底部附近时；首屏定位由上方 useLayoutEffect 负责）
   useEffect(() => {
@@ -256,6 +285,17 @@ export const Chat: React.FC = () => {
 
   // 处理服务端消息
   const handleServerMessage = async (message: ChatServerMessage) => {
+    if (message.type === 'chat_push' && message.message.role === 'assistant') {
+      settleWaiting(message.message.request_ids ?? (message.message.request_id ? [message.message.request_id] : []))
+    } else if (message.type === 'chat_reply') {
+      settleWaiting(message.request_ids ?? (message.request_id ? [message.request_id] : []))
+    } else if (message.type === 'chat_error') {
+      if (message.request_id) settleWaiting([message.request_id])
+      else setWaitingRequests(previous => new Map([...previous].map(([id, request]) => [id, { ...request, phase: 'unknown' as const }])))
+    } else if (message.type === 'chat_message_deleted') {
+      const deleted = messagesRef.current.find(item => item.message_id === message.message_id)
+      if (deleted?.role === 'user' && deleted.request_id) settleWaiting([deleted.request_id])
+    }
     if (message.type !== 'chat_reply' && message.type !== 'chat_error') {
       await refreshSnapshot()
       return
@@ -431,11 +471,13 @@ export const Chat: React.FC = () => {
       && previous.files.every((file, index) => file === files[index])
     const requestId = same ? previous.id : createRequestId()
     pendingSend.current = { id: requestId, text: composed, files }
+    setWaitingRequests(previous => new Map(previous).set(requestId, { phase: 'sending', sentAt: Date.now() }))
     try {
       const { message } = files.length
         ? await chatService.sendMessageWithAttachments(composed, files, requestId)
         : await chatService.sendMessage(composed, requestId)
       if (scope !== getServerScope()) return
+      updateWaiting(requestId, 'waiting')
       setMessages(prev => prev.some(item => item.message_id === message.message_id)
         ? prev : [...prev, { ...message, status: 'sent' as const }])
       setAttachments(current => current.filter(file => !files.includes(file)))
@@ -446,6 +488,10 @@ export const Chat: React.FC = () => {
       inputRef.current?.focus()
       void refreshSnapshot()
     } catch (error) {
+      if (scope === getServerScope()) {
+        if (error instanceof ClientError && ['unreachable', 'timeout', 'cancelled'].includes(error.kind)) updateWaiting(requestId, 'unknown')
+        else settleWaiting([requestId])
+      }
       toast.error(error instanceof ClientError && ['unreachable', 'timeout', 'cancelled'].includes(error.kind)
         ? '发送结果尚未确认，草稿已保留。原样重试会核对同一条消息。' : '发送失败，草稿已保留，请重试')
     } finally {
@@ -701,9 +747,10 @@ export const Chat: React.FC = () => {
                   </React.Fragment>
                 )
               })}
-              <div ref={messagesEndRef} />
             </>
           )}
+          <ChatActivity requests={waitingRequests} connectionStatus={connectionStatus} />
+          <div ref={messagesEndRef} />
           </div>
 
           {/* 回到最新按钮 */}
@@ -957,6 +1004,7 @@ export const Chat: React.FC = () => {
           }}
           onDelete={() => {
             const msg = contextMenu.message
+            if (msg.role === 'user' && msg.request_id) settleWaiting([msg.request_id])
             // 乐观本地移除
             setMessages((prev) => prev.filter((m) => m.message_id !== msg.message_id))
             // 本地占位消息（msg_ 前缀）从未落服务端，无需调接口（否则 404 误报"删除失败"）；
@@ -985,6 +1033,7 @@ export const Chat: React.FC = () => {
           try {
             await chatService.clearMessages()
             setMessages([])
+            setWaitingRequests(new Map())
             setTaskStatuses(new Map())
             setShowClearConfirm(false)
             toast.success('已清空')
