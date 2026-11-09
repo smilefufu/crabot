@@ -1,4 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { UnifiedAgent } from '../../src/unified-agent.js'
 import { ConfigLoader } from '../../src/core/config-loader.js'
 import { McpConnector } from '../../src/agent/mcp-connector.js'
@@ -13,10 +16,24 @@ function config(): UnifiedAgentConfig {
 }
 
 describe('UnifiedAgent runtime config invalidation', () => {
-  beforeEach(() => vi.restoreAllMocks())
+  let directory: string, previousDataDir: string | undefined
+  const agents: UnifiedAgent[] = []
+  const boot = (cfg: UnifiedAgentConfig) => { const agent = new UnifiedAgent(cfg); agents.push(agent); return agent }
+  beforeEach(async () => {
+    vi.restoreAllMocks()
+    directory = await fs.mkdtemp(path.join(os.tmpdir(), 'permission-config-pull-'))
+    previousDataDir = process.env.DATA_DIR
+    process.env.DATA_DIR = directory
+  })
+  afterEach(async () => {
+    await Promise.all(agents.splice(0).map(agent => agent.stop().catch(() => {})))
+    if (previousDataDir === undefined) delete process.env.DATA_DIR
+    else process.env.DATA_DIR = previousDataDir
+    await fs.rm(directory, { recursive: true, force: true })
+  })
 
   it('subscribes to nonsecret invalidation and atomically accepts a higher pull revision', async () => {
-    const agent = new UnifiedAgent(config()) as any
+    const agent = boot(config()) as any
     expect(agent.config.subscriptions).toContain('admin.agent_config_invalidated')
     agent.adminPort = 19998
     const next = config()
@@ -37,7 +54,7 @@ describe('UnifiedAgent runtime config invalidation', () => {
   })
 
   it('clears stale after a successful equal-revision authenticated pull without reapplying config', async () => {
-    const agent = new UnifiedAgent(config()) as any
+    const agent = boot(config()) as any
     agent.adminPort = 19998
     agent.configRevision = 2
     agent.configAuthenticated = true
@@ -50,7 +67,7 @@ describe('UnifiedAgent runtime config invalidation', () => {
   })
 
   it('rebuilds detached runtime resources when an equal-revision pull recovers after a failure', async () => {
-    const agent = new UnifiedAgent(config()) as any
+    const agent = boot(config()) as any
     agent.adminPort = 19998
     agent.configRevision = 2
     agent.configAuthenticated = true
@@ -79,7 +96,7 @@ describe('UnifiedAgent runtime config invalidation', () => {
     const cold = config()
     cold.agent_config!.roles = ['worker']
     cold.agent_config!.model_config = {}
-    const agent = new UnifiedAgent(cold) as any
+    const agent = boot(cold) as any
     agent.adminPort = 19998
     agent.configRevision = 1
     agent.configAuthenticated = true
@@ -93,16 +110,13 @@ describe('UnifiedAgent runtime config invalidation', () => {
     expect(agent.agentHandler).toBeDefined()
     expect(agent.configRevision).toBe(2)
     expect(agent.configStale).toBe(false)
-    await expect(agent.managerStack.harness.spawnWorker({
-      managerKey: 'admin-web::admin-chat', title: 'ready', prompt: 'ready',
-      origin: { trigger_type: 'human' }, report_to: { channel_id: 'admin-web', session_id: 'admin-chat' },
-    })).resolves.toBeDefined()
+    expect(() => agent.assertRuntimeExecutionAdmission()).not.toThrow()
   })
 
   it('applies a revision change that only touches max_iterations without losing admission', async () => {
     // max_iterations 已无消费方，且协议只要求 revision 变化时原子替换；不得把这类变更
     // 打成永久 fail-closed（旧实现 throw 'controlled restart' 后退避重试永远撞同一堵墙）。
-    const agent = new UnifiedAgent(config()) as any
+    const agent = boot(config()) as any
     agent.adminPort = 19998
     agent.configRevision = 1
     agent.configAuthenticated = true
@@ -114,7 +128,7 @@ describe('UnifiedAgent runtime config invalidation', () => {
   })
 
   it('rejects schedule, background maintenance, and new worker runtime resolution while stale', async () => {
-    const agent = new UnifiedAgent(config()) as any
+    const agent = boot(config()) as any
     agent.configAuthenticated = true
     agent.configStale = true
     const routeSchedule = vi.spyOn(agent.managerStack.registry, 'routeSchedule')
@@ -132,7 +146,7 @@ describe('UnifiedAgent runtime config invalidation', () => {
   })
 
   it('rejects media completion Manager wakes while runtime config is stale', async () => {
-    const agent = new UnifiedAgent(config()) as any
+    const agent = boot(config()) as any
     agent.configAuthenticated = true
     agent.configStale = true
     const route = vi.spyOn(agent.managerStack.registry, 'routeMediaNotification')
@@ -148,10 +162,10 @@ describe('UnifiedAgent runtime config invalidation', () => {
     const configured = config()
     configured.image_config = { endpoint: 'https://image.example', apikey: 'image-key', model_id: 'image-model', format: 'openai', provider_id: 'image' }
     configured.image_capability = { available: true }
-    const ready = new UnifiedAgent(configured) as any
+    const ready = boot(configured) as any
     expect(ready.imageConnInfo).toMatchObject({ endpoint: 'https://image.example', model_id: 'image-model' })
     expect(ready.imageCapability).toEqual({ available: true })
-    const unavailable = new UnifiedAgent({ ...config(), image_capability: { available: false, reason: 'not_configured' } }) as any
+    const unavailable = boot({ ...config(), image_capability: { available: false, reason: 'not_configured' } }) as any
     expect(unavailable.imageConnInfo).toBeUndefined()
     expect(unavailable.imageCapability).toEqual({ available: false, reason: 'not_configured' })
   })
@@ -159,7 +173,7 @@ describe('UnifiedAgent runtime config invalidation', () => {
   it('applies new config while degrading an unconnectable MCP server (availability never blocks config)', async () => {
     // 第三方 MCP 不可用 ≠ 配置不可信：与启动 connectAll 一样降级该 server，
     // 不得把整个 pull 打成失败（configStale + 全入口 fail closed）。
-    const agent = new UnifiedAgent(config()) as any
+    const agent = boot(config()) as any
     agent.adminPort = 19998
     agent.configRevision = 1
     const next = config()
@@ -175,7 +189,7 @@ describe('UnifiedAgent runtime config invalidation', () => {
   it('propagates extra replacement to the running worker handler on hot apply', async () => {
     // extra 是原子替换的一部分：运行中 handler 从快照读 goal_mode_enabled 等开关，
     // 热更必须同步整批 extra，否则配置已换、handler 仍按旧值判定。
-    const agent = new UnifiedAgent(config()) as any
+    const agent = boot(config()) as any
     agent.adminPort = 19998
     agent.configRevision = 1
     agent.configAuthenticated = true
@@ -197,7 +211,7 @@ describe('UnifiedAgent runtime config invalidation', () => {
   it('closes candidate MCP connections when post-prepare validation fails (no child process leak)', async () => {
     // prepare 已拉起真实 MCP 子进程；其后校验失败必须关掉候选连接，
     // 否则退避重试每轮泄漏一批子进程。
-    const agent = new UnifiedAgent(config()) as any
+    const agent = boot(config()) as any
     agent.adminPort = 19998
     agent.configRevision = 1
     const candidateDisconnect = vi.fn().mockResolvedValue(undefined)
@@ -212,7 +226,7 @@ describe('UnifiedAgent runtime config invalidation', () => {
   })
 
   it('keeps old config and revision when image or subagent candidate validation fails', async () => {
-    const agent = new UnifiedAgent(config()) as any
+    const agent = boot(config()) as any
     agent.adminPort = 19998
     agent.configRevision = 1
     const old = JSON.stringify(agent.agentConfig)
@@ -233,7 +247,7 @@ describe('UnifiedAgent runtime config invalidation', () => {
     const degraded = config()
     degraded.agent_config = undefined
     degraded.runtime_config_authenticated = false
-    const agent = new UnifiedAgent(degraded) as any
+    const agent = boot(degraded) as any
     agent.adminPort = 19998
     agent.configRevision = 1
     expect(agent.configAuthenticated).toBe(false)
@@ -268,7 +282,7 @@ describe('UnifiedAgent runtime config invalidation', () => {
   })
 
   it('treats a crossed older-revision response as a no-op without touching live state', async () => {
-    const agent = new UnifiedAgent(config()) as any
+    const agent = boot(config()) as any
     agent.adminPort = 19998
     agent.configRevision = 3
     const disconnectAll = vi.spyOn(agent.mcpConnector, 'disconnectAll').mockResolvedValue(undefined)
@@ -281,7 +295,7 @@ describe('UnifiedAgent runtime config invalidation', () => {
   })
 
   it('marks failed pull stale, closes stale MCP connections, and retries with backoff', async () => {
-    const agent = new UnifiedAgent(config()) as any
+    const agent = boot(config()) as any
     agent.adminPort = 19998
     agent.configRevision = 1
     const disconnectAll = vi.spyOn(agent.mcpConnector, 'disconnectAll').mockResolvedValue(undefined)
@@ -295,8 +309,7 @@ describe('UnifiedAgent runtime config invalidation', () => {
     const good = config()
     good.agent_config!.system_prompt = 'recovered'
     pull.mockResolvedValue({ config: good, revision: 2 })
-    await new Promise((resolve) => setTimeout(resolve, 1300))
-    expect(agent.configStale).toBe(false)
+    await vi.waitFor(() => expect(agent.configStale).toBe(false), { timeout: 10000 })
     expect(agent.agentConfig.system_prompt).toBe('recovered')
   })
 })

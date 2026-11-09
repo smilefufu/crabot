@@ -31,6 +31,9 @@ import { createBuiltinWorkerHookRegistry } from './runtime.js'
 const WORKER_OWNER = '__builtin_worker__'
 
 export interface BuiltinSubagentExecutionContext {
+  readonly prepareTools?: () => Promise<void>
+  readonly getParentTools?: () => ReadonlyArray<ToolDefinition>
+  readonly getResolvedPermissions?: () => ResolvedPermissions
   readonly requestTools?: WorkerRequestToolScope
   readonly requestCliAuthorization?: EngineOptions['requestCliAuthorization']
   readonly permissionConfig: ToolPermissionConfig
@@ -168,21 +171,39 @@ export class BuiltinSubagentRunner {
             } }),
           createOutputTool(deps), createKillTool(deps), createListEntitiesTool(deps),
         ]
+        let capabilities = childCapabilities
+        const currentCapabilities = () => this.capabilitiesFor(subagent, execution.getParentTools?.() ?? parentTools, execution)
         return {
-          tools: childCapabilities.tools.map(tool => {
-            const bound = rebound.find(bound => bound.name === tool.name)
-            if (execution.requestTools && bound) return execution.requestTools.wrapChildBound(tool, bound)
-            if (execution.requestTools && tool.name === 'Skill') return execution.requestTools.wrapChildSkill(tool, childCapabilities.skills)
-            if (tool.authorization) return authorizeTool(bound ?? tool, { ...tool.authorization, role: 'child' })
-            if (tool.name === 'Skill') return authorizeTool(tool, roleAuthorization('child'))
-            return bound ?? tool
-          }),
+          prepareTools: execution.prepareTools,
+          getResolvedPermissions: execution.getResolvedPermissions,
+          tools: () => {
+            capabilities = currentCapabilities()
+            return capabilities.tools.map(tool => {
+              const bound = rebound.find(bound => bound.name === tool.name)
+              if (execution.requestTools && bound) return execution.requestTools.wrapChildBound(tool, bound)
+              if (execution.requestTools && tool.name === 'Skill') return execution.requestTools.wrapChildSkill(tool, subagent.allowed_skill_ids)
+              if (tool.authorization) return authorizeTool(bound ?? tool, { ...tool.authorization, role: 'child' })
+              if (tool.name === 'Skill') {
+                return authorizeTool({ ...tool, call: async (input, context) => {
+                  const skill = currentCapabilities().tools.find(candidate => candidate.name === 'Skill')
+                  return skill ? skill.call(input, context) : { output: 'PERMISSION_DENIED: Skill is no longer authorized', isError: true }
+                } }, { ...roleAuthorization('child'), check: async input => {
+                  await execution.prepareTools?.()
+                  const skills = currentCapabilities().skills
+                  const name = typeof input.skill === 'string' ? input.skill.trim().toLowerCase() : ''
+                  return skills.length > 0 && (name === 'list' || skills.some(skill => skill.name.toLowerCase() === name))
+                    ? { allowed: true } : { allowed: false, reason: 'PERMISSION_DENIED: Skill is no longer authorized' }
+                } })
+              }
+              return bound ?? tool
+            })
+          },
           observeTools: this.observationsDir ? async tools => {
             const parentId = worker.parent_incarnation_id ?? worker.incarnation_id
             if (!parentId) throw new Error('CAPABILITY_UNKNOWN: 缺少父化身身份')
             await persistObservation(observationFile(this.observationsDir!, worker.worker_id, parentId, entityId),
               requestObservation(tools, { role: 'child', impl: 'builtin', source: 'builtin_request', worker_id: worker.worker_id,
-                incarnation_id: parentId, subagent_id: entityId, skills: childCapabilities.skills.map(skill => skill.name),
+                incarnation_id: parentId, subagent_id: entityId, skills: capabilities.skills.map(skill => skill.name),
                 constraints: ['子 Agent 角色不含人类投递、桌面控制和继续派发。'] }))
           } : undefined,
           drainExternalInputs: session.drain, hasPendingExternalInputs: session.hasPending,
@@ -361,7 +382,7 @@ export class BuiltinSubagentRunner {
       allowedSkillIds: subagent.allowed_skill_ids,
       availableSkills: execution.availableSkills,
       getCwd: execution.getCwd,
-      allowPermissionGatedSkills: execution.requestTools?.permitsChildUserSkills ?? execution.resolvedPermissions.tool_access.mcp_skill,
+      allowPermissionGatedSkills: execution.requestTools?.permitsChildUserSkills ?? (execution.getResolvedPermissions?.() ?? execution.resolvedPermissions).tool_access.mcp_skill,
     })
   }
 

@@ -24,9 +24,11 @@ export interface RequestRunContext {
   authority: ConversationRequestAuthority
   onSuccessfulOriginDelivery?: (target: { channel_id: string; session_id: string }) => void
   voiceReplyContext?: VoiceReplyContext
+  assertCanContinue?: () => Promise<void>
 }
 interface Dependencies {
   canRun?(): boolean
+  allWorkersClosed?(request: ConversationRequestRecord): Promise<boolean>
   isRetired?(request: ConversationRequestRecord): boolean
   onSettled?(key: ManagerKey): void
   createLoop(context: RequestRunContext): ManagerLoop
@@ -54,6 +56,8 @@ export class ConversationRequestRunner {
   private readonly queueLock = new AsyncMutex()
   private readonly drains = new Map<string, Promise<void>>()
   private readonly receipts = new Map<string, ActivityContextAdmissionReceipt>()
+  private permissionRecovery?: Promise<void>
+  private readonly appliedPermissionHashes = new Map<string, string>()
   private closing = false
   constructor(private readonly root: string, private readonly requests: ConversationRequestStore, private readonly deps: Dependencies) {}
 
@@ -135,17 +139,58 @@ export class ConversationRequestRunner {
     return this.routeEvent(key, requestId, { kind: 'voice_management', ts: fixed.source.received_at, seq: 0, result: structuredClone(result) })
   }
 
+  async refreshPermissions(configRevision: number): Promise<void> {
+    if (this.closing || this.deps.canRun?.() === false) return
+    const ids = await fs.readdir(this.root).catch(error => { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error })
+    const recoveries: Array<{ key: ManagerKey; requestId: string }> = []
+    for (const id of ids) {
+      if (!/^[a-f0-9]{64}$/.test(id)) continue
+      try {
+        const owner = JSON.parse(await fs.readFile(path.join(this.root, id, 'owner.json'), 'utf8'))
+        const fixed = await this.requests.get(owner.manager_key, id)
+        if (!fixed || owner.schema_version !== 1 || owner.request_id !== id || owner.source_sha256 !== fixed.record.source_sha256) throw new Error('Invalid request owner')
+        if (fixed.record.status !== 'open' || this.deps.isRetired?.(fixed.record) || await this.deps.allWorkersClosed?.(fixed.record)) continue
+        const authority = new ConversationRequestAuthority(this.requests, owner.manager_key, id, 'request', this.deps.resolveCurrent)
+        const current = sha256CanonicalJson(await authority.currentSources())
+        let previous = this.appliedPermissionHashes.get(id)
+        if (!previous) {
+          previous = sha256CanonicalJson([fixed.record.permission_sources.group, ...(fixed.record.permission_sources.friend ? [fixed.record.permission_sources.friend] : [])])
+          let lastRevision = 0
+          const events = await fs.readdir(path.join(this.root, id, 'events')).catch(error => { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error })
+          for (const eventId of events) {
+            const item = await readRequestEvent(path.join(this.root, id, 'events', eventId, 'event.json'), fixed.record, eventId)
+            if (item && item.phase !== 'settled') this.eventRequests.add(id)
+            if (item?.event.kind === 'permission_update' && item.event.config_revision > lastRevision) {
+              previous = item.event.authority_sha256; lastRevision = item.event.config_revision
+            }
+          }
+        }
+        if (current !== previous) await this.routeEvent(owner.manager_key, id, { kind: 'permission_update', ts: new Date().toISOString(), seq: 0,
+          config_revision: configRevision, authority_sha256: current }, undefined, true)
+        this.appliedPermissionHashes.set(id, current)
+        if (await new ManagerSessionStore(path.join(this.root, id, 'session')).loadCheckpoint(owner.manager_key)) recoveries.push({ key: owner.manager_key, requestId: id })
+        if (this.eventRequests.has(id)) void this.drain(owner.manager_key, id).catch(() => { /* Durable event remains pending. */ })
+      } catch (error) { console.warn('[request-runner] Permission update remains pending:', id, error instanceof Error ? error.message : String(error)) }
+    }
+    if (!this.permissionRecovery) this.permissionRecovery = (async () => {
+      for (const item of recoveries) await this.recover(item.key, item.requestId)
+    })()
+      .catch(error => console.warn('[request-runner] Permission recovery pending:', error))
+      .finally(() => { this.permissionRecovery = undefined })
+  }
+
   private async validateEvent(key: ManagerKey, requestId: string, event: RequestRuntimeEvent): Promise<void> {
+    if (event.kind === 'permission_update') return
     if (event.kind === 'voice_management') {
       if (!this.deps.validateVoiceManagement) throw new Error('Management event validation is unavailable')
       await this.deps.validateVoiceManagement(key, requestId, event.result)
     } else if (event.kind === 'voice_delivery') await this.deps.validateVoiceDelivery?.(key, requestId, event.result)
     else await this.deps.validateEvent?.(key, requestId, event)
   }
-  private async routeEvent(key: ManagerKey, requestId: string, event: RequestRuntimeEvent, receipt?: ActivityContextAdmissionReceipt): Promise<HarnessEventDelivery> {
+  private async routeEvent(key: ManagerKey, requestId: string, event: RequestRuntimeEvent, receipt?: ActivityContextAdmissionReceipt, background = false): Promise<HarnessEventDelivery> {
     if (this.closing) return { consumed: false }
     const fixed = await this.requests.get(key, requestId)
-    if (!fixed || fixed.record.status !== 'open' || event.kind !== 'voice_management' && !fixed.record.worker_ids.includes(event.worker_id)) throw new Error('Request event binding unavailable')
+    if (!fixed || fixed.record.status !== 'open' || event.kind !== 'voice_management' && event.kind !== 'permission_update' && !fixed.record.worker_ids.includes(event.worker_id)) throw new Error('Request event binding unavailable')
     await this.validateEvent(key, requestId, event)
     if (this.deps.isRetired?.(fixed.record)) return { consumed: false }
     if (receipt && event.kind !== 'activity_available') throw new Error('Invalid activity receipt kind')
@@ -154,8 +199,8 @@ export class ConversationRequestRunner {
     const item = await this.queueLock.run(async () => {
       let item = await readRequestEvent(file, fixed.record, eventId)
       if (!item) {
-        item = { schema_version: event.kind === 'voice_management' ? 3 : event.kind === 'voice_delivery' ? 2 : 1, manager_key: key, request_id: requestId, source_sha256: fixed.record.source_sha256,
-          ...(event.kind === 'voice_management' ? { event_sha256: sha256CanonicalJson(normalized) } : {}),
+        item = { schema_version: event.kind === 'permission_update' ? 4 : event.kind === 'voice_management' ? 3 : event.kind === 'voice_delivery' ? 2 : 1, manager_key: key, request_id: requestId, source_sha256: fixed.record.source_sha256,
+          ...(event.kind === 'voice_management' || event.kind === 'permission_update' ? { event_sha256: sha256CanonicalJson(normalized) } : {}),
           event_id: eventId, event: normalized, received_at: new Date().toISOString(), phase: 'queued', consumed: false, context_admitted: false }
         await fs.mkdir(directory, { recursive: true, mode: 0o700 })
         await this.writeJsonAtomic(file, item)
@@ -174,7 +219,7 @@ export class ConversationRequestRunner {
     const wasActive = this.active.has(requestId)
     const run = this.drain(key, requestId)
     // Worker callbacks can occur inside spawn/query tools; never await the active initial episode.
-    if (wasActive || receipt) {
+    if (wasActive || receipt || background) {
       void run.then(() => this.drain(key, requestId)).catch(async () => {
         const pending = this.receipts.get(eventId)
         this.receipts.delete(eventId)
@@ -226,6 +271,11 @@ export class ConversationRequestRunner {
       const store = new ManagerSessionStore(path.join(directory, 'session'))
       const checkpoint = await store.loadCheckpoint(key)
       if (item.phase === 'admitted' && !checkpoint) return // Unknown outcome is a barrier, never replay.
+      if (item.event.kind === 'permission_update' && await this.deps.allWorkersClosed?.(fixed.record)) {
+        item.phase = 'settled'; item.consumed = true
+        await this.persistEvent(file, item)
+        continue
+      }
       if (item.phase === 'queued') {
         if (checkpoint) throw new Error('Unadmitted private event checkpoint')
         await store.save(await canonical.load(key))
@@ -241,10 +291,15 @@ export class ConversationRequestRunner {
         },
       } : undefined
       const loop = this.deps.createLoop({ source: structuredClone(fixed.source), request: structuredClone(fixed.record), store,
-        authority: new ConversationRequestAuthority(this.requests, key, requestId, 'request', this.deps.resolveCurrent) })
+        authority: new ConversationRequestAuthority(this.requests, key, requestId, 'request', this.deps.resolveCurrent),
+        ...(item.event.kind === 'permission_update' ? { assertCanContinue: async () => {
+          const current = await this.requests.get(key, requestId)
+          if (!current || current.record.status !== 'open' || await this.deps.allWorkersClosed?.(current.record)) throw new Error('REQUEST_CLOSED: 原任务已关闭，权限通知不能重新派活')
+        } } : {}),
+      })
       try {
         const result = checkpoint ? await loop.resume(checkpoint) : await loop.wakeUp({
-          wake: item.event.kind === 'voice_management' ? { kind: 'voice_management', result: structuredClone(item.event.result) } : item.event.kind === 'voice_delivery' ? { kind: 'voice_delivery', results: [structuredClone(item.event.result)] } : { kind: 'worker_event', event: structuredClone(item.event) }, received_at: item.received_at, timezone: this.deps.timezone(),
+          wake: item.event.kind === 'permission_update' ? { kind: 'permission_update', configRevision: item.event.config_revision } : item.event.kind === 'voice_management' ? { kind: 'voice_management', result: structuredClone(item.event.result) } : item.event.kind === 'voice_delivery' ? { kind: 'voice_delivery', results: [structuredClone(item.event.result)] } : { kind: 'worker_event', event: structuredClone(item.event) }, received_at: item.received_at, timezone: this.deps.timezone(),
           ...(admission ? { activity_context_receipt: admission } : {}),
         })
         if (result.contextRecoveryRequired || !result.consumedEvents) { await liveReceipt?.reject(); return }
@@ -275,7 +330,7 @@ export class ConversationRequestRunner {
     }
   }
 
-  /** Startup recovery scans only the request-owned index, never the shared mailbox/history. */
+  /** Restore the same request-owned checkpoints/events on startup or authority recovery; never create a recovery task or human wake. */
   async recoverPending(): Promise<void> {
     const ids = await fs.readdir(this.root).catch(error => { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error })
     for (const id of ids) {
@@ -289,7 +344,7 @@ export class ConversationRequestRunner {
       } catch { console.error(`[request-runner] Request recovery unavailable (${id}); original responsibility preserved`) }
     }
   }
-  async dispose(): Promise<void> { this.closing = true; await Promise.allSettled(this.drains.values()) }
+  async dispose(): Promise<void> { this.closing = true; await Promise.allSettled([...this.drains.values(), ...(this.permissionRecovery ? [this.permissionRecovery] : [])]) }
 
   private async saveOwner(key: ManagerKey, request: ConversationRequestRecord): Promise<void> {
     const directory = path.join(this.root, request.request_id), file = path.join(directory, 'owner.json')

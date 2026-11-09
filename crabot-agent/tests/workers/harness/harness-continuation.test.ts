@@ -1,4 +1,3 @@
-import { BUILTIN_WORKER_PERMISSIONS } from '../../../src/workers/builtin/runtime.js'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { promises as fs } from 'fs'
 import { tmpdir } from 'os'
@@ -23,6 +22,8 @@ import { assertExecutionPolicy } from '../../../src/workers/execution-policy'
 import type { BuiltinRuntimeContext } from '../../../src/workers/builtin/runtime'
 import type { LLMAdapter } from '../../../src/engine/llm-adapter-types.js'
 import { chunksFromContent } from '../../engine/helpers/mock-stream'
+import { sha256CanonicalJson } from 'crabot-shared'
+import { observationFile, persistObservation, requestObservation } from '../../../src/permissions/execution-observation'
 import type {
   WorkerAdapter,
   WorkerImplId,
@@ -323,8 +324,130 @@ it.each(['resume', 'handoff'] as const)('project identity, shared files and auth
   expect(await fs.readFile(join(project, 'result.txt'), 'utf8')).toBe('shared result')
 })
 
+describe('current permission updates keep the logical Worker', () => {
+  it('compares the actual builtin session configuration instead of its older in-memory initial value', async () => {
+    const initial = { ...structuredClone(BUILTIN_WORKER_PERMISSIONS), storage: { scope: 'all' as const, access: 'readwrite' as const } }
+    let current = initial
+    const { harness, adaptersMap, workersDir } = await makeHarness({ resolvePermissions: async () => current, assertExecutionPolicy })
+    const adapter = new FakeAdapter({ onStateChange: harness.handleStateChange })
+    adaptersMap.set('builtin', adapter)
+    const worker = await harness.spawnWorker(spawnParams({ principal_permissions: initial }))
+    current = { ...initial, tool_access: { ...initial.tool_access, mcp_skill: false } }
+    await persistObservation(observationFile(workersDir, worker.worker_id, worker.incarnations[0].incarnation_id!),
+      requestObservation([], { role: 'worker', impl: 'builtin', source: 'builtin_request', worker_id: worker.worker_id,
+        incarnation_id: worker.incarnations[0].incarnation_id, authorization_revision: sha256CanonicalJson(current) }))
+    await harness.refreshPermissions()
+    expect(adapter.sendInputCalls).toHaveLength(0)
+    current = initial
+    await harness.refreshPermissions()
+    expect(adapter.sendInputCalls).toHaveLength(1)
+  })
+
+  it.each(['builtin', 'claude-code', 'codex'] as const)('%s does not restart a finalized Worker when permissions change', async impl => {
+    let current = { ...structuredClone(BUILTIN_WORKER_PERMISSIONS), storage: { scope: 'all' as const, access: 'readwrite' as const } }
+    const { harness, adaptersMap, ledger } = await makeHarness({ resolvePermissions: async () => current, assertExecutionPolicy })
+    const adapter = new FakeAdapter({ implId: impl, caps: { revive: true }, onStateChange: harness.handleStateChange })
+    adaptersMap.set(impl, adapter)
+    const worker = await harness.spawnWorker(spawnParams({ impl, principal_permissions: current }))
+    await ledger.upsertWorker(worker.manager_key, worker.worker_id, value => ({ ...value!, task: { ...value!.task, status: 'halted',
+      halt: { halted_at: now(), halt_reason: 'worker_finalized', worker_self_report: { outcome: 'completed', summary: 'done' } } } }))
+    current = { ...current, tool_access: { ...current.tool_access, mcp_skill: false } }
+    await harness.refreshPermissions()
+    expect(adapter.sendInputCalls).toHaveLength(0)
+    expect(adapter.killCalls).toHaveLength(0)
+    expect(adapter.resumeCalls).toHaveLength(0)
+  })
+
+  it.each(['builtin', 'claude-code', 'codex'] as const)('%s does not apply the same permission change again after host restart', async impl => {
+    let current = { ...structuredClone(BUILTIN_WORKER_PERMISSIONS), storage: { scope: 'all' as const, access: 'readwrite' as const } }
+    const resolvePermissions = async () => current
+    const { harness, adaptersMap, workersDir } = await makeHarness({ resolvePermissions, assertExecutionPolicy })
+    const adapter = new FakeAdapter({ implId: impl, caps: { revive: true }, onStateChange: harness.handleStateChange })
+    adaptersMap.set(impl, adapter)
+    const worker = await harness.spawnWorker(spawnParams({ impl, principal_permissions: current }))
+    current = { ...current, tool_access: { ...current.tool_access, mcp_skill: false } }
+    await harness.refreshPermissions()
+    if (impl === 'builtin') {
+      // FakeAdapter does not execute an Engine turn; model its completed tool assembly.
+      await persistObservation(observationFile(workersDir, worker.worker_id, worker.incarnations[0].incarnation_id!),
+        requestObservation([], { role: 'worker', impl, source: 'builtin_request', worker_id: worker.worker_id,
+          incarnation_id: worker.incarnations[0].incarnation_id, authorization_revision: sha256CanonicalJson(current) }))
+    }
+    const delivered = adapter.sendInputCalls.length, resumed = adapter.resumeCalls.length, stopped = adapter.killCalls.length
+    const restored = await makeHarness({ resolvePermissions, assertExecutionPolicy })
+    restored.adaptersMap.set(impl, adapter)
+    await restored.harness.refreshPermissions()
+    expect(adapter.sendInputCalls).toHaveLength(delivered)
+    expect(adapter.resumeCalls).toHaveLength(resumed)
+    expect(adapter.killCalls).toHaveLength(stopped)
+  })
+
+  it.each(['claude-code', 'codex'] as const)('%s stops before reprovisioning and does not revive a closed task', async impl => {
+    let current = { ...structuredClone(BUILTIN_WORKER_PERMISSIONS), storage: { scope: 'all' as const, access: 'readwrite' as const } }
+    const capabilities = vi.fn(async (_context: unknown) => ({ skills: [], mcp_servers: [] }))
+    const { harness, adaptersMap } = await makeHarness({ resolvePermissions: async () => current, capabilityBundle: capabilities, assertExecutionPolicy })
+    const adapter = new FakeAdapter({ implId: impl, caps: { revive: true }, onStateChange: harness.handleStateChange })
+    adaptersMap.set(impl, adapter)
+    const worker = await harness.spawnWorker(spawnParams({ impl, principal_permissions: current }))
+    const origin = structuredClone(worker.origin), reportTo = structuredClone(worker.report_to)
+    current = { ...current, tool_access: { ...current.tool_access, shell: false } }
+    await harness.refreshPermissions()
+    expect(adapter.killCalls).toHaveLength(1)
+    expect(adapter.resumeCalls).toHaveLength(0)
+    expect((await harness.findWorker(worker.worker_id))!.worker.task.status).not.toBe('closed')
+    current = { ...current, tool_access: { ...current.tool_access, shell: true, mcp_skill: false } }
+    await harness.refreshPermissions()
+    expect(adapter.resumeCalls).toHaveLength(1)
+    expect(adapter.provisionCalls).toHaveLength(2)
+    expect(capabilities.mock.calls.at(-1)![0]).toMatchObject({ worker_id: worker.worker_id, principal_permissions: current })
+    const updated = (await harness.findWorker(worker.worker_id))!.worker
+    expect(updated.origin).toEqual(origin); expect(updated.report_to).toEqual(reportTo)
+    expect(updated.incarnations).toHaveLength(2)
+    await harness.refreshPermissions()
+    expect(adapter.resumeCalls).toHaveLength(1)
+    await harness.killWorker(worker.worker_id)
+    current = { ...current, tool_access: { ...current.tool_access, mcp_skill: true } }
+    await harness.refreshPermissions()
+    expect(adapter.resumeCalls).toHaveLength(1)
+  })
+
+  it.each(['claude-code', 'codex'] as const)('%s stops on authority failure and resumes after host restart with the same permissions', async impl => {
+    const current = { ...structuredClone(BUILTIN_WORKER_PERMISSIONS), storage: { scope: 'all' as const, access: 'readwrite' as const } }
+    let unavailable = false
+    const resolvePermissions = async () => { if (unavailable) throw new Error('authority unavailable'); return current }
+    const { harness, adaptersMap } = await makeHarness({ resolvePermissions, assertExecutionPolicy })
+    const adapter = new FakeAdapter({ implId: impl, caps: { revive: true }, onStateChange: harness.handleStateChange })
+    adaptersMap.set(impl, adapter)
+    const worker = await harness.spawnWorker(spawnParams({ impl, principal_permissions: current }))
+    unavailable = true
+    await harness.refreshPermissions()
+    expect(adapter.killCalls).toHaveLength(1); expect(adapter.resumeCalls).toHaveLength(0)
+    unavailable = false
+    const restored = await makeHarness({ resolvePermissions, assertExecutionPolicy })
+    restored.adaptersMap.set(impl, adapter)
+    await restored.harness.refreshPermissions()
+    expect(adapter.resumeCalls).toHaveLength(1)
+    expect((await restored.harness.findWorker(worker.worker_id))!.worker.origin).toEqual(worker.origin)
+  })
+
+  it.each(['claude-code', 'codex'] as const)('%s cannot start a replacement while carrier stop is unconfirmed', async impl => {
+    let current = { ...structuredClone(BUILTIN_WORKER_PERMISSIONS), storage: { scope: 'all' as const, access: 'readwrite' as const } }
+    const { harness, adaptersMap } = await makeHarness({ resolvePermissions: async () => current, assertExecutionPolicy })
+    const adapter = new FakeAdapter({ implId: impl, caps: { revive: true }, onStateChange: harness.handleStateChange })
+    adaptersMap.set(impl, adapter)
+    const worker = await harness.spawnWorker(spawnParams({ impl, principal_permissions: current }))
+    vi.spyOn(adapter, 'kill').mockResolvedValue(undefined)
+    current = { ...current, tool_access: { ...current.tool_access, mcp_skill: false } }
+    await harness.refreshPermissions()
+    expect(adapter.kill).toHaveBeenCalledOnce()
+    expect(adapter.resumeCalls).toHaveLength(0)
+    expect(adapter.provisionCalls).toHaveLength(1)
+    expect((await harness.findWorker(worker.worker_id))!.worker.incarnations).toHaveLength(1)
+  })
+})
+
 describe('WorkerHarness — 透明接续：revive (capabilities().revive === true)', () => {
-  it('CLI 接续保留已记录的注入事实，约束变化更新 revision，重复接续不重复说明', async () => {
+  it('CLI 接续重新装配当前配置，配置未变时观察 revision 保持一致', async () => {
     const { harness, adaptersMap, workersDir } = await makeHarness({ assertExecutionPolicy })
     const fake = new FakeAdapter({ implId: 'codex', caps: { revive: true }, onStateChange: harness.handleStateChange })
     adaptersMap.set('codex', fake)
@@ -343,13 +466,13 @@ describe('WorkerHarness — 透明接续：revive (capabilities().revive === tru
       previous = revived.incarnations.at(-1)!
       observations.push(await read(previous.incarnation_id!))
     }
-    expect(observations[0].revision).not.toBe(first.revision)
+    expect(observations[0].revision).toBe(first.revision)
     expect(observations[1].revision).toBe(observations[0].revision)
-    expect(observations[1].constraints).toHaveLength(first.constraints.length + 1)
+    expect(observations[1].constraints).toEqual(first.constraints)
     expect(observations[1].mcp_servers).toEqual(first.mcp_servers)
     expect(observations[1].skills).toEqual(first.skills)
     expect(observations[1].native_tools).toBeNull()
-    expect(fake.provisionCalls).toHaveLength(1)
+    expect(fake.provisionCalls).toHaveLength(3)
   })
 
   it('台账主线化身已 exited → adapter.resume 被调用（prevRef 用主线化身的 handle）→ 新化身入主线链 → sendToWorker 无感返回 → 事件 resumed', async () => {

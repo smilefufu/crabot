@@ -18,7 +18,7 @@ export interface WorkerControlOperation {
   readonly seq: number
   readonly kind: WorkerControlOperationKind
   readonly actor: WorkerControlOperationActor
-  readonly reason?: 'continuation_candidate_evicted'
+  readonly reason?: 'continuation_candidate_evicted' | 'permission_update'
   readonly status: WorkerControlOperationStatus
   readonly created_at: string
   readonly settled_at?: string

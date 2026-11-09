@@ -194,6 +194,14 @@ it.each([false, true])('valid request-bound data uses real original/hash/double-
     await fs.writeFile(path.join(directory, 'admission.json'), JSON.stringify({ schema_version: 1, request_id: request.request_id, source_sha256: request.source_sha256, phase: 'admitted', outcome: null }))
     await fs.writeFile(path.join(directory, 'events', eventId, 'event.json'), JSON.stringify({ schema_version: 3, manager_key: key, request_id: request.request_id, source_sha256: request.source_sha256,
       event_id: eventId, event_sha256: sha256CanonicalJson(event), event, received_at: timestamp, phase: 'queued', consumed: false, context_admitted: false }))
+    const { requestEventId } = await load('crabot-agent/dist/manager/request-runtime-metadata.js')
+    const permissionEvent = { kind: 'permission_update', ts: timestamp, seq: 0, config_revision: 2, authority_sha256: '2'.repeat(64) }
+    const permissionId = requestEventId(permissionEvent)
+    await fs.mkdir(path.join(directory, 'events', permissionId))
+    await fs.writeFile(path.join(directory, 'events', permissionId, 'event.json'), JSON.stringify({ schema_version: 4,
+      manager_key: key, request_id: request.request_id, source_sha256: request.source_sha256,
+      event_id: permissionId, event_sha256: sha256CanonicalJson(permissionEvent), event: permissionEvent,
+      received_at: timestamp, phase: 'queued', consumed: false, context_admitted: false }))
   }
   const binding = { schema_version: 1, request_id: request.request_id, source_sha256: corrupted ? 'a'.repeat(64) : request.source_sha256, execution_scope: 'request' }
   const context = new WorkerContextStore(path.join(root, 'agent', 'workers'))

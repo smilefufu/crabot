@@ -17,8 +17,9 @@ interface Dependencies {
 
 /** Only candidate definitions are combined; execution always selects one whole, current source. */
 export class WorkerRequestToolScope {
-  private readonly ceilings: ReadonlyArray<RequestPermissionSource>
+  private ceilings: ReadonlyArray<RequestPermissionSource>
   constructor(private readonly deps: Dependencies) { this.ceilings = structuredClone(deps.ceilings) }
+  async refresh(): Promise<void> { this.ceilings = await this.deps.guard.currentSources(this.deps.workerId) }
   tools(includeDelegation = true): ToolDefinition[] {
     const byName = new Map<string, ToolDefinition>()
     for (const source of this.ceilings) for (const tool of this.deps.rawTools(source.resolved, includeDelegation)) {
@@ -27,8 +28,8 @@ export class WorkerRequestToolScope {
     return [...byName.values()].map(tool => this.wrap(tool, includeDelegation))
   }
   get permitsChildUserSkills(): boolean { return this.ceilings.some(source => source.resolved.tool_access.mcp_skill) }
-  wrapChildSkill(tool: ToolDefinition, skills: ReadonlyArray<SkillConfig>): ToolDefinition {
-    return this.wrap(tool, false, skills.map(skill => skill.id), undefined, 'child')
+  wrapChildSkill(tool: ToolDefinition, allowedSkillIds: ReadonlyArray<string>): ToolDefinition {
+    return this.wrap(tool, false, allowedSkillIds, undefined, 'child')
   }
   wrapChildBound(tool: ToolDefinition, rebound: ToolDefinition): ToolDefinition {
     if (tool.name !== rebound.name) throw new Error('Child tool rebound name mismatch')

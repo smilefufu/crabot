@@ -133,7 +133,7 @@ describe('BuiltinSubagentRunner execution boundary', () => {
     }, parentTools, { ...executionContext(), getCwd: () => dir })
     const opts = spawnPersistentAgent.mock.calls[0][0]
     const runtime = opts.createExecution('agent_child', new AbortController().signal)
-    expect(runtime.tools.every((tool: ToolDefinition) => !parentTools.includes(tool))).toBe(true)
+    expect((typeof runtime.tools === 'function' ? runtime.tools() : runtime.tools).every((tool: ToolDefinition) => !parentTools.includes(tool))).toBe(true)
     expect(opts.systemPrompt).toContain('系统会在结果到达后自动恢复你的执行')
     const now = new Date().toISOString()
     await registry.register({ entity_id: 'shell_child', type: 'shell', status: 'completed', exit_code: 0,
@@ -153,6 +153,45 @@ describe('BuiltinSubagentRunner execution boundary', () => {
       exit_notification: { status: 'pending', updated_at: now, attempts: 0 } })
     expect(await restarted.routeShellExit('shell_late')).toBe(true)
     expect((await registry.get('shell_late'))?.exit_notification?.status).toBe('dead_letter')
+  })
+
+  it('an existing child rebuilds newly granted tools and rejects a retained tool after revocation', async () => {
+    spawnPersistentAgent.mockResolvedValue('agent_child')
+    const runner = new BuiltinSubagentRunner({} as TraceStore, lspManager, undefined, registry)
+    let permitted = false
+    const parentTool = authorizeTool(fakeTool('Bash'), { role: 'worker', entry: 'shell', available: () => permitted,
+      check: async () => permitted ? { allowed: true } : { allowed: false, reason: 'PERMISSION_DENIED' } })
+    const execution = { ...executionContext(), prepareTools: vi.fn(async () => {}), getParentTools: () => permitted ? [parentTool] : [] }
+    await runner.run(testSubagent(), { task: 'test' }, { worker_subagent: { worker_id: 'worker-1', parent_trace_id: 'trace-parent' } }, [], execution)
+    const runtime = spawnPersistentAgent.mock.calls[0][0].createExecution('agent_child', new AbortController().signal)
+    expect(runtime.tools()).toHaveLength(0)
+    permitted = true
+    await runtime.prepareTools()
+    const retained = runtime.tools().find((tool: ToolDefinition) => tool.name === 'Bash')!
+    expect(retained).toBeDefined()
+    expect((await retained.authorization.check({ command: 'true' })).allowed).toBe(true)
+    permitted = false
+    expect((await retained.authorization.check({ command: 'true' })).allowed).toBe(false)
+    expect(runtime.tools()).toHaveLength(0)
+    await runtime.close()
+  })
+
+  it('a retained child Skill reference cannot load a user Skill after mcp_skill is revoked', async () => {
+    spawnPersistentAgent.mockResolvedValue('agent_child')
+    const runner = new BuiltinSubagentRunner({} as TraceStore, lspManager, undefined, registry)
+    let permitted = true
+    await runner.run(testSubagent({ allowed_skill_ids: ['skill-a'] }), { task: 'test' },
+      { worker_subagent: { worker_id: 'worker-1', parent_trace_id: 'trace-parent' } }, [], {
+        ...executionContext(AVAILABLE_SKILLS), getResolvedPermissions: () => ({ ...BUILTIN_WORKER_PERMISSIONS,
+          tool_access: { ...BUILTIN_WORKER_PERMISSIONS.tool_access, mcp_skill: permitted } }),
+      })
+    const runtime = spawnPersistentAgent.mock.calls[0][0].createExecution('agent_child', new AbortController().signal)
+    const retained = runtime.tools().find((tool: ToolDefinition) => tool.name === 'Skill')!
+    expect((await retained.authorization.check({ skill: 'skill-a' })).allowed).toBe(true)
+    permitted = false
+    expect((await retained.authorization.check({ skill: 'skill-a' })).allowed).toBe(false)
+    expect((await retained.call({ skill: 'skill-a' }, {})).isError).toBe(true)
+    await runtime.close()
   })
 
   it('拒绝在 AgentHandler 注入共享 registry 前运行', async () => {

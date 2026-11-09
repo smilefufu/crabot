@@ -324,7 +324,7 @@ export interface CapabilityBundle {
   readonly mcp_servers: ReadonlyArray<MCPServerConfig>
 }
 
-/** Harness 向 capability provider 提供的 worker 身份上下文；权限是 spawn 时固定的快照。 */
+/** Harness 向 capability provider 提供固定 Worker 身份及当前有效权限。 */
 export interface WorkerCapabilityContext {
   readonly worker_id: string
   readonly impl: WorkerImplId
@@ -365,6 +365,8 @@ export interface SpawnSpec {
   readonly builtin?: {
     readonly resolvedPermissions?: ResolvedPermissions
     readonly requestCliAuthorization?: import('../engine/types.js').EngineOptions['requestCliAuthorization']
+    readonly prepareTools?: import('../engine/types.js').EngineOptions['prepareTools']
+    readonly getResolvedPermissions?: () => ResolvedPermissions | undefined
     readonly observeTools?: import('../engine/types.js').EngineOptions['onBeforeLlmCall']
     readonly adapter: LLMAdapter
     readonly model: string

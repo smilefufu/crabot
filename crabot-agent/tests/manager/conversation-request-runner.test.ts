@@ -60,6 +60,80 @@ describe('isolated request admission with real ManagerLoop', () => {
   }
   async function input(message = raw()) { return sources.capture(key, [message]) }
 
+  it('continues a waiting request without a Worker or human input, with durable permission-notice deduplication', async () => {
+    let granted = false
+    const factory = (frame: RequestRunContext) => {
+      frames.push(frame)
+      const adapter: LLMAdapter = { updateConfig() {}, async *stream(params) {
+        calls.push({ ...params, messages: structuredClone(params.messages) })
+        const changed = JSON.stringify(params.messages).includes('[宿主权限更新]')
+        const act = changed && !hasOperation(params)
+        yield* chunksFromContent(act ? [{ type: 'tool_use', name: 'operation', id: 'granted-operation', input: {} }] : [], act ? 'tool_use' : 'end_turn')
+      } }
+      return new ManagerLoop({ key, managerKey: () => key, isSystemThread: false, store: frame.store,
+        policy: { keepRecent: 10, hardCapTokens: 100000 }, adapter: () => adapter, model: () => 'fixture',
+        toolFace: () => [defineTool({ name: 'operation', description: 'current permission action', inputSchema: { type: 'object' }, call: async () =>
+          frame.authority.run(source => Promise.resolve(source.resolved.tool_access.shell ? allowed : denied('PERMISSION_DENIED', 'Shell required')),
+            async () => { sideEffects++; return { output: 'done', isError: false } }) })],
+        promptInputs: () => ({ isGroup: true, requestAuthorization: 'request' }), harness: {} as never, now: () => new Date(), markPendingReply() {}, hasPendingReply: () => false })
+    }
+    const executor = runner(factory)
+    const current = async (kind: 'group' | 'friend', source: ConversationRequestSource) => {
+      const value = resolved(source)[kind]
+      if (value) value.resolved.tool_access.shell = granted
+      return value
+    }
+    ;(executor as any).deps.resolveCurrent = current
+    const inputs = await input(), result = await executor.execute(key, inputs, { source_id: inputs[0].source_id, delivery: 'origin' })
+    expect(sideEffects).toBe(0); expect(result.worker_ids).toEqual([])
+    granted = true
+    await executor.refreshPermissions(2)
+    await vi.waitFor(() => expect(sideEffects).toBe(1))
+    await executor.dispose()
+    const count = calls.length
+    const restarted = runner(factory)
+    ;(restarted as any).deps.resolveCurrent = current
+    await restarted.refreshPermissions(2)
+    await restarted.dispose()
+    expect(calls).toHaveLength(count)
+    expect(frames).toHaveLength(2)
+    expect(frames[1].request.request_id).toBe(result.request_id)
+    expect(frames[1].source.sender_friend_id).toBe('actual-a')
+    const latest = (await requests.get(key, result.request_id))!.record
+    expect(latest.worker_ids).toEqual([])
+    expect(latest.permission_sources.group.resolved.tool_access.shell).toBe(false)
+    const events = await fs.readdir(path.join(root, result.request_id, 'events'))
+    expect(events).toHaveLength(1)
+    const event = JSON.parse(await fs.readFile(path.join(root, result.request_id, 'events', events[0], 'event.json'), 'utf8'))
+    expect(event).toMatchObject({ schema_version: 4, consumed: true, event: { kind: 'permission_update', config_revision: 2 } })
+  })
+
+  it('resumes the original checkpoint after a temporary authority failure without a new message or permission change', async () => {
+    const executor = runner(), deps = (executor as any).deps
+    let unavailable = true
+    const create = deps.createLoop
+    deps.createLoop = (frame: RequestRunContext) => {
+      const loop = create(frame)
+      ;(loop as any).deps.prepareTools = async () => { await frame.authority.currentSources() }
+      return loop
+    }
+    deps.resolveCurrent = async (kind: 'group' | 'friend', source: ConversationRequestSource) => {
+      if (unavailable) throw new Error('authority unavailable')
+      return resolved(source)[kind]
+    }
+    const inputs = await input(), first = await executor.execute(key, inputs, { source_id: inputs[0].source_id, delivery: 'origin' })
+    expect(first.status).toBe('recovery_required'); expect(calls).toHaveLength(0); expect(sideEffects).toBe(0)
+    expect(await new ManagerSessionStore(path.join(root, first.request_id, 'session')).loadCheckpoint(key)).toBeDefined()
+    unavailable = false
+    await executor.refreshPermissions(2)
+    await vi.waitFor(() => expect(sideEffects).toBe(1))
+    await executor.dispose()
+    expect(frames).toHaveLength(2)
+    expect(frames[1].request.request_id).toBe(first.request_id)
+    expect(frames[1].source.source_id).toBe(inputs[0].source_id)
+    expect((await requests.get(key, first.request_id))!.record.worker_ids).toEqual([])
+  })
+
   it('starts in a separate real group Manager using the full original author text, never shared or private history', async () => {
     const shared = new ManagerSessionStore(path.join(directory, 'shared-manager'))
     await shared.save({ key, foldedCount: 0, recent: [createUserMessage('SHARED_OTHER_AUTHOR_INSTRUCTION')] })

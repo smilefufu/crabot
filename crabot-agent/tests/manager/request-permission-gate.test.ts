@@ -7,7 +7,7 @@ import { RequestPermissionGate } from '../../src/manager/request-permission-gate
 import type { ConversationRequestSource, RequestPermissionSource, ResolveRequestPermissionSourcesResult } from '../../src/manager/request-permission-sources.js'
 
 const origin: ConversationRequestSource = { source_id: 'fixture', channel_id: 'channel', session_id: 'group', session_type: 'group', platform_message_id: 'message', platform_user_id: 'platform-a', sender_friend_id: 'friend-a' }
-describe('Request operation checks keep complete sources and fixed ceilings', () => {
+describe('Request operation checks keep complete sources and current authority', () => {
   let directory: string, group: RequestPermissionSource, personal: RequestPermissionSource
   beforeEach(async () => {
     directory = await fs.mkdtemp(path.join(os.tmpdir(), 'request-operation-'))
@@ -35,17 +35,20 @@ describe('Request operation checks keep complete sources and fixed ceilings', ()
     expect((await gate.authorize(file(path.join(directory, 'read-a/item'), false))).allowed).toBe(true)
     expect(current.mock.calls.map(call => call[0])).toEqual(['group'])
   })
-  it('checks current scope and the creation scope independently without expanding either one', async () => {
+  it('applies current directory grants without a creation-time ceiling', async () => {
     const { gate } = setup()
     personal.resolved.storage = { workspace_path: directory, access: 'readwrite' }
-    expect((await gate.authorize(file(path.join(directory, 'read-a/item'), true))).allowed).toBe(false)
+    expect((await gate.authorize(file(path.join(directory, 'read-a/item'), true))).allowed).toBe(true)
     personal.resolved.storage = { workspace_path: path.join(directory, 'read-a'), access: 'readwrite' }
     expect((await gate.authorize(file(path.join(directory, 'write-b/item'), true))).allowed).toBe(false)
   })
-  it('newly granted categories or changed caller copies cannot enlarge a previously captured ceiling', async () => {
+  it('uses newly granted categories for the same subject without trusting caller copies', async () => {
     const { gate, ceiling } = setup()
     ceiling.friend!.resolved.tool_access.shell = true
+    expect((await gate.authorize(async source => source.resolved.tool_access.shell ? allowed : denied('PERMISSION_DENIED', 'shell'))).allowed).toBe(false)
     personal.resolved.tool_access.shell = true
+    expect((await gate.authorize(async source => source.resolved.tool_access.shell ? allowed : denied('PERMISSION_DENIED', 'shell'))).allowed).toBe(true)
+    personal.resolved.tool_access.shell = false
     expect((await gate.authorize(async source => source.resolved.tool_access.shell ? allowed : denied('PERMISSION_DENIED', 'shell'))).allowed).toBe(false)
   })
   it('revalidates personal authority on every call and rejects a different subject with identical permissions', async () => {

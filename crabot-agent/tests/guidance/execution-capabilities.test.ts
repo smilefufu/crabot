@@ -7,6 +7,7 @@ function setup() {
   const current = { ...BUILTIN_WORKER_PERMISSIONS, tool_access: { ...BUILTIN_WORKER_PERMISSIONS.tool_access, task: true, desktop: true } }
   const old = { ...current, tool_access: { ...current.tool_access, shell: false, desktop: false } }
   const deps = {
+    resolveWorkerPermissions: vi.fn(async () => structuredClone(old)),
     workerContext: () => ({ managerKey: 'm::s', principalPermissions: current }),
     workerImplSnapshot: () => ({ statuses: [{ impl: 'builtin', ready: true }] }),
     projectDocs: {
@@ -42,7 +43,7 @@ describe('execution capability evidence', () => {
     deps.projectDocs.ledger.findWorker.mockResolvedValue({ managerKey: 'm::s', worker: { origin: {}, incarnations: [{ impl, workspace: '/fixture' }] } })
     const result = await query(tool, { worker_id: 'old-worker' })
 
-    expect(result.authorization.source).toBe('worker_snapshot')
+    expect(result.authorization.source).toBe('worker_current')
     expect(result.authorization.tool_access).not.toHaveProperty('remote_exec')
     expect(result.authorization.tool_access).toMatchObject({ shell: false, desktop: false })
     expect(old).toEqual(before)
@@ -55,12 +56,21 @@ describe('execution capability evidence', () => {
     expect(result.orchestration.can_spawn).toBe(true)
     expect(result.execution.implementations[0]).toMatchObject({ ready: true, admission: { status: 'allowed' } })
   })
-  it('uses the existing worker snapshot after a new principal has more permission', async () => {
+  it('resolves the original Worker current permissions without borrowing a newer Manager principal', async () => {
     const { deps, old, tool } = setup()
     const result = await query(tool, { worker_id: 'old-worker' })
-    expect(result.authorization.source).toBe('worker_snapshot')
+    expect(result.authorization.source).toBe('worker_current')
     expect(result.authorization.tool_access).toMatchObject({ shell: false, desktop: false })
     expect(deps.describeExecutionTools).not.toHaveBeenCalled()
+  })
+  it('reports a same-subject grant while leaving the historical Worker snapshot untouched', async () => {
+    const { deps, old, tool } = setup()
+    deps.resolveWorkerPermissions.mockResolvedValue({ ...old, tool_access: { ...old.tool_access, shell: true } })
+    const result = await query(tool, { worker_id: 'old-worker' })
+    expect(result.authorization.source).toBe('worker_current')
+    expect(result.authorization.tool_access.shell).toBe(true)
+    expect(old.tool_access.shell).toBe(false)
+    expect(deps.projectDocs.readWorkerContext).not.toHaveBeenCalled()
   })
   it('does not consult worker context or assembly before checking ownership', async () => {
     const { deps, tool } = setup()
@@ -71,7 +81,7 @@ describe('execution capability evidence', () => {
   })
   it('distinguishes unknown principal/CLI live tools from current configuration', async () => {
     const { deps, tool } = setup()
-    deps.projectDocs.readWorkerContext.mockResolvedValue(undefined as never)
+    deps.resolveWorkerPermissions.mockResolvedValue(null as never)
     deps.projectDocs.ledger.findWorker.mockResolvedValue({ managerKey: 'm::s', worker: { origin: {}, incarnations: [{ impl: 'codex', workspace: '/fixture' }] } })
     const result = await query(tool, { worker_id: 'old' })
     expect(result.authorization.known).toBe(false)

@@ -76,6 +76,8 @@ describe('Admin Web API', () => {
       }
     )
 
+    // This API fixture has no Module Manager; acknowledge its config invalidations.
+    ;(admin as any).publishAdminEventDurable = async () => {}
     await admin.start()
   })
 

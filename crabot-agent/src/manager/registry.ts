@@ -138,6 +138,7 @@ export interface ManagerRegistryDeps {
    * 自己按 episode 边界调用,本 registry 不缓存解析结果。
    */
   readonly adapter: () => LLMAdapter
+  readonly preparePermissions?: (key: ManagerKey) => Promise<void>
   readonly observeTools?: (key: ManagerKey, episodeId: string, tools: ReadonlyArray<ToolDefinition>) => Promise<void>
   readonly model: () => string
   /** 运行时配置已原子替换后的通知源与代数 getter(spec 2026-08-30-llm-retry-config-hotreload);原样下传 ManagerLoopDeps。 */
@@ -426,6 +427,7 @@ export class ManagerRegistry {
 
     const isSystemThread = key === SYSTEM_TASKS_MANAGER_KEY
 
+    const currentSchedulePermissions = new WeakMap<WakeEvent, ResolvedPermissions | undefined>()
     const loopDeps: ManagerLoopDeps = {
       key,
       voiceOutput: this.deps.voiceOutputFor?.(key),
@@ -452,6 +454,12 @@ export class ManagerRegistry {
       thinking: this.deps.thinking,
       supportsVision: this.deps.supportsVision,
       imagesOnDemand: () => this.deps.imagesOnDemand?.(key) ?? false,
+      prepareTools: async wake => {
+        if (wake?.kind === 'schedule') {
+          const current = await this.authorizeSchedule({ targetSession: wake.targetSession, creatorFriendId: wake.creatorFriendId, isBuiltin: wake.isBuiltin })
+          currentSchedulePermissions.set(wake, current ?? undefined)
+        } else await this.deps.preparePermissions?.(key)
+      },
       quotedPrefetch: this.deps.quotedPrefetch,
       // 唤醒事件由 ManagerLoop 按 episode 传入(见 ManagerLoopDeps.toolFace);schedule 之外
       // 的唤醒不带身份,工具面照旧。
@@ -461,7 +469,7 @@ export class ManagerRegistry {
           isSystemThread,
           scheduleIdentityOf(wakeEvent),
           humanPrincipalOf(wakeEvent),
-          principalPermissionsOf(wakeEvent),
+          wakeEvent && currentSchedulePermissions.has(wakeEvent) ? currentSchedulePermissions.get(wakeEvent) : principalPermissionsOf(wakeEvent),
           {
             currentTraceId: () => this.loops.get(key)?.currentEpisodeTraceId,
             requestInputs: () => this.loops.get(key)?.requestInputs ?? [],
@@ -763,6 +771,12 @@ export class ManagerRegistry {
       }
       item.receipt_handled = true; port.save(item)
     }
+  }
+
+  routePermissionUpdate(key: ManagerKey, configRevision: number): void {
+    const envelope = this.makeEnvelope(this.captureIngress(), { kind: 'permission_update', configRevision })
+    if (this.isEpisodeActive(key)) this.getOrCreate(key).enqueueDuringEpisode(envelope)
+    else void this.runWake(key, envelope).catch(error => console.warn('[ManagerRegistry] permission notification pending:', key, error))
   }
 
   async routeMediaNotification(p: {

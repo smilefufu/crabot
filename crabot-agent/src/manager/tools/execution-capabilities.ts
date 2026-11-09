@@ -25,6 +25,7 @@ export interface RequestExecutionCapabilities {
   >
 }
 export interface ExecutionCapabilities {
+  request_sources?: RequestExecutionCapabilities['request_sources']
   request?: {
     binding: import('../conversation-request.js').ConversationRequestBinding
     source: import('../request-permission-sources.js').ConversationRequestSource
@@ -34,7 +35,7 @@ export interface ExecutionCapabilities {
   orchestration: { can_spawn: boolean; scope: 'current_manager'; reasons: string[] }
   authorization: {
     known: boolean
-    source: 'current_principal' | 'worker_snapshot' | 'missing'
+    source: 'current_principal' | 'worker_current' | 'missing'
     tool_access: EffectiveToolAccessConfig | null
     cli_access: CliAccessConfig | null
     storage: StoragePermission | null
@@ -49,7 +50,7 @@ export interface ExecutionCapabilities {
 export function createExecutionCapabilitiesTool(deps: ToolFaceDeps): ToolDefinition {
   return defineTool({
     name: 'get_execution_capabilities',
-    description: deps.requestAuthorization ? '核对当前执行边界的主体授权、角色职责和执行事实。共享主控只显示群公共授权，不代表发起人个人能力；独立请求显示固定来源及当前可用范围，不合并成一份更宽权限。worker_id 返回有权读取的 Worker 固定请求与最新主线记录。planned 不代表实际收到工具，legacy_unknown 不代表权限被关闭。查询不派发、不授予权限；先按明确拒绝判断真实缺口。' : '核对主体授权、角色职责和执行事实。省略参数返回当前主体的新建计划；worker_id 返回当前会话 Worker 的固定主体和最新主线化身记录，impl 仅筛选新建计划。planned 不代表实际收到工具；legacy_unknown 不代表权限被关闭。工具调用明确拒绝前，不将缺记录或角色限制当成需要用户开权。查询不派发、不授予权限。',
+    description: deps.requestAuthorization ? '核对当前执行边界的主体授权、角色职责和执行事实。共享主控只显示群公共授权，不代表发起人个人能力；独立请求显示固定来源及当前可用范围，不合并成一份更宽权限。worker_id 返回有权读取的 Worker 固定请求、分立的当前 request_sources 与最新主线记录；多来源能力逐份判断，不能只用顶层单一来源代表全部能力。planned 不代表实际收到工具，legacy_unknown 不代表权限被关闭。查询不派发、不授予权限；先按明确拒绝判断真实缺口。' : '核对主体授权、角色职责和执行事实。省略参数返回当前主体的新建计划；worker_id 返回当前会话 Worker 的固定主体和最新主线化身记录，impl 仅筛选新建计划。planned 不代表实际收到工具；legacy_unknown 不代表权限被关闭。工具调用明确拒绝前，不将缺记录或角色限制当成需要用户开权。查询不派发、不授予权限。',
     inputSchema: { type: 'object', properties: {
       worker_id: { type: 'string' }, impl: { type: 'string', enum: ['builtin', 'claude-code', 'codex'] },
     }, additionalProperties: false },
@@ -67,6 +68,7 @@ export function createExecutionCapabilitiesTool(deps: ToolFaceDeps): ToolDefinit
         let implementations: WorkerImplId[] = args.impl ? [args.impl] : ['builtin', 'claude-code', 'codex']
         let request: ExecutionCapabilities['request']
         let recorded: ExecutionObservation | undefined
+        let currentSources: import('../request-permission-sources.js').RequestPermissionSource[] | undefined
         if (args.worker_id) {
           const found = await deps.projectDocs.ledger.findWorker(args.worker_id)
           if (!found || found.managerKey !== current.managerKey) throw new Error('执行器不存在或不属于当前会话')
@@ -75,36 +77,47 @@ export function createExecutionCapabilitiesTool(deps: ToolFaceDeps): ToolDefinit
             const caller = workerRequestCaller(callContext)
             if (caller) await deps.requestGuard.authorizeControl(args.worker_id, caller, async () => allowed)
             else if (bound) throw new Error('REQUEST_CONTEXT_REQUIRED')
-            if (bound) request = { binding: bound.worker.origin.request!, source: requestSourceFor(bound.source), permission_sources: bound.request.permission_sources }
+            if (bound) {
+              request = { binding: bound.worker.origin.request!, source: requestSourceFor(bound.source), permission_sources: bound.request.permission_sources }
+              currentSources = await deps.requestGuard.currentSources(args.worker_id)
+            }
           } else if (found.worker.origin.request) throw new Error('CAPABILITY_UNKNOWN: Worker request guard unavailable')
           const incarnation = found.worker.incarnations.filter(item => item.forked_from === undefined).at(-1)
           if (!incarnation || incarnation.impl === 'legacy') throw new Error('该执行器没有现代主线化身')
           implementations = [incarnation.impl]
-          principal = (await deps.projectDocs.readWorkerContext(args.worker_id))?.principal_permissions
+          principal = await deps.resolveWorkerPermissions?.(args.worker_id) ?? undefined
           recorded = incarnation.incarnation_id && deps.readExecutionObservation
             ? await deps.readExecutionObservation(args.worker_id, incarnation.incarnation_id, incarnation.impl)
             : executionObservation({ role: 'worker', impl: incarnation.impl, state: 'legacy_unknown', source: 'legacy',
                 worker_id: args.worker_id, incarnation_id: incarnation.incarnation_id, constraints: ['该化身没有可核实记录；不从当前配置补推。'] })
         }
         const registry = deps.workerImplSnapshot?.()
-        const entries = implementations.map(impl => ({ impl,
+        const entriesFor = (permissions: ResolvedPermissions | undefined) => implementations.map(impl => ({ impl,
           ready: registry?.statuses.find(item => item.impl === impl)?.ready ?? null,
-          admission: executionAdmission(impl, principal),
-          observation: recorded ?? deps.describeExecutionTools?.(impl, principal)
+          admission: executionAdmission(impl, permissions),
+          observation: recorded ?? deps.describeExecutionTools?.(impl, permissions)
             ?? executionObservation({ role: 'worker', impl, source: 'execution_plan', constraints: ['当前装配计划不可核实。'] }),
         }))
+        const authorizationFor = (permissions: ResolvedPermissions | undefined): ExecutionCapabilities['authorization'] => ({
+          known: !!permissions, source: permissions ? args.worker_id ? 'worker_current' : 'current_principal' : 'missing',
+          tool_access: permissions ? effectiveToolAccess(permissions.tool_access) : null,
+          cli_access: permissions?.cli_access ?? null, storage: permissions?.storage ?? null,
+          memory_scopes: permissions?.memory_scopes ?? null, explanations: TOOL_ENTRY_EXPLANATIONS, memory_enforcement: 'unverified',
+        })
+        const entries = entriesFor(principal)
         const result: ExecutionCapabilities = {
           schema_version: 1,
           ...(request ? { request } : {}),
           orchestration: { can_spawn: !!current.principalPermissions, scope: 'current_manager',
             reasons: current.principalPermissions ? [] : ['CAPABILITY_UNKNOWN: 新建执行器需要可信主体授权'] },
-          authorization: { known: !!principal, source: principal ? args.worker_id ? 'worker_snapshot' : 'current_principal' : 'missing',
-            tool_access: principal ? effectiveToolAccess(principal.tool_access) : null,
-            cli_access: principal?.cli_access ?? null, storage: principal?.storage ?? null,
-            memory_scopes: principal?.memory_scopes ?? null, explanations: TOOL_ENTRY_EXPLANATIONS, memory_enforcement: 'unverified' },
+          authorization: authorizationFor(principal),
           role_capabilities: { role: 'manager', child_profiles: [...new Set(entries.flatMap(entry => entry.observation.child_profiles))] },
           execution: { implementations: entries },
         }
+        if (currentSources) result.request_sources = currentSources.map(source => ({
+          kind: source.kind, subject_id: source.subject_id, is_master: source.is_master, status: 'available',
+          capabilities: { ...result, authorization: authorizationFor(source.resolved), execution: { implementations: entriesFor(source.resolved) } },
+        }))
         return { isError: false, output: JSON.stringify(result) }
       } catch (error) { return { isError: true, output: `执行条件查询失败：${(error as Error).message}` } }
     },

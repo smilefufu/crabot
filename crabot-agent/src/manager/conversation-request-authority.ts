@@ -43,6 +43,19 @@ export class ConversationRequestAuthority {
     const kind = decision.source.kind
     return execute(structuredClone({ request: fixed.record, source: fixed.source, ceiling: ceilings[kind]!, current: current.get(kind)! }))
   }
+  async currentSources(): Promise<RequestPermissionSource[]> {
+    const sources: RequestPermissionSource[] = []
+    let unavailable: unknown
+    for (const kind of ['group', 'friend'] as const) {
+      try {
+        await this.run(source => source.kind === kind ? Promise.resolve({ allowed: true })
+          : Promise.resolve({ allowed: false, reason: 'Other source' }), async frame => { sources.push(frame.current) })
+      } catch (error) { unavailable = error }
+    }
+    if (!sources.length) throw unavailable ?? new Error('CAPABILITY_UNKNOWN: No current permission source')
+    await this.requireOpen()
+    return sources
+  }
   private async requireOpen(): Promise<{ record: ConversationRequestRecord; source: TrustedHumanInput }> {
     const fixed = await this.store.get(this.managerKey, this.requestId)
     if (!fixed) throw new Error('Request not found')

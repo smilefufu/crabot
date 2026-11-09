@@ -21,9 +21,16 @@ export interface RequestVoiceManagementEvent {
   seq: number
   result: import('crabot-shared').VoiceAgentManagementResult
 }
-export type RequestRuntimeEvent = HarnessEvent | RequestVoiceDeliveryEvent | RequestVoiceManagementEvent
+export interface RequestPermissionUpdateEvent {
+  kind: 'permission_update'
+  ts: string
+  seq: 0
+  config_revision: number
+  authority_sha256: string
+}
+export type RequestRuntimeEvent = HarnessEvent | RequestVoiceDeliveryEvent | RequestVoiceManagementEvent | RequestPermissionUpdateEvent
 export interface RequestEvent {
-  schema_version: 1 | 2 | 3
+  schema_version: 1 | 2 | 3 | 4
   event_sha256?: string
   manager_key: ManagerKey
   request_id: string
@@ -44,6 +51,7 @@ export interface Admission {
 }
 
 export function requestEventId(event: RequestRuntimeEvent): string {
+  if (event.kind === 'permission_update') return sha256CanonicalJson({ kind: event.kind, config_revision: event.config_revision, authority_sha256: event.authority_sha256 })
   return sha256CanonicalJson(event.kind === 'voice_management' ? { kind: event.kind, operation_id: event.result.operation_id } : event)
 }
 
@@ -52,13 +60,13 @@ export async function readRequestEvent(file: string, request: ConversationReques
   try { item = JSON.parse(await fs.readFile(file, 'utf8')) }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error }
   const fields = ['schema_version', 'manager_key', 'request_id', 'source_sha256', 'event_id', 'event', 'received_at', 'phase', 'consumed', 'context_admitted']
-  if (item?.schema_version === 3) fields.push('event_sha256')
+  if (item?.schema_version === 3 || item?.schema_version === 4) fields.push('event_sha256')
   if (!item || typeof item !== 'object' || Array.isArray(item) || Object.keys(item).length !== fields.length || fields.some(field => !Object.prototype.hasOwnProperty.call(item, field))
-    || ![1, 2, 3].includes(item.schema_version) || (item.schema_version === 2) !== (item.event?.kind === 'voice_delivery') || (item.schema_version === 3) !== (item.event?.kind === 'voice_management') || item.manager_key !== request.manager_key || item.request_id !== request.request_id
+    || ![1, 2, 3, 4].includes(item.schema_version) || (item.schema_version === 2) !== (item.event?.kind === 'voice_delivery') || (item.schema_version === 3) !== (item.event?.kind === 'voice_management') || (item.schema_version === 4) !== (item.event?.kind === 'permission_update') || item.manager_key !== request.manager_key || item.request_id !== request.request_id
     || item.source_sha256 !== request.source_sha256 || item.event_id !== id || requestEventId(item.event) !== id
-    || item.schema_version === 3 && item.event_sha256 !== sha256CanonicalJson(item.event)
+    || (item.schema_version === 3 || item.schema_version === 4) && item.event_sha256 !== sha256CanonicalJson(item.event)
     || !item.event || typeof item.event.kind !== 'string' || !Number.isFinite(Date.parse(item.event.ts)) || !Number.isInteger(item.event.seq) || item.event.seq < 0
-    || (item.event.kind === 'voice_management' ? !item.event.result?.operation_id || !['completed', 'rejected'].includes(item.event.result.status) : !request.worker_ids.includes(item.event.worker_id)) || !['queued', 'admitted', 'settled'].includes(item.phase)
+    || (item.event.kind === 'permission_update' ? !Number.isSafeInteger(item.event.config_revision) || item.event.config_revision < 1 || !/^[a-f0-9]{64}$/.test(item.event.authority_sha256) || item.event.seq !== 0 : item.event.kind === 'voice_management' ? !item.event.result?.operation_id || !['completed', 'rejected'].includes(item.event.result.status) : !request.worker_ids.includes(item.event.worker_id)) || !['queued', 'admitted', 'settled'].includes(item.phase)
     || item.phase === 'queued' && (item.consumed || item.context_admitted) || item.phase === 'admitted' && item.consumed || item.phase === 'settled' && !item.consumed
     || typeof item.consumed !== 'boolean' || typeof item.context_admitted !== 'boolean' || !Number.isFinite(Date.parse(item.received_at))) throw new Error('Invalid request event; refusing replay')
   return item

@@ -136,6 +136,7 @@ export const DEFAULT_MANAGER_COMPACTION_POLICY: CompactionPolicy = {
 export interface ManagerStack {
   voiceManagementReady(payload: import('crabot-shared').VoiceAgentManagementReadyPayload): Promise<void>
   startContinuationReconciliation(): Promise<void>
+  refreshPermissions(configRevision: number): Promise<void>
   readonly dailyReflectionFor: (key: ManagerKey) => DailyReflection
   readonly ledger: LedgerStore
   /** Manager session 持久化（P6-A 读模型用：disk session keys 枚举）。 */
@@ -148,14 +149,7 @@ export interface ManagerStack {
   readonly adapters: Map<WorkerImplId, WorkerAdapter>
   /** Release all adapter-owned resources. Repeated calls share one cleanup. */
   dispose(): Promise<void>
-  /**
-   * 人类消息发起人身份的解析缓存(P7 J)。服务于三个**同步** thunk:记忆档位、台账归档键、
-   * 对话对象档案(见 `principal.ts` 文件头)。
-   *
-   * **不是 worker 权限的取数入口**(PR #59 review):缓存是"该会话最近一次解析",worker 的
-   * 权限档位是身份属性——由本 episode 的唤醒事件带来、在 spawn 那一刻随 worker 固定并落盘
-   * (`SpawnWorkerParams.principal_permissions` → `context.json`)。
-   */
+  /** Manager 自身的当前主体缓存。Worker 只按自己的固定原主体向 Admin 解析，不借最新发言者。 */
   readonly principals: ManagerPrincipalStore
   /** Persistent bindings are initialized during reconciliation, never construction. */
   readonly principalBindings: PrincipalBindingStore
@@ -431,6 +425,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
   const adapters = new Map<WorkerImplId, WorkerAdapter>()
   let reconcileContinuationCandidatesForWorker: ((workerId: string) => void) | undefined
 
+  const appliedManagerPermissions = new Map<ManagerKey, string>()
   let requestRunner: ConversationRequestRunner
   let requestGuard: WorkerRequestGuard
   const personalWorkerRoute = async (event: import('../workers/harness/worker-events.js').HarnessEvent, receipt?: import('../workers/harness/worker-events.js').ActivityContextAdmissionReceipt) => {
@@ -452,7 +447,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
   const resolveBuiltinRuntime: BuiltinRuntimeFactory | undefined = deps.builtinSpawnDefaults ? async ctx => {
     const bound = await requestGuard.load(ctx.worker_id)
     const wire = (value: unknown) => JSON.parse(JSON.stringify(value) ?? 'null')
-    ctx = { ...ctx, managed_workspace: async () => {
+    ctx = { ...ctx, resolve_permissions: () => harness.currentWorkerPermissions(ctx.worker_id), managed_workspace: async () => {
       const found = await ledger.findWorker(ctx.worker_id), saved = await workerContextStore.read(ctx.worker_id)
       if (!found || !saved?.principal_permissions || saved.manager_key !== found.managerKey
         || saved.creator_friend_id !== found.worker.origin.creator_friend_id
@@ -467,10 +462,17 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     if (!isDeepStrictEqual(wire(ctx.origin), wire(bound.worker.origin)) || !bound.worker.incarnations.some(item => item.workspace === ctx.workspace.root)) throw new Error('CAPABILITY_UNKNOWN: Adapter context does not match its request-bound Worker')
     return requestGuard.runResource(ctx.worker_id, async () => allowed, async () => deps.builtinSpawnDefaults!({ ...ctx, request_runtime: {
       guard: requestGuard,
+      refresh: () => requestGuard.currentSources(ctx.worker_id),
       ceilings: [bound.request.permission_sources.group, ...(bound.worker.origin.request!.execution_scope === 'request' && bound.request.permission_sources.friend ? [bound.request.permission_sources.friend] : [])],
     } }))
   } : undefined
   const harnessDeps: HarnessDeps = {
+    resolvePermissions: async (_worker, context) => {
+      const target = context.target_session
+      if (!target || context.manager_key !== `${target.channel_id}::${target.session_id}`) return null
+      return applyGroupScopeFallback(await deps.principalResolver.resolvePermissions({ channelId: target.channel_id, sessionId: target.session_id,
+        sessionType: target.type, ...(target.type === 'private' && context.creator_friend_id ? { senderFriendId: context.creator_friend_id } : {}) }), target.type, target.session_id)
+    },
     requestGuard: () => requestGuard,
     adapters,
     defaultImpl: DEFAULT_WORKER_IMPL,
@@ -740,6 +742,15 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
   let voiceManagementHost: VoiceManagementHost
   requestRunner = new ConversationRequestRunner(requestRuntimeRoot, conversationRequests, {
     isRetired: deps.isRequestRetired,
+    allWorkersClosed: async request => {
+      if (!request.worker_ids.length) return false
+      for (const id of request.worker_ids) {
+        const found = await ledger.findWorker(id)
+        if (!found || found.managerKey !== request.manager_key || found.worker.origin.request?.request_id !== request.request_id
+          || found.worker.task.status !== 'closed') return false
+      }
+      return true
+    },
     validateVoiceManagement: (key, requestId, result) => voiceManagementHost.validate(key, requestId, result),
     canRun: () => candidatesReady && !candidatesClosing && !deps.isClosing?.() && !maintenancePending(),
     timezone: deps.timezone ?? (() => 'Asia/Shanghai'),
@@ -809,6 +820,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     ledger,
     adapter: deps.managerAdapter,
     model: deps.managerModel,
+    preparePermissions: key => principals.refreshForNonHumanWake(key),
     observeTools: async (key, episodeId, tools) => {
       const owner = encodeURIComponent(key)
       await persistObservation(join(managersDir, owner, 'execution-observation.json'),
@@ -831,11 +843,13 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     readCurrentWorkboard: (key) => workboardStore.load(key),
     timezone: deps.timezone,
     managerKeyFor: (key) => key,
-    // 人类消息唤醒边界:这是人类消息链路上**唯一**一次异步解析。返回本批发言者算好的档位,
-    // 由 registry 挂到本 episode 的唤醒事件上——缓存只服务于同步 thunk(记忆档位 /
-    // 对话对象档案),派活用的档位走事件,不走缓存(PR #59 review)。
+    // 人类唤醒建立原主体绑定和当前观察；每轮及实际调用仍按同一绑定重新核实权限。
     recordHumanInputs: (key, messages) => trustedHumanInputs.capture(key, messages),
-    onHumanWake: async (key, principal) => (await principals.resolve(key, principal)).permissions,
+    onHumanWake: async (key, principal) => {
+      const current = await principals.resolve(key, principal)
+      appliedManagerPermissions.set(key, JSON.stringify(current.permissions))
+      return current.permissions
+    },
     beforeWake: async (key, envelope) => {
       const { channelId } = splitManagerKey(key)
       if (deps.coreRuntimeBearer && key !== SYSTEM_TASKS_MANAGER_KEY && !voicePolicies.has(channelId)) {
@@ -969,8 +983,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         ? principals.currentMasterAuthorization(key)
         : undefined
       const profile = managerToolProfileForSchedule(scheduleIdentity)
-      const managerPermissions = principalPermissions
-        ?? (scheduleIdentity ? undefined : managerPrincipal?.permissions ?? undefined)
+      let managerPermissions = scheduleIdentity ? principalPermissions : managerPrincipal?.permissions ?? undefined
       const mcpCreatorFriendId = scheduleIdentity
         ? (scheduleIdentity.isBuiltin ? undefined : scheduleIdentity.creatorFriendId)
         : managerPrincipal?.principal.friend?.id
@@ -1014,6 +1027,16 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
       return buildManagerToolFace({
         dailyReflection: dailyReflectionFor(key),
         describeExecutionTools: deps.describeExecutionTools,
+        preparePermissions: async () => {
+          if (!scheduleIdentity) return principals.refreshForNonHumanWake(key)
+          if (scheduleIdentity.isBuiltin) return
+          if (!scheduleTarget || (scheduleTarget.type === 'private' && !scheduleCreatorFriendId)) throw new Error('CAPABILITY_UNKNOWN: Schedule identity unavailable')
+          const current = await deps.principalResolver.resolvePermissions({ channelId: scheduleTarget.channel_id, sessionId: scheduleTarget.session_id,
+            sessionType: scheduleTarget.type, ...(scheduleTarget.type === 'private' ? { senderFriendId: scheduleCreatorFriendId } : {}) })
+          if (!current) throw new Error('CAPABILITY_UNKNOWN: Schedule permissions unavailable')
+          managerPermissions = applyGroupScopeFallback(current, scheduleTarget.type, scheduleTarget.session_id) ?? undefined
+        },
+        resolveWorkerPermissions: workerId => harness.currentWorkerPermissions(workerId),
         readExecutionObservation: (workerId, incarnationId, impl) => readObservation(observationFile(workersDir, workerId, incarnationId),
           executionObservation({ role: 'worker', impl, source: 'legacy', state: 'legacy_unknown', worker_id: workerId, incarnation_id: incarnationId,
             constraints: ['无该化身记录，历史工具未知。'] })),
@@ -1042,8 +1065,8 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
           creatorFriendId: scheduleIdentity
             ? (scheduleIdentity.isBuiltin ? undefined : scheduleIdentity.creatorFriendId)
             : humanPrincipal?.friend?.id ?? managerPrincipal?.principal.friend?.id,
-          // 与主控其它工具共享有效权限；派发后固定为 Worker 快照。
-          principalPermissions: managerPermissions ?? undefined,
+          // 固定任务主体；权限值在调用前刷新，Worker 后续也按原主体解析。
+          principalPermissions: (scheduleIdentity ? managerPermissions : principals.get(key)?.permissions) ?? undefined,
           legacyContinuationAuth: (targetManagerKey) => principals.bindLegacyContinuationAuth(
             legacyAuthTemplate,
             targetManagerKey,
@@ -1177,10 +1200,24 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
 
   return {
     voiceManagementReady: payload => voiceManagementHost.ready(payload),
+    refreshPermissions: async configRevision => {
+      for (const { key } of registry.listActiveManagers()) {
+        try {
+          const previous = appliedManagerPermissions.get(key) ?? JSON.stringify(principals.get(key)?.permissions ?? null)
+          await principals.refreshForNonHumanWake(key)
+          const current = JSON.stringify(principals.get(key)?.permissions ?? null)
+          if (previous !== current) registry.routePermissionUpdate(key, configRevision)
+          appliedManagerPermissions.set(key, current)
+        } catch (error) { console.warn('[manager-bootstrap] Permission refresh pending:', key, error) }
+      }
+      await requestRunner.refreshPermissions(configRevision)
+      await harness.refreshPermissions()
+    },
     startContinuationReconciliation: async () => {
       if (candidatesClosing || deps.isClosing?.()) return
       candidatesReady = true
       await requestRunner.recoverPending()
+      await harness.refreshPermissions()
       const bearer = deps.coreRuntimeBearer?.()
       if (bearer) {
         try {

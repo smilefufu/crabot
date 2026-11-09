@@ -171,11 +171,14 @@ describe('request spawn binds before any carrier side effect', () => {
     expect((await store.get(worker.worker_id, snapshot.snapshot_id)).status).toBe('active')
     expect(action).not.toHaveBeenCalled()
   })
-  it('current grants cannot promote a directory-scoped original request into a native full-host handoff', async () => {
+  it('current full-host grants admit a native handoff for the same original identity', async () => {
     const { worker } = await harness.spawnRequestWorker(params, caller)
     friend!.resolved.storage = { workspace_path: '/', access: 'readwrite' }
-    await expect((harness as any).handoffIncarnation(key, worker, worker.incarnations[0], 'codex', 'switch')).rejects.toThrow(/PERMISSION_DENIED/)
-    expect(connection).toHaveBeenCalledOnce()
+    expect((await harness.currentWorkerPermissions(worker.worker_id, 'codex')).storage).toEqual({ workspace_path: '/', access: 'readwrite' })
+    expect((await guard.load(worker.worker_id))!.source.sender_friend_id).toBe('actual-owner')
+    await expect((harness as any).handoffIncarnation(key, worker, worker.incarnations[0], 'codex', 'switch')).rejects.toThrow('no adapter registered')
+    expect(connection).toHaveBeenCalledTimes(2)
+    expect((await connection.mock.results[1].value).dispose).toHaveBeenCalledOnce()
   })
   it('startup reconciliation preserves a broken binding and never probes it as a legacy Worker', async () => {
     const { worker } = await harness.spawnRequestWorker(params, caller)
@@ -223,11 +226,11 @@ describe('request spawn binds before any carrier side effect', () => {
     expect(spawn).not.toHaveBeenCalled(); expect(provision).not.toHaveBeenCalled(); expect(connection).toHaveBeenCalledOnce()
   })
 
-  it('never widens a snapshot by combining sources or by intersecting disjoint storage', async () => {
+  it('uses same-source current storage and CLI grants while rejecting different identities', async () => {
     await expect(boundedRequestPermissions(group, friend!)).rejects.toThrow('different request permission sources')
     const moved = structuredClone(friend!); moved.resolved.storage = { workspace_path: path.join(root, 'a'), access: 'read' }; moved.resolved.cli_access.provider = 'read'
     const narrowed = await boundedRequestPermissions(friend!, moved)
-    expect(narrowed.storage).toBeNull(); expect(narrowed.cli_access.provider).toBe('read')
+    expect(narrowed.storage).toEqual(moved.resolved.storage); expect(narrowed.cli_access.provider).toBe(moved.resolved.cli_access.provider)
     moved.resolved.storage = { workspace_path: path.join(root, 'b'), access: 'read' }
     expect((await boundedRequestPermissions(friend!, moved)).storage?.access).toBe('read')
   })

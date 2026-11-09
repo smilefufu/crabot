@@ -187,6 +187,8 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
       // Check if context compaction is needed
       // disableCompaction=true 时整体 bypass（subagent 路径）；详见 EngineOptions 注释。
       // systemPrompt/tools 在 shouldCompact 之前解析——usage 缺失的估算路径要计入两者。
+      try { if (options.prepareTools) await options.prepareTools() }
+      catch (error) { return { ...finishResult('failed', error instanceof Error ? error.message : String(error)), contextRecoveryRequired: true } }
       const currentSystemPrompt = typeof options.systemPrompt === 'function'
         ? (options.systemPrompt as () => string)()
         : options.systemPrompt

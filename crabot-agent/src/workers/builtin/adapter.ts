@@ -340,7 +340,7 @@ export interface BuiltinTraceReader {
  * manager 名义落 trace（否则 get_worker_activity 出现 manager 从未发过的 message/user 事件）。
  * 彻底方案（inbox item 带 source 字段透传）属跨模块契约变更，记 spec §8 follow-up。
  */
-const SYSTEM_NOTIFICATION_ENVELOPES: readonly string[] = ['<bg-notification>', '<sub_agent_notification>']
+const SYSTEM_NOTIFICATION_ENVELOPES: readonly string[] = ['<bg-notification>', '<sub_agent_notification>', '<permission-notification>']
 
 function isSystemNotificationEnvelope(text: string): boolean {
   return SYSTEM_NOTIFICATION_ENVELOPES.some((envelope) => text.includes(envelope))
@@ -1231,6 +1231,8 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         systemPrompt: branch ? forkSystemPrompt(instance.forkSystemPrompt ?? builtin.systemPrompt) : builtin.systemPrompt,
         tools: this.combineTools(builtin.tools, instance),
         model: builtin.model,
+        prepareTools: builtin.prepareTools,
+        getResolvedPermissions: builtin.getResolvedPermissions,
         onBeforeLlmCall: builtin.observeTools,
         ...(!branch && builtin.maxTurnsPerBurst !== undefined ? { maxTurns: builtin.maxTurnsPerBurst } : {}),
         // 每次实际主推理请求前（包括内部重试），消费本执行线排队的输入。

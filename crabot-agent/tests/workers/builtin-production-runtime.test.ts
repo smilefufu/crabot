@@ -45,9 +45,7 @@ import type {
 } from '../../src/types.js'
 import { BUILTIN_WORKER_PERMISSIONS, type BuiltinRuntimeContext } from '../../src/workers/builtin/runtime.js'
 import { CLI_DOMAINS } from '../../src/types.js'
-import type { ManagerKey } from '../../src/manager/types.js'
 import type { SpawnSpec } from '../../src/workers/types.js'
-import { chunksFromContent } from '../engine/helpers/mock-stream.js'
 
 // ============================================================================
 // helpers
@@ -214,6 +212,16 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     agents.add(agent)
     const internals = agent as unknown as AgentInternals
     internals.adminPort = 1
+    // This fixture supplies the trusted Admin permission response; tools and filesystem execution remain real.
+    vi.spyOn(internals.rpcClient, 'call').mockImplementation(async (_port, method) => {
+      if (method === 'resolve_principal_permissions') return { resolved: testPrincipal(), sources: {} }
+      if (method === 'get_friend') return { friend: { id: 'friend-f1', display_name: 'Fixture', permission: 'normal', channel_identities: [], created_at: 't', updated_at: 't' } }
+      return {}
+    })
+    vi.spyOn((internals as any).rpcClient, 'callSensitive').mockImplementation(async (_port: unknown, method: string) => {
+      if (method === 'issue_agent_cli_credential') return { token: 'fixture-cli-token' }
+      throw new Error(`unexpected sensitive fixture RPC: ${method}`)
+    })
     return { agent, internals }
   }
 
@@ -253,6 +261,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
       prompt,
       origin: { spawned_by_episode: 'wechat::sess-1', trigger_type: 'message', creator_friend_id: 'friend-f1' },
       report_to: { channel_id: 'wechat' as ModuleId, session_id: 'sess-1' },
+      target_session: { channel_id: managerKey.split('::')[0], session_id: managerKey.split('::')[1], type: 'private' },
       impl: 'builtin',
       principal_permissions: testPrincipal(),
     })
@@ -299,6 +308,101 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     expect(rpc).toHaveBeenCalled()
     await stack.adapters.get('builtin')!.dispose()
   })
+
+  async function verifyPermissionRefresh(kind: 'group' | 'friend', connection?: LLMConnectionInfo): Promise<void> {
+    let modelRequests = llm.adapter.stream as ReturnType<typeof vi.fn>
+    if (connection) {
+      const { createAdapter } = await import('../../src/engine/llm-adapter.js')
+      const actual = createAdapter({ endpoint: connection.endpoint, apikey: connection.apikey, format: connection.format })
+      modelRequests = vi.spyOn(actual, 'stream') as unknown as ReturnType<typeof vi.fn>
+      vi.mocked(agentHandlerModule.adapterFromSdkEnv).mockReturnValue(actual as never)
+    }
+    const timeout = connection ? 90000 : 8000
+    const { agent, internals } = boot(connection ? makeConfig({ modelConfig: { powerful: connection } }) : undefined), stack = internals.managerStack!, runtime = internals as any
+    // This acceptance isolates Worker execution; request event routing is outside this test.
+    const harnessInternal = stack.harness as any
+    harnessInternal.deps.onEvent = async () => ({ consumed: true })
+    harnessInternal.deps.onOperationNotification = async () => ({ consumed: true })
+    vi.spyOn(ConfigLoader, 'getRuntimeBearer').mockReturnValue('fixture-runtime-bearer')
+    const key = 'wechat::request-production' as ManagerKey, workspace = join(tmpRoot, 'request-workspace')
+    await fs.mkdir(workspace)
+    const now = new Date().toISOString()
+    const friend = { id: 'owner', display_name: 'Owner', permission: 'master', created_at: now, updated_at: now,
+      channel_identities: [{ channel_id: 'wechat', platform_user_id: 'owner-platform' }] }
+    const group = { kind: 'group', subject_id: key, is_master: false, resolved: testPrincipal() } as any
+    group.resolved = structuredClone(group.resolved); group.resolved.tool_access.file_io = false; group.resolved.tool_access.shell = false; group.resolved.storage = null
+    const owner = { kind: 'friend', subject_id: 'owner', is_master: true, resolved: { ...structuredClone(testPrincipal()), storage: null } } as any
+    owner.resolved.tool_access.shell = false; owner.resolved.tool_access.file_io = false
+    const rpc = vi.spyOn(runtime.rpcClient, 'call').mockImplementation(async (_port, method) => {
+      if (method === 'resolve_friend') return { friend }
+      throw new Error('unexpected fixture RPC')
+    })
+    vi.spyOn(runtime.rpcClient, 'callSensitive').mockImplementation(async (_port, method, params: any) => {
+      if (method === 'issue_agent_cli_credential') return { token: 'fixture-cli-token', expires_at: new Date(Date.now() + 60000).toISOString() }
+      if (method === 'resolve_request_permission_sources') return structuredClone({ group, friend: owner })
+      if (method === 'resolve_request_permission_source') return { source: structuredClone(params.kind === 'group' ? group : owner) }
+      throw new Error('unexpected sensitive fixture RPC')
+    })
+    const [source] = await stack.trustedHumanInputs.capture(key, [{ platform_message_id: 'original-request', session: { channel_id: 'wechat', session_id: 'request-production', type: 'group' },
+      sender: { platform_user_id: 'owner-platform', platform_display_name: 'Owner' }, content: { type: 'text', text: 'Write the result in my authorized workspace' }, features: { is_mention_crab: true }, platform_timestamp: now }])
+    const request = await stack.conversationRequests.forInputs(key, [source]).create({ source_id: source.source_id, delivery: 'origin' })
+    const authority = new ConversationRequestAuthority(stack.conversationRequests, key, request.request_id, 'request', async kind => structuredClone(kind === 'group' ? group : owner))
+    const publicAuthority = new ConversationRequestAuthority(stack.conversationRequests, key, request.request_id, 'group', async () => structuredClone(group))
+    if (!connection) llm.queue.push({ text: '等待 shell 权限', stopReason: 'end_turn' })
+    const { worker } = await stack.harness.spawnRequestWorker({ managerKey: key, title: 'permission update', prompt: 'Create live.txt in your working directory with text live, using Bash. If Bash is absent, reply waiting and end this turn. Keep this task open: do not call finish_task while waiting. After a host permission update, inspect your current tools and complete the original write; do not ask for another human message.', impl: 'builtin',
+      origin: { trigger_type: 'message' }, report_to: { channel_id: 'wechat', session_id: 'request-production' } }, kind === 'group' ? publicAuthority : authority)
+    const originalIncarnation = worker.incarnations[0]
+    await waitUntil(async () => (await stack.harness.findWorker(worker.worker_id))?.worker.incarnations[0].state === 'idle', timeout)
+    const firstRequest = modelRequests.mock.calls.find(([params]: any[]) => params.tools.some((tool: any) => tool.name === 'finish_task'))[0]
+    expect(firstRequest.tools.some((tool: any) => tool.name === 'Bash')).toBe(false)
+    const changed = kind === 'group' ? group : owner
+    changed.resolved.tool_access.shell = true
+    changed.resolved.tool_access.file_io = true
+    if (!connection) llm.queue.push({ toolCalls: [{ name: 'Bash', id: 'newly-granted-shell', input: { command: 'printf live > live.txt' } }], stopReason: 'tool_use' },
+      { text: '完成', stopReason: 'end_turn' })
+    vi.spyOn(ConfigLoader, 'pull').mockResolvedValueOnce({ config: { ...runtime.config, agent_config: runtime.agentConfig, runtime_config_authenticated: true }, revision: (runtime.configRevision ?? 0) + 1 })
+    await runtime.onEvent({ type: 'admin.agent_config_invalidated', payload: { config_revision: (runtime.configRevision ?? 0) + 1, domains: ['permissions'] } })
+    await waitUntil(async () => (await fs.readFile(join(originalIncarnation.workspace, 'live.txt'), 'utf8').catch(() => '')).trim() === 'live', timeout)
+    expect((await stack.requestGuard.load(worker.worker_id))!.request.request_id).toBe(request.request_id)
+    expect((await stack.harness.findWorker(worker.worker_id))!.worker.incarnations).toHaveLength(1)
+    expect((await stack.conversationRequests.get(key, request.request_id))!.record.worker_ids).toEqual([worker.worker_id])
+    await waitUntil(async () => ['idle', 'exited'].includes((await stack.harness.findWorker(worker.worker_id))?.worker.incarnations[0].state ?? ''), timeout)
+    const turns = modelRequests.mock.calls.length
+    await stack.harness.refreshPermissions()
+    expect(modelRequests.mock.calls.length).toBe(turns)
+    const ordinaryRpc = vi.mocked(runtime.rpcClient.call).getMockImplementation()!
+    const sensitiveRpc = vi.mocked(runtime.rpcClient.callSensitive).getMockImplementation()!
+    await agent.stop()
+    agents.delete(agent)
+    const restarted = boot(connection ? makeConfig({ modelConfig: { powerful: connection } }) : undefined)
+    const restored = restarted.internals as any
+    vi.mocked(restored.rpcClient.call).mockImplementation(ordinaryRpc)
+    vi.mocked(restored.rpcClient.callSensitive).mockImplementation(sensitiveRpc)
+    const restoredStack = restored.managerStack as ManagerStack
+    ;(restoredStack.harness as any).deps.onEvent = async () => ({ consumed: true })
+    ;(restoredStack.harness as any).deps.onOperationNotification = async () => ({ consumed: true })
+    await restoredStack.harness.refreshPermissions()
+    await restoredStack.harness.refreshPermissions()
+    expect(modelRequests.mock.calls.length).toBe(turns)
+    expect((await restoredStack.harness.findWorker(worker.worker_id))!.worker.incarnations).toHaveLength(1)
+    await restarted.agent.stop()
+    agents.delete(restarted.agent)
+  }
+
+  it.each(['group', 'friend'] as const)('applies a %s permission hint to the same waiting request and Worker without another human message', kind => verifyPermissionRefresh(kind))
+
+  it.skipIf(!process.env.CRABOT_ACCEPTANCE_PROVIDER_DIR)('real model continues the same waiting Worker after a permission hint', async () => {
+    const { ModelProviderManager } = await import('../../../crabot-admin/src/model-provider-manager.js')
+    const manager = new ModelProviderManager(process.env.CRABOT_ACCEPTANCE_PROVIDER_DIR!)
+    // Load-only: do not initialize, seed, or mutate the live provider store.
+    await (manager as any).loadData()
+    const global = manager.getGlobalConfig()
+    const providerId = process.env.CRABOT_ACCEPTANCE_PROVIDER_ID
+    const modelId = process.env.CRABOT_ACCEPTANCE_MODEL_ID
+    if (Boolean(providerId) !== Boolean(modelId)) throw new Error('Acceptance provider and model overrides must be supplied together')
+    const connection = await manager.buildConnectionInfo(providerId ?? global.default_llm_provider_id!, modelId ?? global.default_llm_model_id!)
+    await verifyPermissionRefresh('group', connection)
+  }, 180000)
 
   it('query_worker 返回的化身 ID 可直接读取真实分支活动，不会读到主线', async () => {
     const { internals } = boot()
@@ -1074,6 +1178,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
       spawned_at: now, last_activity_at: now, ended_at: null, exit_code: null,
       task_description: '核对来源', messages_log_file: join(tmpRoot, 'child.jsonl'), result_file: null })
     const deps = (stack.registry as unknown as { deps: ManagerRegistryDeps }).deps
+    await stack.principals.resolve(key, { sessionType: 'private', friend: { id: 'friend-f1', display_name: 'Fixture', permission: 'normal', channel_identities: [], created_at: 't', updated_at: 't' } })
     const faceState = createManagerToolFaceState()
     const face = () => deps.toolFace(key, false, undefined, undefined, { ...BUILTIN_WORKER_PERMISSIONS, tool_access: { ...BUILTIN_WORKER_PERMISSIONS.tool_access, task: true } }, undefined, undefined, faceState)
     const call = async (name: string, params: Record<string, unknown>) => {

@@ -14,6 +14,7 @@ describe('group permission authorization boundary', () => {
     templates.initSystemTemplates()
     admin = Object.create(AdminModule.prototype)
     Object.assign(admin, {
+      commitPermissionChange: (apply: () => Promise<unknown>) => apply(),
       sessionConfigs: new Map(),
       friends: new Map(),
       friendPermissionConfigs: new Map(),

@@ -1,3 +1,4 @@
+import { createSkillTool } from './engine/tools/skill-tool.js'
 import { createWorkspaceInterruptedRootVerifier } from './core/workspace-interrupted-validation.js'
 import { createWorkspaceRelocationStopJournal } from './core/workspace-relocation-stop-journal.js'
 import { createWorkspaceInterruptedExecutionAuthority } from './core/workspace-interrupted-execution.js'
@@ -1510,17 +1511,8 @@ export class UnifiedAgent extends ModuleBase {
    * （`initializeManagerStack`）算好塞进闭包，"改了配置下次起化身生效"就退化成"agent
    * 重启才生效"，进程重启后的 revive 也会拿不到配置（spec 决策 2）。
    *
-   * **但权限恰恰相反：它必须是 spawn 那一刻的快照，只能从入参 `ctx` 读**（见
-   * `resolveWorkerPrincipalPermissions`）。两者都经过这个工厂，语义却是反的，别混：
-   *
-   * | | 来源 | 变更何时生效 | 为什么 |
-   * |---|---|---|---|
-   * | LLM 运行配置（model/人格/skills/MCP） | `this.agentConfig` **现取** | 下次起化身 | 它是**实例配置**：用户在 admin 改了就该用新的（spec 决策 2） |
-   * | 发起人权限档位 | `ctx.principal_permissions` **spawn 时固定** | 永不（新 worker 才有新档位） | 它是**身份属性**：这个 worker 以谁的名义执行，在 spawn 那一刻就定死了 |
-   *
-   * 判据很简单：换了值之后，"这个 worker 还是同一个 worker 吗"——换 model 是；换成另一个
-   * 人的权限不是。把权限也做成现取，就是 PR #59 review 揪出的那条越权
-   * （worker 的档位随"该会话最近说话的人"漂移）。
+   * 授权主体始终沿原 Worker 绑定；该主体的权限配置与 tools/MCP 一样刷新。
+   * 创建快照保留历史事实，每轮通过宿主当前解析装配工具，不能取群内最近发言者的权限。
    *
    * 缺 `powerful` slot 时**抛错，不降级**：harness 会把这次 spawn 如实落成一条 failed 台账
    * 加一条 `spawn_failed` 事件，manager 的 `spawn_worker` 拿到错误文本。静默降级只会让
@@ -1537,23 +1529,33 @@ export class UnifiedAgent extends ModuleBase {
       )
     }
     const sdkEnv = this.buildSdkEnv(connInfo)
+    let current = ctx
+    const prepareTools = async () => {
+      const permissions = ctx.resolve_permissions ? await ctx.resolve_permissions() : ctx.principal_permissions ?? null
+      const sources = ctx.request_runtime?.refresh ? await ctx.request_runtime.refresh() : ctx.request_runtime?.ceilings
+      current = { ...ctx, principal_permissions: permissions ?? undefined,
+        ...(ctx.request_runtime && sources ? { request_runtime: { ...ctx.request_runtime, ceilings: sources } } : {}) }
+    }
     return {
+      prepareTools,
+      getResolvedPermissions: () => ({ ...narrowWorkerPermissions(BUILTIN_WORKER_PERMISSIONS, current.principal_permissions ?? null), cli_access: workerCliExecutionPermissions(current.principal_permissions).cli_access }),
       adapter: adapterFromSdkEnv(sdkEnv),
       model: sdkEnv.modelId,
       // systemPrompt / tools 都给 thunk：engine 每轮 turn 重新 resolve，admin 中途 push 的
       // 人格 / skills / MCP 变更因此在同一个 burst 内即时生效（与现网 worker loop 的
       // buildSystemPromptDynamic / buildToolsDynamic 同款语义）。
-      systemPrompt: () => this.buildBuiltinWorkerSystemPrompt(ctx),
-      tools: () => this.buildBuiltinWorkerTools(ctx),
+      systemPrompt: () => this.buildBuiltinWorkerSystemPrompt(current),
+      tools: () => this.buildBuiltinWorkerTools(current),
       ...(ctx.request_runtime ? { requestCliAuthorization: this.requestWorkerCliAuthorization(ctx) } : {}),
       observeTools: async tools => {
         const id = ctx.incarnation_id ?? ctx.workspace_git?.incarnation_id
         if (!id) throw new Error('CAPABILITY_UNKNOWN: 缺少执行化身身份')
         await persistObservation(observationFile(path.join(getAgentDataDir(), 'workers'), ctx.worker_id, id),
           requestObservation(tools, { role: 'worker', impl: 'builtin', source: 'builtin_request', worker_id: ctx.worker_id, incarnation_id: id,
+            authorization_revision: sha256CanonicalJson(current.request_runtime?.ceilings ?? current.principal_permissions ?? null),
             child_profiles: tools.some(tool => tool.name === 'delegate_task') ? (this.agentConfig?.subagents ?? []).map(profile => profile.name) : [],
-            skills: this.requestWorkerSkills(ctx).map(skill => skill.name),
-            constraints: ['主体授权为派发时快照；Worker 不提供记忆、人类投递、换工作目录或 goal 管理；主体开启标志不增加角色职责。'],
+            skills: this.requestWorkerSkills(current).map(skill => skill.name),
+            constraints: ['主体身份固定，权限使用当前配置；Worker 不提供记忆、人类投递、换工作目录或 goal 管理；主体开启标志不增加角色职责。'],
           }))
       },
       resolvedPermissions: { ...narrowWorkerPermissions(BUILTIN_WORKER_PERMISSIONS, ctx.principal_permissions ?? null), cli_access: workerCliExecutionPermissions(ctx.principal_permissions).cli_access },
@@ -1716,7 +1718,8 @@ export class UnifiedAgent extends ModuleBase {
 
   private requestWorkerCliAuthorization(ctx: BuiltinRuntimeContext): NonNullable<NonNullable<SpawnSpec['builtin']>['requestCliAuthorization']> {
     return async input => {
-      const bash = this.buildBuiltinWorkerTools(ctx).find(tool => tool.name === 'Bash')
+      const current = ctx.request_runtime?.refresh ? { ...ctx, request_runtime: { ...ctx.request_runtime, ceilings: await ctx.request_runtime.refresh() } } : ctx
+      const bash = this.buildBuiltinWorkerTools(current).find(tool => tool.name === 'Bash')
       if (!bash?.authorization) return { action: 'block', message: 'PERMISSION_DENIED: Shell unavailable' }
       const decision = await bash.authorization.check(input.toolInput ?? {})
       return decision.allowed ? { action: 'continue' } : { action: 'block', message: decision.reason }
@@ -1733,7 +1736,7 @@ export class UnifiedAgent extends ModuleBase {
   private assembleBuiltinWorkerTools(ctx: BuiltinRuntimeContext, bgOptions?: ReturnType<AgentHandler['createBuiltinBgToolOptions']>, requestTools?: WorkerRequestToolScope, includeDelegation = true): ReadonlyArray<EngineToolDefinition> {
     const tools: EngineToolDefinition[] = []
     const workspaceRoot = ctx.workspace.root
-    const principalPerms = this.resolveWorkerPrincipalPermissions(ctx)
+    let principalPerms = this.resolveWorkerPrincipalPermissions(ctx)
     const workerPerms = narrowWorkerPermissions(BUILTIN_WORKER_PERMISSIONS, principalPerms)
     const workerSkills = this.resolveMainlineWorkerSkills(ctx)
     const builtinTools = getConfiguredBuiltinTools(
@@ -1797,7 +1800,26 @@ export class UnifiedAgent extends ModuleBase {
       } else if (fixedProduct.has(tool)) authorization = roleAuthorization('worker')
       else if (tool === workspaceGitTool) authorization = fileAuthorization('worker', () => principalPerms, () => workspaceRoot, 'workspace_root', false, ctx.managed_workspace)
       if (!authorization) throw new Error(`CAPABILITY_UNAVAILABLE: 未声明的 Worker 工具 ${tool.name}`)
-      return authorizeTool(tool, authorization)
+      const policy = authorization
+      const actual = tool.name === 'Skill' ? { ...tool, call: (input: Record<string, unknown>, context: import('./engine/types.js').ToolCallContext) =>
+        createSkillTool({ availableSkills: this.resolveMainlineWorkerSkills({ ...ctx, principal_permissions: principalPerms ?? undefined }), getCwd: () => workspaceRoot }).call(input, context) } : tool
+      return authorizeTool(actual, { ...policy, check: async input => {
+        if (!requestTools && ctx.resolve_permissions) principalPerms = await ctx.resolve_permissions()
+        const decision = await policy.check(input)
+        if (!decision.allowed) return decision
+        if (tool.name === 'Skill') {
+          const name = typeof input.skill === 'string' ? input.skill.trim().toLowerCase() : ''
+          if (name !== 'list' && !this.resolveMainlineWorkerSkills({ ...ctx, principal_permissions: principalPerms ?? undefined }).some(skill => skill.name.toLowerCase() === name)) {
+            return { allowed: false, reason: 'PERMISSION_DENIED: 当前授权不提供该 Skill' }
+          }
+        }
+        if (tool.name !== 'Bash') return decision
+        const gate = getInternalHandler('cli-permission-gate')
+        if (!gate) return { allowed: false, reason: 'CAPABILITY_UNKNOWN: CLI gate unavailable' }
+        const result = await gate({ event: 'PreToolUse', toolName: 'Bash', toolInput: input, workingDirectory: workspaceRoot },
+          { workingDirectory: workspaceRoot, resolvedPermissions: principalPerms ?? undefined, senderIsMaster: false })
+        return result.action === 'continue' ? { allowed: true } : { allowed: false, reason: result.message ?? 'CLI permission denied' }
+      } })
     }).filter(tool => tool.authorization!.available())
     effectiveTools.push(authorizeTool(createGuidanceTool('worker', { computerUse: effectiveTools.some(tool => tool.traceMetadata?.computer_use_standard === true) }), roleAuthorization('worker')))
     assertAuthorizedTools(effectiveTools)
@@ -1812,6 +1834,14 @@ export class UnifiedAgent extends ModuleBase {
         toolContext,
         (requestTools ? requestTools.tools(false) : effectiveTools).filter((tool) => tool.name !== workspaceGitTool?.name && tool.name !== 'load_guidance' && tool.category !== 'desktop'),
         {
+          prepareTools: async () => {
+            if (ctx.resolve_permissions) principalPerms = await ctx.resolve_permissions()
+            await requestTools?.refresh()
+          },
+          getParentTools: () => requestTools ? requestTools.tools(false) : this.assembleBuiltinWorkerTools(
+            { ...ctx, principal_permissions: principalPerms ?? undefined }, bgOptions, undefined, false),
+          getResolvedPermissions: () => ({ ...narrowWorkerPermissions(BUILTIN_WORKER_PERMISSIONS, principalPerms),
+            cli_access: workerCliExecutionPermissions(principalPerms ?? undefined).cli_access }),
           permissionConfig: childPermissionConfig,
           ...(requestTools ? { requestTools, requestCliAuthorization: this.requestWorkerCliAuthorization(ctx) } : {}),
           resolvedPermissions: { ...workerPerms, tool_access: { ...workerPerms.tool_access, desktop: false } },
@@ -1822,30 +1852,7 @@ export class UnifiedAgent extends ModuleBase {
     }), roleAuthorization('worker')), authorizeTool(createSendToSubagentTool((id, text, context) => this.builtinSubagentRunner.sendInput(id, text, context)), roleAuthorization('worker'))]
   }
 
-  /**
-   * 派活时 manager 已经解析好的发起人权限档位（§8.2）——**只读这个 worker 自己那份**
-   * （`spec.principal_permissions` → `context.json` → `ctx.principal_permissions`）。
-   *
-   * ## 为什么不查 `ManagerPrincipalStore`（这是 PR #59 review 修掉的越权）
-   *
-   * `ManagerPrincipalStore` 是**按 ManagerKey 缓存的"该会话最近一次解析出来的发起人"**，
-   * 群聊里 A 说完 B 说就会被整体覆盖。而本方法跑在两条"每次都重来"的路径上：
-   * `tools` 是 thunk（engine 每轮 turn 重新 resolve）、`resolveRuntime` 在 resume / fork /
-   * idle→running 续 burst / 重启 revive 时每次起化身现调。按会话缓存取数 ⇒ 低权限成员 S
-   * 派出的 worker，在 master 于同群发言之后的下一轮 turn 就会拿到 master 的 `Bash`/`file_io`
-   * ——以 S 的名义登记、却实际获得 master 的能力（反方向同样成立）。
-   *
-   * **权限是身份属性，不是会话属性**：谁的名义（`origin.creator_friend_id`）在 spawn 那一刻
-   * 就定死了，随之算出的档位也必须在那一刻定死并落盘。会话级缓存只在**派活那一刻**
-   * （`bootstrap.ts` 的 `workerContext()`）被读一次，之后与这个 worker 再无关系。
-   *
-   * 重启 revive 同理：档位从 `context.json` 读回，**不重新解析**——重新解析等于把"当时以谁
-   * 的名义派的"换成"现在这个会话是谁在说话"。
-   *
-   * **worker 侧不做任何身份解析**：它既不知道 friend 是谁，也不调 admin。取不到（系统派工 /
-   * 派活时身份未解析 / 本字段出现之前 spawn 的老 worker）时返回 null，
-   * 资源操作关闭，仅保留产品内闭环职责。
-   */
+  /** Runtime context is refreshed from this Worker's fixed original identity, never the latest speaker. */
   private resolveWorkerPrincipalPermissions(ctx: BuiltinRuntimeContext): ResolvedPermissions | null {
     return ctx.principal_permissions ?? null
   }
@@ -2163,6 +2170,7 @@ export class UnifiedAgent extends ModuleBase {
         this.configAuthenticated = true
         await this.refreshComputerUseResource()
         this.verifyComputerUseSetup(loaded.computer_use_setup)
+        await this.applyCurrentPermissions()
         return
       }
       await this.applyRuntimeConfigCandidate(loaded.config)
@@ -2172,6 +2180,7 @@ export class UnifiedAgent extends ModuleBase {
       this.configStale = false
       this.configAuthenticated = true
       this.verifyComputerUseSetup(loaded.computer_use_setup)
+      await this.applyCurrentPermissions()
     } catch (error) {
       this.configStale = true
       this.configAuthenticated = false
@@ -2179,6 +2188,11 @@ export class UnifiedAgent extends ModuleBase {
       this.disconnectRuntimeConfigResources()
       throw error
     }
+  }
+
+  private async applyCurrentPermissions(): Promise<void> {
+    if (!this.managerStack) return
+    await this.managerStack.refreshPermissions(this.configRevision)
   }
 
   private desktopSetupRequest?: import('crabot-shared').ComputerUseSetupRequest
