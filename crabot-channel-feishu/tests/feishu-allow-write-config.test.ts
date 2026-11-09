@@ -14,7 +14,7 @@ import { FeishuChannel } from '../src/feishu-channel'
 let dir: string; let channel: any
 beforeEach(async () => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fs-aw-'))
-  channel = new FeishuChannel({ module_id: 'channel-feishu-test', module_type: 'channel', version: '0', protocol_version: '0', port: 0, data_dir: dir, feishu: { app_id: 'cli_x', app_secret: 's', domain: 'feishu', only_respond_to_mentions: true, markdown_format: 'auto' } })
+  channel = new FeishuChannel({ module_id: 'channel-feishu-test', module_type: 'channel', version: '0', protocol_version: '0', data_dir: dir, feishu: { app_id: 'cli_x', app_secret: 's', domain: 'feishu', only_respond_to_mentions: true, markdown_format: 'auto' } }, { publishEvent: async () => {} })
   await channel.mediaHandleStore.init()
 })
 afterEach(() => fs.rmSync(dir, { recursive: true, force: true }))

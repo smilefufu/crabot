@@ -1,0 +1,74 @@
+{
+  "date": "2026-11-10",
+  "code_baseline": "de3aab77bde39450aedd01143bb397f3356e78ad",
+  "environment": {
+    "platform": "darwin-arm64",
+    "node": "22.22.3",
+    "npm": "10.9.8",
+    "cordis": "4.0.0-rc.12",
+    "feishu_sdk": "1.62.1"
+  },
+  "tests": {
+    "pre_migration_feishu": {
+      "passed": 285,
+      "failed": 0
+    },
+    "final_feishu": {
+      "passed": 290,
+      "failed": 0
+    },
+    "web_targeted": {
+      "passed": 9,
+      "failed": 0
+    },
+    "npm_integration": {
+      "passed": 2,
+      "failed": 0
+    }
+  },
+  "builds": {
+    "shared": "passed",
+    "feishu": "passed",
+    "admin_web_types": "passed",
+    "admin_web_vite": "passed"
+  },
+  "artifact": {
+    "name": "crabot-channel-feishu-0.1.0.tgz",
+    "bytes": 196477,
+    "unpacked_logical_bytes": 853700,
+    "files": 223,
+    "sha256": "10dccaf142e18edd19516589cb42909bef0156db66d33bf500e2c2345733b2a7",
+    "bundled": [
+      "crabot-shared runtime only"
+    ],
+    "sdk_in_tarball": false
+  },
+  "npm_install": {
+    "empty_cache": true,
+    "registry": "https://registry.npmmirror.com",
+    "registry_dependencies": 56,
+    "download_origins": [
+      "https://registry.npmmirror.com",
+      "https://cdn.npmmirror.com"
+    ],
+    "package_lock_sha256": "b2867ad939f86ae0d757b8308e842628b2dec63d886e17122b920867e30dfd60",
+    "installed_node_modules_logical_bytes": 38728755,
+    "isolated_npm_cache_bytes": 22241234
+  },
+  "runtime": {
+    "instances": 2,
+    "host_tcp_listeners": 1,
+    "channel_tcp_listeners": 0,
+    "generations": 2,
+    "outbound_connections_during_smoke": "forbidden",
+    "session_id_survives_restart": true
+  },
+  "limitations": [
+    "Synthetic platform and temporary data only; no real Feishu login or message",
+    "Host is a component fixture, not production Admin/Agent authorization acceptance",
+    "No npm publish or plugin metadata mirror synchronization acceptance",
+    "Domestic registry accessed from this machine; mainland real-network coverage unmeasured",
+    "Production installer and base installer size unchanged",
+    "No complete offline first install, HMR, upgrade rollback, or arbitrary in-flight drain guarantee"
+  ]
+}

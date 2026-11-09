@@ -28,9 +28,9 @@ beforeEach(async () => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fs-async-'))
   channel = new FeishuChannel({
     module_id: 'channel-feishu-test', module_type: 'channel', version: '0', protocol_version: '0',
-    port: 0, data_dir: dir,
+    data_dir: dir,
     feishu: { app_id: 'cli_x', app_secret: 's', domain: 'feishu', only_respond_to_mentions: true, markdown_format: 'auto' },
-  })
+  }, { publishEvent: async () => {} })
   await (channel as any).mediaHandleStore.init()
 })
 afterEach(() => fs.rmSync(dir, { recursive: true, force: true }))
@@ -38,7 +38,7 @@ afterEach(() => fs.rmSync(dir, { recursive: true, force: true }))
 describe('fetch_media 大文件非阻塞 + 完成事件', () => {
   it('文件 ≥ 异步阈值 → 立即返回 fetching 不阻塞；后台下完发 media.download_completed 事件', async () => {
     const publishEvent = vi.fn(async (_event: any, _source?: string) => 1)
-    ;(channel as any).rpcClient.publishEvent = publishEvent
+    ;(channel as any).events.publishEvent = publishEvent
     let resolveDownload!: (b: Buffer) => void
     ;(channel as any).client.downloadResource = vi.fn(() => new Promise<Buffer>((res) => { resolveDownload = res }))
 
@@ -61,7 +61,7 @@ describe('fetch_media 大文件非阻塞 + 完成事件', () => {
 
   it('后台下载失败 → 发事件 status=failed', async () => {
     const publishEvent = vi.fn(async (_event: any, _source?: string) => 1)
-    ;(channel as any).rpcClient.publishEvent = publishEvent
+    ;(channel as any).events.publishEvent = publishEvent
     ;(channel as any).client.downloadResource = vi.fn(async () => { throw new Error('net') })
     const handle = await (channel as any).mediaHandleStore.put({
       kind: 'file', filename: 'f.pdf', size: 20 * 1024 * 1024, session_id: 'sess_2',
@@ -76,7 +76,7 @@ describe('fetch_media 大文件非阻塞 + 完成事件', () => {
 
   it('小文件（< 阈值）仍同步返回 ready，不发事件', async () => {
     const publishEvent = vi.fn(async (_event: any, _source?: string) => 1)
-    ;(channel as any).rpcClient.publishEvent = publishEvent
+    ;(channel as any).events.publishEvent = publishEvent
     ;(channel as any).client.downloadResource = vi.fn(async () => Buffer.from('hi'))
     const handle = await (channel as any).mediaHandleStore.put({
       kind: 'file', filename: 's.pdf', size: 100, session_id: 'sess_3',

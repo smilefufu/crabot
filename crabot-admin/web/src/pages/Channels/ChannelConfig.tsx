@@ -293,6 +293,10 @@ export const ChannelConfig: React.FC = () => {
     const implId = searchParams.get('implementation_id')
     if (!implId || implementations.length === 0) return
     if (!implementations.some((i) => i.id === implId)) return
+    if (implId === 'channel-feishu') {
+      navigate('/channels/new/channel-feishu/device_code_oauth', { replace: true })
+      return
+    }
     handleImplChange(implId)
     setShowCreateForm(true)
     const next = new URLSearchParams(searchParams)
@@ -518,6 +522,7 @@ export const ChannelConfig: React.FC = () => {
 
   const handleImplChange = (implId: string) => {
     if (implId === 'channel-voice') { navigate('/channels/new/voice'); return }
+    if (implId === 'channel-feishu') { navigate('/channels/new/channel-feishu/device_code_oauth'); return }
     setCreateImplId(implId)
     setCreateEnv({})
     const impl = implementations.find((i) => i.id === implId)
@@ -619,7 +624,7 @@ export const ChannelConfig: React.FC = () => {
               <div className="form-group form-group--flush">
                 <label className="form-label">实现（Implementation）</label>
                 <select className="select" value={createImplId} onChange={(e) => handleImplChange(e.target.value)}>
-                  {implementations.map((impl) => (
+                  {implementations.filter((impl) => impl.id !== 'channel-feishu').map((impl) => (
                     <option key={impl.id} value={impl.id}>{impl.name} ({impl.id})</option>
                   ))}
                 </select>

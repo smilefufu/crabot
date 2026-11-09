@@ -4,7 +4,7 @@
  * 职责：
  * - 订阅飞书 IM 事件（im.message.receive_v1 + 群成员/群信息相关 5 个事件）
  * - 维护 SessionManager / MessageStore
- * - 注册 protocol-channel.md 全部必需 RPC 端点
+ * - 提供 protocol-channel.md 业务方法，由 Cordis 在进程内调用
  *
  * 对应 spec：crabot-docs/superpowers/specs/2026-04-30-native-feishu-channel-design.md
  */
@@ -14,8 +14,6 @@ import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import {
-  ModuleBase,
-  type ModuleConfig,
   generateId,
   generateTimestamp,
   type Event,
@@ -109,7 +107,6 @@ export interface FeishuChannelInitConfig {
   module_type: 'channel'
   version: string
   protocol_version: string
-  port: number
   data_dir: string
   feishu: FeishuChannelConfig
 }
@@ -121,7 +118,7 @@ const READ_SCOPE_BY_KIND: Record<string, string> = {
   file: 'drive:drive:readonly',
 }
 
-export class FeishuChannel extends ModuleBase {
+export class FeishuChannel {
   private readonly feishuConfig: FeishuChannelConfig
   private readonly dataDir: string
   private readonly client: FeishuClient
@@ -148,18 +145,12 @@ export class FeishuChannel extends ModuleBase {
   private static readonly DOC_TITLE_TTL_MS = 60 * 60 * 1000 // 1h
   private static readonly DOC_TITLE_CACHE_MAX = 500
 
-  constructor(config: FeishuChannelInitConfig) {
-    const moduleConfig: ModuleConfig = {
-      moduleId: config.module_id,
-      moduleType: config.module_type,
-      version: config.version,
-      protocolVersion: config.protocol_version,
-      port: config.port,
-      subscriptions: [],
-    }
-    super(moduleConfig)
-
-    this.feishuConfig = config.feishu
+  constructor(
+    private readonly config: FeishuChannelInitConfig,
+    private readonly events: { publishEvent(event: Event): Promise<void> },
+  ) {
+    this.config = structuredClone(config)
+    this.feishuConfig = this.config.feishu
     this.dataDir = config.data_dir
     this.client = new FeishuClient({
       app_id: config.feishu.app_id,
@@ -177,7 +168,7 @@ export class FeishuChannel extends ModuleBase {
     this.mediaCleaner = new MediaCleaner(config.data_dir, 7)
     this.mediaFetch = new MediaFetchManager({
       store: this.mediaHandleStore,
-      channelId: this.config.moduleId,
+      channelId: this.config.module_id,
       download: (rec) => rec.credential.file_token
         ? this.downloadDriveFileToDisk(rec.credential.file_token as string, rec.filename)
         : this.downloadAndPersistMedia(
@@ -186,19 +177,18 @@ export class FeishuChannel extends ModuleBase {
             rec.kind,
             rec.filename,
           ),
-      publishEvent: (event) => this.rpcClient.publishEvent(event, this.config.moduleId).then(() => undefined),
+      publishEvent: (event) => this.events.publishEvent(event).then(() => undefined),
     })
     this.docReader = new FeishuDocReader(this.client)
 
     fs.mkdirSync(path.join(this.dataDir, 'media'), { recursive: true })
-    this.registerMethods()
   }
 
   // ============================================================================
   // 生命周期
   // ============================================================================
 
-  protected override async onStart(): Promise<void> {
+  async start(): Promise<void> {
     try {
       const info = await this.client.getBotInfo()
       this.botOpenId = info.open_id || null
@@ -259,7 +249,7 @@ export class FeishuChannel extends ModuleBase {
     if (repaired > 0) console.log(`[FeishuChannel] repaired ${repaired} group titles (was chat_id placeholder)`)
   }
 
-  protected override async onStop(): Promise<void> {
+  async stop(): Promise<void> {
     this.messageStore.stopCleanup()
     this.mediaCleaner.stopCleanup()
     await this.subscriber.close()
@@ -325,7 +315,7 @@ export class FeishuChannel extends ModuleBase {
 
     const channelMessage: ChannelMessage = {
       platform_message_id: message.message_id,
-      session: { session_id: session.id, channel_id: this.config.moduleId, type: session.type },
+      session: { session_id: session.id, channel_id: this.config.module_id, type: session.type },
       sender: { platform_user_id: senderOpenId, platform_display_name: senderName || senderOpenId },
       content,
       features: {
@@ -349,9 +339,9 @@ export class FeishuChannel extends ModuleBase {
     const event: Event = {
       id: generateId(),
       type: 'channel.message_received',
-      source: this.config.moduleId,
+      source: this.config.module_id,
       payload: {
-        channel_id: this.config.moduleId,
+        channel_id: this.config.module_id,
         message: channelMessage,
         ...(this.botName ? { crab_display_name: this.botName } : {}),
         // 飞书消息正文里 mention 的字面通常是占位符或昵称，但 mentions 元数据
@@ -360,7 +350,7 @@ export class FeishuChannel extends ModuleBase {
       },
       timestamp: generateTimestamp(),
     }
-    await this.rpcClient.publishEvent(event, this.config.moduleId)
+    await this.events.publishEvent(event)
   }
 
   /**
@@ -661,7 +651,7 @@ export class FeishuChannel extends ModuleBase {
       platform_message_id: `system:members_added:${session.platform_session_id}:${now}`,
       session: {
         session_id: session.id,
-        channel_id: this.config.moduleId,
+        channel_id: this.config.module_id,
         type: 'group',
       },
       sender: {
@@ -680,11 +670,11 @@ export class FeishuChannel extends ModuleBase {
     const event: Event = {
       id: generateId(),
       type: 'channel.message_received',
-      source: this.config.moduleId,
-      payload: { channel_id: this.config.moduleId, message: channelMessage },
+      source: this.config.module_id,
+      payload: { channel_id: this.config.module_id, message: channelMessage },
       timestamp: now,
     }
-    await this.rpcClient.publishEvent(event, this.config.moduleId)
+    await this.events.publishEvent(event)
   }
 
   private async handleUsersDeleted(data: { chat_id?: string; users?: Array<{ user_id?: { open_id?: string } }> }): Promise<void> {
@@ -706,11 +696,11 @@ export class FeishuChannel extends ModuleBase {
     const event: Event = {
       id: generateId(),
       type: 'channel.session_changed',
-      source: this.config.moduleId,
-      payload: { type, channel_id: this.config.moduleId, session },
+      source: this.config.module_id,
+      payload: { type, channel_id: this.config.module_id, session },
       timestamp: generateTimestamp(),
     }
-    await this.rpcClient.publishEvent(event, this.config.moduleId)
+    await this.events.publishEvent(event)
   }
 
   // ============================================================================
@@ -771,32 +761,39 @@ export class FeishuChannel extends ModuleBase {
   }
 
   // ============================================================================
-  // RPC
+  // 进程内业务方法
   // ============================================================================
 
-  private registerMethods(): void {
-    this.registerMethod('send_message', this.handleSendMessage.bind(this))
-    this.registerMethod('get_capabilities', this.handleGetCapabilities.bind(this))
-    this.registerMethod('get_sessions', this.handleGetSessions.bind(this))
-    this.registerMethod('get_session', this.handleGetSession.bind(this))
-    this.registerMethod('find_or_create_private_session', this.handleFindOrCreatePrivateSession.bind(this))
-    this.registerMethod('get_history', this.handleGetHistory.bind(this))
-    this.registerMethod('get_message', this.handleGetMessage.bind(this))
-    this.registerMethod('backfill_history', this.handleBackfillHistory.bind(this))
-    this.registerMethod('get_platform_user_info', this.handleGetPlatformUserInfo.bind(this))
-    this.registerMethod('sync_sessions', this.handleSyncSessions.bind(this))
-    this.registerMethod('delete_session', this.handleDeleteSession.bind(this))
-    this.registerMethod('list_contacts', this.handleListContacts.bind(this))
-    this.registerMethod('list_groups', this.handleListGroups.bind(this))
-    this.registerMethod('list_group_members', this.handleListGroupMembers.bind(this))
-    this.registerMethod('get_config', this.handleGetConfig.bind(this))
-    this.registerMethod('update_config', this.handleUpdateConfig.bind(this))
-    this.registerMethod('read_document', this.handleReadDocument.bind(this))
-    this.registerMethod('add_reaction', this.handleAddReaction.bind(this))
-    this.registerMethod('fetch_media', this.handleFetchMedia.bind(this))
-    this.registerMethod('feishu_get', this.handleFeishuGet.bind(this))
-    this.registerMethod('feishu_download', this.handleFeishuDownload.bind(this))
-    this.registerMethod('feishu_write', this.handleFeishuWrite.bind(this))
+  readonly methods = {
+    send_message: this.method(this.handleSendMessage),
+    get_capabilities: this.method(this.handleGetCapabilities),
+    get_sessions: this.method(this.handleGetSessions),
+    get_session: this.method(this.handleGetSession),
+    find_or_create_private_session: this.method(this.handleFindOrCreatePrivateSession),
+    get_history: this.method(this.handleGetHistory),
+    get_message: this.method(this.handleGetMessage),
+    backfill_history: this.method(this.handleBackfillHistory),
+    get_platform_user_info: this.method(this.handleGetPlatformUserInfo),
+    sync_sessions: this.method(this.handleSyncSessions),
+    delete_session: this.method(this.handleDeleteSession),
+    list_contacts: this.method(this.handleListContacts),
+    list_groups: this.method(this.handleListGroups),
+    list_group_members: this.method(this.handleListGroupMembers),
+    get_config: this.method(this.handleGetConfig),
+    update_config: this.method(this.handleUpdateConfig),
+    read_document: this.method(this.handleReadDocument),
+    add_reaction: this.method(this.handleAddReaction),
+    fetch_media: this.method(this.handleFetchMedia),
+    feishu_get: this.method(this.handleFeishuGet),
+    feishu_download: this.method(this.handleFeishuDownload),
+    feishu_write: this.method(this.handleFeishuWrite),
+  }
+
+  private method<P, R>(handler: (params: P) => R) {
+    return async (params: P): Promise<Awaited<R>> => {
+      // Preserve the former transport's ownership boundary without JSON or HTTP.
+      return structuredClone(await handler.call(this, structuredClone(params)))
+    }
   }
 
   /**
@@ -1603,7 +1600,7 @@ export class FeishuChannel extends ModuleBase {
 
   // ── health ────────────────────────────────────────────────────────────────
 
-  protected override async getHealthDetails(): Promise<Record<string, unknown>> {
+  async getHealthDetails(): Promise<Record<string, unknown>> {
     return {
       platform: 'feishu',
       domain: this.feishuConfig.domain,

@@ -8,7 +8,7 @@ protocol_version: "0.1.0"
 
 runtime:
   type: nodejs
-  version: ">=20.0.0"
+  version: ">=22.12.0"
 
 install: corepack pnpm install
 build: corepack pnpm run build

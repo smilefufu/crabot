@@ -30,9 +30,9 @@ beforeEach(async () => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fs-lazy-'))
   channel = new FeishuChannel({
     module_id: 'channel-feishu-test', module_type: 'channel', version: '0', protocol_version: '0',
-    port: 0, data_dir: dir,
+    data_dir: dir,
     feishu: { app_id: 'cli_x', app_secret: 's', domain: 'feishu', only_respond_to_mentions: true, markdown_format: 'auto' },
-  })
+  }, { publishEvent: async () => {} })
   await (channel as any).mediaHandleStore.init()
 })
 afterEach(() => {
@@ -135,7 +135,7 @@ describe('飞书入站惰性媒体', () => {
   it('富文本图文的 message_received 事件携带真实媒体', async () => {
     ;(channel as any).client.getUser = vi.fn(async () => ({ name: '用户' }))
     ;(channel as any).client.downloadResource = vi.fn(async () => PNG)
-    const publishEvent = vi.spyOn((channel as any).rpcClient, 'publishEvent').mockResolvedValue(undefined)
+    const publishEvent = vi.spyOn((channel as any).events, 'publishEvent').mockResolvedValue(undefined)
 
     await (channel as any).handleMessageReceive({
       sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },

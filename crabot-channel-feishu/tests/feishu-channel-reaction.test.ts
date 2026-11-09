@@ -43,7 +43,6 @@ beforeEach(() => {
     module_type: 'channel',
     version: '0.1.0',
     protocol_version: '0.1.0',
-    port: 0,
     data_dir: tmpDir,
     feishu: {
       app_id: 'cli_x',
@@ -52,7 +51,7 @@ beforeEach(() => {
       only_respond_to_mentions: true,
       markdown_format: 'auto',
     },
-  })
+  }, { publishEvent: async () => {} })
 })
 
 afterEach(() => {

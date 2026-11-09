@@ -30,7 +30,7 @@ vi.mock('@larksuiteoapi/node-sdk', () => {
 import { FeishuChannel } from '../src/feishu-channel.js'
 
 interface ChannelInternals {
-  rpcClient: { publishEvent: (...args: unknown[]) => Promise<void> }
+  events: { publishEvent: (...args: unknown[]) => Promise<void> }
   sessionManager: {
     upsertGroupSessionFromSnapshot: (p: {
       platform_session_id: string
@@ -60,7 +60,6 @@ beforeEach(() => {
     module_type: 'channel',
     version: '0.0.1',
     protocol_version: '0.1.0',
-    port: 0,
     data_dir: tmpDir,
     feishu: {
       app_id: 'a',
@@ -69,7 +68,7 @@ beforeEach(() => {
       only_respond_to_mentions: true,
       markdown_format: 'auto',
     },
-  })
+  }, { publishEvent: async () => {} })
   const internals = channel as unknown as ChannelInternals
   internals.botOpenId = 'ou_bot_x'
   internals.botName = 'Crabot'
@@ -87,7 +86,7 @@ describe('FeishuChannel.handleUsersAdded → system_event', () => {
       title: '产品群',
       participants: [{ platform_user_id: 'ou_existing', role: 'member' }],
     })
-    const publish = vi.spyOn(internals.rpcClient, 'publishEvent').mockResolvedValue(undefined)
+    const publish = vi.spyOn(internals.events, 'publishEvent').mockResolvedValue(undefined)
     await internals.handleUsersAdded({
       chat_id: 'oc_g1',
       users: [
@@ -123,7 +122,7 @@ describe('FeishuChannel.handleUsersAdded → system_event', () => {
       title: '小群',
       participants: [],
     })
-    const publish = vi.spyOn(internals.rpcClient, 'publishEvent').mockResolvedValue(undefined)
+    const publish = vi.spyOn(internals.events, 'publishEvent').mockResolvedValue(undefined)
     await internals.handleUsersAdded({
       chat_id: 'oc_g_solo',
       users: [{ user_id: { open_id: 'ou_solo' }, name: '王五' }],
@@ -145,7 +144,7 @@ describe('FeishuChannel.handleUsersAdded → system_event', () => {
       title: '运维群',
       participants: [],
     })
-    const publish = vi.spyOn(internals.rpcClient, 'publishEvent').mockResolvedValue(undefined)
+    const publish = vi.spyOn(internals.events, 'publishEvent').mockResolvedValue(undefined)
     await internals.handleUsersAdded({
       chat_id: 'oc_g2',
       users: [{ user_id: { open_id: 'ou_anon' } }],
@@ -160,7 +159,7 @@ describe('FeishuChannel.handleUsersAdded → system_event', () => {
 
   it('chat_id 缺失时不发任何事件', async () => {
     const internals = channel as unknown as ChannelInternals
-    const publish = vi.spyOn(internals.rpcClient, 'publishEvent').mockResolvedValue(undefined)
+    const publish = vi.spyOn(internals.events, 'publishEvent').mockResolvedValue(undefined)
     await internals.handleUsersAdded({ users: [{ user_id: { open_id: 'ou_x' }, name: 'X' }] })
     expect(publish).not.toHaveBeenCalled()
   })
@@ -172,7 +171,7 @@ describe('FeishuChannel.handleUsersAdded → system_event', () => {
       title: '空群',
       participants: [],
     })
-    const publish = vi.spyOn(internals.rpcClient, 'publishEvent').mockResolvedValue(undefined)
+    const publish = vi.spyOn(internals.events, 'publishEvent').mockResolvedValue(undefined)
     await internals.handleUsersAdded({
       chat_id: 'oc_g3',
       users: [{ name: '无 ID' }],

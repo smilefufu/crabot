@@ -4,7 +4,7 @@
  * 数据驱动：从 /channel-implementations 读取实现列表 + 每个实现声明的 onboarding_methods，
  * 每个 (implementation, method) 渲一张卡片。点击进入 /channels/new/:implId/:methodId。
  *
- * 没有声明 onboarding_methods 的实现额外提供"手动填写"入口（指向 /channels/config 旧表单）。
+ * 飞书仅提供扫码入口；其它实现额外提供"手动填写"入口（指向 /channels/config 旧表单）。
  */
 
 import React, { useEffect, useState } from 'react'
@@ -50,7 +50,9 @@ export const NewChannel: React.FC = () => {
       }
     }
 
-    // 始终提供"手动填写"入口
+    if (impl.id === 'channel-feishu') continue
+
+    // 其它平台保留原有创建入口
     cards.push({
       key: `${impl.id}:schema`,
       title: `${impl.name} · ${impl.id === 'channel-voice' ? '手机扫码配对' : '手动填写'}`,

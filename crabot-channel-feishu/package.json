@@ -5,7 +5,6 @@
   "main": "dist/main.js",
   "scripts": {
     "build": "tsc",
-    "start": "node dist/main.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage"
@@ -14,13 +13,27 @@
   "author": "Crabot Team",
   "license": "Apache-2.0",
   "dependencies": {
-    "@larksuiteoapi/node-sdk": "^1.46.0",
+    "@larksuiteoapi/node-sdk": "1.62.1",
     "crabot-shared": "file:../crabot-shared"
   },
   "devDependencies": {
     "@types/node": "^20.19.37",
     "@vitest/coverage-v8": "^1.0.0",
+    "cordis": "4.0.0-rc.12",
     "typescript": "^5.0.0",
     "vitest": "^1.0.0"
+  },
+  "peerDependencies": {
+    "cordis": "4.0.0-rc.12"
+  },
+  "files": [
+    "dist",
+    "crabot-module.yaml"
+  ],
+  "bundleDependencies": [
+    "crabot-shared"
+  ],
+  "engines": {
+    "node": ">=22.12.0"
   }
 }
