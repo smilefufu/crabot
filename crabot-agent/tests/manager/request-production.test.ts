@@ -338,7 +338,8 @@ describe('production isolated request tool closure', () => {
     expect(admin.mock.calls.some(call => call[0] === 'trigger_now')).toBe(false)
   })
 
-  it('injects a genuine group master_request Memory actor and fixes private writes to private visibility', async () => {
+  it.each([false, true])('keeps private writes on the Master source when group Memory is enabled=%s', async groupMemory => {
+    group.resolved.tool_access.memory = groupMemory
     let turn = 0
     inspect = async params => {
       if (turn++ === 0) { planned = { name: 'load_tool_family', input: { family: 'memory' } }; return }
@@ -554,6 +555,19 @@ describe('production isolated request tool closure', () => {
     const result = await retained!.call({ channel_id: 'chat', session_id: 'owner-private', content: 'after shutdown', post_send_action: 'none' }, context)
     expect(result.isError).toBe(true)
     expect(rpc.mock.calls.some(call => call[1] === 'send_message')).toBe(false)
+  })
+
+  it('prefers the current group source for an ordinary Memory query when both sources allow it', async () => {
+    group.resolved.tool_access.memory = true
+    group.resolved.memory_scopes = ['shared']
+    let step = 0
+    inspect = async params => {
+      if (step++ === 0) { planned = { name: 'load_tool_family', input: { family: 'memory' } }; return }
+      if (step === 2) results.search = await tool(params, 'mcp__crab-memory__search_memory').call({ query: 'shared facts', level: 'long_term', limit: 5 }, context)
+    }
+    await execute('origin')
+    expect(results.search.isError).toBe(false)
+    expect(rpc.mock.calls.find(call => call[1] === 'search_long_term')?.[2]).toMatchObject({ accessible_scopes: ['shared'], access_context: { actor_kind: 'conversation' } })
   })
 
   it('preserves the existing group Memory query fallback instead of treating empty scopes as an unfiltered search', async () => {

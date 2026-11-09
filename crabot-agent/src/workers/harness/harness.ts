@@ -732,7 +732,7 @@ export interface HarnessDeps {
   }) => Promise<string>
   /** Removes runtime credentials before an operation failure reason is persisted or returned. */
   readonly redactFailureReason?: (text: string) => string
-  /** provision 素材(P3 可返回空集)，必须按 worker 固定的权限快照生成。 */
+  /** provision 素材(P3 可返回空集)，必须按 Worker 原主体的当前权限生成。 */
   readonly capabilityBundle?: (ctx: WorkerCapabilityContext) => Promise<CapabilityBundle>
   /**
    * handoff(§5.3 交接续办 / switchWorkerImpl)目标实现是 'builtin' 时所需的 LLM 注入
@@ -3982,26 +3982,26 @@ export class WorkerHarness {
         authorizationKnown = true
         const revision = sha256CanonicalJson(mainline.impl === 'builtin' ? sources ?? permissions : permissions)
         let previous = this.sessionPermissionRevisions.get(worker.worker_id)
-        if (previous === undefined && mainline.incarnation_id) {
+        if (previous !== null && mainline.incarnation_id) {
           const observation = await readObservation(observationFile(this.deps.workersDir, worker.worker_id, mainline.incarnation_id),
             executionObservation({ role: 'worker', impl: mainline.impl, source: mainline.impl === 'builtin' ? 'builtin_request' : 'cli_provision', worker_id: worker.worker_id, incarnation_id: mainline.incarnation_id }))
-          previous = observation.authorization_revision
+          previous = observation.authorization_revision ?? previous
         }
         if (previous === revision && !this.permissionStops.has(worker.worker_id)) continue
         if (mainline.impl !== 'builtin') {
           if (!await this.stopForPermissionUpdate(worker.worker_id)) { this.permissionRefreshPending = true; continue }
           if (executionAdmission(mainline.impl, permissions).status !== 'allowed') {
-            this.sessionPermissionRevisions.set(worker.worker_id, revision)
+            this.sessionPermissionRevisions.delete(worker.worker_id)
             this.permissionStops.delete(worker.worker_id)
             continue
           }
         }
         const current = await this.deps.ledger.findWorker(worker.worker_id)
-        if (!current || current.worker.task.status === 'closed') continue
+        if (!current || current.worker.task.status === 'closed' || current.worker.task.status === 'halted' && current.worker.task.halt?.halt_reason === 'worker_finalized') continue
         await this.sendToWorker(worker.worker_id,
           '<permission-notification>原授权主体的权限配置已更新。核对当前工具，继续本任务尚未完成的事项；不要重做已完成或结果未知的操作。</permission-notification>',
           { dedupeKey: `permissions:${revision}` })
-        this.sessionPermissionRevisions.set(worker.worker_id, revision)
+        this.sessionPermissionRevisions.delete(worker.worker_id)
         this.permissionStops.delete(worker.worker_id)
       } catch (error) {
         if (!authorizationKnown) {

@@ -93,10 +93,8 @@ const WORKER_TOOL_ACCESS: ToolAccessConfig = {
  *   - tool_access 只开"干活必需"的面,`remote_exec` 关闭；`desktop` 只有明确主体授权时开放;
  *   - cli_access 全 `none` —— 放开等于让任何人都能借 worker 改 crabot 自身配置;
  *   - storage 由主体快照提供，memory_scopes 不授予 Worker 记忆角色。
- * **J 已接线**:manager 在派活那一刻按 `origin.creator_friend_id` 算好档位,随 spawn 下传
- * 并落盘(`principal_permissions`),worker 的实际档位 = 本档位 ∩ 那一份
- * (`narrowWorkerPermissions`)。注意**不是"实时解析"**:实时解析等于让权限随"该会话最近
- * 说话的人"漂移(PR #59 review 的越权),权限是 spawn 时定死的身份属性。
+ * **J 已接线**:Worker 绑定原发起人；落盘的 `principal_permissions` 保留创建时观察。
+ * 实际档位由 `narrowWorkerPermissions` 收窄原主体的当前权限，不从最近发言者取权。
  */
 export const BUILTIN_WORKER_PERMISSIONS: ResolvedPermissions = {
   tool_access: WORKER_TOOL_ACCESS,

@@ -61,6 +61,29 @@ describe('permission saves use the durable config notification path', () => {
       : admin.permissionTemplateManager.get(template.id).tool_access.shell).toBe(false)
   })
 
+  it('keeps an imported template while a concurrent template save is committing', async () => {
+    const { template } = await admin.handleCreatePermissionTemplate({ ...config, name: 'Original' })
+    const write = admin.atomicWriteFile.bind(admin)
+    let release!: () => void
+    let entered!: () => void
+    const writing = new Promise<void>(resolve => { entered = resolve })
+    const paused = new Promise<void>(resolve => { release = resolve })
+    vi.spyOn(admin, 'atomicWriteFile').mockImplementation(async (file, text) => {
+      if (file === admin.templatesFilePath) { entered(); await paused }
+      return write(file, text)
+    })
+    const save = admin.handleUpdatePermissionTemplate({ template_id: template.id, name: 'Edited' })
+    await writing
+    const imported = { ...template, id: 'imported-template', name: 'Imported' }
+    const importing = admin.buildCrabotImportDeps('unused', 'overwrite', {}).upsertTemplate(imported)
+    await Promise.resolve()
+    release()
+    await Promise.all([save, importing])
+    expect(admin.permissionTemplateManager.get(template.id).name).toBe('Edited')
+    expect(admin.permissionTemplateManager.get(imported.id)?.name).toBe('Imported')
+    expect(JSON.parse(await fs.readFile(admin.templatesFilePath, 'utf8')).some((value: { id: string }) => value.id === imported.id)).toBe(true)
+  })
+
   it('retains and retries a failed notification after a successful source save', async () => {
     let attempts = 0
     const published: unknown[] = []

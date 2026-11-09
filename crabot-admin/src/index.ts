@@ -12661,7 +12661,7 @@ export class AdminModule extends ModuleBase {
       upsertProvider: async (r) => this.modelProviderManager.upsertById(r as ModelProvider, onConflict),
       upsertMcp: async (r) => this.mcpServerManager.upsertById(r as MCPServerRegistryEntry, onConflict),
       upsertSubagent: async (r) => this.subAgentManager.upsertById(r as SubAgentRegistryEntry, onConflict),
-      upsertTemplate: async (r) => this.permissionTemplateManager.upsertById(r as PermissionTemplate, onConflict),
+      upsertTemplate: async (r) => this.commitPermissionChange(() => this.mutatePermissionTemplates(manager => manager.upsertById(r as PermissionTemplate, onConflict))),
       upsertChannel: async (r) => {
         const inst = r as ChannelInstance
         const cfgText = await readArchiveTextFile(

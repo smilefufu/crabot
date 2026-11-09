@@ -318,7 +318,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
       vi.mocked(agentHandlerModule.adapterFromSdkEnv).mockReturnValue(actual as never)
     }
     const timeout = connection ? 90000 : 8000
-    const { internals } = boot(connection ? makeConfig({ modelConfig: { powerful: connection } }) : undefined), stack = internals.managerStack!, runtime = internals as any
+    const { agent, internals } = boot(connection ? makeConfig({ modelConfig: { powerful: connection } }) : undefined), stack = internals.managerStack!, runtime = internals as any
     // This acceptance isolates Worker execution; request event routing is outside this test.
     const harnessInternal = stack.harness as any
     harnessInternal.deps.onEvent = async () => ({ consumed: true })
@@ -372,8 +372,10 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     expect(modelRequests.mock.calls.length).toBe(turns)
     const ordinaryRpc = vi.mocked(runtime.rpcClient.call).getMockImplementation()!
     const sensitiveRpc = vi.mocked(runtime.rpcClient.callSensitive).getMockImplementation()!
-    await stack.dispose()
-    const restored = boot(connection ? makeConfig({ modelConfig: { powerful: connection } }) : undefined).internals as any
+    await agent.stop()
+    agents.delete(agent)
+    const restarted = boot(connection ? makeConfig({ modelConfig: { powerful: connection } }) : undefined)
+    const restored = restarted.internals as any
     vi.mocked(restored.rpcClient.call).mockImplementation(ordinaryRpc)
     vi.mocked(restored.rpcClient.callSensitive).mockImplementation(sensitiveRpc)
     const restoredStack = restored.managerStack as ManagerStack
@@ -383,7 +385,8 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     await restoredStack.harness.refreshPermissions()
     expect(modelRequests.mock.calls.length).toBe(turns)
     expect((await restoredStack.harness.findWorker(worker.worker_id))!.worker.incarnations).toHaveLength(1)
-    await restoredStack.dispose()
+    await restarted.agent.stop()
+    agents.delete(restarted.agent)
   }
 
   it.each(['group', 'friend'] as const)('applies a %s permission hint to the same waiting request and Worker without another human message', kind => verifyPermissionRefresh(kind))
