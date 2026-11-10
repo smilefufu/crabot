@@ -6,7 +6,7 @@ import path from 'node:path'
 import net from 'node:net'
 import control from '../../scripts/lib/runtime-control.cjs'
 import identity from '../../scripts/lib/process-identity.cjs'
-import { launchNormalFixture } from './normal-instance-fixture.mjs'
+import { observeInstanceListeners, launchNormalFixture } from './normal-instance-fixture.mjs'
 
 async function freePort() {
   const listener = net.createServer()
@@ -37,6 +37,7 @@ test('normal managed Core main boots, serves and stops the real single-port inst
       ports.push(...listening)
     }
     assert.deepEqual(ports, [web])
+    assert.deepEqual(observeInstanceListeners(ready.pid).filter(item => item.ports.length), [{ pid: ready.modules.find(module => module.module_id === 'admin-web').pid, ports: [web] }])
     assert.ok(['healthy', 'degraded'].includes((await control.callRuntimeControl(directory,
       { target: 19339, source: 'fixture', method: 'health', params: {} }, { timeoutMs: 1500 })).status))
     child.kill('SIGTERM')

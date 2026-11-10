@@ -7,7 +7,7 @@ import net from 'node:net'
 import http from 'node:http'
 import control from '../../scripts/lib/runtime-control.cjs'
 import identity from '../../scripts/lib/process-identity.cjs'
-import { launchNormalFixture, normalFixtureRoot as root } from './normal-instance-fixture.mjs'
+import { observeInstanceListeners, launchNormalFixture, normalFixtureRoot as root } from './normal-instance-fixture.mjs'
 
 async function freePort() {
   const listener = net.createServer()
@@ -17,11 +17,12 @@ async function freePort() {
   return port
 }
 
-test('normal Crabot completes npm Feishu QR onboarding and delivers a synthetic model reply through the real Agent', { timeout: 120_000 }, async () => {
+test('normal Crabot completes npm Feishu QR onboarding and delivers a synthetic model reply through the real Agent', { timeout: process.env.CORDIS_PUBLIC_NPM === '1' ? 720_000 : 120_000 }, async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-normal-cordis-'))
   const web = await freePort()
   const artifact = process.env.CORDIS_PLUGIN_TARBALL, npmCache = process.env.CORDIS_NPM_CACHE_DIR
-  if (!artifact || !npmCache) throw new Error('CORDIS_PLUGIN_TARBALL and CORDIS_NPM_CACHE_DIR must point to the test npm artifact and prepared domestic cache')
+  const publicNpm = process.env.CORDIS_PUBLIC_NPM === '1'
+  if (!publicNpm && (!artifact || !npmCache)) throw new Error('CORDIS_PLUGIN_TARBALL and CORDIS_NPM_CACHE_DIR must point to the test npm artifact and prepared domestic cache')
   const packageVersion = path.join(directory, 'admin/channel-packages/crabot-channel-feishu/0.1.0')
 
   const plugin = path.join(packageVersion, 'node_modules/crabot-channel-feishu')
@@ -52,9 +53,12 @@ test('normal Crabot completes npm Feishu QR onboarding and delivers a synthetic 
       if(host&&!['127.0.0.1','localhost','::1'].includes(host))throw new Error('External TCP forbidden in synthetic fixture')
       return connect.apply(this,args)
     }
+    ${publicNpm ? '' : `
     const {ChannelPackageStore}=require(${JSON.stringify(path.join(root,'crabot-admin/dist/channel-package.js'))})
     const ensure=ChannelPackageStore.prototype.ensure
     ChannelPackageStore.prototype.ensure=function(definition,options={}){return ensure.call(this,definition,{...options,specification:${JSON.stringify(artifact)},cache:${JSON.stringify(npmCache)},execute:(node,args,opts)=>require('node:util').promisify(require('node:child_process').execFile)(node,[...args,'--offline'],opts)})}
+    `}
+
     let patched=false
     function patchPlatform(){
       if(patched||!fs.existsSync(${JSON.stringify(path.join(plugin,'dist/main.js'))}))return
@@ -140,6 +144,7 @@ test('normal Crabot completes npm Feishu QR onboarding and delivers a synthetic 
       ports.push(...listening)
     }
     assert.deepEqual(ports, [web])
+    assert.deepEqual(observeInstanceListeners(ready.pid).filter(item => item.ports.length), [{ pid: ready.modules.find(module => module.module_id === 'admin-web').pid, ports: [web] }])
     assert.ok(['healthy', 'degraded'].includes((await control.callRuntimeControl(directory,
       { target: 19339, source: 'fixture', method: 'health', params: {} }, { timeoutMs: 1500 })).status))
 
@@ -163,6 +168,15 @@ test('normal Crabot completes npm Feishu QR onboarding and delivers a synthetic 
     }
     assert.equal(admitted, true, 'Actual authenticated Admin/Agent cutover did not complete')
     const begin = await api('/api/channels/onboard/begin', 'POST', {implementation_id:'channel-feishu',method_id:'device_code_oauth'})
+    if (publicNpm) {
+      const installation = JSON.parse(await fs.readFile(path.join(packageVersion, 'installation.json'), 'utf8'))
+      assert.equal(installation.registry, 'https://registry.npmmirror.com')
+      assert.ok(installation.download_origins.length > 0, 'Fresh public installation must record actual downloads')
+      assert.ok(installation.download_origins.every(origin => ['https://registry.npmmirror.com', 'https://cdn.npmmirror.com'].includes(origin)))
+      const lock = JSON.parse(await fs.readFile(path.join(packageVersion, 'package-lock.json'), 'utf8'))
+      assert.match(lock.packages['node_modules/crabot-channel-feishu'].resolved, /^https:\/\/registry[.]npmmirror[.]com\//)
+    }
+
     assert.equal(begin.ui_mode, 'qrcode')
     assert.ok(begin.verification_uri.includes('from=onboard'))
     const poll = await fetch(base + `/api/channels/onboard/poll?implementation_id=channel-feishu&method_id=device_code_oauth&session_id=${begin.session_id}&token=${encodeURIComponent(token)}`)
@@ -250,6 +264,7 @@ test('normal Crabot completes npm Feishu QR onboarding and delivers a synthetic 
     assert.equal(restored.session.id,privateSession)
     assert.deepEqual(identity.listListeningTcpPorts(newChannel.pid),[])
 
+    assert.deepEqual(observeInstanceListeners(ready.pid).filter(item => item.ports.length), [{ pid: ready.modules.find(module => module.module_id === 'admin-web').pid, ports: [web] }])
     child.kill('SIGTERM')
     const [code, signal] = await exited
     assert.equal(code, 0); assert.equal(signal, null)

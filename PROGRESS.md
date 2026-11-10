@@ -6,7 +6,8 @@
 - 正式 Core main 已接通 Node IPC、Python Memory MessagePack 与 OS 核验的本地控制管道；真实 Admin/Agent/Memory 启动、仅 Web 监听、正常停机及运行记录清理通过。CLI 健康、后台启动和固定 runtime 连接回归通过；Windows 数值地址不再充当 listener 归属证据，未能核验的孤儿保留现场。
 - npm 已接入有效扫码 begin 和实例定义加载：精确版本、实例目录、持久缓存、国内 registry/CDN、不改全局配置、不自动转国外源。实际正式安装器空缓存国内源安装通过，安装失败/离线复用/源逃逸回归通过；sealed Core 与旧 Unix/Windows 发行均只保留飞书目录元数据，实际整包差额待构建计量。
 - 已通过 Core 全量 572/16skip、Shared 379/2skip、飞书 292、Memory 34、语音全量 55 及 Admin 定向回归；真实 CLI init/start/status/check/stop、独立 Electron ASAR 和 Node 维护包管道回归通过；当前继续完整全量/跨平台回归与最终人工验收；扫码→真实 Agent→本地模型工具回复、群聊/媒体/历史/飞书重启和 workspace durable IPC gate 均已通过。所有外部服务验证仅本地模拟与合成数据，尚未真人飞书/Provider 验收、未发布 npm、未部署；公共包/国内镜像仍为 404，发布授权是最终必要边界，不将组件通过当作交付。
-- [复现与证据](experiments/cordis-feishu/README.md)：包体和依赖/缓存分别计量，完整产品包瘦身尚未形成最终测量。语音手机 URL 保持，内部 WS 改为 OS 核验的私有管道，真实 Voice child 启动、音频透传及父 IPC 断开清理通过。
+- 首轮干净提交 `9b08cc26` 的 macOS ARM 发行归档已构建：压缩 445,021,546 B，清单展开 1,145,223,367 B；真实 CLI、正常实例及合成扫码/Agent 收发三项通过，解包与运行后清单均核验通过。最终修正完成后须重建候选；不能和不同构建格式的旧发行直接比较瘦身比例。
+- [复现与证据](experiments/cordis-feishu/README.md)：全进程树监听盘点通过；Windows 大帧、长调用、慢读端、真实 Voice 退出及 Core IPC 已通过，整组 CI 尚有旧 POSIX 权限断言正在改成 ACL 校验。旧读取器接受新运输记录的问题已复现；兼容换版书面方案与 npm 首次发布均被自动审批要求先获明确确认，尚未实施/发布。
 
 ### v2026.11.10.1 与桌面 .25 公开预览（2026-11-10，未部署本机）
 

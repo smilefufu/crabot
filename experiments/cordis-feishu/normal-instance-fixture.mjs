@@ -2,6 +2,8 @@ import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import identity from '../../scripts/lib/process-identity.cjs'
+import scope from '../../scripts/lib/owned-process-tree.cjs'
 export const normalFixtureRoot = path.resolve(process.env.CORDIS_CORE_ROOT ?? fileURLToPath(new URL('../..', import.meta.url)))
 const root = normalFixtureRoot
 const moduleUrl = file => pathToFileURL(path.join(root, file)).href
@@ -45,4 +47,10 @@ export function launchNormalFixture(directory, web, { preload, initializeCredent
     exited.then(([code]) => { throw new Error(`Controller exited ${code}`) })])
   void ready.catch(() => {})
   return { child, exited, ready, output: () => output }
+}
+
+// Include grandchildren such as the production Python carrier, not only registered roots.
+export function observeInstanceListeners(mmPid) {
+  return scope.captureOwnedProcessTree([identity.inspectProcess(mmPid)])
+    .map(process => ({ pid: process.pid, ports: identity.listListeningTcpPorts(process.pid) }))
 }
