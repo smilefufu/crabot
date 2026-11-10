@@ -1,4 +1,4 @@
-name: Release ARM64 runner fallback
+name: Release pinned CLI packages
 
 on:
   workflow_dispatch:
@@ -8,13 +8,23 @@ permissions:
 jobs:
   build:
     strategy:
-      fail-fast: ${{ github.event_name != 'pull_request' }}
+      fail-fast: false
       matrix:
         include:
+          - os: ubuntu-22.04
+            platform: linux
+            arch: x64
+          - os: windows-latest
+            platform: windows
+            arch: x64
+          - os: macos-15-intel
+            platform: darwin
+            arch: x64
           - os: macos-15
             platform: darwin
             arch: arm64
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
 
     steps:
       - uses: actions/checkout@v4
@@ -327,6 +337,20 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node .github/scripts/smoke-scrapling.mjs "$Unpacked"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Install and boot the exact final archive in an isolated home
+        timeout-minutes: 100
+        shell: bash
+        env:
+          CRABOT_CI_SKIP_SOURCE: '1'
+        run: |
+          archive="crabot-v2026.11.10.1-${{ matrix.platform }}-${{ matrix.arch }}.tar.gz"
+          if [ "${{ matrix.platform }}" = windows ]; then
+            archive="crabot-v2026.11.10.1-windows-x64.zip"
+            node .github/scripts/smoke-installer.mjs "$archive" powershell.exe
+          else
+            node .github/scripts/smoke-installer.mjs "$archive"
+          fi
 
       - name: Upload Release Assets
         uses: softprops/action-gh-release@v2
