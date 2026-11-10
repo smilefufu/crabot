@@ -251,7 +251,7 @@ jobs:
         if: matrix.platform == 'windows'
         shell: pwsh
         run: |
-          $Version = $env:GITHUB_REF_NAME
+          $Version = "v2026.11.10.1"
           if ("${{ github.event_name }}" -eq "pull_request") { $Version = "pr-${{ github.event.number }}" }
           $DirName = "crabot-${Version}-windows-x64"
           $TempDir = "$env:TEMP\$DirName"

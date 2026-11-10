@@ -41,9 +41,49 @@ jobs:
             addresses=sorted(set(a[4][0] for a in socket.getaddrinfo(host,443,type=socket.SOCK_STREAM)))
             print('UBUNTU_ADDRESSES',addresses,flush=True)
             url='https://archive.ubuntu.com/ubuntu/pool/main/a/avahi/libavahi-common3_0.8-5ubuntu5.5_amd64.deb'
-            for ip in [a for a in addresses if ':' not in a][:5]:
+            for ip in [a for a in addresses if ':' not in a]:
               out=pathlib.Path(os.environ['RUNNER_TEMP'])/'locked-resource.deb'
               r=subprocess.run(['curl','--silent','--show-error','--fail','--max-time','12','--resolve',host+':443:'+ip,url,'-o',str(out)],capture_output=True,text=True,timeout=15)
               digest=hashlib.sha256(out.read_bytes()).hexdigest() if r.returncode==0 else None
               print('UBUNTU_PIN',ip,r.returncode,digest,r.stderr.strip(),flush=True)
+          PY
+
+  packaged-mac:
+    runs-on: macos-15
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: crabot-darwin-arm64-offline-test-45ac91532d4308c48ec936f4149d7d56ef437eec
+          run-id: 42750399454
+          github-token: ${{ github.token }}
+          path: candidate
+      - name: Inspect HTTPS using the exact sealed candidate Python and packages
+        shell: bash
+        run: |
+          dmg=$(find candidate -name '*candidate.dmg' -print -quit)
+          mount="$RUNNER_TEMP/inspect-candidate"
+          mkdir -p "$mount"
+          hdiutil attach -readonly -nobrowse -mountpoint "$mount" "$dmg"
+          trap 'hdiutil detach "$mount"' EXIT
+          core="$mount/Crabot.app/Contents/Resources/core"
+          runtime=$(node -p 'const fs=require("fs");fs.realpathSync(process.argv[1]+"/"+JSON.parse(fs.readFileSync(process.argv[1]+"/scrapling-runtime.json")).directory)' "$core")
+          "$runtime/python/bin/python3.12" -I -B - "$runtime" <<'PY'
+          import sys, pathlib, hashlib, ssl, urllib.request
+          root=pathlib.Path(sys.argv[1]); sys.path.insert(0,str(root/'packages'))
+          import curl_cffi, curl_cffi.curl, certifi
+          print('PACKAGED_TLS',sys.version,ssl.OPENSSL_VERSION,flush=True)
+          for label,file in [('curl',curl_cffi.curl.DEFAULT_CACERT),('certifi',certifi.where())]:
+            p=pathlib.Path(file); print('PACKAGED_CA',label,p.relative_to(root),hashlib.sha256(p.read_bytes()).hexdigest(),flush=True)
+          for url in ['https://example.com','https://github.com']:
+            for label,ca in [('default',True),('certifi',certifi.where())]:
+              try:
+                r=curl_cffi.requests.get(url,verify=ca,timeout=15); print('PACKAGED_CURL',url,label,r.status_code,flush=True)
+              except Exception as e: print('PACKAGED_CURL_ERROR',url,label,str(e),flush=True)
+            try:
+              with urllib.request.urlopen(url,context=ssl.create_default_context(cafile=certifi.where()),timeout=15) as r: print('PACKAGED_URLLIB',url,r.status,flush=True)
+            except Exception as e: print('PACKAGED_URLLIB_ERROR',url,str(e),flush=True)
           PY

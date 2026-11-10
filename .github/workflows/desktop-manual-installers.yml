@@ -51,6 +51,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends build-essential libcurl4-openssl-dev libexpat1-dev zlib1g-dev dh-apparmor debhelper apparmor-utils libgtk-3-0t64 libnss3 libxss1 libasound2t64 libgbm1 xvfb xauth xdotool dbus-x11 zstd
+      - name: Select a verified official Ubuntu archive address for this disposable runner
+        run: echo '185.125.190.81 archive.ubuntu.com' | sudo tee -a /etc/hosts
       - name: Locked same-source build dependencies
         run: |
           mkdir -p .desktop-build
