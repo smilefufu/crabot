@@ -34,7 +34,7 @@ node --test experiments/cordis-feishu/product-e2e.test.mjs
 
 通过 `CORDIS_CORE_ROOT=<解包后的Core根>` 可把正常实例、CLI 和完整收发夹具指向实际发行目录。主包飞书目录仅有 package.json / crabot-module.yaml，共 3,918 B；安装后的完整插件依赖约 40 MiB，缓存另计。已准备 `CORDIS_PUBLIC_NPM=1` 的真实公开源安装验证入口，届时不会替换安装器，也不使用离线 tarball/cache 注入；平台与 Provider 仍只用合成数据。公共包未发布，目前不能执行这项验收。
 
-当前三种 Linux/Mac 平台 CI 整组通过；Windows 运行时大帧、长调用、慢读端、Voice 及 Core IPC 已通过。旧网关测试对 Windows 误用 POSIX 权限位，正在换成真实私有目录与原生 ACL 断言；Windows 整组不计全绿。
+[四平台整组 CI](https://github.com/smilefufu/crabot/actions/runs/42772577876) 已全通过（提交 `025907a5`）：Windows、Linux、Mac ARM / Intel。覆盖 Windows 实际私有 ACL、超过 64 KiB 的帧、超过原握手期限的调用和慢读端背压、真实 Voice 子进程退出、Core IPC、完整停机等待、后台维护与启动/升级入口。生产请求期限与生命周期保持；八个 libuv worker 仅用于同进程承载多个管道两端的测试夹具。
 
 ## 未完成及发布边界
 
@@ -43,3 +43,5 @@ Core 全量 572 项通过、16 项平台跳过；Shared 379/2skip、飞书 292�
 不新增停用状态机、任务排空、强杀期限、HMR 或其它 Channel 批量 npm 化；不改变 Provider 直连与配置引用语义。
 
 旧 HTTP 读取器会忽略新运输字段并接受当前 v1 记录；应拒绝新记录的实际旧读取器回归已复现失败。拟采用新瞬时运行记录 v2、新读取器兼容旧 HTTP v1、旧工具明确拒绝新实例的方案；见 `crabot-docs/superpowers/specs/2026-11-10-cordis-runtime-record-compatibility-design.md`。自动审批已拒绝直接修改持久化格式，等待用户确认；当前未改正式协议或实现，不把候选视为可合入版本。
+
+`legacy-compatibility-repro.test.mjs` 保存待确认兼容方案的红色复现，使用从原版 `45ac9153` 原样提取的实际读取器；当前预期失败，不能算通过或被遗漏的默认回归。运行方式：`node --test experiments/cordis-feishu/legacy-compatibility-repro.test.mjs`。未据此擅自修改正式协议、运行记录或恢复实现。
