@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { createRequire } from 'node:module'
 import { ChannelPackageStore, CHANNEL_NPM_REGISTRY } from '../../crabot-admin/dist/channel-package.js'
+import { verifyManagedPackage } from './managed-package-fixture.mjs'
 import { CHANNEL_CATALOG } from '../../crabot-admin/dist/channel-catalog.js'
 
 test('public exact Channel versions install without a source checkout and restart offline', { timeout: 720000 }, async () => {
@@ -27,6 +28,7 @@ test('public exact Channel versions install without a source checkout and restar
         const sdk = await fs.readFile(path.join(directory, 'node_modules/@slack/socket-mode/dist/src/SocketModeClient.js'), 'utf8')
         assert.ok(sdk.includes('cb.apply(this).then(res, rej)'))
       }
+      await verifyManagedPackage(directory, item.platform)
       console.log(JSON.stringify({ name: definition.name, version: definition.version, registry, origins: record.download_origins }))
     }
   } finally { await fs.rm(root, { recursive: true, force: true }) }

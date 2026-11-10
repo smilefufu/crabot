@@ -1,6 +1,6 @@
 {
   "name": "crabot-channel-voice",
-  "version": "0.1.1",
+  "version": "0.1.3",
   "description": "Crabot paired foreground voice terminals",
   "type": "module",
   "main": "dist/main.js",

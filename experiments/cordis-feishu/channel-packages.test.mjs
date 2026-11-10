@@ -4,6 +4,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { createRequire } from 'node:module'
+import { verifyManagedPackage } from './managed-package-fixture.mjs'
 import { pack } from '../../scripts/pack-channel.mjs'
 import { ChannelPackageStore } from '../../crabot-admin/dist/channel-package.js'
 
@@ -16,7 +17,7 @@ test('all six actual npm artifacts install independently, retain exports and res
   try {
     for (const platform of platforms) {
       const summary = await pack(platform, artifacts)
-      assert.equal(summary.version, '0.1.1')
+      assert.equal(summary.version, platform === 'feishu' ? '0.1.1' : '0.1.3')
       const definition = { name: summary.name, version: summary.version }
       const directory = await store.ensure(definition, { specification: path.join(artifacts, summary.filename) })
       const load = createRequire(path.join(directory, 'package.json'))
@@ -32,6 +33,7 @@ test('all six actual npm artifacts install independently, retain exports and res
         assert.ok(sdk.includes('cb.apply(this).then(res, rej)'))
         assert.ok(sdk.includes('this.delayReconnectAttempt(this.start).catch('))
       }
+      await verifyManagedPackage(directory, platform)
       console.log(JSON.stringify({ platform, bytes: summary.size, unpacked: summary.unpackedSize, integrity: summary.integrity }))
     }
   } finally { await fs.rm(root, { recursive: true, force: true }) }

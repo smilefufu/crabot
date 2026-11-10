@@ -1,6 +1,6 @@
 {
   "name": "crabot-channel-wechat",
-  "version": "0.1.1",
+  "version": "0.1.3",
   "description": "Crabot Channel module for WeChat via wechat-connector Bot API",
   "main": "dist/main.js",
   "scripts": {

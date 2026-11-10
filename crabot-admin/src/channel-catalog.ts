@@ -7,4 +7,4 @@ export const CHANNEL_CATALOG = [
   { platform: 'slack', name: 'Slack' },
   { platform: 'voice', name: '语音' },
 ].map(item => ({ ...item, implementation_id: `channel-${item.platform}`,
-  package_name: `crabot-channel-${item.platform}`, version: '0.1.1' }))
+  package_name: `crabot-channel-${item.platform}`, version: item.platform === 'feishu' ? '0.1.1' : '0.1.3' }))
