@@ -1,13 +1,13 @@
 # Crabot 项目进度
 
-### Cordis 飞书迁移（2026-11-10，goal 持续实施，未交付）
+### Cordis 飞书迁移（2026-11-10，自动验证完成，待真人验收）
 
-- 独立 worktree / `research/cordis-validation` 开发，不触及现有部署；完整验收通过后才提正式 PR。飞书保留 Cordis 单入口、添加仅现有扫码；身份、权限、会话、投递及已有生命周期保持。
-- 正式 Core main 已接通 Node IPC、Python Memory MessagePack 与 OS 核验的本地控制管道；真实 Admin/Agent/Memory 启动、仅 Web 监听、正常停机及运行记录清理通过。CLI 健康、后台启动和固定 runtime 连接回归通过；Windows 数值地址不再充当 listener 归属证据，未能核验的孤儿保留现场。
-- npm 已接入有效扫码 begin 和实例定义加载：精确版本、实例目录、持久缓存、国内 registry/CDN、不改全局配置、不自动转国外源。实际正式安装器空缓存国内源安装通过，安装失败/离线复用/源逃逸回归通过；sealed Core 与旧 Unix/Windows 发行均只保留飞书目录元数据，实际整包差额待构建计量。
-- 已通过 Core 全量 572/16skip、Shared 379/2skip、飞书 292、Memory 34、语音全量 55 及 Admin 定向回归；真实 CLI init/start/status/check/stop、独立 Electron ASAR 和 Node 维护包管道回归通过；当前继续完整全量/跨平台回归与最终人工验收；扫码→真实 Agent→本地模型工具回复、群聊/媒体/历史/飞书重启和 workspace durable IPC gate 均已通过。所有外部服务验证仅本地模拟与合成数据，尚未真人飞书/Provider 验收、未部署；用户授权先发布 npm 后，飞书 0.1.0 已用 cordis-validation 标签公开发布，官方与国内镜像一致。全新临时实例经正式扫码入口、正式安装器从国内源安装公开包并完成真实 Agent 合成收发 1/1 通过（不替换包来源 / 缓存）。不将模拟结果当作真人交付。
-- 首轮干净提交 `9b08cc26` 的 macOS ARM 发行归档已构建：压缩 445,021,546 B，清单展开 1,145,223,367 B；真实 CLI、正常实例及合成扫码/Agent 收发三项通过，解包与运行后清单均核验通过。最终修正完成后须重建候选；不能和不同构建格式的旧发行直接比较瘦身比例。
-- [复现与证据](experiments/cordis-feishu/README.md)：全进程树监听盘点通过；[四平台整组 CI](https://github.com/smilefufu/crabot/actions/runs/42772577876) 已全通过，包含 Windows 原生 ACL、大帧、长调用、慢读端、真实 Voice 退出、Core IPC、完整停机等待和后台维护流程。用户确认新版工具与实例配套升级后，已同步协议与记录 v2，原版旧读取器明确拒绝新记录的回归转绿，新增版本组合与进程保护回归通过；最终四平台复验与干净候选重建继续进行。
+- 独立 worktree / `research/cordis-validation` 开发，产品提交 `ec4b9c82`；未改现有实例、未提 PR、未合入。真实飞书扫码收发验收通过后才提正式 PR。
+- 正常 Core/Admin/Agent/Memory 与 Cordis 飞书已接通，内部使用受管 IPC / MessagePack / OS 核验管道，整个受管进程树仅 Web 常驻监听。身份、权限、会话、投递和原生命周期保持；运行记录 v2 与配套工具升级、残留旧程序拒绝已验证，未核验孤儿保留现场。
+- 飞书仅 Cordis 入口，添加仅现有扫码。用户授权后首次发布 `crabot-channel-feishu@0.1.0`（cordis-validation）；官方与国内镜像完整性一致，全新实例从真实扫码入口走正式安装器、国内源公开包安装和真实 Agent 合成收发通过。不改全局 npm 配置，不自动转国外源；失败保留缓存 / 旧版本，已安装可离线重启；其它 Channel 本轮不批量 npm 化。
+- [四平台最终 CI](https://github.com/smilefufu/crabot/actions/runs/42799423129) 全部通过；Core 572/16skip、Shared 379/2skip、飞书 292、Memory 34、语音 55 与 Admin 定向验证已通过。Admin 两条文档断言、Telegram 一条 reaction 断言在原基线同样失败，未扩大修复。运行记录、真实 CLI / 独立维护包、workspace durable IPC 恢复与固定记录回归通过。
+- 干净 macOS ARM 完整候选 `2026.11.10-cordis.3`：归档 445,003,459 B，清单展开 1,145,224,541 B；归档解包后的正常实例、CLI、公开 npm 国内安装合成端到端 3/3 通过，前后 seal 完整。主包飞书仅 3,918 B 元数据，插件完整依赖约 40 MiB、缓存另计；不与不同格式的旧发行直接比较瘦身比例。
+- [复现与产物](experiments/cordis-feishu/README.md)。正式协议已同步独立文档仓；外部平台 / 模型自动验证均为本地模拟与合成数据，真人扫码及真实 Provider 结果不由 mock 代替。已准备隔离临时验收实例，不复制现有凭据。
 
 ### v2026.11.10.1 与桌面 .25 公开预览（2026-11-10，未部署本机）
 

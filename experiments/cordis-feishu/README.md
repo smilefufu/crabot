@@ -30,7 +30,7 @@ node --test experiments/cordis-feishu/product-e2e.test.mjs
 
 ## 发行归档与平台验证
 
-首轮干净提交 `9b08cc26` 的 macOS ARM 候选已构建并解包核验：29,863 个清单文件、展开 1,145,223,367 B；tar.gz 445,021,546 B，SHA-256 `438f8728d4b9e2d440dba4e4c7f1a7b8bc06a4d090c682d8d0029be07c363d60`。正常实例、真实 CLI 启停及 npm 扫码/真实 Agent 合成收发 3/3 通过，运行后 seal 清单不变。最终修正后仍需重建候选；不同资源或构建格式的旧发行不能直接拿来计算瘦身比例。
+首轮干净提交 `9b08cc26` 的 macOS ARM 候选已构建并解包核验：29,863 个清单文件、展开 1,145,223,367 B；tar.gz 445,021,546 B，SHA-256 `438f8728d4b9e2d440dba4e4c7f1a7b8bc06a4d090c682d8d0029be07c363d60`。正常实例、真实 CLI 启停及 npm 扫码/真实 Agent 合成收发 3/3 通过，运行后 seal 清单不变。不同资源或构建格式的旧发行不能直接拿来计算瘦身比例。
 
 通过 `CORDIS_CORE_ROOT=<解包后的Core根>` 可把正常实例、CLI 和完整收发夹具指向实际发行目录。主包飞书目录仅有 package.json / crabot-module.yaml，共 3,918 B；安装后的完整插件依赖约 40 MiB，缓存另计。已准备 `CORDIS_PUBLIC_NPM=1` 的真实公开源安装验证入口，届时不会替换安装器，也不使用离线 tarball/cache 注入；平台与 Provider 仍只用合成数据。已首次公开发布 `crabot-channel-feishu@0.1.0`，标签 `cordis-validation`；官方与国内镜像元数据完整性一致。公开包模式端到端 1/1 通过（29.5 秒）：全新临时实例从正式扫码入口触发真实国内源安装，不替换安装器、不注入 tarball 或缓存；安装来源断言、真实 Agent 合成收发及完整进程树单 Web 监听均通过。日志 `/private/tmp/crabot-cordis-public-npm-e2e-20261110.tap`。
 
@@ -38,8 +38,16 @@ node --test experiments/cordis-feishu/product-e2e.test.mjs
 
 ## 未完成及发布边界
 
-Core 全量 572 项通过、16 项平台跳过；Shared 379/2skip、飞书 292、Memory 34、语音 55 通过。真实 CLI init/start/status/check/stop、独立 Electron ASAR / Node 维护包和 Voice 私有管道验证已通过。Admin 两条静态文档断言在未改动基线同样失败，其他隔离定向回归已通过；最终跨平台回归、最终候选重建与人工验收仍在收尾。用户已明确授权并完成 npm 登录 / 2FA，飞书候选 0.1.0 已发布且在国内可安装；未新增自动发布 workflow。真人扫码/真实客户端验收与现有部署仍分别记录，不能由本地模拟结果代替。
+Core 全量 572 项通过、16 项平台跳过；Shared 379/2skip、飞书 292、Memory 34、语音 55 通过。真实 CLI init/start/status/check/stop、独立 Electron ASAR / Node 维护包和 Voice 私有管道验证已通过。Admin 两条静态文档断言在未改动基线同样失败，其他隔离定向回归已通过；最终跨平台回归与候选重建已完成，人工验收待进行。用户已明确授权并完成 npm 登录 / 2FA，飞书候选 0.1.0 已发布且在国内可安装；未新增自动发布 workflow。真人扫码/真实客户端验收与现有部署仍分别记录，不能由本地模拟结果代替。
 
 不新增停用状态机、任务排空、强杀期限、HMR 或其它 Channel 批量 npm 化；不改变 Provider 直连与配置引用语义。
 
-新实例和模块记录使用版本 2，CLI / 桌面与实例配套升级。新版只读取无运输字段的旧 HTTP v1 记录作升级前识别，旧程序明确拒绝新记录。`legacy-compatibility-repro.test.mjs` 使用原版 `45ac9153` 的真实读取器，已从红色复现转为通过，并验证拒绝后记录字节保持不变。运行记录写入与版本组合 8 项、模块登记 / 孤儿保护 26 项通过；运行记录控制回归 28 项通过、9 项平台跳过，workspace 门禁与恢复 11 项通过。正式行为见 `crabot-docs/superpowers/specs/2026-11-10-cordis-runtime-record-compatibility-design.md`。最终跨平台回归与干净候选仍待完成，不能视为已可合入。
+新实例和模块记录使用版本 2，CLI / 桌面与实例配套升级。新版只读取无运输字段的旧 HTTP v1 记录作升级前识别，旧程序明确拒绝新记录。`legacy-compatibility-repro.test.mjs` 使用原版 `45ac9153` 的真实读取器，已从红色复现转为通过，并验证拒绝后记录字节保持不变。运行记录写入与版本组合 8 项、模块登记 / 孤儿保护 26 项通过；运行记录控制回归 28 项通过、9 项平台跳过，workspace 门禁与恢复 11 项通过。正式行为见 `crabot-docs/superpowers/specs/2026-11-10-cordis-runtime-record-compatibility-design.md`。最终跨平台与干净候选验证结果见下文；真人收发验收前不提正式 PR。
+
+## 最终自动验证（2026-11-10）
+
+- 产品提交 `ec4b9c82` 的[四平台原生 CI](https://github.com/smilefufu/crabot/actions/runs/42799423129) 全部通过，含运行记录版本组合与真实旧读取器回归。
+- 干净提交的完整 macOS ARM 候选：`2026.11.10-cordis.3`，29,863 个清单文件、展开 1,145,224,541 B；归档 445,003,459 B，SHA-256 `62d3d51236e80a8cda195e359d4fd2803cf619fd246ea5ff8c98e3d2b75ba259`。归档位于 worktree 的 `.desktop-build/crabot-cordis-validation-darwin-arm64-20261110-v3.tar.gz`。
+- 实际归档解包目录的正常启动/停止、真实 CLI、公开 npm 国内安装扫码及真实 Agent 合成收发 3/3 通过，运行前后完整 seal 核验通过。日志 `/private/tmp/crabot-cordis-v3-sealed-public-e2e-20261110.tap`；这是公开包安装，不是本地 tarball 或暖缓存替代。
+- 记录 v2 的 workspace 文件回归 179 项通过、1 项平台跳过；真实独立协调器、Admin/Agent 和 durable IPC 恢复定向用例通过。自动化没有使用真实业务账号、对话或外部 Provider。
+- 正式协议已在独立文档仓同步到 main。产品分支保持独立，未提 PR、未合并、未部署。剩余为用户亲自扫码、真实飞书收发验收；需要模型时应在临时实例的 Admin 配置测试 Provider，不自动复制现有实例凭据。
