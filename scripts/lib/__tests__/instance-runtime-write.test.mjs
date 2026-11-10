@@ -118,3 +118,16 @@ test('cleanup still reports other runtime record removal errors and retains the 
   assert.throws(() => clearInstanceRuntime(f.root, f.record.generation), { code: 'EPERM' })
   assert.deepEqual(fs.readFileSync(f.file), f.before)
 })
+
+
+test('concurrent cleanup may remove mm.pid after its presence check without preventing runtime cleanup', async t => {
+  const f = await fixture(t), read = fs.readFileSync, pidFile = join(f.root, 'mm.pid')
+  t.mock.method(fs, 'readFileSync', (target, ...args) => {
+    if (target === pidFile) fs.unlinkSync(target)
+    return read(target, ...args)
+  })
+  syncBuiltinESMExports()
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports() })
+  assert.equal(clearInstanceRuntime(f.root, f.record.generation), true)
+  assert.equal(readInstanceRuntime(f.root), null)
+})
