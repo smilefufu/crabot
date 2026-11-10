@@ -1,193 +1,49 @@
-name: Desktop installer initialization probe
+name: Inspect isolated release proxy and CA environment
 on:
   workflow_dispatch:
-    inputs:
-      ubuntu_deb:
-        description: 'Install and verify an already-built exact DEB on Ubuntu24/26; no rebuild'
-        type: boolean
-        default: false
-      directory_only:
-        description: 'Run only native installation-directory regressions without a package download'
-        type: boolean
-        default: false
-      source_run:
-        type: string
-        default: '41170496475'
-      artifact_name:
-        type: string
-        default: 'crabot-win32-x64-offline-test-a34d9e253fa9ea565e29c0a34f8c2b8ed960b7a7'
-      upgrade_from14:
-        description: Verify an actual desktop.14 installation upgrades through the new EXE and GUI
-        type: boolean
-        default: false
-      upgrade_launch:
-        description: Actual candidate entry after stopping desktop.14
-        type: choice
-        options: [direct, finish, menu]
-        default: direct
-      ui_only:
-        description: 'Verify the completed EXE interface without repeating source builds or legacy acceptance'
-        type: boolean
-        default: false
 permissions:
   contents: read
   actions: read
 jobs:
-  ubuntu-deb:
-    if: inputs.ubuntu_deb == true
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, ubuntu-26.04]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
+  inspect:
+    runs-on: macos-15
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22.22.3'
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - uses: astral-sh/setup-uv@v6
-        with:
-          version: '0.13.0'
       - uses: actions/download-artifact@v4
         with:
+          name: crabot-darwin-arm64-offline-test-45ac91532d4308c48ec936f4149d7d56ef437eec
+          run-id: 42750399454
           github-token: ${{ github.token }}
-          run-id: ${{ inputs.source_run }}
-          name: ${{ inputs.artifact_name }}
-          path: .desktop-build
-      - name: Native system display and ordinary package dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends apparmor-utils libgtk-3-0t64 libnss3 libxss1 libasound2t64 libgbm1 xvfb xauth xdotool dbus-x11 zstd
-      - name: Exact DEB installation and kernel sandbox before independent source preparation
-        run: |
-          ulimit -c 0
-          dbus-run-session -- xvfb-run -a node .github/scripts/verify-ubuntu-deb.mjs .desktop-build/deb/distribution
-      - name: Published CLI14 and CLI15 data through the ordinary DEB GUI
-        run: |
-          for version in v2026.10.14.1 v2026.10.15.1; do
-            dbus-run-session -- xvfb-run -a node .github/scripts/verify-ubuntu-deb.mjs .desktop-build/deb/distribution --legacy="$version"
-          done
-      - name: Actual fixed-path version21 to version22 upgrade
-        run: |
-          dbus-run-session -- xvfb-run -a node .github/scripts/verify-ubuntu-deb.mjs .desktop-build/deb-upgrade/distribution --baseline=.desktop-build/deb/distribution
-      - name: Independent source GUI and Core coexistence with the accepted DEB
-        run: |
-          UV_PYTHON=3.12 node scripts/dev.mjs build
-          node --test scripts/lib/__tests__/desktop-entry.test.mjs
-          pnpm --dir crabot-desktop install --frozen-lockfile
-          pnpm --dir crabot-desktop run build
-          ulimit -c 0
-          dbus-run-session -- xvfb-run -a node .github/scripts/verify-ubuntu-deb-coexistence.mjs .desktop-build/deb-upgrade/distribution
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: ubuntu-deb-acceptance-${{ matrix.os }}-${{ github.run_id }}
-          path: |
-            .desktop-build/deb-upgrade/acceptance.json
-            .desktop-build/deb/acceptance.json
-            .desktop-build/deb/acceptance-*.log
-            .desktop-build/deb/legacy-*/acceptance.json
-            .desktop-build/deb/legacy-*/acceptance-*.log
-            .desktop-build/deb-upgrade/acceptance-*.log
-            .desktop-build/development-coexistence.log
-            .desktop-build/development-*.log
-          if-no-files-found: warn
-          retention-days: 7
-  recheck:
-    if: inputs.ubuntu_deb != true
-    runs-on: windows-latest
-    timeout-minutes: 40
-    defaults:
-      run:
+          path: candidate
+      - name: Compare inherited environment and explicitly disabled proxies with strict TLS
         shell: bash
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22.22.3'
-      - name: Native installation directory regression
-        if: inputs.directory_only == true
         run: |
-          node scripts/build-native.mjs
-          node .github/scripts/probe-windows-install-directory.mjs 2>&1 | tee .desktop-build/directory-regression.log
-          node --test scripts/lib/__tests__/private-file-paths.test.mjs scripts/lib/__tests__/process-identity.test.mjs
-          pnpm --dir crabot-client install --frozen-lockfile
-          pnpm --dir crabot-client run build
-          pnpm --dir crabot-desktop install --frozen-lockfile
-          node .github/scripts/probe-windows-single-layer-installer.mjs 2>&1 | tee .desktop-build/directory-extraction-regression.log
-          pnpm --dir crabot-desktop run build
-          node --test --test-concurrency=1 crabot-desktop/tests/windows-removal-entry.test.mjs crabot-desktop/tests/startup-page.test.mjs crabot-desktop/tests/startup-page-real.test.mjs crabot-desktop/tests/paired-binding.test.mjs
-          pnpm install --frozen-lockfile
-          pnpm --dir scripts/lib install --frozen-lockfile
-          node --test --test-name-pattern='publish-source-remove-public' crabot-desktop/tests/removal-frame.test.mjs
-      - name: Prepare the finite test dependencies
-        if: inputs.directory_only != true && inputs.ui_only != true
-        run: |
-          node scripts/build-native.mjs
-          pnpm --dir crabot-client install --frozen-lockfile
-          pnpm --dir crabot-client run build
-          pnpm install --frozen-lockfile
-          pnpm --dir scripts/lib install --frozen-lockfile
-          pnpm --dir crabot-desktop install --frozen-lockfile
-          pnpm --dir crabot-desktop run build
-      - uses: actions/download-artifact@v4
-        if: inputs.directory_only != true
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          run-id: ${{ inputs.source_run }}
-          name: ${{ inputs.artifact_name }}
-          path: .desktop-build/completed-exe
-      - uses: actions/download-artifact@v4
-        if: inputs.upgrade_from14 == true
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          run-id: '41277405704'
-          name: crabot-win32-x64-offline-test-aed22d452babae4048e16f2da02df51a2cd5c42b
-          path: .desktop-build/desktop14-baseline
-      - name: Place the original completed EXE without rebuilding it
-        if: inputs.directory_only != true
-        run: |
-          mkdir -p .desktop-build/manual/installer/distribution
-          find .desktop-build/completed-exe -type f \( -name '*offline-candidate.exe' -o -name SHA256SUMS \) -exec cp {} .desktop-build/manual/installer/distribution/ \;
-      - name: Exact EXE extraction with the original and sufficient output budgets
-        if: inputs.directory_only != true && inputs.ui_only != true
-        run: node .github/scripts/recheck-windows-single-layer.mjs 2>&1 | tee .desktop-build/exact-exe-recheck.log
-      - name: Real v14 data confirmation in the unchanged packaged GUI
-        if: inputs.directory_only != true && inputs.ui_only != true
-        run: node .github/scripts/verify-legacy-user-takeover.mjs .desktop-build/manual/paired .desktop-build/manual/installer v2026.10.14.1 2>&1 | tee .desktop-build/exact-exe-legacy-gui.log
-      - name: Real EXE Finish opens the GUI with 1.5 GiB free TEMP
-        env:
-          CRABOT_UPGRADE_FROM14: ${{ inputs.upgrade_from14 }}
-          CRABOT_UPGRADE_LAUNCH: ${{ inputs.upgrade_launch }}
-        if: ${{ !cancelled() && inputs.directory_only != true && inputs.ui_only == true }}
-        shell: pwsh
-        run: |
-          $files = @(Get-ChildItem .desktop-build/manual/installer/distribution -Filter '*offline-candidate.exe')
-          if ($files.Count -ne 1) { throw 'Expected exactly one unchanged completed EXE' }
-          $expected = (Get-Content .desktop-build/manual/installer/distribution/SHA256SUMS -Raw).Trim().Split(' ')[0]
-          if ((Get-FileHash $files[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) { throw 'Completed EXE SHA mismatch' }
-          if ($env:CRABOT_UPGRADE_FROM14 -eq 'true') {
-            $old = @(Get-ChildItem .desktop-build/desktop14-baseline -Recurse -Filter '*offline-candidate.exe')
-            if ($old.Count -ne 1 -or (Get-FileHash $old[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant() -ne '3c725b47a01d5c2c4211241c8c86b91c5829d60f4f5ed554ef21d1c8cf7a3d3a') { throw 'Pinned desktop.14 baseline mismatch' }
-            $version = $files[0].Name -replace '^Crabot-(.+)-win-x64-offline-candidate\.exe$', '$1'
-            & .github/scripts/smoke-windows-wrapper-capacity.ps1 -Installer $old[0].FullName -UpgradeInstaller $files[0].FullName -ExpectedVersion $version -UpgradeLaunch $env:CRABOT_UPGRADE_LAUNCH -Expected complete | Tee-Object .desktop-build/exact-exe-ui.log
-          } else {
-            & .github/scripts/smoke-windows-wrapper-capacity.ps1 -Installer $files[0].FullName -Expected complete | Tee-Object .desktop-build/exact-exe-ui.log
-          }
-      - name: Retain exact package recheck evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: exact-windows-exe-recheck-${{ github.sha }}
-          path: |
-            .desktop-build/*.log
-            .desktop-build/*.json
-          include-hidden-files: true
-          if-no-files-found: warn
-          retention-days: 7
+          dmg=$(find candidate -name '*candidate.dmg' -print -quit)
+          mount="$RUNNER_TEMP/inspect-proxy-candidate"
+          mkdir -p "$mount"
+          hdiutil attach -readonly -nobrowse -mountpoint "$mount" "$dmg"
+          trap 'hdiutil detach "$mount"' EXIT
+          core="$mount/Crabot.app/Contents/Resources/core"
+          runtime=$(node -p 'const fs=require("fs");fs.realpathSync(process.argv[1]+"/"+JSON.parse(fs.readFileSync(process.argv[1]+"/scrapling-runtime.json")).directory)' "$core")
+          "$runtime/python/bin/python3.12" -I -B - "$runtime" <<'PY'
+          import os,sys,json,subprocess,re,hashlib,pathlib
+          root=pathlib.Path(sys.argv[1]);sys.path.insert(0,str(root/'packages'))
+          import curl_cffi,curl_cffi.curl,certifi
+          keys=['HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY','http_proxy','https_proxy','all_proxy','no_proxy','SSL_CERT_FILE','CURL_CA_BUNDLE','REQUESTS_CA_BUNDLE','SSL_CERT_DIR']
+          print('ENV_PRESENCE '+json.dumps({key:bool(os.environ.get(key)) for key in keys}),flush=True)
+          system=subprocess.check_output(['scutil','--proxy'],text=True)
+          flags={key:int(value) for key,value in re.findall(r'(\w*Enable)\s*:\s*(\d+)',system)}
+          print('SYSTEM_PROXY_FLAGS '+json.dumps(flags),flush=True)
+          ca=pathlib.Path(curl_cffi.curl.DEFAULT_CACERT)
+          print('DEFAULT_CA '+json.dumps({'path':str(ca),'sha256':hashlib.sha256(ca.read_bytes()).hexdigest()}),flush=True)
+          for mode in ['inherited','proxy_disabled','proxy_disabled_current_ca']:
+            if mode!='inherited':
+              for key in keys[:8]:os.environ.pop(key,None)
+            options={} if mode=='inherited' else {'trust_env':False,'curl_options':{curl_cffi.CurlOpt.PROXY:''}}
+            for url in ['https://example.com','https://github.com']:
+              try:
+                with curl_cffi.requests.Session(**options) as session:
+                  response=session.get(url,timeout=20,verify=certifi.where() if mode.endswith('current_ca') else True)
+                  print('PROXY_CA_COMPARE '+json.dumps({'mode':mode,'url':url,'http_status':response.status_code,'passed':True}),flush=True)
+              except Exception as error:print('PROXY_CA_COMPARE '+json.dumps({'mode':mode,'url':url,'passed':False,'error':str(error)}),flush=True)
+          PY
