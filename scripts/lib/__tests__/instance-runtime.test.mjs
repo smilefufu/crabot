@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, copyFileSy
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
+import { createRequire } from 'node:module'
 import { once } from 'node:events'
 import { createServer } from 'node:net'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -272,6 +273,9 @@ test('independent common stop settles its exact fixture generation without any C
     filter: file => !file.split(/[\\/]/).some(part => ['__tests__', 'node_modules'].includes(part)) })
   mkdirSync(join(host, 'crabot-native/build/Release'), { recursive: true })
   copyFileSync(new URL('../../../crabot-native/build/Release/crabot-native.node', import.meta.url), join(host, 'crabot-native/build/Release/crabot-native.node'))
+  const { buildRuntimeControl } = await import('../../desktop/build-runtime-control.mjs')
+  const { build } = createRequire(new URL('../../../crabot-desktop/package.json', import.meta.url))('esbuild')
+  await buildRuntimeControl(build, fileURLToPath(new URL('../../../', import.meta.url)), join(host, 'scripts/lib/runtime-control.cjs'))
   const entry = join(host, 'scripts/lib/instance-controller.mjs')
   const source = `const {stopInstance}=await import(process.env.CRABOT_FIXTURE_STOP_ENTRY);await stopInstance(process.env.CRABOT_FIXTURE_STOP_DATA)`
   const stopper = spawn(process.execPath, ['--input-type=module', '-e', source], { env: { ...process.env,
@@ -324,16 +328,15 @@ test('status preserves verified running state when the module RPC is unavailable
 
 
 test('Windows native stop terminates its exact processes after a lost shutdown RPC and the full grace window', { skip: process.platform !== 'win32', timeout: 90000 }, async t => {
-  const f = await fixture(t), fetch = globalThis.fetch
+  const f = await fixture(t)
+  const { renameSync } = await import('node:fs')
+  renameSync(join(f.data, 'runtime-control.json'), join(f.data, 'runtime-control-unavailable.json'))
   const started = Date.now()
-  try {
-    globalThis.fetch = async () => { throw new Error('fixture shutdown connection reset') }
-    await stopInstance(f.data)
-    assert.ok(Date.now() - started >= 70000)
-    assert.equal(identity.sameProcess(f.record.mm, identity.inspectProcess(f.record.mm.pid)), false)
-    assert.equal(identity.sameProcess(f.record.controller, identity.inspectProcess(f.record.controller.pid)), false)
-    assert.equal(readInstanceRuntime(f.data), null)
-  } finally { globalThis.fetch = fetch }
+  await stopInstance(f.data)
+  assert.ok(Date.now() - started >= 70000)
+  assert.equal(identity.sameProcess(f.record.mm, identity.inspectProcess(f.record.mm.pid)), false)
+  assert.equal(identity.sameProcess(f.record.controller, identity.inspectProcess(f.record.controller.pid)), false)
+  assert.equal(readInstanceRuntime(f.data), null)
 })
 
 

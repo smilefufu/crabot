@@ -7,8 +7,8 @@ const { once } = require('node:events')
 const identity = require('./process-identity.cjs')
 
 class PipeSocket extends Duplex {
-  constructor(handle) {
-    super({ allowHalfOpen: false }); this.handle = handle; this.reading = false
+  constructor(handle, stream = false) {
+    super({ allowHalfOpen: false }); this.handle = handle; this.reading = false; this.stream = stream
     this.exit = () => this.destroy()
     process.once('exit', this.exit)
   }
@@ -18,13 +18,19 @@ class PipeSocket extends Duplex {
   _read() {
     if (this.reading) return
     this.reading = true
-    identity.readPipe(this.handle).then(bytes => {
+    const read = this.stream ? identity.readPipeStream : identity.readPipe
+    read(this.handle).then(bytes => {
       this.reading = false
       if (!this.destroyed) this.push(bytes)
     }, error => this.destroy(error))
   }
   _write(bytes, _encoding, callback) {
-    identity.writePipe(this.handle, bytes).then(() => callback(), callback)
+    const write = async () => {
+      for (let offset = 0; offset < bytes.length; offset += 65536) {
+        await (this.stream ? identity.writePipeStream : identity.writePipe)(this.handle, bytes.subarray(offset, offset + 65536))
+      }
+    }
+    write().then(() => callback(), callback)
   }
   _destroy(error, callback) { process.removeListener('exit', this.exit); identity.closePipe(this.handle); callback(error) }
 }
@@ -44,7 +50,7 @@ function authAddress(dataDir, server = identity.inspectProcess(process.pid), nam
   return join(directory, `${server.pid}-${generation}.sock`)
 }
 
-async function listenLocalAuth(address, handler, onError = () => {}) {
+async function listenLocalAuth(address, handler, onError = () => {}, { stream = false } = {}) {
   const sockets = new Set()
   let closed = false
   const accept = (socket, fd = socket._handle.fd) => {
@@ -75,7 +81,7 @@ async function listenLocalAuth(address, handler, onError = () => {}) {
       while (!closed) {
         const handle = await identity.acceptPipe(server)
         let socket
-        try { socket = new PipeSocket(handle); accept(socket, handle) }
+        try { socket = new PipeSocket(handle, stream); accept(socket, handle) }
         catch (error) { if (socket) socket.destroy(); else identity.closePipe(handle); throw error }
       }
     } catch { if (!closed) { closed = true; identity.closePipeServer(server); onError(new Error('Private authentication listener unavailable')) } }
@@ -86,12 +92,12 @@ async function listenLocalAuth(address, handler, onError = () => {}) {
   } }
 }
 
-async function connectLocalAuth(address) {
+async function connectLocalAuth(address, { stream = false } = {}) {
   let socket, descriptor
   if (process.platform === 'win32') {
     const handle = await identity.connectPipe(address)
     descriptor = handle
-    try { socket = new PipeSocket(handle) }
+    try { socket = new PipeSocket(handle, stream) }
     catch (error) { identity.closePipe(handle); throw error }
   } else {
     socket = connect(address)

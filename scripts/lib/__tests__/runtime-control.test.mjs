@@ -99,3 +99,16 @@ test('health probes use the verified local pipe and never fall back to an unrela
     await fs.writeFile(file, JSON.stringify(description) + '\n')
   } finally { await server.close(); await fs.rm(data, { recursive: true, force: true }) }
 })
+
+test('runtime byte streams keep the caller deadline beyond a handshake and carry frames over 64 KiB', { timeout: 15000 }, async t => {
+  const data = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-control-stream-'))
+  const server = await control.startRuntimeControl({ dataDir: data, root, target: 19000, async dispatch(call) {
+    if (call.method === 'delayed') await new Promise(resolve => setTimeout(resolve, 6500))
+    return call.params
+  } })
+  t.after(async () => { await server.close(); await fs.rm(data, { recursive: true, force: true }) })
+  const bytes = new Uint8Array(256 * 1024).fill(37)
+  const large = await control.callRuntimeControl(data, { target: 19000, source: 'fixture', method: 'echo', params: { bytes } }, { timeoutMs: 2000 })
+  assert.deepEqual(Buffer.from(large.bytes), Buffer.from(bytes))
+  assert.deepEqual(await control.callRuntimeControl(data, { target: 19000, source: 'fixture', method: 'delayed', params: { completed: true } }, { timeoutMs: 10000 }), { completed: true })
+})

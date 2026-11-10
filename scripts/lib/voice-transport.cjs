@@ -10,7 +10,7 @@ async function listenVoiceTransport(dataDir, httpServer) {
       socket.destroy(); return
     }
     httpServer.emit('connection', socket)
-  })
+  }, undefined, { stream: true })
   return { description: { server, socket_address }, close: () => listener.close() }
 }
 
@@ -21,7 +21,7 @@ async function connectVoiceTransport(dataDir, description) {
     || description.socket_address !== authAddress(dataDir, description.server, 'voice')) {
     throw new Error('Verified Voice transport is unavailable')
   }
-  const { socket, peer } = await connectLocalAuth(description.socket_address)
+  const { socket, peer } = await connectLocalAuth(description.socket_address, { stream: true })
   if (!identity.sameProcess(description.server, peer)) { socket.destroy(); throw new Error('Voice process changed') }
   socket.setTimeout?.(0)
   return socket

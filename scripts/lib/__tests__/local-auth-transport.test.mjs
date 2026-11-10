@@ -84,3 +84,27 @@ test('normal process exit cancels native pipe accept and read workers without a 
   const [code, signal] = await exited
   assert.equal(code, 7, output); assert.equal(signal, null)
 })
+
+test('persistent byte streams retain backpressure across a slow reader beyond handshake time', { timeout: 15000 }, async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'crabot-pipe-slow-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const address = transport.authAddress(directory), bytes = Buffer.alloc(256 * 1024, 41)
+  let timer
+  const listener = await transport.listenLocalAuth(address, socket => {
+    timer = setTimeout(() => {
+      let received = 0
+      socket.on('data', chunk => {
+        received += chunk.length
+        assert.equal(chunk.every(value => value === 41), true)
+        if (received === bytes.length) socket.write(Buffer.from('complete'))
+      })
+    }, 6500)
+  }, undefined, { stream: true })
+  t.after(async () => { clearTimeout(timer); await listener.close() })
+  const { socket } = await transport.connectLocalAuth(address, { stream: true })
+  t.after(() => socket.destroy())
+  const reply = once(socket, 'data')
+  const sent = new Promise((resolve, reject) => socket.write(bytes, error => error ? reject(error) : resolve()))
+  await sent
+  assert.equal((await reply)[0].toString(), 'complete')
+})

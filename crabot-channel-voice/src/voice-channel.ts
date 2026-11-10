@@ -330,12 +330,12 @@ export class VoiceChannel extends ModuleBase {
       default: throw new RpcError('INVALID_PARAMS', 'Invalid voice action')
     }
   }
-  private send(socket: WebSocket, control: VoiceServerControl): void {
+  private send(socket: WebSocket, control: VoiceServerControl, completed?: (error?: Error) => void): void {
     if (socket.readyState !== WebSocket.OPEN) throw new Error('Terminal disconnected')
     if (socket.bufferedAmount > 50000) throw new Error('Terminal queue exceeds one second')
     const text = JSON.stringify(control)
     if (Buffer.byteLength(text) > 65536) throw new Error('Voice catalog exceeds control frame limit')
-    socket.send(text)
+    socket.send(text, completed)
   }
   private sendHello(c: Connection): void {
     this.send(c.socket, { type: 'hello', connection_epoch: c.epoch, setup_status: this.settings.setup_status, config: this.settings.config, catalog: this.catalog(), owner_activation: this.settings.owner_activation,
@@ -345,17 +345,19 @@ export class VoiceChannel extends ModuleBase {
     c.helloSent = true
   }
   private connected(socket: WebSocket): void {
-    let authenticated = false, pairingOnly = false, queue = Promise.resolve()
+    let authenticated = false, pairingOnly = false, rejecting = false, queue = Promise.resolve()
     const handshake = setTimeout(() => { if (!authenticated && !pairingOnly) socket.terminate() }, 5000)
     socket.on('error', () => {})
     socket.on('close', () => { clearTimeout(handshake); if (this.connection?.socket === socket) this.disconnect(); if (this.pairing?.socket === socket) this.pairing = undefined })
     const reject = (error?: unknown) => {
-      try { this.send(socket, { type: 'error', code: error instanceof VoiceProtocolVersionError ? 'VOICE_VERSION_UNSUPPORTED' : 'VOICE_REJECTED', message: error instanceof VoiceProtocolVersionError ? error.message : '本轮无法继续，请检查连接、登记和音频状态' }) } catch { /* disconnected */ }
-      socket.terminate()
+      if (rejecting) return
+      rejecting = true
+      try { this.send(socket, { type: 'error', code: error instanceof VoiceProtocolVersionError ? 'VOICE_VERSION_UNSUPPORTED' : 'VOICE_REJECTED', message: error instanceof VoiceProtocolVersionError ? error.message : '本轮无法继续，请检查连接、登记和音频状态' }, () => socket.terminate()) } catch { socket.terminate() }
     }
     socket.on('message', (raw: RawData, binary: boolean) => {
       try {
         const data = Buffer.isBuffer(raw) ? raw : Array.isArray(raw) ? Buffer.concat(raw) : Buffer.from(raw)
+        if (rejecting) { if (binary) data.fill(0); return }
         const control = binary ? undefined : parseVoiceClientControl(data.toString('utf8'))
         if (binary) {
           try {

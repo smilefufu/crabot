@@ -40,7 +40,7 @@ async function openRuntimeControl(dataDir, { expectedServer, expectedGeneration 
     const description = readDescription(dataDir)
     if (expectedGeneration !== undefined && description.value.generation !== expectedGeneration) throw failure()
     if (expectedServer && !identity.sameProcess(expectedServer, description.value.server)) throw failure()
-    const connection = await transport.connectLocalAuth(description.value.socket_address)
+    const connection = await transport.connectLocalAuth(description.value.socket_address, { stream: true })
     socket = connection.socket
     socket.setTimeout?.(0)
     if (!identity.sameProcess(description.value.server, connection.peer)) throw failure()
@@ -106,7 +106,7 @@ async function startRuntimeControl({ dataDir, root, target, dispatch, onError = 
       if (!current.bytes.equals(bytes)) throw new RuntimeRpcError('STALE_INSTANCE', 'Runtime controller is no longer current')
       return dispatch(call, origin, bindings)
     })
-  }, onError)
+  }, onError, { stream: true })
   const temporary = file + '.tmp-' + crypto.randomUUID()
   try {
     fs.writeFileSync(temporary, bytes, { flag: 'wx', mode: 0o600 })
