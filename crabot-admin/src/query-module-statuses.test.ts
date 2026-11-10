@@ -17,13 +17,18 @@ for (const [handler, method] of [['handleStartModuleAdmin', 'start_module'], ['h
     const accepted = { status: 'accepted', tracking_id: 'synthetic-tracking' }
     const callModuleManager = vi.fn().mockResolvedValue(accepted)
     const resolveModuleStartEnv = vi.fn().mockResolvedValue({ SYNTHETIC: 'configured' })
-    const app = { rpcClient: { callModuleManager }, config: { moduleId: 'admin-web' }, resolveModuleStartEnv }
+    const ensureInstanceDefinition = vi.fn().mockResolvedValue(undefined)
+    const app = { rpcClient: { callModuleManager }, config: { moduleId: 'admin-web' }, resolveModuleStartEnv, channelManager: { ensureInstanceDefinition } }
     expect(await (AdminModule.prototype as any)[handler].call(app, { module_id: 'fixture-channel', force: false })).toEqual(accepted)
     expect(callModuleManager).toHaveBeenCalledWith(method, { module_id: 'fixture-channel',
       ...(method === 'start_module' ? {} : { force: false }), ...(method === 'stop_module' ? {} : { env: { SYNTHETIC: 'configured' } }) }, 'admin-web')
     expect(fetch).not.toHaveBeenCalled()
+    if (method === 'stop_module') expect(ensureInstanceDefinition).not.toHaveBeenCalled()
+    else expect(ensureInstanceDefinition).toHaveBeenCalledWith('fixture-channel')
+    ensureInstanceDefinition.mockClear()
     callModuleManager.mockClear()
     await (AdminModule.prototype as any)[handler].call(app, { module_id: 'crabot-agent', force: false })
     expect(callModuleManager.mock.calls[0][1]).not.toHaveProperty('env')
+    expect(ensureInstanceDefinition).not.toHaveBeenCalled()
   })
 }
