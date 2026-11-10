@@ -1,13 +1,13 @@
 # Crabot 项目进度
 
-### Cordis 迁移与 Channel 按需安装（2026-11-10，最终发行验证中）
+### Cordis 迁移与六平台按需安装（2026-11-10，自动验证完成，原实例待最终验收）
 
-- 用户确认六平台 npm 按需安装；[补充设计](crabot-docs/superpowers/specs/2026-11-10-cordis-channel-installation-design.md)已确认。模块页显式安装，已安装分类和新增实例仅显示完整安装结果；主包移除六平台代码/SDK。飞书仅扫码；删除 Telegram／微信 Webhook，保留 polling／Socket.IO。
-- 独立 worktree / `research/cordis-validation`。真实核心模块已接通 IPC/MessagePack/OS 核验管道，整个受管树只保留 Admin Web TCP；权限、身份、会话、投递与原生命周期保持。运行记录 v2 与配套工具升级，残留旧程序拒绝已验证。
-- 六包已首次发布；真实受管往返发现五个普通 function 入口被 Cordis 当构造函数，已修正为 async。最终目录锁定飞书 0.1.1、其它五包 0.1.3；不覆盖历史包，不消费 latest。国内源/原子安装/断网复用及单父 IPC peer已验证；最终公开包的国内安装、断网复用及实际归档宿主受管往返均通过；官方/国内12份完整性一致。
-- Core 576/16skip、Shared 380/2skip、飞书292、Slack138/5skip、语音55、Admin增量75和安装组65、相关Web13通过；微信118、钉钉58通过，Telegram1条既有reaction失败单列。六个真实tgz受管合成收发/敏感语音注册/无TCP/退出清理通过。
-- 本轮v6完整归档441,399,482 B、展开1,123,310,016 B，无平台SDK；解包启动/CLI/公开安装/扫码/合成收发/重启3/3及六包受管往返通过，前后seal完整。Windows实测同代际记录并发清理的ENOENT误报已确定性复现并修正，运行记录与PID两处竞态10项定向通过；重新构建最终候选与四平台CI；[此前四平台CI](https://github.com/smilefufu/crabot/actions/runs/42799423129)及v3归档解包启动/CLI/国内公开包端到端3/3通过，只属于前一范围。[复现与产物](experiments/cordis-feishu/README.md)。
-- 用户隔离实例飞书扫码已确认可用，保留其账号/Provider/历史；生产3000未改，未提PR、未合入。当前新候选验证全部通过后才交付验收；合成平台/模型不冒充真人收发结果。正式协议已同步独立文档仓。
+- 按已确认[补充设计](crabot-docs/superpowers/specs/2026-11-10-cordis-channel-installation-design.md)实现：模块页显式npm安装，已安装分类与新增实例仅显示真实安装结果，主包无Channel代码/平台SDK；飞书添加仅扫码，删除Telegram/微信Webhook，保留polling/Socket.IO。
+- 真实核心模块使用IPC/MessagePack/OS核验管道，受管树仅Admin Web监听；权限、身份、会话、投递及原生命周期保持。运行记录v2与配套工具升级，残留旧程序拒绝、重复登记和同代际文件并发清理均有回归。
+- 六包公开发布并锁定飞书0.1.1、其它五包0.1.3；官方/国内12份SHA-512一致。空缓存国内安装、断网复用、真实归档宿主六包收发/语音鉴权/无TCP/退出通过；不改全局npm源、不静默切国外源、不消费latest。旧账号/配置/自动启动保持，准备失败不启动并显示脱敏错误。
+- 生产提交`75345346`的[最终四平台CI](https://github.com/smilefufu/crabot/actions/runs/42847959084)全绿；Core576/16skip、Shared380/2skip、飞书292、Slack138/5skip、语音55、微信118、钉钉58、Admin增量及Web13通过。Telegram一条既有reaction失败单列，不宣称全量全绿。
+- 干净macOS ARM候选v8：归档441,399,176 B、展开1,123,310,154 B；解包启动/CLI/国内公开安装/扫码/真实Agent合成收发/重启及六包受管往返4/4通过，前后seal完整。[复现、摘要和证据](experiments/cordis-feishu/README.md)。
+- 已把v8归档接回原55885隔离实例：四模块running、飞书已连接、Agent模型ready，仅55885监听；原Provider/全局/飞书配置哈希保持，生产3000身份未变。浏览器已安装Channel(1)仅飞书、新增仅飞书扫码、聊天已同步；零安装/双插件/无Webhook表单另在临时实例验证并停机。正式协议已同步独立文档仓；产品分支保持独立，最终真人收发验收后才提正式PR，不自行合并。
 
 ### v2026.11.10.1 与桌面 .25 公开预览（2026-11-10，未部署本机）
 

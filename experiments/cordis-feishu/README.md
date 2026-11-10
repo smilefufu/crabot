@@ -30,20 +30,26 @@ node --test --test-concurrency=1 experiments/cordis-feishu/normal-instance.test.
 
 `managed-package-fixture.mjs` 使用实际 npm 业务代码、Cordis 和 IPC，只替换外部平台客户端；验证初始化完成、入站事件、canonical session、回复目标、Slack 断连健康、语音敏感注册和私有通道、单 IPC listener、无 Channel TCP、正常退出及无凭据日志。`product-e2e` 则串联显式安装、飞书扫码、Admin 权限、真实 Agent、本地模拟模型与真实投递工具，覆盖私聊、群聊、图片、文件、历史和重启持久化。SDK 导入成功不能替代这些运行验证。
 
-本轮 Core 全量 576 pass/16 skip、Shared 380/2 skip、飞书 292、Slack 138/5 skip、语音 55、Admin 增量 75及最新安装组 65、相关 Web 13通过；微信 118、钉钉58通过，Telegram 37通过及原基线已复现的1条 reaction 断言失败。六个本地真实 tgz 的受管合成往返已通过。公开精确版本六包空缓存国内安装、断网复用及真实受管往返通过；官方与国内镜像12份元数据的SHA-512均与发布tgz一致。刚发布时国内安装用元数据曾短暂滞后并返回ETARGET，镜像缓存同步后实际安装成功，未切换国外源。本轮四平台 CI 仍在运行。
+本轮 Core 全量 576 pass/16 skip、Shared 380/2 skip、飞书 292、Slack 138/5 skip、语音 55、Admin 增量 75及最新安装组 65、相关 Web 13通过；微信 118、钉钉58通过，Telegram 37通过及原基线已复现的1条 reaction 断言失败。六个本地真实 tgz 的受管合成往返已通过。公开精确版本六包空缓存国内安装、断网复用及真实受管往返通过；官方与国内镜像12份元数据的SHA-512均与发布tgz一致。刚发布时国内安装用元数据曾短暂滞后并返回ETARGET，镜像缓存同步后实际安装成功，未切换国外源。[最终四平台原生CI](https://github.com/smilefufu/crabot/actions/runs/42847959084)在生产提交 `75345346` 全部通过：Windows、Linux、macOS ARM/Intel，包含实际公开包安装/受管往返和完整退出组。
 
 ## 本轮完整归档（2026-11-10）
 
-生产提交 `97b65356`，候选 `2026.11.10-cordis.6`；后续 `bc453602` 仅修正测试夹具。macOS ARM 归档 `.desktop-build/crabot-cordis-validation-darwin-arm64-20261110-v6.tar.gz`：441,399,482 B，SHA-256 `e67612a3fdb13d15ae739ac7abab5b63e03ee63b5ade71021df4e619e31b21d5`；25,291个清单文件、展开1,123,310,016 B。主包无六个Channel目录和平台专属SDK。
+生产提交 `75345346`，候选 `2026.11.10-cordis.8`。macOS ARM 归档 `.desktop-build/crabot-cordis-validation-darwin-arm64-20261110-v8.tar.gz`：441,399,176 B，SHA-256 `f840dc0264d2bbc869d0ab6c556dfff05af4adc55ab2f2f8240af2e3507c1611`；25,291个清单文件、展开1,123,310,154 B。主包无六个Channel目录和平台专属SDK。
 
-实际解包后的正常实例、CLI、公开npm显式安装/飞书扫码/真实Agent合成收发/重启持久化3/3通过；同一解包宿主再通过六个国内公开包的受管往返，运行后完整seal保持。日志 `/private/tmp/cordis-v6-sealed-public-e2e-20261110.tap`、`/private/tmp/cordis-public-managed-six-sealed-20261110.tap`。归档验证发现并修正了重复定义错误码误判，按正式协议仅接受 `MODULE_MANAGER_DUPLICATE_ID`，其它登记失败继续保留账号并失败。
+实际解包后的正常实例、CLI、公开npm显式安装/飞书扫码/真实Agent合成收发/重启持久化、六个国内公开包受管往返4/4通过，运行后完整seal保持。日志 `/private/tmp/cordis-v8-sealed-public-e2e-20261110.tap`；完整性与摘要 `/private/tmp/cordis-v8-proof-20261110.json`。归档验证发现并修正了重复定义错误码误判，按正式协议仅接受 `MODULE_MANAGER_DUPLICATE_ID`，其它登记失败继续保留账号并失败。
 
-相较同平台、同格式的前一轮v3候选，本轮主包压缩少3,603,977 B（0.81%），展开少21,914,525 B（1.91%）。v3已拆出飞书，因此这不是六平台拆包相对原版的总差额；用户安装插件后其依赖和缓存另占实例目录，不承诺所有插件装全后的总占用减少。
+相较同平台、同格式的前一轮v3候选，本轮主包压缩少3,604,283 B（0.81%），展开少21,914,387 B（1.91%）。v3已拆出飞书，因此这不是六平台拆包相对原版的总差额；用户安装插件后其依赖和缓存另占实例目录，不承诺所有插件装全后的总占用减少。
 
 ## 历史证据与交付边界
 
 此前飞书首轮产品提交 `ec4b9c82` 的[四平台原生 CI](https://github.com/smilefufu/crabot/actions/runs/42799423129) 全通过；macOS ARM `2026.11.10-cordis.3` 归档 445,003,459 B、展开 1,145,224,541 B，SHA-256 `62d3d51236e80a8cda195e359d4fd2803cf619fd246ea5ff8c98e3d2b75ba259`。实际解包后的正常实例、CLI、国内公开 npm 安装及真实 Agent 合成往返 3/3通过，前后 seal 完整。这是先前范围证据，不能替代本轮六平台验证。
 
-用户已在隔离实例完成飞书扫码并确认流程可用。实例保持原数据；生产实例未部署。完成本轮公开包、发行归档、四平台回归、diff review 和界面验证后才交付人工验收；不提未完成 PR、不自行合并。
+Windows原生回归检出controller与stop并发清理同代际记录的ENOENT误报；确定性回归先失败后修复，运行记录与PID两处只容忍已消失文件，其它I/O错误继续报告；身份/代际/停止期限保持。10项定向、完整退出组29 pass/9 skip及上述四平台原生组通过。
+
+用户已在隔离实例完成飞书扫码并确认流程可用。本轮将实际v8解包程序接回原 `http://127.0.0.1:55885` 数据目录；四个模块running、飞书真实连接、Agent模型ready，整个受管树仅55885监听。Provider/global/飞书配置哈希保持，原生产3000的精确进程身份未变。浏览器确认聊天已同步、已安装Channel(1)只有飞书、新增仅飞书扫码。证据 `/private/tmp/cordis-human-acceptance-v8-20261110.log`，页面截图 `/private/tmp/cordis-human-modules-v8-20261110.png` 与 `/private/tmp/cordis-human-new-channel-v8-20261110.png`。
+
+另用完整归档和纯临时数据在浏览器验证零安装引导、从真实模块按钮安装两个国内公开插件、分类Channel(2)及新增仅显示对应两个平台、Telegram表单无Webhook字段；没有创建账号或调用模型，该测试实例已正常停止。
+
+公开包、完整归档、四平台、最终diff review和页面验证完成，原实例现可进行最终真人收发验收。生产未部署，产品分支未合入；人工验收后才提正式PR，不自行合并。
 
 运行记录 v2 与配套 CLI/桌面一同升级，已移除旧运行入口；残留旧工具拒绝新记录的回归使用原版 `45ac9153` 读取器，拒绝不改记录。正式契约以独立 `crabot-docs` 为准；旧实验 `install.mjs` / `smoke.test.mjs` 不作完整交付证据。不新增停用状态机、强杀期限、自动重发或 HMR。
