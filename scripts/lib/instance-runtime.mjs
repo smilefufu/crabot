@@ -75,7 +75,8 @@ export function clearInstanceRuntime(dataDir, generation) {
   if (record?.generation !== generation) return false
   // Caller holds the bounded lifecycle lock, or is the sole controller of this generation.
   if (readPid(dataDir) === record.controller.pid) clearPid(dataDir)
-  unlinkSync(join(dataDir, filename))
+  try { unlinkSync(join(dataDir, filename)) }
+  catch (error) { if (error.code !== 'ENOENT') throw error }
   return true
 }
 
