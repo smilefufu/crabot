@@ -111,7 +111,7 @@ jobs:
           node scripts/prepare-scrapling.mjs --release="v2026.11.10.1"
           node scripts/prepare-computer-use.mjs
 
-      - name: Configure the current CA bundle only for isolated Mac CI
+      - name: Configure current curl CA trust only for isolated Mac CI
         if: matrix.platform == 'darwin'
         shell: bash
         run: |
@@ -121,8 +121,10 @@ jobs:
           const bytes=await fs.readFile(path.join(pointer.directory,'packages/certifi/cacert.pem'));
           if(createHash('sha256').update(bytes).digest('hex')!=='9cc2a774b5198dcff14d9be1e66091f538975d867ce029a96bce15a55dfd730f') throw new Error('Unexpected locked CI CA bundle');
           const ca=path.join(process.env.RUNNER_TEMP,'release-ci-ca.pem'); await fs.writeFile(ca,bytes);
-          await fs.appendFile(process.env.GITHUB_ENV,'SSL_CERT_FILE='+ca+'\n');
-          console.log('Isolated CI uses the current unchanged locked CA bundle; product default trust rules and bytes remain unchanged. Original default-host fixture failure is retained separately.');
+          await fs.appendFile(process.env.GITHUB_ENV,'CURL_CA_BUNDLE='+ca+'\n');
+          const {uvTransport}=await import('./scripts/lib/install-network.mjs');
+          await uvTransport('uv',process.cwd(),{...process.env,CURL_CA_BUNDLE:ca});
+          console.log('Isolated CI curl uses the current unchanged locked CA bundle; product default trust rules and bytes remain unchanged. Original default-host fixture failure is retained separately.');
           NODE
 
       - name: Prune to production-only dependencies
