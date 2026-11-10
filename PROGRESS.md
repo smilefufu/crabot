@@ -8,6 +8,12 @@
 - 已通过 Core 全量 572/16skip、Shared 379/2skip、飞书 292、Memory 34、语音全量 55 及 Admin 定向回归；真实 CLI init/start/status/check/stop、独立 Electron ASAR 和 Node 维护包管道回归通过；当前继续完整全量/跨平台回归与最终人工验收；扫码→真实 Agent→本地模型工具回复、群聊/媒体/历史/飞书重启和 workspace durable IPC gate 均已通过。所有外部服务验证仅本地模拟与合成数据，尚未真人飞书/Provider 验收、未发布 npm、未部署；公共包/国内镜像仍为 404，发布授权是最终必要边界，不将组件通过当作交付。
 - [复现与证据](experiments/cordis-feishu/README.md)：包体和依赖/缓存分别计量，完整产品包瘦身尚未形成最终测量。语音手机 URL 保持，内部 WS 改为 OS 核验的私有管道，真实 Voice child 启动、音频透传及父 IPC 断开清理通过。
 
+### v2026.11.10.1 与桌面 .25 公开预览（2026-11-10，未部署本机）
+
+- 从 `main` 的 `45ac9153` 固定打 tag，发布 macOS ARM／Intel、Windows x64、Ubuntu x64 四个桌面 `.25` 安装包及四个独立 CLI 归档：[Release](https://github.com/smilefufu/crabot/releases/tag/v2026.11.10.1)。八个最终包均通过原生 CI 安装／启动及各自的健康、停止、重连或升级检查。
+- [公开下载核验](https://github.com/smilefufu/crabot/actions/runs/42764721587)确认 17 个附件匿名 HTTP 200，实际 SHA-256、校验文件和 GitHub 摘要一致；源码、版本、桌面载荷清单与对应验收记录一致。桌面仍为未正式签名／公证的公开预览，自动更新关闭；不等同于普通用户真机／真实模型业务验收。
+- Mac CI 默认 CA 下静态请求 `example.com` 的单站证书兼容问题原样留证；同站浏览器及其它三站对照通过，强制直连仍复现，包内 CA 可通过。CLI 完整验收仅在 CI 显式配置当前 curl CA，未改产品信任规则；Linux 使用经当前指纹和完整清单校验的已有依赖缓存。细节与原始失败见发行说明；本机实例和真实数据未更新。
+
 ### 后台 Shell 输出留存（2026-11-10，未部署）
 
 - 修复前台转后台命令结束时，tail采集尚未读到末尾输出便清理捕获文件的问题：发布终态/通知前核对已落盘字节，必要时补存带stdout/stderr标签的完整快照并注明可能重叠，不改命令、退出码、权限或资源预算。补存失败保留捕获，不发布成功通知；不重跑命令。
