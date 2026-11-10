@@ -1,106 +1,82 @@
-name: Stage validated desktop.25 release assets
+name: Verify exact release downloads
 on:
   workflow_dispatch:
+    inputs:
+      public:
+        description: 'Verify anonymous public downloads after publication; false verifies the draft'
+        type: boolean
+        default: false
 permissions:
-  contents: write
+  contents: read
   actions: read
 jobs:
-  stage:
+  verify:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       GH_TOKEN: ${{ github.token }}
+      VERIFY_PUBLIC: ${{ inputs.public }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: v2026.11.10.1
-      - name: Require the fixed tag and successful native acceptance runs
+      - name: Verify all final assets, sidecars, native gates and exact source
         shell: bash
         run: |
           test "$(git rev-parse HEAD)" = 45ac91532d4308c48ec936f4149d7d56ef437eec
-          for run in 42750399454 42750404481 42750408813 42753456320; do
-            test "$(gh run view "$run" --repo smilefufu/crabot --json conclusion --jq .conclusion)" = success
-          done
-          test "$(gh release view v2026.11.10.1 --repo smilefufu/crabot --json isDraft --jq .isDraft)" = true
-      - uses: actions/download-artifact@v4
-        with:
-          name: crabot-darwin-arm64-offline-test-45ac91532d4308c48ec936f4149d7d56ef437eec
-          run-id: 42750399454
-          github-token: ${{ github.token }}
-          path: release-input/darwin-arm64
-      - uses: actions/download-artifact@v4
-        with:
-          name: crabot-darwin-x64-offline-test-45ac91532d4308c48ec936f4149d7d56ef437eec
-          run-id: 42750404481
-          github-token: ${{ github.token }}
-          path: release-input/darwin-x64
-      - uses: actions/download-artifact@v4
-        with:
-          name: crabot-win32-x64-offline-test-45ac91532d4308c48ec936f4149d7d56ef437eec
-          run-id: 42750408813
-          github-token: ${{ github.token }}
-          path: release-input/win32-x64
-      - uses: actions/download-artifact@v4
-        with:
-          name: crabot-linux-x64-deb-test-45ac91532d4308c48ec936f4149d7d56ef437eec
-          run-id: 42753456320
-          github-token: ${{ github.token }}
-          path: release-input/linux-x64
-      - name: Verify exact source, version, manifests and final bytes before draft upload
-        shell: bash
-        run: |
           python3 - <<'PY'
-          import json, hashlib, shutil
+          import datetime,hashlib,json,os,re,subprocess,tempfile,urllib.request,urllib.parse
           from pathlib import Path
-          source='45ac91532d4308c48ec936f4149d7d56ef437eec'; version='0.1.0-desktop.25'
-          out=Path('release-out'); out.mkdir()
-          rows=[]
-          targets=[('darwin-arm64','darwin','arm64','*.dmg',42750399454),('darwin-x64','darwin','x64','*.dmg',42750404481),('win32-x64','win32','x64','*.exe',42750408813),('linux-x64','linux','x64','*.deb',42753456320)]
-          def only(root,pattern):
-            values=list(root.rglob(pattern)); assert len(values)==1,(root,pattern,values); return values[0]
-          def digest(file):
-            with file.open('rb') as stream:return hashlib.file_digest(stream,'sha256').hexdigest()
-          for target,platform,arch,pattern,run in targets:
-            root=Path('release-input')/target; package=only(root,pattern)
-            assert package.name.startswith('Crabot-'+version+'-') and 'candidate' in package.name
-            assert package.is_file() and not package.is_symlink()
-            sha=digest(package); size=package.stat().st_size
-            if platform=='linux':
-              provenance=json.loads(only(root,'source.json').read_text()); assert provenance=={'commit':source,'version':version}
-              accepted=json.loads(only(root,'acceptance.json').read_text())
-              assert accepted['package_source']==source and accepted['version']==version
-              assert any(item.get('name')=='stop_overwrite_remove_reinstall_preserves_data_and_admin_configuration' and item.get('passed') for item in accepted['checks'])
+          tag='v2026.11.10.1'; source='45ac91532d4308c48ec936f4149d7d56ef437eec'; public=os.environ['VERIFY_PUBLIC']=='true'
+          def gh(*args):return subprocess.check_output(['gh',*args],text=True)
+          runs=[42750399454,42750404481,42750408813,42753456320,42753460891,42761472005]
+          for run in runs:assert gh('run','view',str(run),'--repo','smilefufu/crabot','--json','conclusion','--jq','.conclusion').strip()=='success',run
+          releases=json.loads(gh('api','repos/smilefufu/crabot/releases'))
+          release=next(v for v in releases if v['tag_name']==tag)
+          assert release['draft']==(not public) and release['prerelease'] is False
+          if public:assert json.loads(gh('api','repos/smilefufu/crabot/releases/latest'))['tag_name']==tag
+          desktop=['Crabot-0.1.0-desktop.25-mac-arm64-candidate.dmg','Crabot-0.1.0-desktop.25-mac-x64-candidate.dmg','Crabot-0.1.0-desktop.25-win-x64-offline-candidate.exe','Crabot-0.1.0-desktop.25-linux-amd64-candidate.deb']
+          cli=['crabot-'+tag+'-'+platform+extension for platform,extension in [('darwin-arm64','.tar.gz'),('darwin-x64','.tar.gz'),('linux-x64','.tar.gz'),('windows-x64','.zip')]]
+          packages=desktop+cli; expected=set(packages+[name+'.sha256' for name in packages]+['desktop.25-verification.json'])
+          assets={item['name']:item for item in release['assets']};assert set(assets)==expected,sorted(set(assets)^expected)
+          results={}; small={}
+          for name,asset in sorted(assets.items()):
+            assert asset['state']=='uploaded' and asset['size']>0,name
+            digest=hashlib.sha256(); size=0; keep=bytearray(); status=None
+            url='https://github.com/smilefufu/crabot/releases/download/'+tag+'/'+urllib.parse.quote(name)
+            if public:
+              with urllib.request.urlopen(url,timeout=120) as response:
+                status=response.status;assert status==200,(name,status)
+                while chunk:=response.read(1024*1024):
+                  digest.update(chunk);size+=len(chunk)
+                  if name.endswith(('.sha256','.json')):keep.extend(chunk);assert len(keep)<512*1024
             else:
-              provenance=json.loads(only(root,'runtime-footprint.json').read_text())
-              assert (provenance['commit'],provenance['platform'],provenance['arch'])==(source,platform,arch)
-              log=only(root,'final-dmg-boot.log' if platform=='darwin' else 'windows-payload-boot.log').read_text()
-              accepted=[json.loads(line.split('CRABOT_PACKAGED_BOOT ',1)[1]) for line in log.splitlines() if line.startswith('CRABOT_PACKAGED_BOOT ')]
-              assert len(accepted)==1 and accepted[0]['platform']==platform and accepted[0]['arch']==arch
-              for key in ['packaged_asar_native_auth','installed_core_shared_with_cli','gui_crash_preserves_core','reattach_same_generation','cli_stop_stays_stopped','outside_checkout','registered_bundled_cli']:assert accepted[0][key] is True,key
-              sums=only(root,'SHA256SUMS').read_text().splitlines()
-              assert sha+'  '+package.name in sums
-            manifest=json.loads(only(root,'artifacts.json' if platform=='win32' else 'installers.json').read_text())
-            assert manifest['candidate_only'] is True and manifest['release_signed'] is False
-            if platform=='win32':
-              assert package.name in manifest['files']
-            else:
-              assert (manifest['version'],manifest['platform'],manifest['arch'])==(version,platform,arch)
-              entries=[item for item in manifest['files'] if item['file']==package.name]
-              assert len(entries)==1 and entries[0]['sha256']==sha and entries[0]['bytes']==size
-            shutil.copyfile(package,out/package.name)
-            (out/(package.name+'.sha256')).write_text(sha+'  '+package.name+'\n')
-            rows.append({'target':target,'file':package.name,'bytes':size,'sha256':sha,'source_commit':source,'native_acceptance_run':run})
-          receipt={'tag':'v2026.11.10.1','desktop_version':version,'source_commit':source,'candidate_only':True,'release_signed':False,'environment':'Native GitHub CI. Real-user OS trust prompts, GNOME/Wayland and real model business use are not represented.','https_scope_diagnostic_run':42759268758,'known_limitations':['On the tested macOS15 host, static make_request to example.com fails with its default system CA; browser fetch/stealthy_fetch succeed. All three tools succeed for GitHub, Python docs and Baidu. Product trust policy unchanged.'],'files':rows}
-          (out/'desktop.25-verification.json').write_text(json.dumps(receipt,ensure_ascii=False,indent=2)+'\n')
-          print(json.dumps(receipt,ensure_ascii=False,indent=2))
+              with tempfile.TemporaryDirectory(prefix='release-asset-') as directory:
+                subprocess.run(['gh','release','download',tag,'--repo','smilefufu/crabot','--pattern',name,'--dir',directory],check=True,timeout=1200)
+                with (Path(directory)/name).open('rb') as stream:
+                  while chunk:=stream.read(1024*1024):
+                    digest.update(chunk);size+=len(chunk)
+                    if name.endswith(('.sha256','.json')):keep.extend(chunk);assert len(keep)<512*1024
+            sha=digest.hexdigest();assert size==asset['size'],name
+            assert asset['digest']=='sha256:'+sha,(name,'GitHub digest mismatch')
+            results[name]={'bytes':size,'sha256':sha,'http_status':status,'url':url if public else None}
+            if keep:small[name]=bytes(keep)
+            print('ASSET_VERIFIED '+json.dumps({'name':name,**results[name]}),flush=True)
+          for name in packages:
+            match=re.fullmatch(r'([0-9a-fA-F]{64})(?:\s+\*?(.+))?',small[name+'.sha256'].decode('utf-8-sig').strip())
+            assert match and match[1].lower()==results[name]['sha256'],name
+            assert match[2] is None or match[2]==name,name
+          desktop_receipt=json.loads(small['desktop.25-verification.json'])
+          assert desktop_receipt['source_commit']==source and desktop_receipt['desktop_version']=='0.1.0-desktop.25'
+          assert {item['file'] for item in desktop_receipt['files']}==set(desktop)
+          for item in desktop_receipt['files']:assert (item['sha256'],item['bytes'])==(results[item['file']]['sha256'],results[item['file']]['bytes'])
+          receipt={'tag':tag,'source_commit':source,'phase':'public' if public else 'draft','verified_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'native_acceptance_runs':runs,'mac_cli_ci_trust':'Explicit CURL_CA_BUNDLE with unchanged locked certifi; original default-host example.com static TLS failure retained in release notes and diagnostic42759268758. Product default trust unchanged.','assets':results}
+          output=Path('release-public-verification.json' if public else 'release-draft-verification.json')
+          output.write_text(json.dumps(receipt,ensure_ascii=False,indent=2)+'\n')
+          print('RELEASE_VERIFIED '+json.dumps({'phase':receipt['phase'],'tag':tag,'packages':len(packages),'assets':len(results),'source':source}),flush=True)
           PY
-      - name: Add exact validated desktop packages to the existing draft
-        shell: bash
-        run: |
-          test "$(gh release view v2026.11.10.1 --repo smilefufu/crabot --json isDraft --jq .isDraft)" = true
-          gh release upload v2026.11.10.1 release-out/* --repo smilefufu/crabot
       - uses: actions/upload-artifact@v4
         with:
-          name: desktop.25-release-verification
-          path: release-out/desktop.25-verification.json
+          name: release-${{ inputs.public && 'public' || 'draft' }}-verification
+          path: release-*-verification.json
           if-no-files-found: error
