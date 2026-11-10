@@ -7,7 +7,7 @@ on:
         type: boolean
         default: false
 permissions:
-  contents: read
+  contents: write
   actions: read
 jobs:
   verify:
@@ -32,7 +32,9 @@ jobs:
           runs=[42750399454,42750404481,42750408813,42753456320,42753460891,42761472005]
           for run in runs:assert gh('run','view',str(run),'--repo','smilefufu/crabot','--json','conclusion','--jq','.conclusion').strip()=='success',run
           releases=json.loads(gh('api','repos/smilefufu/crabot/releases'))
-          release=next(v for v in releases if v['tag_name']==tag)
+          matches=[v for v in releases if v['tag_name']==tag]
+          assert len(matches)==1,'Expected one tagged release visible to this token; draft access requires repository write permission'
+          release=matches[0]
           assert release['draft']==(not public) and release['prerelease'] is False
           if public:assert json.loads(gh('api','repos/smilefufu/crabot/releases/latest'))['tag_name']==tag
           desktop=['Crabot-0.1.0-desktop.25-mac-arm64-candidate.dmg','Crabot-0.1.0-desktop.25-mac-x64-candidate.dmg','Crabot-0.1.0-desktop.25-win-x64-offline-candidate.exe','Crabot-0.1.0-desktop.25-linux-amd64-candidate.deb']
