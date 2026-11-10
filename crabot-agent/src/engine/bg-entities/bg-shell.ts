@@ -11,6 +11,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { promisify } from 'node:util'
+import { pipeline } from 'node:stream/promises'
 import { getBgEntitiesLogsDir } from '../../core/data-paths.js'
 import { buildChildEnv } from '../../core/runtime-env.js'
 import { resolveBashPath, BASH_NOT_FOUND_MESSAGE } from '../../utils/resolve-bash-path.js'
@@ -364,6 +365,19 @@ async function readFileQuiet(file: string): Promise<string> {
   }
 }
 
+async function retainMissingBackgroundOutput(logFile: string, stdoutFile: string, stderrFile: string): Promise<void> {
+  const [log, stdout, stderr] = await Promise.all([logFile, stdoutFile, stderrFile].map(file => fs.promises.stat(file)))
+  if (log.size >= stdout.size + stderr.size) return
+  // The polling tails may exit before their final read. Their stream order cannot be reconstructed;
+  // retain labelled snapshots, including possible overlap, rather than silently discard known output.
+  await fs.promises.appendFile(logFile, '\n[capture recovery: complete stream snapshots; may overlap preceding output]\n')
+  for (const [label, file] of [['stdout', stdoutFile], ['stderr', stderrFile]]) {
+    await fs.promises.appendFile(logFile, `[${label}]\n`)
+    await pipeline(fs.createReadStream(file), fs.createWriteStream(logFile, { flags: 'a' }))
+    await fs.promises.appendFile(logFile, '\n')
+  }
+}
+
 /**
  * 统一 shell 执行：命令从 spawn 起就 OS 直写磁盘日志（detached + sentinel），前台宽限
  * `gracePeriodMs`。
@@ -477,8 +491,11 @@ async function startShellWithGrace(opts: RunShellWithGraceOpts): Promise<RunShel
     const exitedAt = Date.now()
     const runtimeMs = exitedAt - spawnedAtMs
     await registeredPromise
+    let outputRetained = false
     try {
       const resources = await finishToolResources(child)
+      await retainMissingBackgroundOutput(logFile, stdoutFile, stderrFile)
+      outputRetained = true
       const failure = resourceFailure(resources)
       if (failure) await fs.promises.appendFile(logFile, `\n${failure}\n`)
       const observedStatus: 'completed' | 'failed' = exitCode === 0 && !failure ? 'completed' : 'failed'
@@ -515,10 +532,12 @@ async function startShellWithGrace(opts: RunShellWithGraceOpts): Promise<RunShel
         }
       }
     } finally {
-      await unlinkQuiet(stdoutFile)
-      await unlinkQuiet(stderrFile)
-      await unlinkQuiet(stdoutFifo)
-      await unlinkQuiet(stderrFifo)
+      if (outputRetained) {
+        await unlinkQuiet(stdoutFile)
+        await unlinkQuiet(stderrFile)
+        await unlinkQuiet(stdoutFifo)
+        await unlinkQuiet(stderrFifo)
+      }
     }
   }
 

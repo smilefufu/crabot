@@ -6,19 +6,21 @@
  */
 import React from 'react'
 import { MemoryRouter } from 'react-router-dom'
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Chat } from './index'
-import type { ChatMessage, ChatServerMessage } from '../../types/chat'
+import type { ChatMessage, ChatServerMessage, ConnectionStatus } from '../../types/chat'
 import { ClientError } from 'crabot-client'
 import { setServerScope } from '../../services/server-state'
 
 const loadHistory = vi.fn()
 const sendMessage = vi.fn()
+const sendMessageWithAttachments = vi.fn()
+const clearMessages = vi.fn()
 const getTaskSnapshot = vi.fn()
 const toastMocks = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), info: vi.fn() }))
 let messageHandler: ((m: ChatServerMessage) => void) | null = null
-let statusHandler: ((s: 'connected') => void) | null = null
+let statusHandler: ((s: ConnectionStatus) => void) | null = null
 let persistedMessages: ChatMessage[] = []
 let nextRequestId = 'keyboard-request'
 vi.mock('crabot-client', async () => ({
@@ -38,7 +40,7 @@ vi.mock('../../services/chat', () => ({
   chatService: {
     get status() { return 'connected' },
     connect: vi.fn(),
-    onStatusChange: (handler: (s: 'connected') => void) => {
+    onStatusChange: (handler: (s: ConnectionStatus) => void) => {
       statusHandler = handler
       return () => { statusHandler = null }
     },
@@ -48,10 +50,10 @@ vi.mock('../../services/chat', () => ({
     },
     loadHistory: (...args: unknown[]) => loadHistory(...args),
     sendMessage: (...args: unknown[]) => sendMessage(...args),
-    sendMessageWithAttachments: vi.fn(),
+    sendMessageWithAttachments: (...args: unknown[]) => sendMessageWithAttachments(...args),
     getTaskSnapshot: (...args: unknown[]) => getTaskSnapshot(...args),
     deleteMessage: vi.fn(),
-    clearMessages: vi.fn(),
+    clearMessages: (...args: unknown[]) => clearMessages(...args),
     mediaSrc: (u: string) => u,
   },
 }))
@@ -64,6 +66,8 @@ beforeAll(() => {
     disconnect() {}
   }
   Element.prototype.scrollIntoView = vi.fn()
+  URL.createObjectURL = vi.fn(() => 'blob:test')
+  URL.revokeObjectURL = vi.fn()
 })
 
 /** 渲染并发送一条消息，返回它的 request_id */
@@ -116,13 +120,15 @@ describe('Master Chat 无占位追加流与已接收标记', () => {
     persistedMessages = []
     loadHistory.mockImplementation(async (limit = 30, before?: string) => [...persistedMessages].filter(message => !before || message.timestamp < before).sort((a, b) => b.timestamp.localeCompare(a.timestamp)).slice(0, limit))
     getTaskSnapshot.mockResolvedValue(null)
+    clearMessages.mockResolvedValue(undefined)
   })
 
-  it('发送后只显示用户消息，无「思考中」占位', async () => {
+  it('发送后显示临时思考提示，不添加 assistant 占位消息', async () => {
     await renderAndSend('req-1')
 
     expect(screen.getByText('帮我看下这个')).toBeInTheDocument()
-    expect(screen.queryByText('思考中...')).not.toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('Crabot 思考中…')
+    expect(document.querySelector('[data-msg-role="assistant"]')).toBeNull()
   })
 
   it('HTTP 发送结果未知时保留草稿，原样重试复用 request_id 且只显示一个服务端 UUID', async () => {
@@ -175,6 +181,7 @@ describe('Master Chat 无占位追加流与已接收标记', () => {
 
     expect(screen.getByText('帮我看下这个')).toBeInTheDocument()
     expect(screen.getByText('看完了，结论是这样')).toBeInTheDocument()
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
   })
 
   it('一轮多条回复：全部追加，互不覆盖', async () => {
@@ -197,6 +204,7 @@ describe('Master Chat 无占位追加流与已接收标记', () => {
     })
 
     expect(screen.getByText('我这条消息没处理完，暂时回不了你。')).toBeInTheDocument()
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
   })
 
   it('chat_error 以 toast 提示，不改写消息流', async () => {
@@ -205,6 +213,7 @@ describe('Master Chat 无占位追加流与已接收标记', () => {
 
     expect(toastMocks.error).toHaveBeenCalledWith('系统暂时不可用，请稍后重试')
     expect(screen.getByText('帮我看下这个')).toBeInTheDocument()
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
   })
 
   it('chat_message_acked 后用户消息出现已接收标记；发送后先无标记', async () => {
@@ -216,6 +225,7 @@ describe('Master Chat 无占位追加流与已接收标记', () => {
     await push({ type: 'chat_message_acked', request_ids: ['req-6'] })
 
     expect(screen.getByTitle(/已接收/)).toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('Crabot 思考中…')
   })
 
   it('chat_message_acked 对不上的 request_id：不误标别人的消息', async () => {
@@ -269,6 +279,104 @@ describe('Master Chat 无占位追加流与已接收标记', () => {
     const user = screen.getByText('帮我看下这个')
     const reply = screen.getByText('回复先到了')
     expect(user.compareDocumentPosition(reply) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('主动推送不收起等待，多请求乱序回复只收起显式关联的请求', async () => {
+    await renderAndSend('req-first')
+    nextRequestId = 'req-second'
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: '还有另一件事' } })
+    await act(async () => { fireEvent.click(screen.getByText('发送')) })
+    await push(assistantPush('主动提醒'))
+    await push(assistantPush('第二件事办好了', 'req-second'))
+    expect(screen.getByRole('status')).toHaveTextContent('Crabot 思考中…')
+    await push(assistantPush('第一件事办好了', 'req-first'))
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  })
+
+  it('一次回复关联多个 request_ids 时全部收起，数组优先于历史单 ID', async () => {
+    await renderAndSend('req-batch-1')
+    nextRequestId = 'req-batch-2'
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: '第二条' } })
+    await act(async () => { fireEvent.click(screen.getByText('发送')) })
+    const reply = assistantPush('统一答复', 'req-unrelated')
+    if (reply.type !== 'chat_push') throw new Error('Expected chat_push')
+    reply.message.request_ids = ['req-batch-1', 'req-batch-2']
+    await push(reply)
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  })
+
+  it('断连切换为静态提示，重连通过历史显式关联收起等待', async () => {
+    await renderAndSend('req-disconnect')
+    await act(async () => { statusHandler!('disconnected') })
+    expect(screen.getByRole('status')).toHaveTextContent('连接中断，回复状态暂无法确认')
+    expect(document.querySelector('[data-thinking="true"]')).toBeNull()
+    const reply = assistantPush('断连期间的答复', 'req-disconnect')
+    if (reply.type !== 'chat_push') throw new Error('Expected chat_push')
+    persistedMessages.push(reply.message)
+    await act(async () => { statusHandler!('connected') })
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  })
+
+  it('无归属错误改为静态未知状态，不猜测结算；对应回复仍可收起', async () => {
+    await renderAndSend('req-unknown')
+    await push({ type: 'chat_error', error: '连接异常' })
+    expect(screen.getByRole('status')).toHaveTextContent('回复状态暂无法确认')
+    expect(document.querySelector('[data-thinking="true"]')).toBeNull()
+    await push(assistantPush('迟到答复', 'req-unknown'))
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  })
+
+  it('附件上传期间立即反馈，回复先于 HTTP 返回时不重新显示思考提示', async () => {
+    let resolve!: (value: unknown) => void
+    sendMessageWithAttachments.mockImplementation(() => new Promise(done => { resolve = done }))
+    nextRequestId = 'req-upload'
+    render(<MemoryRouter><Chat /></MemoryRouter>)
+    await waitFor(() => expect(loadHistory).toHaveBeenCalled())
+    fireEvent.change(document.querySelector('input[type="file"]')!, {
+      target: { files: [new File(['hello'], 'test.txt', { type: 'text/plain' })] },
+    })
+    fireEvent.click(screen.getByText('发送'))
+    expect(screen.getByRole('status')).toHaveTextContent('正在发送…')
+    expect(screen.queryByText('Crabot 思考中…')).not.toBeInTheDocument()
+    await push(assistantPush('文件收到了', 'req-upload'))
+    await act(async () => { resolve({ message: {
+      message_id: 'upload-user', role: 'user', content: { type: 'file', text: '' }, request_id: 'req-upload', timestamp: new Date().toISOString(),
+    } }) })
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  })
+
+  it('发送失败不留下动态提示并保留草稿', async () => {
+    sendMessage.mockRejectedValueOnce(new Error('rejected'))
+    await renderAndSend('req-rejected')
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    expect(screen.getByRole('textbox')).toHaveValue('帮我看下这个')
+    expect(toastMocks.error).toHaveBeenCalledWith(expect.stringContaining('发送失败'))
+  })
+
+  it('首次加载历史中的未回复消息不恢复思考提示', async () => {
+    persistedMessages.push({ message_id: 'old-user', role: 'user', content: { type: 'text', text: '旧消息' }, request_id: 'old-request', timestamp: new Date().toISOString() })
+    render(<MemoryRouter><Chat /></MemoryRouter>)
+    await screen.findByText('旧消息')
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  })
+
+  it('其他请求的错误不误收起等待，删除当前用户消息后收起', async () => {
+    await renderAndSend('req-delete')
+    await push({ type: 'chat_error', request_id: 'req-other', error: '别的请求失败' })
+    expect(screen.getByRole('status')).toHaveTextContent('Crabot 思考中…')
+    persistedMessages = []
+    await push({ type: 'chat_message_deleted', message_id: 'srv-user-req-delete' })
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  })
+
+  it('清空失败保留等待提示，清空成功才收起', async () => {
+    await renderAndSend('req-clear')
+    clearMessages.mockRejectedValueOnce(new Error('clear failed'))
+    fireEvent.click(screen.getByTitle('清空聊天记录'))
+    await act(async () => { fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '清空' })) })
+    expect(screen.getByRole('status')).toHaveTextContent('Crabot 思考中…')
+    await act(async () => { fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '清空' })) })
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
   })
 })
 
