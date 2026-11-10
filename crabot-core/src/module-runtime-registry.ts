@@ -13,10 +13,8 @@ const { probeProcessStartIdentity: probeModuleStartIdentity } = require('../../s
   probeProcessStartIdentity: (pid: number) => Promise<string | null>
 }
 
-const SCHEMA_VERSION = 1
-
 export interface ModuleRuntimeRecord {
-  schema_version: typeof SCHEMA_VERSION
+  schema_version: 1 | 2
   instance_id: string
   runtime_id: string
   module_id: string
@@ -185,14 +183,14 @@ export function formatOrphanTerminationCandidate(candidate: OrphanTerminationCan
 function isRuntimeRecord(value: unknown): value is ModuleRuntimeRecord {
   if (!value || typeof value !== 'object') return false
   const record = value as Partial<ModuleRuntimeRecord>
-  return record.schema_version === SCHEMA_VERSION
+  return (record.schema_version === 1 && record.rpc_transport === undefined
+    || record.schema_version === 2 && ['ipc', 'pipe'].includes(record.rpc_transport ?? ''))
     && typeof record.instance_id === 'string'
     && typeof record.runtime_id === 'string'
     && typeof record.module_id === 'string'
     && Number.isInteger(record.root_pid) && (record.root_pid ?? 0) > 0
     && typeof record.process_start_identity === 'string'
     && Number.isInteger(record.module_port) && (record.module_port ?? 0) > 0
-    && (record.rpc_transport === undefined || ['ipc', 'pipe'].includes(record.rpc_transport))
     && typeof record.created_at === 'string'
 }
 
@@ -251,7 +249,7 @@ export class ModuleRuntimeRegistry {
       throw new Error(`Cannot capture process start identity for module ${input.moduleId} PID ${input.rootPid}`)
     }
     const record: ModuleRuntimeRecord = {
-      schema_version: SCHEMA_VERSION,
+      schema_version: input.rpcTransport ? 2 : 1,
       instance_id: this.getInstanceId(),
       runtime_id: input.runtimeId,
       module_id: input.moduleId,

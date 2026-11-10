@@ -11,11 +11,12 @@ function readInstanceRuntime(dataDir) {
   try { record = JSON.parse(readFileSync(file, 'utf8')) } catch { fail('运行记录损坏；保留现场，请打开诊断。') }
   const validProcess = process => process && Number.isSafeInteger(process.pid) && process.pid > 0
     && ['owner', 'started', 'executable'].every(key => typeof process[key] === 'string' && process[key])
-  if (record?.schema_version !== 1 || !/^[a-f0-9]{64}$/.test(record.instance_id)
+  const validVersion = record?.schema_version === 1 && record.control_transport === undefined
+    || record?.schema_version === 2 && record.control_transport === 'pipe'
+  if (!validVersion || !/^[a-f0-9]{64}$/.test(record.instance_id)
     || !/^[a-f0-9-]{36}$/.test(record.generation) || typeof record.data_dir !== 'string'
     || typeof record.install_root !== 'string' || !validProcess(record.controller)
     || (record.mm !== null && !validProcess(record.mm))
-    || record.control_transport !== undefined && record.control_transport !== 'pipe'
     || !Number.isInteger(record.mm_port) || record.mm_port < 1 || record.mm_port > 65535) fail('运行记录格式不兼容；未终止任何进程。')
   if (record.data_dir !== realpathSync(dataDir)) fail('运行记录的数据目录不匹配。')
   return record

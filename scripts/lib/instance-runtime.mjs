@@ -41,7 +41,7 @@ export function createInstanceRuntime({ dataDir, root, controllerPid = process.p
   const existing = inspectInstance(dataDir)
   if (existing.state !== 'stopped') fail('实例已运行；不能覆盖现有启动记录。')
   const record = {
-    schema_version: 1,
+    schema_version: 2,
     instance_id: createHash('sha256').update(controller.owner + '\0' + dataDir).digest('hex'),
     generation, data_dir: dataDir, install_root: realpathSync(root),
     controller, mm: null, mm_port: mmPort, control_transport: 'pipe',

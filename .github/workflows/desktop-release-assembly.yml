@@ -62,7 +62,7 @@ jobs:
         timeout-minutes: 5
         env:
           UV_THREADPOOL_SIZE: '8'
-        run: node --test --test-concurrency=1 scripts/lib/__tests__/background-core.test.mjs scripts/lib/__tests__/instance-runtime.test.mjs
+        run: node --test --test-concurrency=1 scripts/lib/__tests__/background-core.test.mjs scripts/lib/__tests__/instance-runtime.test.mjs scripts/lib/__tests__/instance-runtime-write.test.mjs experiments/cordis-feishu/legacy-compatibility-repro.test.mjs
       - name: Verify original sealed CLI routing, installation compatibility and staging imports
         run: node --test --test-concurrency=1 scripts/lib/__tests__/stage-core-imports.test.mjs scripts/lib/__tests__/desktop-cli-install.test.mjs scripts/lib/__tests__/desktop-update-entry.test.mjs scripts/lib/__tests__/installer-compat.test.mjs
       - name: Verify actual startup entry contracts and original upgrade boundaries

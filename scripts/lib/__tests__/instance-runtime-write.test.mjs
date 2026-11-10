@@ -76,3 +76,20 @@ test('an unrelated Windows I/O failure is returned immediately without another r
   assert.equal(attempts, 1); assert.deepEqual(fs.readFileSync(f.file), f.before)
   assert.deepEqual(fs.readdirSync(f.root), ['instance-runtime.json', 'mm.pid'])
 })
+
+
+test('runtime versions distinguish new pipe records from upgrade-time HTTP records', async t => {
+  const f = await fixture(t)
+  assert.equal(f.record.schema_version, 2)
+  assert.equal(f.record.control_transport, 'pipe')
+  const legacy = { ...f.record, schema_version: 1 }
+  delete legacy.control_transport
+  fs.writeFileSync(f.file, JSON.stringify(legacy))
+  assert.deepEqual(readInstanceRuntime(f.root), legacy)
+  for (const [schema_version, control_transport] of [[1, 'pipe'], [2, undefined], [2, 'http'], [3, 'pipe']]) {
+    const bytes = JSON.stringify({ ...f.record, schema_version, control_transport })
+    fs.writeFileSync(f.file, bytes)
+    assert.throws(() => readInstanceRuntime(f.root), { code: 'CRABOT_INSTANCE_UNVERIFIED' })
+    assert.equal(fs.readFileSync(f.file, 'utf8'), bytes)
+  }
+})

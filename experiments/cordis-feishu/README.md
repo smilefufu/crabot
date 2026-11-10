@@ -1,6 +1,6 @@
 # Cordis 完整实例验证
 
-本目录保存单端口迁移的临时数据复现。产品入口已接入真实 Core/Admin/Agent/Memory、Cordis 飞书和实例级 npm 安装；现有部署不变。全部外部业务验证使用合成账号与本地平台/模型夹具，不能冒充真人飞书扫码或真实模型能力验收。当前不发布 npm、不部署、不提未完成 PR。
+本目录保存单端口迁移的临时数据复现。产品入口已接入真实 Core/Admin/Agent/Memory、Cordis 飞书和实例级 npm 安装；现有部署不变。全部外部业务验证使用合成账号与本地平台/模型夹具，不能冒充真人飞书扫码或真实模型能力验收。用户已授权先发布 npm 候选包；不部署现有实例、不提未完成 PR。
 
 ## 已有证据
 
@@ -32,16 +32,14 @@ node --test experiments/cordis-feishu/product-e2e.test.mjs
 
 首轮干净提交 `9b08cc26` 的 macOS ARM 候选已构建并解包核验：29,863 个清单文件、展开 1,145,223,367 B；tar.gz 445,021,546 B，SHA-256 `438f8728d4b9e2d440dba4e4c7f1a7b8bc06a4d090c682d8d0029be07c363d60`。正常实例、真实 CLI 启停及 npm 扫码/真实 Agent 合成收发 3/3 通过，运行后 seal 清单不变。最终修正后仍需重建候选；不同资源或构建格式的旧发行不能直接拿来计算瘦身比例。
 
-通过 `CORDIS_CORE_ROOT=<解包后的Core根>` 可把正常实例、CLI 和完整收发夹具指向实际发行目录。主包飞书目录仅有 package.json / crabot-module.yaml，共 3,918 B；安装后的完整插件依赖约 40 MiB，缓存另计。已准备 `CORDIS_PUBLIC_NPM=1` 的真实公开源安装验证入口，届时不会替换安装器，也不使用离线 tarball/cache 注入；平台与 Provider 仍只用合成数据。公共包未发布，目前不能执行这项验收。
+通过 `CORDIS_CORE_ROOT=<解包后的Core根>` 可把正常实例、CLI 和完整收发夹具指向实际发行目录。主包飞书目录仅有 package.json / crabot-module.yaml，共 3,918 B；安装后的完整插件依赖约 40 MiB，缓存另计。已准备 `CORDIS_PUBLIC_NPM=1` 的真实公开源安装验证入口，届时不会替换安装器，也不使用离线 tarball/cache 注入；平台与 Provider 仍只用合成数据。已首次公开发布 `crabot-channel-feishu@0.1.0`，标签 `cordis-validation`；官方与国内镜像元数据完整性一致。公开包模式端到端 1/1 通过（29.5 秒）：全新临时实例从正式扫码入口触发真实国内源安装，不替换安装器、不注入 tarball 或缓存；安装来源断言、真实 Agent 合成收发及完整进程树单 Web 监听均通过。日志 `/private/tmp/crabot-cordis-public-npm-e2e-20261110.tap`。
 
 [四平台整组 CI](https://github.com/smilefufu/crabot/actions/runs/42772577876) 已全通过（提交 `025907a5`）：Windows、Linux、Mac ARM / Intel。覆盖 Windows 实际私有 ACL、超过 64 KiB 的帧、超过原握手期限的调用和慢读端背压、真实 Voice 子进程退出、Core IPC、完整停机等待、后台维护与启动/升级入口。生产请求期限与生命周期保持；八个 libuv worker 仅用于同进程承载多个管道两端的测试夹具。
 
 ## 未完成及发布边界
 
-Core 全量 572 项通过、16 项平台跳过；Shared 379/2skip、飞书 292、Memory 34、语音 55 通过。真实 CLI init/start/status/check/stop、独立 Electron ASAR / Node 维护包和 Voice 私有管道验证已通过。Admin 两条静态文档断言在未改动基线同样失败，其他隔离定向回归已通过；最终跨平台回归、最终候选重建与人工验收仍在收尾。当前 `crabot-channel-feishu@0.1.0` 在官方 npm 和国内镜像均返回 404，不能把本地 tarball 验证说成公共 npm 已可安装。在正式包发布与国内镜像可用之前，不能合入/发行依赖它的半成品。未获发布授权，未新增 npm 自动发布 workflow；自动审批已拒绝该外部发布副作用。包发布、真人扫码/真实客户端验收和现有部署都需要分别确认，不能由本地模拟结果代替。
+Core 全量 572 项通过、16 项平台跳过；Shared 379/2skip、飞书 292、Memory 34、语音 55 通过。真实 CLI init/start/status/check/stop、独立 Electron ASAR / Node 维护包和 Voice 私有管道验证已通过。Admin 两条静态文档断言在未改动基线同样失败，其他隔离定向回归已通过；最终跨平台回归、最终候选重建与人工验收仍在收尾。用户已明确授权并完成 npm 登录 / 2FA，飞书候选 0.1.0 已发布且在国内可安装；未新增自动发布 workflow。真人扫码/真实客户端验收与现有部署仍分别记录，不能由本地模拟结果代替。
 
 不新增停用状态机、任务排空、强杀期限、HMR 或其它 Channel 批量 npm 化；不改变 Provider 直连与配置引用语义。
 
-旧 HTTP 读取器会忽略新运输字段并接受当前 v1 记录；应拒绝新记录的实际旧读取器回归已复现失败。拟采用新瞬时运行记录 v2、新读取器兼容旧 HTTP v1、旧工具明确拒绝新实例的方案；见 `crabot-docs/superpowers/specs/2026-11-10-cordis-runtime-record-compatibility-design.md`。自动审批已拒绝直接修改持久化格式，等待用户确认；当前未改正式协议或实现，不把候选视为可合入版本。
-
-`legacy-compatibility-repro.test.mjs` 保存待确认兼容方案的红色复现，使用从原版 `45ac9153` 原样提取的实际读取器；当前预期失败，不能算通过或被遗漏的默认回归。运行方式：`node --test experiments/cordis-feishu/legacy-compatibility-repro.test.mjs`。未据此擅自修改正式协议、运行记录或恢复实现。
+新实例和模块记录使用版本 2，CLI / 桌面与实例配套升级。新版只读取无运输字段的旧 HTTP v1 记录作升级前识别，旧程序明确拒绝新记录。`legacy-compatibility-repro.test.mjs` 使用原版 `45ac9153` 的真实读取器，已从红色复现转为通过，并验证拒绝后记录字节保持不变。运行记录写入与版本组合 8 项、模块登记 / 孤儿保护 26 项通过；运行记录控制回归 28 项通过、9 项平台跳过，workspace 门禁与恢复 11 项通过。正式行为见 `crabot-docs/superpowers/specs/2026-11-10-cordis-runtime-record-compatibility-design.md`。最终跨平台回归与干净候选仍待完成，不能视为已可合入。

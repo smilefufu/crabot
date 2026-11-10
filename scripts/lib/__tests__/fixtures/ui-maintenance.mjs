@@ -66,7 +66,7 @@ await fs.writeFile(path.join(root, 'controller.mjs'), prefix('controller') + `
 import{spawn}from'node:child_process';import{existsSync}from'node:fs';import{createInstanceRuntime,recordMmProcess}from ${JSON.stringify(url('scripts/lib/instance-runtime.mjs'))};
 const data=${JSON.stringify(path.join(root, 'data'))};const record=createInstanceRuntime({dataDir:data,root:${JSON.stringify(root)},mmPort:${port}});
 // This maintenance fixture intentionally exercises the legacy HTTP controller.
-delete record.control_transport;writeFileSync(${JSON.stringify(path.join(root, 'data/instance-runtime.json'))},JSON.stringify(record));
+record.schema_version=1;delete record.control_transport;writeFileSync(${JSON.stringify(path.join(root, 'data/instance-runtime.json'))},JSON.stringify(record));
 const mm=spawn(process.execPath,[${JSON.stringify(path.join(root, 'crabot-core/dist/main.js'))}],{stdio:'inherit'});
 ${mode === 'registration-delay' ? `const deadline=Date.now()+5000;while(!existsSync(${JSON.stringify(path.join(root, 'mm-listening'))})){if(Date.now()>deadline)throw new Error('fixture server did not listen');await new Promise(resolve=>setTimeout(resolve,25))}await new Promise(resolve=>setTimeout(resolve,400));` : ''}
 recordMmProcess(data,record.generation,mm.pid);

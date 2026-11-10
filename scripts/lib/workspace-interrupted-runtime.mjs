@@ -98,7 +98,7 @@ function observationValue(value, role, source) {
       || ['started', 'owner', 'executable'].some(key => typeof identity[key] !== 'string' || !identity[key] || identity[key].includes('\0'))
       || !exact(runtime, ['schema_version', 'instance_id', 'runtime_id', 'module_id', 'root_pid', 'process_start_identity', 'module_port', 'created_at', ...(runtime?.rpc_transport === undefined ? [] : ['rpc_transport'])])
       || runtime.rpc_transport !== undefined && !['ipc', 'pipe'].includes(runtime.rpc_transport)
-      || runtime.schema_version !== 1 || !uuid(runtime.instance_id) || !uuid(runtime.runtime_id) || !moduleName(runtime.module_id)
+      || (runtime.rpc_transport === undefined ? runtime.schema_version !== 1 : runtime.schema_version !== 2) || !uuid(runtime.instance_id) || !uuid(runtime.runtime_id) || !moduleName(runtime.module_id)
       || runtime.root_pid !== identity.pid || !Number.isInteger(runtime.module_port) || runtime.module_port < 1 || runtime.module_port > 65535
       || typeof runtime.process_start_identity !== 'string' || !runtime.process_start_identity || typeof runtime.created_at !== 'string'
       || new Date(runtime.created_at).toISOString() !== runtime.created_at || ids.has(runtime.module_id) || runtimes.has(runtime.runtime_id)) throw failure()
@@ -151,7 +151,7 @@ function runtimeValue(record, ctx, plan, moduleId) {
     || record.process.owner !== record.parent.owner || record.process.pid === record.parent.pid || record.process.executable !== record.parent.executable
     || !exact(runtime, ['schema_version', 'instance_id', 'runtime_id', 'module_id', 'root_pid', 'process_start_identity', 'module_port', 'created_at', ...(runtime?.rpc_transport === undefined ? [] : ['rpc_transport'])])
     || runtime.rpc_transport !== undefined && !['ipc', 'pipe'].includes(runtime.rpc_transport)
-      || runtime.schema_version !== 1 || runtime.instance_id !== plan.instance_id || runtime.runtime_id !== target.runtime_id
+      || (runtime.rpc_transport === undefined ? runtime.schema_version !== 1 : runtime.schema_version !== 2) || runtime.instance_id !== plan.instance_id || runtime.runtime_id !== target.runtime_id
     || runtime.module_id !== moduleId || runtime.module_port !== target.module_port || runtime.root_pid !== record.process.pid
     || typeof runtime.process_start_identity !== 'string' || !runtime.process_start_identity || typeof runtime.created_at !== 'string'
     || new Date(runtime.created_at).toISOString() !== runtime.created_at) throw failure()

@@ -5,9 +5,9 @@
 - 独立 worktree / `research/cordis-validation` 开发，不触及现有部署；完整验收通过后才提正式 PR。飞书保留 Cordis 单入口、添加仅现有扫码；身份、权限、会话、投递及已有生命周期保持。
 - 正式 Core main 已接通 Node IPC、Python Memory MessagePack 与 OS 核验的本地控制管道；真实 Admin/Agent/Memory 启动、仅 Web 监听、正常停机及运行记录清理通过。CLI 健康、后台启动和固定 runtime 连接回归通过；Windows 数值地址不再充当 listener 归属证据，未能核验的孤儿保留现场。
 - npm 已接入有效扫码 begin 和实例定义加载：精确版本、实例目录、持久缓存、国内 registry/CDN、不改全局配置、不自动转国外源。实际正式安装器空缓存国内源安装通过，安装失败/离线复用/源逃逸回归通过；sealed Core 与旧 Unix/Windows 发行均只保留飞书目录元数据，实际整包差额待构建计量。
-- 已通过 Core 全量 572/16skip、Shared 379/2skip、飞书 292、Memory 34、语音全量 55 及 Admin 定向回归；真实 CLI init/start/status/check/stop、独立 Electron ASAR 和 Node 维护包管道回归通过；当前继续完整全量/跨平台回归与最终人工验收；扫码→真实 Agent→本地模型工具回复、群聊/媒体/历史/飞书重启和 workspace durable IPC gate 均已通过。所有外部服务验证仅本地模拟与合成数据，尚未真人飞书/Provider 验收、未发布 npm、未部署；公共包/国内镜像仍为 404，发布授权是最终必要边界，不将组件通过当作交付。
+- 已通过 Core 全量 572/16skip、Shared 379/2skip、飞书 292、Memory 34、语音全量 55 及 Admin 定向回归；真实 CLI init/start/status/check/stop、独立 Electron ASAR 和 Node 维护包管道回归通过；当前继续完整全量/跨平台回归与最终人工验收；扫码→真实 Agent→本地模型工具回复、群聊/媒体/历史/飞书重启和 workspace durable IPC gate 均已通过。所有外部服务验证仅本地模拟与合成数据，尚未真人飞书/Provider 验收、未部署；用户授权先发布 npm 后，飞书 0.1.0 已用 cordis-validation 标签公开发布，官方与国内镜像一致。全新临时实例经正式扫码入口、正式安装器从国内源安装公开包并完成真实 Agent 合成收发 1/1 通过（不替换包来源 / 缓存）。不将模拟结果当作真人交付。
 - 首轮干净提交 `9b08cc26` 的 macOS ARM 发行归档已构建：压缩 445,021,546 B，清单展开 1,145,223,367 B；真实 CLI、正常实例及合成扫码/Agent 收发三项通过，解包与运行后清单均核验通过。最终修正完成后须重建候选；不能和不同构建格式的旧发行直接比较瘦身比例。
-- [复现与证据](experiments/cordis-feishu/README.md)：全进程树监听盘点通过；[四平台整组 CI](https://github.com/smilefufu/crabot/actions/runs/42772577876) 已全通过，包含 Windows 原生 ACL、大帧、长调用、慢读端、真实 Voice 退出、Core IPC、完整停机等待和后台维护流程。旧读取器接受新运输记录的问题已复现；兼容换版书面方案与 npm 首次发布均被自动审批要求先获明确确认，尚未实施/发布。
+- [复现与证据](experiments/cordis-feishu/README.md)：全进程树监听盘点通过；[四平台整组 CI](https://github.com/smilefufu/crabot/actions/runs/42772577876) 已全通过，包含 Windows 原生 ACL、大帧、长调用、慢读端、真实 Voice 退出、Core IPC、完整停机等待和后台维护流程。用户确认新版工具与实例配套升级后，已同步协议与记录 v2，原版旧读取器明确拒绝新记录的回归转绿，新增版本组合与进程保护回归通过；最终四平台复验与干净候选重建继续进行。
 
 ### v2026.11.10.1 与桌面 .25 公开预览（2026-11-10，未部署本机）
 

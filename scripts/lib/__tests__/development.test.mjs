@@ -86,7 +86,7 @@ test('developer status reports its own real health separately from process owner
     await Promise.race([once(child, 'message'), exited.then(() => { throw new Error('Finite health fixture exited before listening') })])
     record = createInstanceRuntime({ root, dataDir: data, mmPort: 29000 })
     recordMmProcess(data, record.generation, child.pid)
-    const legacy = readInstanceRuntime(data); delete legacy.control_transport
+    const legacy = readInstanceRuntime(data); legacy.schema_version = 1; delete legacy.control_transport
     writeFileSync(join(data, 'instance-runtime.json'), JSON.stringify(legacy))
     const status = await readDevelopmentStatus(root)
     assert.equal(status.state, 'running'); assert.equal(status.health, 'degraded')

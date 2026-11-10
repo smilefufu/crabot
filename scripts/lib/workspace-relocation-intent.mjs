@@ -2115,7 +2115,7 @@ function verifyFixedWorkspaceRuntime(fixed, directory) {
     if (!native.sameProcess(module.process, native.inspectProcess(module.process.pid))
       || !fields(runtime, ['schema_version', 'instance_id', 'runtime_id', 'module_id', 'root_pid', 'process_start_identity', 'module_port', 'created_at', ...(runtime?.rpc_transport === undefined ? [] : ['rpc_transport'])])
       || runtime.rpc_transport !== undefined && !['ipc', 'pipe'].includes(runtime.rpc_transport)
-      || runtime.schema_version !== 1 || runtime.instance_id !== fixed.root_proof.instance_id || runtime.runtime_id !== module.runtime_id
+      || (runtime.rpc_transport === undefined ? runtime.schema_version !== 1 : runtime.schema_version !== 2) || runtime.instance_id !== fixed.root_proof.instance_id || runtime.runtime_id !== module.runtime_id
       || runtime.module_id !== module.module_id || runtime.root_pid !== module.process.pid || runtime.module_port !== scope.module_port
       || !nonempty(runtime.process_start_identity) || !validDate(runtime.created_at)) fail()
   }
