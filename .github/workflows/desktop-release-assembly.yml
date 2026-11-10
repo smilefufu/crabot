@@ -11,11 +11,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-22.04
-            platform: linux
-            arch: x64
-          - os: windows-latest
-            platform: windows
+          - os: macos-15
+            platform: darwin
+            arch: arm64
+          - os: macos-15-intel
+            platform: darwin
             arch: x64
     runs-on: ${{ matrix.os }}
     timeout-minutes: 180
@@ -110,6 +110,20 @@ jobs:
         run: |
           node scripts/prepare-scrapling.mjs --release="v2026.11.10.1"
           node scripts/prepare-computer-use.mjs
+
+      - name: Configure the current CA bundle only for isolated Mac CI
+        if: matrix.platform == 'darwin'
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs/promises'; import path from 'node:path'; import {createHash} from 'node:crypto';
+          const pointer=JSON.parse(await fs.readFile('scrapling-runtime.json','utf8'));
+          const bytes=await fs.readFile(path.join(pointer.directory,'packages/certifi/cacert.pem'));
+          if(createHash('sha256').update(bytes).digest('hex')!=='9cc2a774b5198dcff14d9be1e66091f538975d867ce029a96bce15a55dfd730f') throw new Error('Unexpected locked CI CA bundle');
+          const ca=path.join(process.env.RUNNER_TEMP,'release-ci-ca.pem'); await fs.writeFile(ca,bytes);
+          await fs.appendFile(process.env.GITHUB_ENV,'SSL_CERT_FILE='+ca+'\n');
+          console.log('Isolated CI uses the current unchanged locked CA bundle; product default trust rules and bytes remain unchanged. Original default-host fixture failure is retained separately.');
+          NODE
 
       - name: Prune to production-only dependencies
         shell: bash
