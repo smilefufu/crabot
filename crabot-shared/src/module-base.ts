@@ -660,6 +660,19 @@ export abstract class ModuleBase {
     }
   }
 
+  /** Platform business only; the Cordis host owns transport, identity and shutdown. */
+  channelService() {
+    const methods = Object.fromEntries([...this.methodHandlers].filter(([method]) =>
+      !['health', 'get_runtime_identity', 'shutdown'].includes(method)))
+    return {
+      methods,
+      start: () => this.onStart(),
+      stop: () => this.stop(),
+      getHealthDetails: () => this.getHealthDetails(),
+      getHealthStatus: (details: Record<string, unknown>) => this.getHealthStatus(details),
+    }
+  }
+
   /**
    * 向 Module Manager 注册
    */

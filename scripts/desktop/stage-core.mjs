@@ -45,8 +45,7 @@ const nodeEnv = product.productEnvironment(runtime, path.join(root, '.desktop-bu
 const commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim()
 const sourceDirty = !!execFileSync('git', ['status', '--porcelain'], { cwd: root, encoding: 'utf8' }).trim()
 if (sourceDirty && options.get('--allow-dirty') !== 'true') throw new Error('Release staging requires committed sources; development candidates may use --allow-dirty=true')
-const modules = ['crabot-client', 'crabot-shared', 'crabot-core', 'crabot-agent', 'crabot-admin', 'crabot-mcp-tools',
-  'crabot-channel-telegram', 'crabot-channel-wechat', 'crabot-channel-feishu', 'crabot-channel-dingtalk', 'crabot-channel-slack', 'crabot-channel-voice']
+const modules = ['crabot-client', 'crabot-shared', 'crabot-core', 'crabot-agent', 'crabot-admin', 'crabot-mcp-tools']
 // Rebuild the actual sources before taking the immutable snapshot. Checking that
 // dist exists is insufficient: a local candidate could otherwise contain old UI.
 for (const module of modules) {
@@ -70,12 +69,7 @@ try {
   for (const file of ['cli.mjs', 'package.json', 'pnpm-lock.yaml', '.npmrc', 'LICENSE', 'install.sh', 'install.ps1']) await fs.copyFile(path.join(root, file), path.join(output, file))
   await copySource(path.join(root, 'dist'), path.join(output, 'dist'))
   await copySource(path.join(root, 'scripts'), path.join(output, 'scripts'))
-  for (const module of modules) {
-    if (module === 'crabot-channel-feishu') {
-      await fs.mkdir(path.join(output, module))
-      for (const file of ['package.json', 'crabot-module.yaml']) await fs.copyFile(path.join(root, module, file), path.join(output, module, file))
-    } else await copySource(path.join(root, module), path.join(output, module), { module: true })
-  }
+  for (const module of modules) await copySource(path.join(root, module), path.join(output, module), { module: true })
   await copySource(path.join(root, 'crabot-memory'), path.join(output, 'crabot-memory'), { module: true, python: true })
   await fs.cp(path.join(root, 'crabot-native/build/Release'), path.join(output, 'crabot-native/build/Release'), { recursive: true })
   const cuaRelative = path.relative(root, cua.directory).split(path.sep).join('/')
@@ -104,7 +98,7 @@ try {
   await fs.writeFile(path.join(output, 'package.json'), JSON.stringify({ ...packageJson, version }, null, 2) + '\n')
   // Frozen production installs happen only in this build candidate. Never prune
   // the developer checkout or install anything on the eventual user's machine.
-  for (const directory of ['crabot-client', 'crabot-shared', '', 'scripts/lib', ...modules.slice(2).filter(module => module !== 'crabot-channel-feishu')]) {
+  for (const directory of ['crabot-client', 'crabot-shared', '', 'scripts/lib', ...modules.slice(2)]) {
     const args = ['install', '--prod', '--frozen-lockfile', '--node-linker=hoisted', '--package-import-method=copy', '--prefer-offline']
     const corepack = path.join(path.dirname(runtime.executables.node), process.platform === 'win32' ? 'node_modules/corepack/dist/corepack.js' : '../lib/node_modules/corepack/dist/corepack.js')
     await runBounded(runtime.executables.node, [corepack, 'pnpm@9.15.9', ...args],

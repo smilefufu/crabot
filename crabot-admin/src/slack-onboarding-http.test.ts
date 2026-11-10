@@ -28,7 +28,7 @@ beforeAll(async () => {
   // Exercise actual Admin routing/auth/body parsing with isolated HTTP transport and storage.
   app = Object.create(AdminModule.prototype)
   Object.assign(app, { adminConfig: { data_dir: root, web_port: 0 }, jwtSecret: secret, voiceAdmin: { handleWeb: async () => false, validateIdentity() {} }, onboardingManager: { get: (impl: string, method: string) => impl === 'channel-slack' && method === 'local-cli' ? onboarder : undefined }, friends: new Map(), channelIdentityIndex: new Map() })
-  app.channelManager = { listInstances: () => ({ items: instance ? [instance] : [] }), getInstance: () => instance, loadLocalConfig: async () => ({ SLACK_BOT_TOKEN: 'xoxb-fixture', SLACK_APP_TOKEN: 'xapp-fixture' }), createInstance: vi.fn(async ({ name }: { name: string }) => { instance = { id: name, name, implementation_id: 'channel-slack' }; return instance }) }
+  app.channelManager = { prepareOnboarding: async () => undefined, listInstances: () => ({ items: instance ? [instance] : [] }), getInstance: () => instance, loadLocalConfig: async () => ({ SLACK_BOT_TOKEN: 'xoxb-fixture', SLACK_APP_TOKEN: 'xapp-fixture' }), createInstance: vi.fn(async ({ name }: { name: string }) => { instance = { id: name, name, implementation_id: 'channel-slack' }; return instance }) }
   app.saveData = vi.fn(async () => { await fs.writeFile(path.join(root, 'friends.json'), JSON.stringify([...app.friends.values()])) })
   server = http.createServer((req, res) => { void app.handleWebRequest(req, res).catch(() => { res.writeHead(500); res.end() }) })
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))

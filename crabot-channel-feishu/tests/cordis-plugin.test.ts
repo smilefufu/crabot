@@ -25,7 +25,7 @@ let root: Context
 let dir: string
 function config(id: string) {
   return {
-    module_id: id, module_type: 'channel' as const, version: '0.1.0', protocol_version: '0.1.0',
+    module_id: id, module_type: 'channel' as const, version: '0.1.1', protocol_version: '0.1.0',
     data_dir: path.join(dir, id),
     feishu: { app_id: id, app_secret: 'synthetic-secret', domain: 'feishu' as const, only_respond_to_mentions: true, markdown_format: 'auto' as const },
   }
@@ -52,7 +52,7 @@ describe('Cordis-only Feishu', () => {
     const result = plugin.createConfig({ Crabot_MODULE_ID: 'current', CRABOT_MODULE_ID: 'old', DATA_DIR: dir,
       FEISHU_APP_ID: 'app', FEISHU_APP_SECRET: 'secret', FEISHU_DOMAIN: 'lark', FEISHU_OWNER_OPEN_ID: 'owner',
       FEISHU_ONLY_RESPOND_TO_MENTIONS: 'FALSE', FEISHU_MARKDOWN_FORMAT: 'off' })
-    expect(result).toEqual({ module_id: 'current', module_type: 'channel', version: '0.1.0', protocol_version: '0.1.0', data_dir: dir,
+    expect(result).toEqual({ module_id: 'current', module_type: 'channel', version: '0.1.1', protocol_version: '0.1.0', data_dir: dir,
       feishu: { app_id: 'app', app_secret: 'secret', domain: 'lark', owner_open_id: 'owner', only_respond_to_mentions: false, markdown_format: 'off' } })
     expect(plugin.createConfig({ CRABOT_MODULE_ID: 'fallback', FEISHU_APP_ID: 'app', FEISHU_APP_SECRET: 'secret' }).feishu)
       .toMatchObject({ domain: 'feishu', only_respond_to_mentions: true, markdown_format: 'auto' })

@@ -5,6 +5,7 @@ interface AdminUnderTest {
   config: { moduleId: string }
   rpcClient: { callModuleManager: ReturnType<typeof vi.fn> }
   channelManager: {
+    ensureInstanceDefinition(id: string): Promise<void>
     getInstance(id: string): unknown
     loadLocalConfig(id: string): Promise<Record<string, string> | null>
   }
@@ -21,6 +22,7 @@ function buildAdmin(): AdminUnderTest {
   admin.config = { moduleId: 'admin-test' }
   admin.rpcClient = { callModuleManager: vi.fn().mockResolvedValue({status:'accepted',tracking_id:'restart-1'}) }
   admin.channelManager = {
+    ensureInstanceDefinition: vi.fn(async () => {}),
     getInstance: () => undefined,
     loadLocalConfig: vi.fn(),
   }
@@ -72,6 +74,7 @@ describe('Admin restart delegation', () => {
     vi.stubGlobal('fetch', vi.fn(() => { throw new Error('Internal HTTP is forbidden') }))
     const admin = buildAdmin()
     admin.channelManager = {
+      ensureInstanceDefinition: vi.fn(async () => {}),
       getInstance: () => ({ id: 'channel-1' }),
       loadLocalConfig: vi.fn().mockResolvedValue({ CHANNEL_SECRET: 'current' }),
     }

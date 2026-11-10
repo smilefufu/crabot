@@ -83,3 +83,10 @@ it('explicit GUI preparation finishes the actual lazy Electron install and propa
   expect(probe.cwd).toBe(desktopDir)
   expect(observed.commands.some(call => call.args.some(value => value.endsWith('prepare-scrapling.mjs')))).toBe(false)
 })
+
+it('does not install or build Channel SDKs during ordinary source preparation', async () => {
+  for (const name of ['crabot-core', 'crabot-admin', 'crabot-channel-feishu', 'crabot-channel-wechat', 'crabot-channel-telegram', 'crabot-channel-dingtalk', 'crabot-channel-slack', 'crabot-channel-voice']) await fs.mkdir(path.join(root, name), { recursive: true })
+  await runSourceUpgrade(root, logger)
+  expect(observed.commands.some(call => /crabot-channel-/.test(call.cwd))).toBe(false)
+  expect(observed.commands.some(call => call.cwd === path.join(root, 'crabot-core'))).toBe(true)
+})

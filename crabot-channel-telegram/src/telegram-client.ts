@@ -118,14 +118,7 @@ export class TelegramClient {
 
   // ── Webhook ───────────────────────────────────────────────────────────────
 
-  async setWebhook(url: string, secret?: string): Promise<boolean> {
-    const params: Record<string, unknown> = {
-      url,
-      allowed_updates: ['message', 'edited_message'],
-    }
-    if (secret) params.secret_token = secret
-    return this.callApi<boolean>('setWebhook', params)
-  }
+
 
   async deleteWebhook(): Promise<boolean> {
     return this.callApi<boolean>('deleteWebhook')

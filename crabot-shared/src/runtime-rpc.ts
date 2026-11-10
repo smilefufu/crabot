@@ -28,7 +28,12 @@ interface Message {
   value?: unknown
   error?: { code: string; message: string; details?: Record<string, unknown> }
 }
+const runtimeRpcErrorKey = Symbol.for('crabot.runtime-rpc-error')
 export class RuntimeRpcError extends Error {
+  readonly [runtimeRpcErrorKey] = true
+  static [Symbol.hasInstance](value: unknown): boolean {
+    return value instanceof Error && runtimeRpcErrorKey in value
+  }
   constructor(readonly code: string, message: string, readonly details?: Record<string, unknown>) {
     super(message)
     this.name = 'RuntimeRpcError'
@@ -146,11 +151,11 @@ export class RuntimeRpcPeer {
   }
 }
 
-let processPeer: RuntimeRpcPeer | undefined
+const processPeerKey = Symbol.for('crabot.managed-runtime-rpc-peer')
+const runtimeProcess = process as typeof process & { [processPeerKey]?: RuntimeRpcPeer }
 export function getProcessRpcPeer(): RuntimeRpcPeer | undefined {
   if (process.env.CRABOT_RPC_TRANSPORT !== 'ipc') return undefined
-  if (processPeer) return processPeer
+  if (runtimeProcess[processPeerKey]) return runtimeProcess[processPeerKey]
   if (!process.send || !process.connected) throw new RuntimeRpcError('SERVICE_UNAVAILABLE', 'Managed IPC transport is not connected')
-  processPeer = new RuntimeRpcPeer(process as Channel)
-  return processPeer
+  return runtimeProcess[processPeerKey] = new RuntimeRpcPeer(process as Channel)
 }

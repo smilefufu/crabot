@@ -2423,6 +2423,25 @@ export class AdminModule extends ModuleBase {
         return
       }
 
+      if (pathname === '/api/channel-plugins' && req.method === 'GET') {
+        if (!onboardingHuman) { sendJson(res, 403, { error: 'Human Admin credential required' }); return }
+        sendJson(res, 200, await this.channelManager.listPlugins())
+        return
+      }
+      if (/^\/api\/channel-plugins\/[^/]+\/install$/.test(pathname) && req.method === 'POST') {
+        if (!onboardingHuman) { sendJson(res, 403, { error: 'Human Admin credential required' }); return }
+        try {
+          const implementation = await this.channelManager.installPlugin(decodePathSegment(pathname, 3))
+          this.onboardingManager.loadFromImplementations([implementation])
+          sendJson(res, 200, { implementation })
+        } catch (error) {
+          const unknown = (error as { code?: string }).code === 'NOT_FOUND'
+          sendJson(res, unknown ? 404 : 503, { code: unknown ? 'NOT_FOUND' : 'CHANNEL_INSTALL_FAILED',
+            error: unknown ? '未知 Channel 插件' : '插件安装失败，请检查国内 npm 源及网络后重试；缓存和原有版本已保留。' })
+        }
+        return
+      }
+
       // Channel Implementation 路由
       if (pathname === '/api/channel-implementations' && req.method === 'GET') {
         await this.handleListChannelImplementationsApi(req, res, url)
@@ -2812,11 +2831,16 @@ export class AdminModule extends ModuleBase {
       // SSE poll 走 query string token（EventSource 不支持自定义 header），其他三条走标准 Bearer
       if (req.method === 'POST' && pathname === '/api/channels/onboard/begin') {
         const body = await this.readJsonBody<{ implementation_id?: string; method_id?: string; params?: Record<string, unknown> }>(req).catch(() => ({} as { implementation_id?: string; method_id?: string; params?: Record<string, unknown> }))
-        if (body.implementation_id === 'channel-feishu' && !this.onboardingManager.get(body.implementation_id, body.method_id ?? '')) {
+        if (body.implementation_id) {
           try {
             const implementation = await this.channelManager.prepareOnboarding(body.implementation_id, body.method_id ?? '')
             if (implementation) this.onboardingManager.loadFromImplementations([implementation])
-          } catch { sendJson(res, 503, { error: '飞书插件下载失败，请检查国内 npm 源及当前网络后重试。' }); return }
+          } catch (error) {
+            const missing = (error as { code?: string }).code === 'CHANNEL_NOT_INSTALLED'
+            sendJson(res, missing ? 409 : 404, { code: missing ? 'CHANNEL_NOT_INSTALLED' : 'NOT_FOUND',
+              error: missing ? '请先在模块页安装此 Channel 插件' : '未知 Channel 插件' })
+            return
+          }
         }
         const onboarder = this.resolveOnboarder(res, body.implementation_id, body.method_id)
         if (!onboarder) return
@@ -9546,10 +9570,11 @@ export class AdminModule extends ModuleBase {
     res: ServerResponse,
     id: string
   ): Promise<void> {
-    const impl = this.channelManager.getImplementation(id)
-    if (!impl) {
-      res.writeHead(404)
-      res.end(JSON.stringify({ error: 'Implementation not found' }))
+    let impl
+    try { impl = this.channelManager.requireInstalled(id) }
+    catch (error) {
+      const missing = (error as { code?: string }).code === 'CHANNEL_NOT_INSTALLED'
+      sendJson(res, missing ? 409 : 404, { code: missing ? 'CHANNEL_NOT_INSTALLED' : 'NOT_FOUND', error: missing ? '请先在模块页安装此 Channel 插件' : '未知 Channel 插件' })
       return
     }
     res.writeHead(200, { 'Content-Type': 'application/json' })
@@ -9579,10 +9604,11 @@ export class AdminModule extends ModuleBase {
     const statusMap = await this.queryModuleStatuses()
 
     // 附加 runtime_status 到每个实例
-    const enrichedItems = result.items.map(item => ({
-      ...item,
-      runtime_status: statusMap.get(item.id) ?? 'unknown',
-    }))
+    const enrichedItems = result.items.map(item => {
+      const error = this.channelManager.getStartupError(item.id)
+      return { ...item, runtime_status: statusMap.get(item.id) ?? (error ? 'failed' : 'unknown'),
+        ...(error ? { runtime_error: error } : {}) }
+    })
 
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ ...result, items: enrichedItems }))
@@ -9597,8 +9623,9 @@ export class AdminModule extends ModuleBase {
       res.end(JSON.stringify({ instance }))
     } catch (error) {
       if (error instanceof Error) {
-        res.writeHead(400)
-        res.end(JSON.stringify({ error: error.message }))
+        const code = (error as { code?: string }).code
+        res.writeHead(code === 'CHANNEL_NOT_INSTALLED' ? 409 : code === 'NOT_FOUND' ? 404 : 400)
+        res.end(JSON.stringify({ error: error.message, ...(code ? { code } : {}) }))
         return
       }
       throw error
@@ -10205,6 +10232,7 @@ export class AdminModule extends ModuleBase {
   private async handleStartModuleAdmin(params: {
     module_id: string
   }): Promise<{ status: 'accepted'; tracking_id: string }> {
+    if (params.module_id !== 'crabot-agent') await this.channelManager.ensureInstanceDefinition(params.module_id)
     const mergedConfig = params.module_id === 'crabot-agent'
       ? undefined
       : await this.resolveModuleStartEnv(params.module_id)
@@ -10229,6 +10257,7 @@ export class AdminModule extends ModuleBase {
     module_id: string
     force?: boolean
   }): Promise<{ status: 'accepted'; tracking_id: string }> {
+    if (params.module_id !== 'crabot-agent') await this.channelManager.ensureInstanceDefinition(params.module_id)
     const env = params.module_id === 'crabot-agent'
       ? undefined
       : await this.resolveModuleStartEnv(params.module_id)

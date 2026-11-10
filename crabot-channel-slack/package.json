@@ -1,12 +1,11 @@
 {
   "name": "crabot-channel-slack",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Crabot Slack channel via Socket Mode",
   "type": "module",
   "main": "dist/main.js",
   "scripts": {
     "build": "tsc",
-    "start": "node dist/main.js",
     "test": "vitest run"
   },
   "license": "Apache-2.0",
@@ -28,5 +27,19 @@
     "patchedDependencies": {
       "@slack/socket-mode@3.1.0": "patches/@slack__socket-mode@3.1.0.patch"
     }
+  },
+  "files": [
+    "dist",
+    "crabot-module.yaml"
+  ],
+  "bundleDependencies": [
+    "crabot-shared",
+    "@slack/socket-mode"
+  ],
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "peerDependencies": {
+    "cordis": "4.0.0-rc.12"
   }
 }

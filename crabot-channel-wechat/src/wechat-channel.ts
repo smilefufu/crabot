@@ -2,13 +2,12 @@
  * WechatChannel - Crabot Channel 模块
  *
  * 通过 wechat-connector 的 Bot API 接入微信：
- * - 收消息：Socket.IO 连接 /puppet-events 或 Webhook 监听
+ * - 收消息：Socket.IO 连接 /puppet-events
  * - 发消息：REST API POST /api/v1/bot/send
  *
  * 参考 BOT_INTEGRATION.md
  */
 
-import http from 'node:http'
 import crypto from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
@@ -35,7 +34,6 @@ import { SessionManager } from './session-manager.js'
 import { splitLongText } from './split-long-text.js'
 import type {
   WechatRawEvent,
-  WebhookEnvelope,
   WechatChannelConfig,
   ChannelMessage,
   ChannelCapabilities,
@@ -82,10 +80,8 @@ export class WechatChannel extends ModuleBase {
   /** Crabot 自己的 wxid（puppet 身份仅随事件携带，get_config 用；事件到来前 undefined） */
   private puppetWxid: string | undefined = undefined
 
-  // Socket.IO 连接（动态 import，仅 socketio 模式使用）
+  // Socket.IO 连接（动态 import，接收平台事件）
   private socket: { disconnect(): void; on(event: string, handler: (...args: unknown[]) => void): void } | null = null
-  // Webhook 服务器（仅 webhook 模式使用）
-  private webhookServer: http.Server | null = null
 
   /** Crabot 群昵称缓存: chatroomName → { nick, fetchedAt } */
   private crabNickCache: Map<string, { nick: string; fetchedAt: number }> = new Map()
@@ -102,6 +98,8 @@ export class WechatChannel extends ModuleBase {
     }
 
     super(moduleConfig)
+
+    if ((config.wechat as { mode?: string }).mode === 'webhook') throw new RpcError('INVALID_PARAMS', '微信 Webhook 已移除，请改用 Socket.IO')
 
     // 规范化 connector_url：去掉尾部 /puppet-events（如用户从前端复制了完整连接地址）
     const cleanUrl = config.wechat.connector_url.replace(/\/puppet-events\/?$/, '').replace(/\/+$/, '')
@@ -148,11 +146,7 @@ export class WechatChannel extends ModuleBase {
     await this.bootstrapGroupSessions()
 
     // 启动消息接收
-    if (this.wechatConfig.mode === 'socketio') {
-      await this.startSocketIO()
-    } else if (this.wechatConfig.mode === 'webhook') {
-      await this.startWebhookServer()
-    }
+    await this.startSocketIO()
   }
 
   protected override async onStop(): Promise<void> {
@@ -161,12 +155,7 @@ export class WechatChannel extends ModuleBase {
       this.socket.disconnect()
       this.socket = null
     }
-    if (this.webhookServer) {
-      await new Promise<void>((resolve) => {
-        this.webhookServer!.close(() => resolve())
-      })
-      this.webhookServer = null
-    }
+
   }
 
   // ============================================================================
@@ -208,74 +197,6 @@ export class WechatChannel extends ModuleBase {
     })
 
     this.socket = socket
-  }
-
-  // ============================================================================
-  // Webhook 模式
-  // ============================================================================
-
-  private async startWebhookServer(): Promise<void> {
-    const port = this.wechatConfig.webhook_port
-    if (!port) {
-      throw new Error('webhook_port is required for webhook mode')
-    }
-
-    // 密钥在启动时快照：签名校验回调若实时读 this.wechatConfig.webhook_secret，
-    // update_config 热改会当场改变运行中 server 的行为（改值→connector 旧密钥全部
-    // 401 静默失聪；清空→签名校验立即短路裸奔），与 schema 声明的 hot_reload: false
-    // 相反。快照后该字段的变更只在重启重建 server 时生效。
-    const webhookSecret = this.wechatConfig.webhook_secret
-
-    this.webhookServer = http.createServer((req, res) => {
-      if (req.method !== 'POST') {
-        res.writeHead(405)
-        res.end('Method Not Allowed')
-        return
-      }
-
-      let body = ''
-      req.on('data', (chunk: string) => { body += chunk })
-      req.on('end', () => {
-        try {
-          const envelope = JSON.parse(body) as WebhookEnvelope
-
-          // 验证签名（用启动时快照的密钥）
-          if (webhookSecret) {
-            const dataStr = JSON.stringify(envelope.data)
-            const expected = crypto
-              .createHmac('sha256', webhookSecret)
-              .update(dataStr)
-              .digest('hex')
-
-            if (envelope.signature !== expected) {
-              console.warn('[WechatChannel] Webhook signature mismatch')
-              res.writeHead(401)
-              res.end('Invalid signature')
-              return
-            }
-          }
-
-          res.writeHead(200)
-          res.end('OK')
-
-          // 异步处理事件
-          this.handleWechatEvent(envelope.data).catch((error) => {
-            console.error('[WechatChannel] Error handling webhook event:', error)
-          })
-        } catch (error) {
-          console.error('[WechatChannel] Invalid webhook payload:', error)
-          res.writeHead(400)
-          res.end('Bad Request')
-        }
-      })
-    })
-
-    await new Promise<void>((resolve) => {
-      this.webhookServer!.listen(port, () => {
-        console.log(`[WechatChannel] Webhook server listening on port ${port}`)
-        resolve()
-      })
-    })
   }
 
   // ============================================================================
@@ -510,9 +431,6 @@ export class WechatChannel extends ModuleBase {
       credentials: {
         connector_url: this.wechatConfig.connector_url,
         api_key: '***',
-        mode: this.wechatConfig.mode,
-        ...(this.wechatConfig.webhook_secret ? { webhook_secret: '***' } : {}),
-        ...(this.wechatConfig.webhook_port !== undefined ? { webhook_port: this.wechatConfig.webhook_port } : {}),
       },
       group: {
         only_respond_to_mentions: this.wechatConfig.only_respond_to_mentions,
@@ -525,9 +443,6 @@ export class WechatChannel extends ModuleBase {
       schema: {
         'credentials.connector_url': { hot_reload: false, description: 'wechat-connector 地址，变更需重启' },
         'credentials.api_key': { sensitive: true, hot_reload: false, description: 'Bot API Key，变更需重启' },
-        'credentials.mode': { hot_reload: false, description: '推送模式，变更需重启' },
-        'credentials.webhook_secret': { sensitive: true, hot_reload: false, description: 'Webhook 签名密钥，变更需重启' },
-        'credentials.webhook_port': { hot_reload: false, description: 'Webhook 监听端口，变更需重启' },
         'group.only_respond_to_mentions': { hot_reload: true, description: '群聊仅响应定向消息（@ 或引用/回复 Crabot 发言）' },
       },
     }
@@ -535,7 +450,7 @@ export class WechatChannel extends ModuleBase {
 
   /**
    * Admin Web 把 handleGetConfig 的嵌套结构原样回传，所以 incoming 字段路径必须
-   * 跟 get 输出一一对应：credentials.* / group.*。掩码字段（api_key / webhook_secret）
+   * 跟 get 输出一一对应：credentials.* / group.*。掩码字段（api_key）
    * 收到占位符 *** 表示用户没改，跳过覆盖避免清掉真值。连接/接收类字段变更只置
    * requires_restart，不改运行态连接（WechatClient 持有构造时的 URL/Key，重启才
    * 重建）；仅群聊门控开关热生效。
@@ -545,14 +460,12 @@ export class WechatChannel extends ModuleBase {
       credentials?: {
         connector_url?: string
         api_key?: string
-        mode?: string
-        webhook_secret?: string
-        webhook_port?: number | string
       }
       group?: { only_respond_to_mentions?: boolean | string }
     }
   }): { config: Record<string, unknown>; requires_restart: boolean } {
     const incoming = params.config ?? {}
+    if ((incoming.credentials as { mode?: string } | undefined)?.mode === 'webhook') throw new RpcError('INVALID_PARAMS', '微信 Webhook 已移除，请改用 Socket.IO')
     let requiresRestart = false
 
     const creds = incoming.credentials ?? {}
@@ -567,26 +480,6 @@ export class WechatChannel extends ModuleBase {
       this.wechatConfig.api_key = creds.api_key
       requiresRestart = true
     }
-    if ((creds.mode === 'socketio' || creds.mode === 'webhook') && creds.mode !== this.wechatConfig.mode) {
-      this.wechatConfig.mode = creds.mode
-      requiresRestart = true
-    }
-    if (typeof creds.webhook_secret === 'string' && creds.webhook_secret !== '***') {
-      if (creds.webhook_secret !== this.wechatConfig.webhook_secret) {
-        this.wechatConfig.webhook_secret = creds.webhook_secret || undefined
-        requiresRestart = true
-      }
-    }
-    // Admin SchemaField 的文本框回传字符串，未编辑时原样回传 get_config 的 number——两种都接受
-    const incomingPort = typeof creds.webhook_port === 'string' && /^\d+$/.test(creds.webhook_port)
-      ? Number(creds.webhook_port)
-      : creds.webhook_port
-    if (typeof incomingPort === 'number' && Number.isInteger(incomingPort) && incomingPort > 0
-        && incomingPort !== this.wechatConfig.webhook_port) {
-      this.wechatConfig.webhook_port = incomingPort
-      requiresRestart = true
-    }
-
     const group = incoming.group ?? {}
     // Admin SchemaField 的 enum 分支回传字符串（"true"/"false"），用户未动时原样
     // 回传 get_config 的 boolean——两种都接受，避免运行中热改静默 no-op。
@@ -942,7 +835,6 @@ export class WechatChannel extends ModuleBase {
     return {
       platform: 'wechat',
       platform_connected: connected,
-      mode: this.wechatConfig.mode,
       connector_url: this.wechatConfig.connector_url,
       socket_connected: connected,
       active_sessions: this.sessionManager.listSessions().length,

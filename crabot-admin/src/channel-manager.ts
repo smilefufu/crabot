@@ -10,9 +10,10 @@ import path from 'path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import yaml from 'js-yaml'
-import { generateTimestamp, RpcCallError, type RpcClient, validateInstanceId, voiceSetupStatus, type VoiceSetupMetadata } from 'crabot-shared'
+import { generateTimestamp, RpcError, RpcCallError, type RpcClient, validateInstanceId, voiceSetupStatus, type VoiceSetupMetadata } from 'crabot-shared'
 import type {
   ChannelImplementation,
+  ChannelPluginCatalogEntry,
   ChannelInstance,
   ChannelConfig,
   CreateChannelInstanceParams,
@@ -23,67 +24,8 @@ import type {
   ChannelOnboardingMethod,
 } from './types.js'
 import { ChannelPackageStore } from './channel-package.js'
+import { CHANNEL_CATALOG } from './channel-catalog.js'
 import type { OnConflict } from './backup/import/import-types.js'
-
-// ============================================================================
-// 内置模块声明（只声明路径，元数据从 crabot-module.yaml 动态加载）
-// ============================================================================
-
-/** 内置 Channel 模块的相对路径（相对于 crabot-admin 根目录） */
-const BUILTIN_MODULE_PATHS: readonly string[] = [
-  '../crabot-channel-wechat',
-  '../crabot-channel-telegram',
-  '../crabot-channel-feishu',
-  '../crabot-channel-dingtalk',
-  '../crabot-channel-slack',
-  '../crabot-channel-voice',
-]
-
-/**
- * 从 crabot-module.yaml 加载模块元数据，构造 ChannelImplementation
- */
-function loadBuiltinImplementation(modulePath: string): ChannelImplementation | null {
-  const resolvedPath = path.resolve(__dirname, '..', modulePath)
-  const yamlPath = path.join(resolvedPath, 'crabot-module.yaml')
-
-  if (!fsSync.existsSync(yamlPath)) {
-    console.warn(`[ChannelManager] crabot-module.yaml not found: ${yamlPath}`)
-    return null
-  }
-
-  try {
-    const content = fsSync.readFileSync(yamlPath, 'utf-8')
-    const parsed = (yaml.load(content) as Record<string, unknown>) ?? {}
-
-    const now = generateTimestamp()
-    const onboardingMethods = Array.isArray(parsed.onboarding_methods)
-      ? (parsed.onboarding_methods as ChannelOnboardingMethod[])
-      : undefined
-    return {
-      id: parsed.module_id as string,
-      name: parsed.name as string,
-      type: 'builtin',
-      platform: inferPlatformFromModuleId(parsed.module_id as string),
-      module_path: modulePath,
-      version: (parsed.version as string) ?? '0.1.0',
-      config_schema: parsed.config_schema as Record<string, unknown> | undefined,
-      onboarding_methods: onboardingMethods,
-      created_at: now,
-      updated_at: now,
-    }
-  } catch (error) {
-    console.error(`[ChannelManager] Failed to load crabot-module.yaml from ${yamlPath}:`, error)
-    return null
-  }
-}
-
-/**
- * 从 module_id 推断平台（channel-wechat → wechat）
- */
-function inferPlatformFromModuleId(moduleId: string): string {
-  const match = moduleId.match(/^channel-(.+)$/)
-  return match ? match[1] : 'unknown'
-}
 
 // ============================================================================
 // ChannelManager
@@ -91,6 +33,7 @@ function inferPlatformFromModuleId(moduleId: string): string {
 
 export class ChannelManager {
   private implementations: Map<string, ChannelImplementation> = new Map()
+  private readonly startupErrors = new Map<string, string>()
   private instances: Map<string, ChannelInstance> = new Map()
   private instanceWrites: Promise<unknown> = Promise.resolve()
   private slackConfigUpdates: Promise<unknown> = Promise.resolve()
@@ -115,27 +58,41 @@ export class ChannelManager {
     await fs.mkdir(this.dataDir, { recursive: true })
     await fs.mkdir(this.configsDir, { recursive: true })
     await this.loadData()
-    await this.ensureDefaults()
   }
 
-  private feishuPackage(): { name: string; version: string } {
-    const manifest = JSON.parse(fsSync.readFileSync(path.resolve(__dirname, '../../crabot-channel-feishu/package.json'), 'utf8'))
-    return { name: manifest.name, version: manifest.version }
+  getStartupError(id: string): string | undefined { return this.startupErrors.get(id) }
+
+  private definition(id: string) {
+    const item = CHANNEL_CATALOG.find(item => item.implementation_id === id)
+    if (!item) throw new RpcError('NOT_FOUND', `Unknown Channel: ${id}`)
+    return { name: item.package_name, version: item.version }
+  }
+
+  async listPlugins(): Promise<{ items: ChannelPluginCatalogEntry[] }> {
+    return { items: CHANNEL_CATALOG.map(item => ({ ...item,
+      installed: !!this.packageStore.installedSync(this.definition(item.implementation_id)) })) }
+  }
+
+  async installPlugin(id: string): Promise<ChannelImplementation> {
+    await this.packageStore.ensure(this.definition(id))
+    const implementation = this.getImplementation(id)
+    if (!implementation) throw new RpcError('CHANNEL_INSTALL_FAILED', '插件安装不完整，请重试')
+    return implementation
+  }
+
+  requireInstalled(id: string): ChannelImplementation {
+    this.definition(id)
+    const implementation = this.getImplementation(id)
+    if (!implementation) throw new RpcError('CHANNEL_NOT_INSTALLED', '请先在模块页安装此 Channel 插件')
+    return implementation
   }
 
   async prepareOnboarding(implementationId: string, methodId: string): Promise<ChannelImplementation | undefined> {
-    const implementation = this.implementations.get(implementationId)
-    if (implementationId !== 'channel-feishu' || !implementation?.onboarding_methods?.some(method => method.id === methodId)) return undefined
-    const modulePath = await this.packageStore.ensure(this.feishuPackage())
-    return { ...implementation, module_path: modulePath }
+    const implementation = this.requireInstalled(implementationId)
+    return implementation.onboarding_methods?.some(method => method.id === methodId) ? implementation : undefined
   }
 
-  async onboardingImplementations(): Promise<ChannelImplementation[]> {
-    const items = this.listImplementations().items
-    const installed = await this.packageStore.installed(this.feishuPackage())
-    return items.flatMap(implementation => implementation.id !== 'channel-feishu' ? [implementation]
-      : installed ? [{ ...implementation, module_path: installed }] : [])
-  }
+  async onboardingImplementations(): Promise<ChannelImplementation[]> { return this.listImplementations().items }
 
   // ============================================================================
   // Implementation CRUD
@@ -145,7 +102,10 @@ export class ChannelManager {
     items: ChannelImplementation[]
     pagination: { page: number; page_size: number; total_items: number; total_pages: number }
   } {
-    let items = Array.from(this.implementations.values())
+    let items = CHANNEL_CATALOG.flatMap(item => {
+      const installed = this.getImplementation(item.implementation_id)
+      return installed ? [installed] : []
+    })
 
     if (params?.type) {
       items = items.filter((i) => i.type === params.type)
@@ -167,7 +127,17 @@ export class ChannelManager {
   }
 
   getImplementation(id: string): ChannelImplementation | undefined {
-    return this.implementations.get(id)
+    const item = CHANNEL_CATALOG.find(item => item.implementation_id === id)
+    if (!item) return undefined
+    const directory = this.packageStore.installedSync(this.definition(id))
+    if (!directory) return undefined
+    const metadata = yaml.load(fsSync.readFileSync(path.join(directory, 'crabot-module.yaml'), 'utf8')) as Record<string, unknown>
+    const previous = this.implementations.get(id)
+    const installedAt = fsSync.statSync(path.join(directory, '../../installation.json')).mtime.toISOString()
+    return { id, name: item.name, platform: item.platform, type: 'installed', installed_path: directory,
+      version: item.version, config_schema: metadata.config_schema as ChannelImplementation['config_schema'],
+      onboarding_methods: metadata.onboarding_methods as ChannelOnboardingMethod[] | undefined,
+      created_at: previous?.created_at ?? installedAt, updated_at: installedAt }
   }
 
   async addImplementation(impl: ChannelImplementation): Promise<void> {
@@ -217,10 +187,7 @@ export class ChannelManager {
 
   async createInstance(params: CreateChannelInstanceParams): Promise<ChannelInstance> {
     if ('voice_setup' in params) throw new Error('voice_setup 只能由语音向导维护')
-    const impl = this.implementations.get(params.implementation_id)
-    if (!impl) {
-      throw new Error(`Implementation not found: ${params.implementation_id}`)
-    }
+    const impl = this.requireInstalled(params.implementation_id)
 
     // 实例名即 module_id：校验 + NFC 归一化（crabot-module-spec.md §4.3），确保唯一性
     const validated = validateInstanceId(params.name)
@@ -260,8 +227,8 @@ export class ChannelManager {
       }
     }
 
-    // builtin 实现：注册到 Module Manager
-    if (impl.type === 'builtin' && impl.module_path) {
+    // 已安装 npm 实现：注册到 Module Manager
+    if (impl.installed_path) {
       try {
         await this.registerBuiltinModule(impl, instance)
         const registered: ChannelInstance = { ...instance, module_registered: true }
@@ -307,19 +274,13 @@ export class ChannelManager {
   }
 
   /**
-   * 注册 builtin 实现的模块到 Module Manager
+   * 注册已安装实现的模块到 Module Manager
    */
   private async registerBuiltinModule(impl: ChannelImplementation, instance: ChannelInstance): Promise<void> {
-    const resolvedModulePath = impl.id === 'channel-feishu'
-      ? await this.packageStore.ensure(this.feishuPackage())
-      : path.resolve(__dirname, '..', impl.module_path!)
+    const resolvedModulePath = this.requireInstalled(impl.id).installed_path!
     const env = await this.buildModuleEnv(instance)
-    const entry = impl.id === 'channel-feishu'
-      ? `node "${path.resolve(__dirname, '../../crabot-core/dist/channel-host.js')}"`
-      : `node ${resolvedModulePath}/dist/main.js`
-    if (impl.id === 'channel-feishu') {
-      env.CRABOT_CHANNEL_PLUGIN_PATH = path.join(resolvedModulePath, 'dist/main.js')
-    }
+    const entry = `node "${path.resolve(__dirname, '../../crabot-core/dist/channel-host.js')}"`
+    env.CRABOT_CHANNEL_PLUGIN_PATH = path.join(resolvedModulePath, 'dist/main.js')
 
     await this.rpcClient.registerModuleDefinition(
       {
@@ -532,34 +493,31 @@ export class ChannelManager {
   // ============================================================================
 
   /**
-   * Admin 启动时重新注册所有 builtin 实现的实例到 MM
+   * Admin 启动时重新注册官方 Channel 实例到 MM
    *
    * MM 不持久化 registerModuleDefinition 的结果，重启后动态注册丢失。
    * 此方法在 Admin onStart() 中调用，确保已有实例重新注册。
    * 对 auto_start: true 的实例额外调用 startModule。
    */
   async registerBuiltinInstanceDefinitions(): Promise<ChannelInstance[]> {
-    // 收集所有 builtin 实现的实例
-    const builtinImplIds = new Set(
-      Array.from(this.implementations.values())
-        .filter((i) => i.type === 'builtin' && i.module_path)
-        .map((i) => i.id)
-    )
-    const instances = Array.from(this.instances.values())
-      .filter((i) => builtinImplIds.has(i.implementation_id))
+    const instances = Array.from(this.instances.values()).filter(instance =>
+      CHANNEL_CATALOG.some(item => item.implementation_id === instance.implementation_id))
 
     if (instances.length === 0) {
       return []
     }
 
-    console.log(`[ChannelManager] Re-registering ${instances.length} builtin channel instances to MM`)
+    console.log(`[ChannelManager] Re-registering ${instances.length} channel instances to MM`)
 
+    const registered: ChannelInstance[] = []
     for (const instance of instances) {
-      const impl = this.implementations.get(instance.implementation_id)
-      if (!impl?.module_path) continue
-
       try {
+        let impl = this.getImplementation(instance.implementation_id)
+        if (!impl && instance.auto_start) impl = await this.installPlugin(instance.implementation_id)
+        if (!impl) continue
         await this.registerBuiltinModule(impl, instance)
+        registered.push(instance)
+        this.startupErrors.delete(instance.id)
 
         // 注册成功，更新标志
         if (!instance.module_registered) {
@@ -571,15 +529,35 @@ export class ChannelManager {
       } catch (error: any) {
         // DUPLICATE_ID 表示 MM 没重启，模块已存在，忽略
         if (error?.message?.includes('DUPLICATE_ID') || error?.code === 'DUPLICATE_ID') {
+          registered.push(instance)
+          this.startupErrors.delete(instance.id)
           console.log(`[ChannelManager] Already registered (DUPLICATE_ID): ${instance.id}`)
         } else {
+          this.startupErrors.set(instance.id, 'Channel 插件准备失败，请在模块页检查安装后重试启动；账号配置已保留。')
           console.error(`[ChannelManager] Failed to re-register ${instance.id}:`, error)
         }
       }
     }
 
     await this.saveInstances()
-    return instances
+    return registered
+  }
+
+  /** Restore an existing account before an explicit start; do not create a new account. */
+  async ensureInstanceDefinition(id: string): Promise<void> {
+    const instance = this.instances.get(id)
+    if (!instance) return
+    try {
+      const implementation = await this.installPlugin(instance.implementation_id)
+      try { await this.registerBuiltinModule(implementation, instance) }
+      catch (error) {
+        if ((error as { code?: string }).code !== 'DUPLICATE_ID' && !(error instanceof Error && error.message.includes('DUPLICATE_ID'))) throw error
+      }
+      this.startupErrors.delete(id)
+    } catch (error) {
+      this.startupErrors.set(id, 'Channel 插件准备失败，请在模块页检查安装后重试启动；账号配置已保留。')
+      throw error
+    }
   }
 
   /** Ordinary startup retains its original auto_start semantics. */
@@ -713,7 +691,7 @@ export class ChannelManager {
     else if (voiceSetupStatus(instance.voice_setup) !== 'draft') throw new Error('已完成的语音实例请在配置页维护')
     const running = await this.resolveVoice(id)
     if (!running.length) {
-      const impl = this.implementations.get(instance.implementation_id)!
+      const impl = await this.installPlugin(instance.implementation_id)
       try { await this.registerBuiltinModule(impl, instance) }
       catch (error) { if (!(error instanceof Error && error.message.includes('DUPLICATE_ID')) && (error as { code?: string }).code !== 'DUPLICATE_ID') throw error }
       try { await this.rpcClient.startModule(id, 'admin') }
@@ -768,26 +746,4 @@ export class ChannelManager {
     return exists ? 'overwritten' : 'imported'
   }
 
-  private async ensureDefaults(): Promise<void> {
-    let changed = false
-    for (const modulePath of BUILTIN_MODULE_PATHS) {
-      const impl = loadBuiltinImplementation(modulePath)
-      if (!impl) continue
-
-      const existing = this.implementations.get(impl.id)
-      if (!existing) {
-        this.implementations.set(impl.id, impl)
-        changed = true
-        console.log(`[ChannelManager] Registered builtin: ${impl.id}`)
-      } else if (!existing.config_schema && impl.config_schema) {
-        // 已有记录但缺少 config_schema（旧数据），补充
-        this.implementations.set(impl.id, { ...existing, config_schema: impl.config_schema })
-        changed = true
-        console.log(`[ChannelManager] Updated config_schema for: ${impl.id}`)
-      }
-    }
-    if (changed) {
-      await this.saveImplementations()
-    }
-  }
 }

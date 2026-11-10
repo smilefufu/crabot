@@ -12,7 +12,7 @@ describe('微信事件、历史和详情统一引用 ID', () => {
     dir = await fs.mkdtemp(path.join(os.tmpdir(), 'wechat-quote-id-'))
     const channel = new WechatChannel({ module_id: 'wechat-test', module_type: 'channel', version: '0.0.1',
       protocol_version: '0.1.0', port: 0, data_dir: dir,
-      wechat: { connector_url: 'http://localhost:0', api_key: 'test', mode: 'socketio' } })
+      wechat: { connector_url: 'http://localhost:0', api_key: 'test' } })
     const internals = channel as any
     const session = { id: 's', type: 'private', platform_session_id: 'wxid_sender' }
     internals.sessionManager = { upsert: vi.fn().mockReturnValue({ session, created: false }), findById: () => session }

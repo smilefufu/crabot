@@ -12,10 +12,12 @@ const received: unknown[] = []
 
 before(async () => {
   child = spawn(process.execPath, ['--input-type=module', '-e', `
-    import { ModuleBase, RpcClient, RpcError } from ${JSON.stringify(entry)}
+    import { ModuleBase, RpcClient, RpcError, RuntimeRpcError, getProcessRpcPeer } from ${JSON.stringify(entry)}
+    import * as peerCopy from ${JSON.stringify(new URL('../dist/runtime-rpc.js?channel-copy', import.meta.url).href)}
     class Fixture extends ModuleBase {
       constructor() {
         super({ moduleId: 'fixture', moduleType: 'channel', version: '0.1.0', protocolVersion: '0.2.0', port: 20001 })
+        this.registerMethod('peer_copy', () => ({ samePeer: getProcessRpcPeer() === peerCopy.getProcessRpcPeer(), sameError: new RuntimeRpcError('FORBIDDEN', 'denied') instanceof peerCopy.RuntimeRpcError }))
         this.registerMethod('echo', params => { params.items.push('child'); return params })
         this.registerMethod('fail', () => { throw new RpcError('FORBIDDEN', 'denied', { retryable: false }) })
         this.registerMethod('nested', async params => this.rpcClient.call(19000, 'parent_echo', params, 'fixture'))
@@ -135,6 +137,10 @@ test('shutdown releases the IPC handle so a service can exit normally', async ()
     if (service.exitCode === null && service.signalCode === null) service.kill('SIGKILL')
     await exited
   }
+})
+
+test('independent npm Shared copies reuse the child peer and recognize its typed errors', async () => {
+  assert.deepEqual(await call('peer_copy'), { samePeer: true, sameError: true })
 })
 
 test('disconnect rejects pending calls and never retries them', async () => {

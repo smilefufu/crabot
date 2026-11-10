@@ -20,9 +20,6 @@ beforeEach(() => {
     data_dir: tmpDir,
     telegram: {
       bot_token: 'token-secret',
-      mode: 'polling',
-      webhook_url: undefined,
-      webhook_secret: undefined,
       markdown_format: 'off',
     },
   })
@@ -71,9 +68,6 @@ describe('TelegramChannel session aliases', () => {
       data_dir: tmpDir,
       telegram: {
         bot_token: 'token-secret',
-        mode: 'polling',
-        webhook_url: undefined,
-        webhook_secret: undefined,
         markdown_format: 'off',
       },
     })
@@ -135,9 +129,6 @@ describe('TelegramChannel session aliases', () => {
       data_dir: tmpDir,
       telegram: {
         bot_token: 'token-secret',
-        mode: 'polling',
-        webhook_url: undefined,
-        webhook_secret: undefined,
         markdown_format: 'off',
       },
     })
@@ -225,9 +216,6 @@ describe('TelegramChannel session aliases', () => {
       data_dir: tmpDir,
       telegram: {
         bot_token: 'token-secret',
-        mode: 'polling',
-        webhook_url: undefined,
-        webhook_secret: undefined,
         markdown_format: 'off',
       },
     })

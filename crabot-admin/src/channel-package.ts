@@ -1,5 +1,9 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import fsSync from 'node:fs'
+import { createRequire } from 'node:module'
+import yaml from 'js-yaml'
+import { CHANNEL_CATALOG } from './channel-catalog.js'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 
@@ -19,21 +23,41 @@ export class ChannelPackageStore {
   constructor(private readonly directory: string) {}
 
   packagePath(definition: PackageDefinition): string {
-    if (definition.name !== 'crabot-channel-feishu' || !/^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/.test(definition.version)) {
+    if (!CHANNEL_CATALOG.some(item => item.package_name === definition.name) || !/^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/.test(definition.version)) {
       throw new Error('Unsupported Channel package')
     }
     return path.resolve(this.directory, definition.name, definition.version, 'node_modules', definition.name)
   }
 
-  async installed(definition: PackageDefinition): Promise<string | undefined> {
+  installedSync(definition: PackageDefinition): string | undefined {
     const directory = this.packagePath(definition)
     try {
-      const manifest = JSON.parse(await fs.readFile(path.join(directory, 'package.json'), 'utf8'))
-      if (manifest.name !== definition.name || manifest.version !== definition.version || manifest.main !== 'dist/main.js') throw new Error('Channel package manifest mismatch')
-      await fs.access(path.join(directory, manifest.main))
-      await fs.access(path.join(directory, 'crabot-module.yaml'))
+      const record = JSON.parse(fsSync.readFileSync(path.join(directory, '../../installation.json'), 'utf8'))
+      if (record.name !== definition.name || record.version !== definition.version) return undefined
+      return this.validateDirectory(directory, definition)
+    } catch { return undefined }
+  }
+
+  private validateDirectory(directory: string, definition: PackageDefinition): string | undefined {
+    try {
+      const manifest = JSON.parse(fsSync.readFileSync(path.join(directory, 'package.json'), 'utf8'))
+      if (manifest.name !== definition.name || manifest.version !== definition.version || manifest.main !== 'dist/main.js') return undefined
+      fsSync.accessSync(path.join(directory, manifest.main))
+      const metadata = yaml.load(fsSync.readFileSync(path.join(directory, 'crabot-module.yaml'), 'utf8')) as { module_id?: string; onboarding_methods?: { handler: string }[] }
+      if (metadata.module_id !== definition.name.replace('crabot-', '')) return undefined
+      for (const method of metadata.onboarding_methods ?? []) {
+        const handler = path.resolve(directory, method.handler)
+        if (!handler.startsWith(directory + path.sep)) return undefined
+        fsSync.accessSync(handler)
+      }
+      const requirePackage = createRequire(path.join(directory, 'package.json'))
+      for (const dependency of Object.keys(manifest.dependencies ?? {})) requirePackage.resolve(dependency.startsWith('@types/') ? dependency + '/package.json' : dependency)
       return directory
-    } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error }
+    } catch { return undefined }
+  }
+
+  async installed(definition: PackageDefinition): Promise<string | undefined> {
+    return this.installedSync(definition)
   }
 
   ensure(definition: PackageDefinition, options: InstallOptions = {}): Promise<string> {
@@ -94,12 +118,24 @@ export class ChannelPackageStore {
       if (manifest.name !== definition.name || manifest.version !== definition.version || manifest.main !== 'dist/main.js') throw new Error('Installed Channel package does not match the catalog')
       await fs.access(path.join(packageDirectory, manifest.main))
       await fs.access(path.join(packageDirectory, 'crabot-module.yaml'))
+      if (!this.validateDirectory(packageDirectory, definition)) throw new Error('Incomplete Channel package')
+      // Validate the stage itself before making it visible at the version destination.
+      const check = `const { createRequire } = require('node:module');
+        const path = require('node:path');
+        const root = process.argv[1]; const load = createRequire(path.join(root, 'package.json'));
+        const p = load('./package.json'); const plugin = load('./' + p.main);
+        if (typeof plugin.apply !== 'function' || typeof plugin.createConfig !== 'function') throw new Error('Invalid Channel exports');
+        for (const name of Object.keys(p.dependencies || {})) load.resolve(name.startsWith('@types/') ? name + '/package.json' : name);
+        for (const handler of JSON.parse(process.argv[2])) { if (typeof load('./' + handler).createOnboarder !== 'function') throw new Error('Invalid onboarder'); }`
+      const metadata = yaml.load(await fs.readFile(path.join(packageDirectory, 'crabot-module.yaml'), 'utf8')) as { onboarding_methods?: { handler: string }[] }
+      const handlers = JSON.stringify((metadata.onboarding_methods ?? []).map(method => method.handler))
+      await execute(process.execPath, ['-e', check, packageDirectory, handlers], { cwd: stage, env, timeout: 15000, maxBuffer: 65536, windowsHide: true })
       await fs.writeFile(path.join(stage, 'installation.json'), JSON.stringify({ ...definition, registry, download_origins: [...downloads] }))
       await fs.rename(stage, destination)
       console.log(`[ChannelPackageStore] Installed ${definition.name}@${definition.version}`)
       return (await this.installed(definition))!
     } catch (cause) {
-      throw Object.assign(new Error(`飞书插件安装失败，请检查国内 npm 源及当前网络后重试；下载缓存已保留。`), { cause })
+      throw Object.assign(new Error(`Channel 插件安装失败，下载或安装校验未通过；下载缓存已保留，请检查安装日志后重试。`), { cause })
     } finally { await fs.rm(stage, { recursive: true, force: true }) }
   }
 }

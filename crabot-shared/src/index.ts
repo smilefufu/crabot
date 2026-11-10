@@ -177,3 +177,5 @@ export type { WorkspaceInterruptedRecoveryRequest, WorkspaceInterruptedRecoveryR
 export type { WorkspaceInterruptedExecutionAuthorityParams, WorkspaceInterruptedExecutionAuthorityResult, WorkspaceInterruptedExecutionCaptureResult, CompleteWorkspaceInterruptedWorkerStopsParams } from './workspace-types.js'
 
 export { RuntimeRpcPeer, RuntimeRpcError, getProcessRpcPeer, type RuntimeRpcCall } from './runtime-rpc.js'
+
+export { mountChannel, type ChannelService, type ChannelPluginContext } from './channel-plugin.js'

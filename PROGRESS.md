@@ -1,10 +1,12 @@
 # Crabot 项目进度
 
-### Cordis 飞书迁移（2026-11-10，自动验证完成，待真人验收）
+### Cordis 迁移与 Channel 按需安装（2026-11-10，六平台按需安装实现中）
 
+- 用户确认扩大为六平台 npm 按需安装：模块页显式安装，已安装分类和新增实例仅使用实际安装结果，主包不预装 Channel。[补充设计](crabot-docs/superpowers/specs/2026-11-10-cordis-channel-installation-design.md)已获确认并收紧为删除 Telegram／微信 Webhook，进入实现；以下自动化证据为飞书首轮，不能代替六平台验收。当前隔离实例的飞书扫码流程已获用户确认可用；不改其配置。
+- 六平台增量：已删除 Telegram／微信 Webhook 配置及接收代码，安装列表与服务端门禁已实现；真实 HTTP 8 项、前端安装／候选列表 10 项、管理器初轮 31 项、独立 Shared 副本 IPC 10 项及 Shared 全量 380/2skip 通过。六个实际 tgz 经国内源完整安装、入口／onboarder 导入、补丁检查及断网复用通过；公开 npm、完整实例与新发行物仍在验证中。
 - 独立 worktree / `research/cordis-validation` 开发，产品提交 `ec4b9c82`；未改现有实例、未提 PR、未合入。真实飞书扫码收发验收通过后才提正式 PR。
 - 正常 Core/Admin/Agent/Memory 与 Cordis 飞书已接通，内部使用受管 IPC / MessagePack / OS 核验管道，整个受管进程树仅 Web 常驻监听。身份、权限、会话、投递和原生命周期保持；运行记录 v2 与配套工具升级、残留旧程序拒绝已验证，未核验孤儿保留现场。
-- 飞书仅 Cordis 入口，添加仅现有扫码。用户授权后首次发布 `crabot-channel-feishu@0.1.0`（cordis-validation）；官方与国内镜像完整性一致，全新实例从真实扫码入口走正式安装器、国内源公开包安装和真实 Agent 合成收发通过。不改全局 npm 配置，不自动转国外源；失败保留缓存 / 旧版本，已安装可离线重启；其它 Channel 本轮不批量 npm 化。
+- 飞书仅 Cordis 入口，添加仅现有扫码。用户授权后首次发布 `crabot-channel-feishu@0.1.0`（cordis-validation）；官方与国内镜像完整性一致，全新实例从真实扫码入口走正式安装器、国内源公开包安装和真实 Agent 合成收发通过。不改全局 npm 配置，不自动转国外源；失败保留缓存 / 旧版本，已安装可离线重启；其它 Channel 原先随主包分发，现纳入上述增量。
 - [四平台最终 CI](https://github.com/smilefufu/crabot/actions/runs/42799423129) 全部通过；Core 572/16skip、Shared 379/2skip、飞书 292、Memory 34、语音 55 与 Admin 定向验证已通过。Admin 两条文档断言、Telegram 一条 reaction 断言在原基线同样失败，未扩大修复。运行记录、真实 CLI / 独立维护包、workspace durable IPC 恢复与固定记录回归通过。
 - 干净 macOS ARM 完整候选 `2026.11.10-cordis.3`：归档 445,003,459 B，清单展开 1,145,224,541 B；归档解包后的正常实例、CLI、公开 npm 国内安装合成端到端 3/3 通过，前后 seal 完整。主包飞书仅 3,918 B 元数据，插件完整依赖约 40 MiB、缓存另计；不与不同格式的旧发行直接比较瘦身比例。
 - [复现与产物](experiments/cordis-feishu/README.md)。正式协议已同步独立文档仓；外部平台 / 模型自动验证均为本地模拟与合成数据，真人扫码及真实 Provider 结果不由 mock 代替。已准备隔离临时验收实例，不复制现有凭据。

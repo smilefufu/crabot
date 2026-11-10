@@ -7,7 +7,7 @@ import { MainLayout } from '../../components/Layout/MainLayout'
 import { Card } from '../../components/Common/Card'
 import { Button } from '../../components/Common/Button'
 import { Loading } from '../../components/Common/Loading'
-import type { ChannelImplementation } from '../../types'
+import type { ChannelImplementation, ChannelPluginCatalogEntry } from '../../types'
 
 interface RunningModule {
   module_id: string
@@ -154,6 +154,9 @@ export const ModuleList: React.FC = () => {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [filter, setFilter] = useState<ModuleFilter>('all')
+  const [plugins, setPlugins] = useState<ChannelPluginCatalogEntry[]>([])
+  const [installing, setInstalling] = useState<Set<string>>(new Set())
+  const [installErrors, setInstallErrors] = useState<Record<string, string>>({})
 
   // 运行中模块状态
   const [runningModules, setRunningModules] = useState<RunningModule[]>([])
@@ -206,9 +209,10 @@ export const ModuleList: React.FC = () => {
       setLoading(true)
       setError('')
 
-      const [archiveItems, channelResponse] = await Promise.all([
+      const [archiveItems, channelResponse, pluginResponse] = await Promise.all([
         legacyArchiveService.list().catch(() => [] as LegacyAgentArchiveSummary[]),
-        channelService.listImplementations().catch(() => ({ items: [] as ChannelImplementation[] })),
+        channelService.listImplementations(),
+        channelService.listPlugins(),
       ])
 
       const allModules: ModuleItem[] = [
@@ -219,10 +223,24 @@ export const ModuleList: React.FC = () => {
       ]
 
       setModules(allModules)
+      setPlugins(pluginResponse.items)
     } catch (err) {
       setError(err instanceof Error ? err.message : '加载失败')
     } finally {
       setLoading(false)
+    }
+  }
+
+  const installPlugin = async (id: string) => {
+    setInstalling(previous => new Set(previous).add(id))
+    setInstallErrors(previous => ({ ...previous, [id]: '' }))
+    try {
+      await channelService.installPlugin(id)
+      await loadAllModules()
+    } catch (error) {
+      setInstallErrors(previous => ({ ...previous, [id]: error instanceof Error ? error.message : '安装失败，请重试' }))
+    } finally {
+      setInstalling(previous => { const next = new Set(previous); next.delete(id); return next })
     }
   }
 
@@ -321,6 +339,22 @@ export const ModuleList: React.FC = () => {
           </div>
         </div>
       )}
+
+      <section aria-label="可安装的 Channel" style={{ marginBottom: '2rem' }}>
+        <h2 style={{ fontSize: '1.25rem', fontWeight: 600, marginBottom: '0.75rem' }}>可安装的 Channel</h2>
+        <p style={{ color: 'var(--text-secondary)', marginBottom: '1rem' }}>先安装插件，再添加账号。安装后仍需完成平台配置。</p>
+        <div style={{ display: 'grid', gap: '0.75rem' }}>
+          {plugins.map(plugin => <Card key={plugin.implementation_id}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem' }}>
+              <div><strong>{plugin.name}</strong><span style={{ marginLeft: '0.75rem', color: 'var(--text-secondary)' }}>v{plugin.version}</span></div>
+              <Button variant="secondary" disabled={plugin.installed || installing.has(plugin.implementation_id)} onClick={() => installPlugin(plugin.implementation_id)}>
+                {plugin.installed ? '已安装' : installing.has(plugin.implementation_id) ? '安装中…' : '安装'}
+              </Button>
+            </div>
+            {installErrors[plugin.implementation_id] && <p role="alert" className="error-message">{installErrors[plugin.implementation_id]}</p>}
+          </Card>)}
+        </div>
+      </section>
 
       {/* 已安装模块列表 */}
       <div style={{ marginBottom: '1rem' }}>

@@ -1,3 +1,4 @@
+import { installTestChannel } from '../tests/helpers/installed-channel.js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs/promises'
 import os from 'node:os'
@@ -10,6 +11,7 @@ describe('Voice setup instance owner', () => {
   let dir: string, manager: ChannelManager, rpc: any
   beforeEach(async () => {
     dir = await fs.mkdtemp(path.join(os.tmpdir(), 'voice-instance-owner-'))
+    await installTestChannel(dir, 'voice')
     rpc = { call: vi.fn(async () => ({ status: 'healthy' })), registerModuleDefinition: vi.fn(async () => ({})), startModule: vi.fn(async () => ({})), stopModule: vi.fn(async () => ({})), resolve: vi.fn(async () => []) }
     manager = new ChannelManager(dir, rpc); await manager.addImplementation(impl)
   })

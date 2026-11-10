@@ -23,7 +23,7 @@ test('normal Crabot completes npm Feishu QR onboarding and delivers a synthetic 
   const artifact = process.env.CORDIS_PLUGIN_TARBALL, npmCache = process.env.CORDIS_NPM_CACHE_DIR
   const publicNpm = process.env.CORDIS_PUBLIC_NPM === '1'
   if (!publicNpm && (!artifact || !npmCache)) throw new Error('CORDIS_PLUGIN_TARBALL and CORDIS_NPM_CACHE_DIR must point to the test npm artifact and prepared domestic cache')
-  const packageVersion = path.join(directory, 'admin/channel-packages/crabot-channel-feishu/0.1.0')
+  const packageVersion = path.join(directory, 'admin/channel-packages/crabot-channel-feishu/0.1.1')
 
   const plugin = path.join(packageVersion, 'node_modules/crabot-channel-feishu')
   const incoming = path.join(directory, 'platform-input.json'), outgoing = path.join(directory, 'platform-output.jsonl')
@@ -167,6 +167,7 @@ test('normal Crabot completes npm Feishu QR onboarding and delivers a synthetic 
       await new Promise(resolve=>setTimeout(resolve,100))
     }
     assert.equal(admitted, true, 'Actual authenticated Admin/Agent cutover did not complete')
+    await api('/api/channel-plugins/channel-feishu/install', 'POST', {})
     const begin = await api('/api/channels/onboard/begin', 'POST', {implementation_id:'channel-feishu',method_id:'device_code_oauth'})
     if (publicNpm) {
       const installation = JSON.parse(await fs.readFile(path.join(packageVersion, 'installation.json'), 'utf8'))

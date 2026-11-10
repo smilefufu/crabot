@@ -1,16 +1,13 @@
 import path from 'node:path'
 import { Context } from 'cordis'
-import { ModuleBase, getProcessRpcPeer, type Event } from 'crabot-shared'
+import { ModuleBase, getProcessRpcPeer, type Event, type ChannelService, type HealthResult } from 'crabot-shared'
 
-interface ChannelService {
-  methods: Record<string, (params: unknown) => Promise<unknown>>
-  getHealthDetails(): Promise<Record<string, unknown>>
-}
 interface ChannelConfig {
   module_id: string
   module_type: 'channel'
   version: string
   protocol_version: string
+  runtime_bearer?: string
 }
 interface ChannelPlugin {
   apply(ctx: Context, config: ChannelConfig): Promise<void>
@@ -49,6 +46,11 @@ export class CordisChannelHost extends ModuleBase {
   }
 
   protected async onStop(): Promise<void> { await this.context.fiber.dispose() }
+  protected async getHealthStatus(details: Record<string, unknown>): Promise<HealthResult['status']> {
+    const status = await super.getHealthStatus(details)
+    if (status !== 'healthy' || !this.channel?.getHealthStatus) return status
+    return this.channel.getHealthStatus(details)
+  }
   protected async getHealthDetails(): Promise<Record<string, unknown>> {
     if (!this.channel) throw new Error('Cordis channel has not started')
     return this.channel.getHealthDetails()
@@ -61,13 +63,14 @@ export async function startCordisChannel(): Promise<CordisChannelHost> {
   if (!pluginPath || !path.isAbsolute(pluginPath)) throw new Error('Managed plugin path is required')
   if (!Number.isInteger(port) || port < 1) throw new Error('Managed runtime address is required')
   const plugin = require(pluginPath) as ChannelPlugin
-  const host = new CordisChannelHost(plugin, plugin.createConfig(process.env), port)
+  const config = plugin.createConfig(process.env)
+  const host = new CordisChannelHost(plugin, config, port)
   const shutdown = (): void => { host.stop().catch(error => { console.error(error); process.exitCode = 1 }) }
   process.on('SIGINT', shutdown)
   process.on('SIGTERM', shutdown)
   try {
     await host.start()
-    await host.register()
+    await host.register(config.runtime_bearer)
     return host
   } catch (error) {
     process.removeListener('SIGINT', shutdown)

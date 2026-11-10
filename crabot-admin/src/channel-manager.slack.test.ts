@@ -1,3 +1,4 @@
+import { installTestChannel } from '../tests/helpers/installed-channel.js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs/promises'
 import os from 'node:os'
@@ -15,7 +16,7 @@ describe('Slack Admin -> real module RPC -> persistent restart',()=>{
   it('preserves uppercase through onboarding completion and rejects a differently cased duplicate before authorization', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'slack-case-integration-')); dirs.push(dir)
     const manager = new ChannelManager(dir, { registerModuleDefinition: vi.fn(), startModule: vi.fn() } as any)
-    await manager.initialize()
+    await installTestChannel(dir, 'slack'); await manager.initialize()
     const onboarder = {
       begin: vi.fn(async () => ({ session_id: '44444444-4444-4444-8444-444444444444', ui_mode: 'challenge_code' as const })),
       finish: vi.fn(async () => ({ env: { SLACK_BOT_TOKEN: 'xoxb-fixture', SLACK_APP_TOKEN: 'xapp-fixture' } })),
@@ -79,7 +80,7 @@ describe('Slack Admin -> real module RPC -> persistent restart',()=>{
   it('rolls back a new Slack instance if its initial private credential write fails, allowing a same-session retry', async () => {
     const dir=await fs.mkdtemp(path.join(os.tmpdir(),'slack-config-failure-')); dirs.push(dir)
     const manager=new ChannelManager(dir,{registerModuleDefinition:vi.fn()} as any)
-    await manager.initialize()
+    await installTestChannel(dir, 'slack'); await manager.initialize()
     const write=vi.spyOn(manager,'saveLocalConfig').mockRejectedValueOnce(new Error('fixture disk failure'))
     const params={implementation_id:'channel-slack',name:'slack-retry',auto_start:false,env:{SLACK_BOT_TOKEN:'xoxb-fixture',SLACK_APP_TOKEN:'xapp-fixture'}}
     await expect(manager.createInstance(params)).rejects.toThrow('fixture disk failure')
@@ -97,7 +98,7 @@ describe('Slack Admin -> real module RPC -> persistent restart',()=>{
       if(!result.success) throw Object.assign(new Error(result.error.message),{code:result.error.code})
       return result.data
     }) }
-    const manager=new ChannelManager(dir,rpc as any); await manager.initialize()
+    const manager=new ChannelManager(dir,rpc as any); await installTestChannel(dir, 'slack'); await manager.initialize()
     const implementation=manager.getImplementation('channel-slack')!
     expect(implementation.config_schema).toMatchObject({properties:{SLACK_ONLY_RESPOND_TO_MENTIONS:{default:'true','x-runtime-path':'group.only_respond_to_mentions'}}})
     const instance=await manager.createInstance({implementation_id:'channel-slack',name:'slack-test',env:{SLACK_BOT_TOKEN:'xoxb-test',SLACK_APP_TOKEN:'xapp-test',SLACK_ONLY_RESPOND_TO_MENTIONS:'true'}})

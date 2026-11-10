@@ -45,3 +45,17 @@ it('其他平台手动创建表单不再提供飞书选项', async () => {
   expect(screen.queryByRole('option', { name: /飞书/ })).toBeNull()
   expect(screen.getByRole('option', { name: /Telegram/ })).toBeInTheDocument()
 })
+
+it('零安装时只引导到模块页，不提供平台创建入口', async () => {
+  vi.mocked(channelService.listImplementations).mockResolvedValue({ items: [], pagination: {} } as any)
+  view()
+  expect(await screen.findByText('请先安装 Channel 插件。')).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /扫码授权|手动填写|手机扫码配对/ })).toBeNull()
+  expect(screen.getByRole('button', { name: '前往模块页安装 Channel' })).toBeInTheDocument()
+})
+it('只安装飞书时仅提供飞书扫码', async () => {
+  vi.mocked(channelService.listImplementations).mockResolvedValue({ items: [implementations[0]], pagination: {} } as any)
+  view()
+  expect(await screen.findByRole('button', { name: /飞书 · 扫码授权/ })).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /Telegram|Slack|手动填写/ })).toBeNull()
+})

@@ -12,12 +12,6 @@ const JS_MODULES = [
   'crabot-core',
   'crabot-admin',
   'crabot-agent',
-  'crabot-channel-wechat',
-  'crabot-channel-telegram',
-  'crabot-channel-feishu',
-  'crabot-channel-dingtalk',
-  'crabot-channel-slack',
-  'crabot-channel-voice',
   'crabot-mcp-tools',
 ]
 const PY_MODULE = 'crabot-memory'

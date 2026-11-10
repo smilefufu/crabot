@@ -15,7 +15,7 @@ async function writePackage(stage: string) {
   const module = path.join(stage, 'node_modules', definition.name)
   await fs.mkdir(path.join(module, 'dist'), { recursive: true })
   await fs.writeFile(path.join(module, 'package.json'), JSON.stringify({ ...definition, main: 'dist/main.js' }))
-  await fs.writeFile(path.join(module, 'dist/main.js'), 'exports.apply=()=>{}')
+  await fs.writeFile(path.join(module, 'dist/main.js'), 'exports.apply=()=>{};exports.createConfig=()=>({})')
   await fs.writeFile(path.join(module, 'crabot-module.yaml'), 'module_id: channel-feishu')
 }
 

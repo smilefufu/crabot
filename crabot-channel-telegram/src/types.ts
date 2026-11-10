@@ -329,9 +329,6 @@ export interface StoredMessage {
 
 export interface TelegramChannelConfig {
   bot_token: string
-  mode: 'polling' | 'webhook'
-  webhook_url?: string
-  webhook_secret?: string
   /** bot 发文本时是否按 Markdown 渲染。默认 auto（仅在检测到 markdown 标记时启用） */
   markdown_format: MarkdownFormat
 }

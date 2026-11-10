@@ -69,11 +69,14 @@ export const NewChannel: React.FC = () => {
             新增聊天方式
           </h1>
           <p style={{ fontSize: '0.8125rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
-            选择平台 + 入口方式。"推荐"标签的入口由模块自带交互式流程（如扫码授权），手动填写适合已有凭证的场景。
+            选择已安装的平台完成配置。其它平台请先到模块页安装。
           </p>
         </div>
 
         {error && <div className="error-message">{error}</div>}
+        {!loading && !error && impls.length === 0 && <p>请先安装 Channel 插件。</p>}
+        {!loading && <p style={{ marginBottom: '1rem' }}><button type="button" onClick={() => navigate('/modules')}>前往模块页安装 Channel</button></p>}
+
 
         {loading ? (
           <Loading />

@@ -1,13 +1,20 @@
 import path from 'node:path'
+import { mountChannel, type ChannelPluginContext } from 'crabot-shared'
 import { VoiceChannel } from './voice-channel.js'
 
-async function main(): Promise<void> {
-  const id = process.env.Crabot_MODULE_ID, port = Number(process.env.Crabot_PORT), bearer = process.env.CRABOT_VOICE_RUNTIME_BEARER
-  delete process.env.CRABOT_VOICE_RUNTIME_BEARER
-  if (!id || !Number.isInteger(port) || port <= 0 || port > 65535 || !bearer) throw new Error('MM voice runtime identity and assigned port are required')
-  const data = path.join(process.env.DATA_DIR ?? './data', 'voice', id)
-  const channel = new VoiceChannel({ moduleId: id, moduleType: 'channel', version: '0.1.0', protocolVersion: '0.9.0', port }, data, bearer)
-  for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => { void channel.stop().then(() => process.exit(0), () => process.exit(1)) })
-  await channel.start(); await channel.register(bearer)
+export const name = 'crabot-channel-voice'
+export const inject = ['crabotChannels']
+export function apply(ctx: ChannelPluginContext, config: ReturnType<typeof createConfig>): Promise<void> {
+  const { module_id: id, port, runtime_bearer: bearer, data_dir: data } = config
+  return mountChannel(ctx, new VoiceChannel({ moduleId: id, moduleType: 'channel', version: config.version,
+    protocolVersion: config.protocol_version, port }, data, bearer))
 }
-main().catch(() => { console.error('Voice Channel startup failed; check MM identity, Admin audio configuration and writable data directory'); process.exit(1) })
+export function createConfig(env: NodeJS.ProcessEnv = process.env) {
+  const id = env.Crabot_MODULE_ID ?? env.CRABOT_MODULE_ID
+  const port = Number(env.Crabot_PORT ?? env.CRABOT_PORT)
+  const bearer = env.CRABOT_VOICE_RUNTIME_BEARER
+  delete env.CRABOT_VOICE_RUNTIME_BEARER
+  if (!id || !Number.isInteger(port) || port < 1 || !bearer) throw new Error('MM voice runtime identity is required')
+  return { module_id: id, module_type: 'channel' as const, version: '0.1.1', protocol_version: '0.9.0', port,
+    data_dir: path.join(env.DATA_DIR ?? './data', 'voice', id), runtime_bearer: bearer }
+}

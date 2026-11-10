@@ -51,7 +51,7 @@ export function createConfig(env: NodeJS.ProcessEnv = process.env): Config {
   return {
     module_id: moduleId,
     module_type: 'channel',
-    version: '0.1.0',
+    version: '0.1.1',
     protocol_version: '0.1.0',
     data_dir: env.DATA_DIR ?? path.join(process.cwd(), 'data'),
     feishu: {

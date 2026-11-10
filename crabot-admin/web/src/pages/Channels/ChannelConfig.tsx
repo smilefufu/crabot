@@ -715,6 +715,8 @@ export const ChannelConfig: React.FC = () => {
                         )}
                       </div>
 
+                      {instance.runtime_error && <p role="alert" className="error-message">{instance.runtime_error}</p>}
+
                       {/* Auto-start toggle */}
                       <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginTop: '0.75rem' }}>
                         <label className="toggle-switch">
