@@ -1,5 +1,11 @@
 # Crabot 项目进度
 
+### 第三方磁盘／computer-use 评估复核（2026-11-11）
+
+- 当前 main 的请求分帧已解决旧 desktop.23 computer-use 半关闭故障，本次 Mac MCP 全包 47 项通过。报告的 1000 上限仅为 TraceStore 内存驻留，不能当作磁盘配额；默认 dry-run 是预览保护，不改成默认实删。
+- 修复 running 快照在内容不变时仍每 15 秒重写：只在成功替换后记住内容摘要，变化、丢失及写入／替换失败仍正常落盘与重试；不改检查周期、格式、恢复或保留天数。回归先红后绿，相关 90 项和 Agent 类型检查通过；未部署、未打包。
+- 已复现 Manager 全历史副本重复增长且不受旧 TraceStore 清理；正式协议的统一 retention 仍是待补实现。统一过期回收、停写额外副本和用户确认清理旧程序目录分别待许可；复核与短稿见文档仓 `2026-11-11-third-party-issue-audit.md`／`2026-11-11-desktop-footprint-correction-design.md`，本次没有删除真实数据。
+
 ### v2026.11.10.1 与桌面 .25 公开预览（2026-11-10，未部署本机）
 
 - 从 `main` 的 `45ac9153` 固定打 tag，发布 macOS ARM／Intel、Windows x64、Ubuntu x64 四个桌面 `.25` 安装包及四个独立 CLI 归档：[Release](https://github.com/smilefufu/crabot/releases/tag/v2026.11.10.1)。八个最终包均通过原生 CI 安装／启动及各自的健康、停止、重连或升级检查。

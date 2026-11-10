@@ -6,6 +6,7 @@
 
 import * as fs from 'fs'
 import * as path from 'path'
+import { createHash } from 'node:crypto'
 import type { AgentTrace, AgentSpan, AgentSpanType, AgentSpanDetails, TokenUsage } from '../types.js'
 import { aggregateUsage } from './trace-usage.js'
 import {
@@ -110,6 +111,7 @@ export class TraceStore {
   // 进程重启后 rebuildIndex 把上次 running 的 trace 重新加载到 this.traces，
   // searchTraces 的现有合并逻辑（line 107-112）能直接展示出来。
   private flushTimer?: ReturnType<typeof setInterval>
+  private lastRunningSnapshotHash?: string
   private readonly runningFlushFile: string
   private readonly archiveFilePrefix: string
   private readonly readableArchiveFilePrefixes: readonly string[]
@@ -368,9 +370,12 @@ export class TraceStore {
     }
     const content = lines.length > 0 ? lines.join('\n') + '\n' : ''
     const finalPath = path.join(this.persistDir, this.runningFlushFile)
+    const hash = createHash('sha256').update(content).digest('hex')
+    if (hash === this.lastRunningSnapshotHash && fs.existsSync(finalPath)) return
     const tmpPath = finalPath + '.tmp'
     fs.writeFileSync(tmpPath, content, 'utf-8')
     fs.renameSync(tmpPath, finalPath)
+    this.lastRunningSnapshotHash = hash
   }
 
   /**
