@@ -51,3 +51,5 @@ Core 全量 572 项通过、16 项平台跳过；Shared 379/2skip、飞书 292�
 - 实际归档解包目录的正常启动/停止、真实 CLI、公开 npm 国内安装扫码及真实 Agent 合成收发 3/3 通过，运行前后完整 seal 核验通过。日志 `/private/tmp/crabot-cordis-v3-sealed-public-e2e-20261110.tap`；这是公开包安装，不是本地 tarball 或暖缓存替代。
 - 记录 v2 的 workspace 文件回归 179 项通过、1 项平台跳过；真实独立协调器、Admin/Agent 和 durable IPC 恢复定向用例通过。自动化没有使用真实业务账号、对话或外部 Provider。
 - 正式协议已在独立文档仓同步到 main。产品分支保持独立，未提 PR、未合并、未部署。剩余为用户亲自扫码、真实飞书收发验收；需要模型时应在临时实例的 Admin 配置测试 Provider，不自动复制现有实例凭据。
+
+公开标签核对：发布命令显式传入 `--tag=cordis-validation`，npm 首次发布处理后同时产生 `latest: 0.1.0`。经 2FA 执行官方 `npm dist-tag rm crabot-channel-feishu latest` 返回 HTTP 400；当前两个标签仍存在，没有删除版本或改指向占位包。Crabot 使用目录精确版本 0.1.0，国内源公开安装结果保持有效；不得声称包只有验证标签。
