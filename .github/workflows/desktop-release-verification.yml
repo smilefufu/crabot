@@ -1,38 +1,49 @@
-name: Desktop release verification
+name: Release transport diagnostics
 on:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  host:
+  transport:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-2022]
+        os: [ubuntu-24.04, macos-15]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
-    env:
-      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
-    defaults:
-      run:
-        shell: bash
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
         with:
-          node-version: '22.22.3'
-      - name: Build this checkout's actual SDK, Shared, Native and internal host
+          ref: v2026.11.10.1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Inspect exact locked HTTPS client trust and independent site behavior
+        shell: bash
         run: |
-          pnpm --dir crabot-client install --frozen-lockfile --ignore-scripts
-          pnpm --dir crabot-client run build
-          pnpm --dir crabot-shared install --frozen-lockfile --ignore-scripts
-          pnpm --dir crabot-shared run build
-          pnpm install --frozen-lockfile --ignore-scripts
-          node scripts/build-native.mjs
-          pnpm --dir crabot-desktop install --frozen-lockfile --ignore-scripts
-          pnpm --dir crabot-desktop run build
-      - name: Install original publisher fixture dependency
-        run: pnpm --dir crabot-admin install --frozen-lockfile --ignore-scripts
-      - name: Verify canonical signing, archive bytes and bounded anonymous downloads
-        run: node --test --test-concurrency=1 scripts/desktop/release-signing.test.mjs crabot-desktop/tests/release-signatures.test.mjs crabot-desktop/tests/release-download.test.mjs
+          python -m pip install curl-cffi==0.16.3 certifi==2026.7.22
+          python - <<'PY'
+          import hashlib, pathlib, ssl, urllib.request, subprocess, socket, os
+          import curl_cffi, curl_cffi.curl, certifi
+          print('TLS', ssl.OPENSSL_VERSION, 'curl', curl_cffi.__version__, flush=True)
+          for label, file in [('curl',curl_cffi.curl.DEFAULT_CACERT),('certifi',certifi.where())]:
+            p=pathlib.Path(file); print('CA',label,p.name,hashlib.sha256(p.read_bytes()).hexdigest(),flush=True)
+          for url in ['https://example.com','https://github.com','https://www.wikipedia.org']:
+            for label, ca in [('default',True),('certifi',certifi.where())]:
+              try:
+                r=curl_cffi.requests.get(url,verify=ca,timeout=15); print('CURL_CFFI',url,label,r.status_code,flush=True)
+              except Exception as e: print('CURL_CFFI_ERROR',url,label,str(e),flush=True)
+            try:
+              with urllib.request.urlopen(url,context=ssl.create_default_context(cafile=certifi.where()),timeout=15) as r: print('URLLIB',url,r.status,flush=True)
+            except Exception as e: print('URLLIB_ERROR',url,str(e),flush=True)
+          if os.uname().sysname=='Linux':
+            host='archive.ubuntu.com'
+            addresses=sorted(set(a[4][0] for a in socket.getaddrinfo(host,443,type=socket.SOCK_STREAM)))
+            print('UBUNTU_ADDRESSES',addresses,flush=True)
+            url='https://archive.ubuntu.com/ubuntu/pool/main/a/avahi/libavahi-common3_0.8-5ubuntu5.5_amd64.deb'
+            for ip in [a for a in addresses if ':' not in a][:5]:
+              out=pathlib.Path(os.environ['RUNNER_TEMP'])/'locked-resource.deb'
+              r=subprocess.run(['curl','--silent','--show-error','--fail','--max-time','12','--resolve',host+':443:'+ip,url,'-o',str(out)],capture_output=True,text=True,timeout=15)
+              digest=hashlib.sha256(out.read_bytes()).hexdigest() if r.returncode==0 else None
+              print('UBUNTU_PIN',ip,r.returncode,digest,r.stderr.strip(),flush=True)
+          PY
