@@ -4,50 +4,6 @@ on:
 permissions:
   contents: read
 jobs:
-  transport:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, macos-15]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: v2026.11.10.1
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Inspect exact locked HTTPS client trust and independent site behavior
-        shell: bash
-        run: |
-          python -m pip install curl-cffi==0.16.3 certifi==2026.7.22
-          python - <<'PY'
-          import hashlib, pathlib, ssl, urllib.request, subprocess, socket, os
-          import curl_cffi, curl_cffi.curl, certifi
-          print('TLS', ssl.OPENSSL_VERSION, 'curl', curl_cffi.__version__, flush=True)
-          for label, file in [('curl',curl_cffi.curl.DEFAULT_CACERT),('certifi',certifi.where())]:
-            p=pathlib.Path(file); print('CA',label,p.name,hashlib.sha256(p.read_bytes()).hexdigest(),flush=True)
-          for url in ['https://example.com','https://github.com','https://www.wikipedia.org']:
-            for label, ca in [('default',True),('certifi',certifi.where())]:
-              try:
-                r=curl_cffi.requests.get(url,verify=ca,timeout=15); print('CURL_CFFI',url,label,r.status_code,flush=True)
-              except Exception as e: print('CURL_CFFI_ERROR',url,label,str(e),flush=True)
-            try:
-              with urllib.request.urlopen(url,context=ssl.create_default_context(cafile=certifi.where()),timeout=15) as r: print('URLLIB',url,r.status,flush=True)
-            except Exception as e: print('URLLIB_ERROR',url,str(e),flush=True)
-          if os.uname().sysname=='Linux':
-            host='archive.ubuntu.com'
-            addresses=sorted(set(a[4][0] for a in socket.getaddrinfo(host,443,type=socket.SOCK_STREAM)))
-            print('UBUNTU_ADDRESSES',addresses,flush=True)
-            url='https://archive.ubuntu.com/ubuntu/pool/main/a/avahi/libavahi-common3_0.8-5ubuntu5.5_amd64.deb'
-            for ip in [a for a in addresses if ':' not in a]:
-              out=pathlib.Path(os.environ['RUNNER_TEMP'])/'locked-resource.deb'
-              r=subprocess.run(['curl','--silent','--show-error','--fail','--max-time','12','--resolve',host+':443:'+ip,url,'-o',str(out)],capture_output=True,text=True,timeout=15)
-              digest=hashlib.sha256(out.read_bytes()).hexdigest() if r.returncode==0 else None
-              print('UBUNTU_PIN',ip,r.returncode,digest,r.stderr.strip(),flush=True)
-          PY
-
   packaged-mac:
     runs-on: macos-15
     timeout-minutes: 20
@@ -72,13 +28,13 @@ jobs:
           core="$mount/Crabot.app/Contents/Resources/core"
           runtime=$(node -p 'const fs=require("fs");fs.realpathSync(process.argv[1]+"/"+JSON.parse(fs.readFileSync(process.argv[1]+"/scrapling-runtime.json")).directory)' "$core")
           "$runtime/python/bin/python3.12" -I -B - "$runtime" <<'PY'
-          import sys, pathlib, hashlib, ssl, urllib.request
+          import sys, pathlib, hashlib, ssl, urllib.request, socket
           root=pathlib.Path(sys.argv[1]); sys.path.insert(0,str(root/'packages'))
           import curl_cffi, curl_cffi.curl, certifi
           print('PACKAGED_TLS',sys.version,ssl.OPENSSL_VERSION,flush=True)
           for label,file in [('curl',curl_cffi.curl.DEFAULT_CACERT),('certifi',certifi.where())]:
             p=pathlib.Path(file); print('PACKAGED_CA',label,str(p),hashlib.sha256(p.read_bytes()).hexdigest(),flush=True)
-          for url in ['https://example.com','https://github.com']:
+          for url in ['https://example.com','https://github.com','https://docs.python.org','https://www.baidu.com']:
             for label,ca in [('default',True),('certifi',certifi.where())]:
               try:
                 r=curl_cffi.requests.get(url,verify=ca,timeout=15); print('PACKAGED_CURL',url,label,r.status_code,flush=True)
@@ -86,4 +42,32 @@ jobs:
             try:
               with urllib.request.urlopen(url,context=ssl.create_default_context(cafile=certifi.where()),timeout=15) as r: print('PACKAGED_URLLIB',url,r.status,flush=True)
             except Exception as e: print('PACKAGED_URLLIB_ERROR',url,str(e),flush=True)
+            try:
+              host=url.split('/')[2]
+              with socket.create_connection((host,443),timeout=15) as raw, ssl.create_default_context(cafile=certifi.where()).wrap_socket(raw,server_hostname=host) as tls:
+                peer=tls.getpeercert(); print('VERIFIED_PEER',host,peer.get('issuer'),peer.get('notAfter'),flush=True)
+            except Exception as e: print('VERIFIED_PEER_ERROR',url,str(e),flush=True)
           PY
+          node --input-type=module - "$core" <<'NODE'
+          import {createRequire} from 'node:module'; import path from 'node:path'; import os from 'node:os'; import fs from 'node:fs/promises';
+          const root=process.argv[2], require=createRequire(path.join(root,'crabot-agent/package.json'));
+          const {Client}=require('@modelcontextprotocol/sdk/client/index.js');
+          const {StdioClientTransport}=require('@modelcontextprotocol/sdk/client/stdio.js');
+          const {resolveScraplingConfig}=require(path.join(root,'scripts/lib/scrapling-runtime.cjs'));
+          const scratch=await fs.mkdtemp(path.join(os.tmpdir(),'release-https-scope-'));
+          const config=resolveScraplingConfig(root,scratch,{is_builtin:true,name:'scrapling',transport:'stdio',command:'scrapling',args:['mcp']},{name:'scrapling'});
+          const transport=new StdioClientTransport({command:config.command,args:config.args,env:{...process.env,...config.env,CRABOT_SCRAPLING_SYSTEM:'1'},stderr:'inherit'});
+          const client=new Client({name:'release-https-scope',version:'1'},{capabilities:{}});
+          try {
+            await client.connect(transport);
+            for(const url of ['https://example.com','https://github.com','https://docs.python.org','https://www.baidu.com']) {
+              for(const name of ['make_request','fetch','stealthy_fetch']) {
+                try {
+                  const args={url,extraction_type:'text',...(name==='make_request'?{}:{google_search:false})};
+                  const result=await client.callTool({name,arguments:args},undefined,{timeout:120000});
+                  console.log('ACTUAL_MCP_HTTPS '+JSON.stringify({url,tool:name,passed:!result.isError,output_bytes:JSON.stringify(result).length}));
+                } catch(error){console.log('ACTUAL_MCP_HTTPS '+JSON.stringify({url,tool:name,passed:false,error:String(error)}))}
+              }
+            }
+          } finally {await client.close();await fs.rm(scratch,{recursive:true,force:true})}
+          NODE
