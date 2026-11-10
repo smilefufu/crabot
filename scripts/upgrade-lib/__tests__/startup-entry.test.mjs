@@ -23,6 +23,13 @@ async function scripts() {
   for (const name of ['legacy-releases.json', 'legacy-python-bootstrap.json']) await fs.copyFile(path.join(product, 'scripts/desktop', name), path.join(home, 'scripts/desktop', name))
   await fs.mkdir(path.join(home, 'crabot-native/build/Release'), { recursive: true })
   await fs.copyFile(path.join(product, 'crabot-native/build/Release/crabot-native.node'), path.join(home, 'crabot-native/build/Release/crabot-native.node'))
+  await fs.cp(path.join(product, 'crabot-shared/dist'), path.join(home, 'crabot-shared/dist'), { recursive: true })
+  for (const name of ['crabot-shared', 'crabot-core']) {
+    await fs.mkdir(path.join(home, name), { recursive: true })
+    await fs.symlink(path.join(product, name, 'node_modules'), path.join(home, name, 'node_modules'), 'dir')
+  }
+  await fs.mkdir(path.join(home, 'crabot-core/dist'), { recursive: true })
+  await fs.copyFile(path.join(product, 'crabot-core/dist/runtime-stream.js'), path.join(home, 'crabot-core/dist/runtime-stream.js'))
   await write('scripts/lib/instance.mjs', 'export const resolveCliDataDir = () => process.env.DATA_DIR; export const hasInstance = () => true')
   await write('scripts/lib/node_modules/proper-lockfile/index.js', 'module.exports = {}')
   await write('scripts/lib/scrapling-runtime.cjs', 'module.exports = { runtimeRequired() { return false } }')
@@ -32,6 +39,22 @@ async function scripts() {
   for (const name of ['crabot-core/dist/main.js', 'crabot-core/dist/orphan-recovery-preflight.js', 'crabot-admin/dist/main.js', 'crabot-agent/dist/main.js']) await write(name, '// finite fixture; must not spawn')
   await write('scripts/lib/fixture-note', 'isolated test installation')
   await fs.copyFile(path.join(product, 'scripts/prepare-shared-requests.mjs'), path.join(home, 'scripts/prepare-shared-requests.mjs'))
+}
+function privateMm(port) {
+  return `
+    const root=${JSON.stringify(home)},dataDir=${JSON.stringify(data)};
+    if(process.env.CRABOT_INSTANCE_GENERATION)require(root+'/scripts/lib/mm-startup.cjs').verifyManagedMmStartup({root,dataDir,generation:process.env.CRABOT_INSTANCE_GENERATION});
+    let stop;
+    require(root+'/scripts/lib/runtime-control.cjs').startRuntimeControl({root,dataDir,target:${port},dispatch(call){
+      if(call.method==='health')return {status:'healthy'};
+      if(call.method==='shutdown'){setTimeout(()=>stop(),0);return {}};
+      throw new Error('Unknown finite fixture method');
+    }}).then(control=>{
+      stop=async()=>{await control.close();process.exit(0)};
+      process.on('message',message=>{if(message?.type==='crabot-shutdown')stop()});
+      process.on('SIGTERM',()=>stop());
+    }).catch(error=>{console.error(error);process.exit(1)});
+  `
 }
 async function invalidLedger() {
   const file = path.join(data, 'agent/worker-ledgers/bad.json')
@@ -86,7 +109,7 @@ it('foreground start releases only its startup lock after MM health, while its o
   await write('crabot-admin/dist/credentials.js', 'exports.readCredentials = async () => ({}); exports.writeCredentials = async () => {}; exports.newCredentialsFromPassword = () => {};')
   await fs.copyFile(path.join(product, 'scripts/start.mjs'), path.join(home, 'scripts/start.mjs'))
   const port = await new Promise(resolve => { const socket = net.createServer(); socket.listen(0, '127.0.0.1', () => { const port = socket.address().port; socket.close(() => resolve(port)) }) })
-  await write('crabot-core/dist/main.js', `const http=require('node:http'); const server=http.createServer((req,res)=>{res.setHeader('content-type','application/json');res.end(JSON.stringify({success:true,data:{status:'healthy'}}))}); server.listen(${port},'127.0.0.1'); process.on('message', message => { if(message?.type==='crabot-shutdown')server.close(()=>process.exit(0)) });`)
+  await write('crabot-core/dist/main.js', privateMm(port))
   const child = spawn(process.execPath, [path.join(home, 'scripts/start.mjs')], { cwd: home, env: { ...env(), CRABOT_PORT_OFFSET: String(port - 19000) }, stdio: ['ignore', 'pipe', 'pipe'] })
   let output = ''; child.stdout.on('data', bytes => { output += bytes }); child.stderr.on('data', bytes => { output += bytes })
   const exited = new Promise(resolve => child.on('close', resolve))
@@ -109,7 +132,6 @@ it('foreground start releases only its startup lock after MM health, while its o
 it.each([false, true])('finite compiled MM isolates dev=%s from legacy dotenv and preserves later lock/PID evidence', async isDev => {
   await scripts()
   await fs.cp(path.join(product, 'crabot-core/dist'), path.join(home, 'crabot-core/dist'), { recursive: true })
-  await fs.symlink(path.join(product, 'crabot-core/node_modules'), path.join(home, 'crabot-core/node_modules'), 'dir')
   // Limit this main-entry test to MM lifecycle; independent core-module and venv tests cover those.
   await write('crabot-desktop/package.json', '{"crabotDesktopDevelopment":true}')
   await write('.env', 'WORKER_WORKSPACES_DIR=legacy-workspaces\nCRABOT_ADMIN_DATA_DIR=legacy-admin\nCRABOT_MEMORY_DATA_DIR=legacy-memory\n')
@@ -123,7 +145,7 @@ it.each([false, true])('finite compiled MM isolates dev=%s from legacy dotenv an
     const deadline = Date.now() + 8000
     let healthy = false
     while (Date.now() < deadline) {
-      try { healthy = (await (await fetch(`http://127.0.0.1:${port}/health`, { method: 'POST', body: '{}', signal: AbortSignal.timeout(200) })).json()).data.status === 'healthy' } catch {}
+      try { healthy = (await (await import('../../lib/runtime-control.cjs')).callRuntimeControl(data, { target: port, source: 'fixture', method: 'health', params: {} }, { timeoutMs: 200 })).status === 'healthy' } catch {}
       const locked = await acquireCliLock(data, 'probe', 0).then(lock => { releaseCliLock(lock); return false }, () => true)
       if (healthy && !locked) break
       await new Promise(resolve => setTimeout(resolve, 20))
@@ -166,8 +188,7 @@ it('new developer browser credentials remain schema-compatible before first boot
     const result=checkSchema({moduleDir:${JSON.stringify(path.join(home, 'crabot-admin'))},dataDir:${JSON.stringify(path.join(data, 'admin'))}});
     if(result.kind==='block'){console.error('admin-web schema_mismatch');process.exit(1)}
     require('node:fs').writeFileSync(${JSON.stringify(path.join(data, 'observed-environment.json'))}, JSON.stringify(Object.fromEntries(['WORKER_WORKSPACES_DIR','WORKSPACE_DIR','CRABOT_ADMIN_DATA_DIR','CRABOT_MEMORY_DATA_DIR','CRABOT_JWT_SECRET','DATA_DIR','CRABOT_ADMIN_WEB_PORT'].map(name=>[name,process.env[name]??null]))));
-    const server=require('node:http').createServer((req,res)=>{req.resume();res.setHeader('Content-Type','application/json');res.end(JSON.stringify({success:true,data:{status:'healthy'}}));if(req.url==='/shutdown')req.on('end',()=>server.close(()=>process.exit(0)))});
-    server.listen(29000,'127.0.0.1');process.on('message',message=>{if(message.type==='crabot-shutdown')server.close(()=>process.exit(0))});
+    ${privateMm(29000)}
   `)
   const entry = pathToFileURL(path.join(home, 'scripts/lib/development.mjs')).href
   let credentialBytes

@@ -5,11 +5,9 @@ import os from 'node:os'
 import path from 'node:path'
 import net from 'node:net'
 import http from 'node:http'
-import { fileURLToPath } from 'node:url'
 import control from '../../scripts/lib/runtime-control.cjs'
 import identity from '../../scripts/lib/process-identity.cjs'
-import { launchNormalFixture } from './normal-instance-fixture.mjs'
-const root = fileURLToPath(new URL('../..', import.meta.url))
+import { launchNormalFixture, normalFixtureRoot as root } from './normal-instance-fixture.mjs'
 
 async function freePort() {
   const listener = net.createServer()

@@ -43,6 +43,9 @@ jobs:
       - name: Build actual Admin startup dependency
         run: pnpm --dir crabot-admin run build
       - name: Build and verify the single-port managed transport and existing Voice gateway
+        # These fixtures co-locate both ends of multiple native pipes in one Node process.
+        env:
+          UV_THREADPOOL_SIZE: '8'
         run: |
           pnpm --dir crabot-channel-voice install --frozen-lockfile --ignore-scripts
           pnpm --dir crabot-channel-voice run build

@@ -12,7 +12,7 @@ import { stopInstance } from '../../scripts/lib/instance-controller.mjs'
 import { inspectInstance } from '../../scripts/lib/instance-runtime.mjs'
 const require=createRequire(import.meta.url)
 const {writeCredentials,newCredentialsFromPassword}=require('../../crabot-admin/dist/credentials.js')
-const root=fileURLToPath(new URL('../..',import.meta.url)),run=promisify(execFile)
+const root=path.resolve(process.env.CORDIS_CORE_ROOT??fileURLToPath(new URL('../..',import.meta.url))),run=promisify(execFile)
 
 test('actual CLI starts in background, reads pipe status and stops the normal source instance', {timeout:120000}, async()=>{
   const directory=await fs.mkdtemp(path.join(os.tmpdir(),'crabot-cordis-cli-'))

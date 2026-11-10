@@ -1,20 +1,22 @@
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
-const root = fileURLToPath(new URL('../..', import.meta.url))
+import { fileURLToPath, pathToFileURL } from 'node:url'
+export const normalFixtureRoot = path.resolve(process.env.CORDIS_CORE_ROOT ?? fileURLToPath(new URL('../..', import.meta.url)))
+const root = normalFixtureRoot
+const moduleUrl = file => pathToFileURL(path.join(root, file)).href
 
 // The fixture uses the normal launcher and migrations, with temporary synthetic data only.
 export function launchNormalFixture(directory, web, { preload, initializeCredentials = false } = {}) {
   const program = `
-    import {prepareCoreEnvironment,applyStartupMigrations} from ${JSON.stringify(new URL('../../scripts/lib/core-preparation.mjs', import.meta.url).href)}
-    import {acquireStartupLock,releaseCliLock} from ${JSON.stringify(new URL('../../scripts/lib/cli-lock.mjs', import.meta.url).href)}
-    import {runManagedCore} from ${JSON.stringify(new URL('../../scripts/lib/managed-core.mjs', import.meta.url).href)}
-    import {probeHealthStatus,probeMmModules} from ${JSON.stringify(new URL('../../scripts/lib/mm-probe.mjs', import.meta.url).href)}
+    import {prepareCoreEnvironment,applyStartupMigrations} from ${JSON.stringify(moduleUrl('scripts/lib/core-preparation.mjs'))}
+    import {acquireStartupLock,releaseCliLock} from ${JSON.stringify(moduleUrl('scripts/lib/cli-lock.mjs'))}
+    import {runManagedCore} from ${JSON.stringify(moduleUrl('scripts/lib/managed-core.mjs'))}
+    import {probeHealthStatus,probeMmModules} from ${JSON.stringify(moduleUrl('scripts/lib/mm-probe.mjs'))}
     const root=${JSON.stringify(root)},dataDir=${JSON.stringify(directory)},mmPort=19339
     const lock=await acquireStartupLock(dataDir,'normal-cordis-fixture')
     const prepared=prepareCoreEnvironment({root,dataDir,loadInstallationEnv:false,source:process.env})
-    ${initializeCredentials ? `const {writeCredentials,newCredentialsFromPassword}=await import(${JSON.stringify(new URL('../../crabot-admin/dist/credentials.js', import.meta.url).href)});
+    ${initializeCredentials ? `const {writeCredentials,newCredentialsFromPassword}=await import(${JSON.stringify(moduleUrl('crabot-admin/dist/credentials.js'))});
     await writeCredentials(dataDir+'/admin',await newCredentialsFromPassword('synthetic-test-only',{is_temp:false,changed_via:'start'}));` : ''}
     await applyStartupMigrations(root,dataDir,prepared.env)
     const {mm}=await runManagedCore({root,dataDir,mmPort,env:prepared.env,stdio:['ignore','inherit','inherit'],cleanup:code=>process.exit(code)})
