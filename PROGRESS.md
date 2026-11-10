@@ -1,8 +1,10 @@
 # Crabot 项目进度
 
-### Cordis 飞书独立验证（2026-11-10，首轮验证通过，未部署）
+### Cordis 飞书迁移（2026-11-10，组件验证通过，产品接入未完成）
 
-- 独立 worktree / `research/cordis-validation`：按逐项确认改为飞书 Cordis 单入口，移除旧 HTTP 外壳及 Channel 端口；业务、身份、会话、媒体和错误码保持。添加飞书仅保留现有扫码入口，旧手填链接转向同流程。
+- goal 模式持续实施完整单端口实例；独立分支已接入 Shared/ModuleBase 与 MM 的受管 Node IPC。真实父子进程覆盖无 HTTP/JSON、并发、对象复制、敏感 metadata、错误、超时/迟到响应、断连、正常退出；MM 实测两进程注册/互调/健康、单独停止和 replacement 路由。Shared 全量 379 通过 / 2 跳过；尚未完成真实飞书宿主、Memory、Web/CLI/Desktop 装配，不作为产品验收。
+
+- 完成交付前不提 PR：现有 Admin/MM 启动与调用尚未接入，当前版本不能进入主分支。独立 worktree / `research/cordis-validation` 保留；按逐项确认改为飞书 Cordis 单入口，移除旧 HTTP 外壳及 Channel 端口；业务、身份、会话、媒体和错误码保持。添加飞书仅保留现有扫码入口，旧手填链接转向同流程。
 - 飞书原有 285 项基线通过；最终 290 项（含真实 Cordis 隔离、群媒体、历史和失败清理）、9 项 Web 定向回归及 2 项真实 npm/安装失败验收通过，相关类型检查与 Web 构建通过。发现并修正配置共享引用和 npm shared 间接依赖遗漏。
 - npm 发行包通过空缓存国内源安装，56 项依赖的 resolved 与实际下载均属于 npmmirror registry/CDN；不修改全局 npm 配置、不自动回退国外源。npm 安装目录的双飞书实例在禁止外连的模拟平台夹具中两次启动，只监听宿主一个 Web 端口。
 - [复现与证据](experiments/cordis-feishu/README.md)：插件包 196,477 B，展开 853,700 B；完整安装依赖及缓存另计。未改变正式安装器，未发布 npm、部署或连接真实飞书/模型；不能据此宣称整个 Crabot 已单端口或正式安装包已瘦身。

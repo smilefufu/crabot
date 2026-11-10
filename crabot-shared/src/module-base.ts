@@ -29,6 +29,7 @@ import {
   GlobalErrorCode,
 } from './base-protocol.js'
 import { proxyManager } from './proxy-manager.js'
+import { getProcessRpcPeer, RuntimeRpcError } from './runtime-rpc.js'
 
 // ============================================================================
 // 自定义错误类
@@ -264,8 +265,6 @@ export class RpcClient {
       timestamp: generateTimestamp(),
     }
 
-    const body = JSON.stringify(request)
-
     // 开始 rpc_call span（如果提供了 trace 上下文）
     const span = traceCtx
       ? traceCtx.traceStore.startSpan(traceCtx.traceId, {
@@ -280,6 +279,29 @@ export class RpcClient {
         })
       : null
 
+    const peer = getProcessRpcPeer()
+    if (peer) {
+      try {
+        const result = await peer.call<R>({
+          target: targetPort, source, method, params,
+          ...(options.authorizationBearer ? { metadata: { authorizationBearer: options.authorizationBearer } } : {}),
+        }, options.timeoutMs)
+        if (span && traceCtx) traceCtx.traceStore.endSpan(traceCtx.traceId, span.span_id, 'completed', {
+          target_module: `port:${targetPort}`, target_port: targetPort, method,
+          transport: 'ipc', response_summary: JSON.stringify(result).slice(0, 200),
+        })
+        return result
+      } catch (error) {
+        if (span && traceCtx) traceCtx.traceStore.endSpan(traceCtx.traceId, span.span_id, 'failed', {
+          target_module: `port:${targetPort}`, target_port: targetPort, method,
+          transport: 'ipc', error: error instanceof Error ? error.message : String(error),
+        })
+        if (error instanceof RuntimeRpcError) throw new RpcCallError(error.code, error.message, error.details)
+        throw error
+      }
+    }
+
+    const body = JSON.stringify(request)
     return new Promise((resolve, reject) => {
       let finished = false
       const req = http.request(
@@ -510,6 +532,7 @@ interface ResolveParams {
  * - 代理配置热更新
  */
 export abstract class ModuleBase {
+  private removeRuntimeHandler?: () => void
   protected readonly config: ModuleConfig
   protected readonly rpcClient: RpcClient
   protected readonly methodHandlers: Map<string, MethodHandler> = new Map()
@@ -547,6 +570,17 @@ export abstract class ModuleBase {
    */
   async start(): Promise<void> {
     await this.onStart()
+
+    const peer = getProcessRpcPeer()
+    if (peer) {
+      this.removeRuntimeHandler = peer.handle(async ({ target, method, params, metadata }) => {
+        if (target !== this.config.port) throw new RpcError('NOT_FOUND', 'Runtime target does not match this module')
+        const handler = this.methodHandlers.get(method)
+        if (!handler) throw new RpcError(GlobalErrorCode.METHOD_NOT_FOUND, `Method "${method}" not found`)
+        return handler(params, { authorizationBearer: metadata?.authorizationBearer })
+      })
+      return
+    }
 
     this.server = this.createServer((req, res) => {
       this.handleRequest(req, res).catch((error) => {
@@ -587,6 +621,11 @@ export abstract class ModuleBase {
     console.log(`[${this.config.moduleId}] Shutting down...`)
 
     await this.onStop()
+    if (this.removeRuntimeHandler) {
+      this.removeRuntimeHandler()
+      this.removeRuntimeHandler = undefined
+      process.channel?.unref()
+    }
 
     if (this.server) {
       await new Promise<void>((resolve) => {

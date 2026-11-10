@@ -15,6 +15,9 @@ import type { Socket } from 'node:net'
 import {
   type Request,
   type Response,
+  RuntimeRpcPeer,
+  RuntimeRpcError,
+  type RuntimeRpcCall,
   type HealthResult,
   type ModuleId,
   type ModuleDefinition,
@@ -205,6 +208,7 @@ interface EventSubscription {
 }
 
 export interface ModuleManagerOptions {
+  transport?: 'ipc'
   confirmOrphanTermination?: (candidate: OrphanTerminationCandidate) => Promise<boolean>
 }
 
@@ -374,6 +378,8 @@ interface WorkspaceCoordinatorGrant {
 // ============================================================================
 
 export class ModuleManager {
+  private readonly useIpc: boolean
+  private readonly runtimePeers = new WeakMap<ChildProcess, RuntimeRpcPeer>()
   private readonly config: ModuleManagerConfig
   private readonly portAllocator: PortAllocator
   private readonly modules: Map<ModuleId, ModuleRuntime> = new Map()
@@ -446,6 +452,7 @@ export class ModuleManager {
     options: ModuleManagerOptions = {},
   ) {
     this.config = { ...DEFAULT_CONFIG, ...config }
+    this.useIpc = options.transport === 'ipc'
     if (this.config.hotplug_allowed_types.includes('agent')) {
       throw new Error('Invalid Module Manager config: hotplug_allowed_types must not contain reserved type "agent"')
     }
@@ -552,6 +559,11 @@ export class ModuleManager {
     // newly introduced runnable non-core Agent could hide behind an old marker.
     this.managementOnly = this.modules.has('admin-web') && this.modules.has('crabot-agent')
 
+    if (this.useIpc) {
+      this.startRuntimeServices()
+      return
+    }
+
     // 启动 HTTP 服务器
     this.server = http.createServer((req, res) => {
       this.handleRequest(req, res).catch((error) => {
@@ -577,33 +589,52 @@ export class ModuleManager {
     return new Promise((resolve, reject) => {
       this.server!.listen(this.config.port, () => {
         console.log(`[ModuleManager] Listening on port ${this.config.port}`)
-        this.startHealthCheckTimer()
-
-        // 磁盘水位线监控（每 60s 一次；同状态不重复广播 → 去抖）
-        let lastWasLow = false
-        this.diskWatcherTimer = setInterval(async () => {
-          const r = await checkDiskLow(this.dataDir, 1_000_000_000) // 1GB 阈值
-          if (r.is_low && !lastWasLow && r.payload) {
-            lastWasLow = true
-            this.publishEvent(
-              createSystemDiskLowEvent('module-manager', r.payload)
-            ).catch(console.error)
-            console.warn(
-              `[ModuleManager] DISK LOW: ${(r.available_bytes / 1e9).toFixed(2)}GB free at ${r.payload.path}`
-            )
-          } else if (!r.is_low && lastWasLow) {
-            lastWasLow = false
-            console.log(`[ModuleManager] Disk recovered: ${(r.available_bytes / 1e9).toFixed(2)}GB free`)
-          }
-        }, 60_000)
-
-        // 启动 auto_start 模块
-        this.startAutoStartModules().catch(console.error)
+        this.startRuntimeServices()
 
         resolve()
       })
       this.server!.on('error', reject)
     })
+  }
+
+  private startRuntimeServices(): void {
+    this.startHealthCheckTimer()
+
+    // 磁盘水位线监控（每 60s 一次；同状态不重复广播 → 去抖）
+    let lastWasLow = false
+    this.diskWatcherTimer = setInterval(async () => {
+      const r = await checkDiskLow(this.dataDir, 1_000_000_000) // 1GB 阈值
+      if (r.is_low && !lastWasLow && r.payload) {
+        lastWasLow = true
+        this.publishEvent(
+          createSystemDiskLowEvent('module-manager', r.payload)
+        ).catch(console.error)
+        console.warn(
+          `[ModuleManager] DISK LOW: ${(r.available_bytes / 1e9).toFixed(2)}GB free at ${r.payload.path}`
+        )
+      } else if (!r.is_low && lastWasLow) {
+        lastWasLow = false
+        console.log(`[ModuleManager] Disk recovered: ${(r.available_bytes / 1e9).toFixed(2)}GB free`)
+      }
+    }, 60_000)
+
+    // 启动 auto_start 模块
+    this.startAutoStartModules().catch(console.error)
+  }
+
+  private async dispatchRuntimeCall(call: RuntimeRpcCall): Promise<unknown> {
+    if (call.target === this.config.port) {
+      const handler = this.methodHandlers.get(call.method)
+      if (!handler) throw new RuntimeRpcError(GlobalErrorCode.METHOD_NOT_FOUND, `Method "${call.method}" not found`)
+      return handler(call.params, { authorizationBearer: call.metadata?.authorizationBearer })
+    }
+    const runtime = Array.from(this.modules.values()).find(module => module.port === call.target)
+    const child = runtime && this.processes.get(runtime.module_id)
+    const peer = child && this.runtimePeers.get(child)
+    if (!peer || !runtime || (runtime.status !== 'running' && runtime.status !== 'starting')) {
+      throw new RuntimeRpcError('SERVICE_UNAVAILABLE', 'Target runtime is unavailable')
+    }
+    return peer.call(call)
   }
 
   /**
@@ -4774,6 +4805,11 @@ export class ModuleManager {
     const [rawCommand, ...args] = this.parseEntry(entry)
     // 把 uv 这类用户级 installer 装的工具解析成绝对路径，避开 user PATH 传播延迟
     const command = resolveExecutable(rawCommand)
+    const ipc = this.useIpc && !runtime.skip_health_check
+    if (ipc && !/^node(?:\.exe)?$/.test(path.basename(command))) {
+      runtime.status = 'error'
+      throw new RuntimeRpcError('SERVICE_UNAVAILABLE', 'This runtime requires a managed pipe adapter')
+    }
 
     // 子进程日志同时落盘到 ${DATA_DIR}/logs/<moduleId>.log，
     // 避免子进程崩溃时 console pipe 里的栈被丢失看不到。
@@ -4798,6 +4834,7 @@ export class ModuleManager {
       Crabot_PORT: String(runtime.port),
       CRABOT_INSTANCE_ID: this.runtimeRegistry.getInstanceId(),
       CRABOT_MODULE_RUNTIME_ID: runtimeId,
+      ...(ipc ? { CRABOT_RPC_TRANSPORT: 'ipc' } : {}),
       CRABOT_MM_PORT: String(this.config.port),
       CRABOT_MM_ENDPOINT: `http://localhost:${this.config.port}`,
       ...(adminRpcPort && moduleId !== 'admin-web' ? { CRABOT_ADMIN_ENDPOINT: `http://localhost:${adminRpcPort}` } : {}),
@@ -4836,7 +4873,8 @@ export class ModuleManager {
       } else proc = spawn(command, args, {
         cwd: runtime.cwd,
         env: childEnv,
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: ipc ? ['ignore', 'pipe', 'pipe', 'ipc'] : ['ignore', 'pipe', 'pipe'],
+        ...(ipc ? { serialization: 'advanced' as const } : {}),
         detached: process.platform !== 'win32',
         windowsHide: true,
       })
@@ -4845,6 +4883,23 @@ export class ModuleManager {
       runtime.status = 'error'
       logStream.end(`[${generateTimestamp()}] === spawn failed ${moduleId} ===\n`)
       throw error
+    }
+    let admitRuntime!: () => void
+    const admitted = new Promise<void>(resolve => { admitRuntime = resolve })
+    const runtimePeer = ipc && !runtimeGate ? new RuntimeRpcPeer(proc) : undefined
+    if (runtimePeer) {
+      this.runtimePeers.set(proc, runtimePeer)
+      runtimePeer.handle(async call => {
+        await admitted
+        if (this.processes.get(moduleId) !== proc || this.childStates.get(proc)?.finalizeStarted) {
+          throw new RuntimeRpcError('SERVICE_UNAVAILABLE', 'Caller runtime is no longer current')
+        }
+        if (call.target === this.config.port && ['register', 'register_core_agent', 'register_voice_runtime', 'unregister'].includes(call.method)
+          && (call.params as { module_id?: unknown })?.module_id !== moduleId) {
+          throw new RuntimeRpcError('FORBIDDEN', 'Registration must belong to the calling runtime')
+        }
+        return this.dispatchRuntimeCall(call)
+      })
     }
     let spawnError: Error | undefined
     const captureSpawnError = (error: Error): void => { spawnError = error }
@@ -4861,6 +4916,8 @@ export class ModuleManager {
       })
     }
     if (!proc.pid) {
+      runtimePeer?.close()
+      admitRuntime()
       proc.removeListener('error', captureSpawnError)
       clearPendingCredentials()
       runtime.status = 'error'
@@ -4877,6 +4934,8 @@ export class ModuleManager {
         modulePort: runtime.port,
       })
     } catch (error) {
+      runtimePeer?.close()
+      admitRuntime()
       runtimeGate?.close()
       let cleanupError: unknown
       try {
@@ -4935,6 +4994,7 @@ export class ModuleManager {
       logEnded: false,
     }
     this.childStates.set(proc, childState)
+    admitRuntime()
 
     // 处理输出：同时落盘 + 终端转发（dev/调试可见）
     proc.stdout?.on('data', (data: Buffer) => {
@@ -5194,6 +5254,7 @@ export class ModuleManager {
     }
 
     state.finalizeStarted = true
+    this.runtimePeers.get(state.child)?.close()
     state.finalReason = state.intentionalReason ?? 'crashed'
     const runtime = this.modules.get(state.moduleId)
     const bearer = this.runtimeBearers.get(state.moduleId)
@@ -5438,6 +5499,13 @@ export class ModuleManager {
     params: unknown,
     timeoutMs = this.config.health_check_timeout * 1000,
   ): Promise<R> {
+    if (this.useIpc) {
+      const runtime = Array.from(this.modules.values()).find(module => module.port === port)
+      const child = runtime && this.processes.get(runtime.module_id)
+      const peer = child && this.runtimePeers.get(child)
+      if (!peer) throw new RuntimeRpcError('SERVICE_UNAVAILABLE', 'Target runtime is unavailable')
+      return peer.call<R>({ target: port, source: 'module-manager', method, params }, timeoutMs)
+    }
     return new Promise((resolve, reject) => {
       let settled = false
       let absoluteTimer: NodeJS.Timeout | undefined
@@ -5561,7 +5629,7 @@ export class ModuleManager {
         : m.status === 'error' ? '\u274c'
         : m.status === 'schema_mismatch' ? '\ud83d\udd27'
         : '\u2b55'
-      const portInfo = m.status === 'running' ? `:${m.port}` : ''
+      const portInfo = m.status === 'running' && !this.useIpc ? `:${m.port}` : ''
       lines.push(`  ${icon} ${m.module_id} (${m.module_type}) ${m.status}${portInfo}`)
     }
 
@@ -5580,7 +5648,7 @@ export class ModuleManager {
     }
 
     lines.push('')
-    lines.push(`  Module Manager: http://localhost:${this.config.port}`)
+    lines.push(this.useIpc ? '  Module Manager: managed IPC' : `  Module Manager: http://localhost:${this.config.port}`)
 
     const vite = modules.find((m) => m.module_id === 'vite-dev')
     const admin = modules.find((m) => m.module_id === 'admin-web')

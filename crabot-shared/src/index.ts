@@ -175,3 +175,5 @@ export { geminiApiUrl, geminiApiHeaders, geminiModelId } from './gemini-api.js'
 
 export type { WorkspaceInterruptedRecoveryRequest, WorkspaceInterruptedRecoveryRuntimeResult, WorkspaceInterruptedRecoveryWebVerificationParams, WorkspaceInterruptedRecoveryWebJob, WorkspaceInterruptedRecoveryWebVerificationResult, WorkspaceInterruptedRecoveryWebPrepared, WorkspaceInterruptedRecoveryWebResumed } from './workspace-types.js'
 export type { WorkspaceInterruptedExecutionAuthorityParams, WorkspaceInterruptedExecutionAuthorityResult, WorkspaceInterruptedExecutionCaptureResult, CompleteWorkspaceInterruptedWorkerStopsParams } from './workspace-types.js'
+
+export { RuntimeRpcPeer, RuntimeRpcError, getProcessRpcPeer, type RuntimeRpcCall } from './runtime-rpc.js'
