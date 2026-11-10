@@ -23,6 +23,7 @@ export interface ModuleRuntimeRecord {
   root_pid: number
   process_start_identity: string
   module_port: number
+  rpc_transport?: 'ipc' | 'pipe'
   created_at: string
 }
 
@@ -50,6 +51,7 @@ interface RecordSpawnInput {
   moduleId: string
   rootPid: number
   modulePort: number
+  rpcTransport?: 'ipc' | 'pipe'
 }
 
 interface RecoverOrphansInput {
@@ -190,6 +192,7 @@ function isRuntimeRecord(value: unknown): value is ModuleRuntimeRecord {
     && Number.isInteger(record.root_pid) && (record.root_pid ?? 0) > 0
     && typeof record.process_start_identity === 'string'
     && Number.isInteger(record.module_port) && (record.module_port ?? 0) > 0
+    && (record.rpc_transport === undefined || ['ipc', 'pipe'].includes(record.rpc_transport))
     && typeof record.created_at === 'string'
 }
 
@@ -255,6 +258,7 @@ export class ModuleRuntimeRegistry {
       root_pid: input.rootPid,
       process_start_identity: processStartIdentity,
       module_port: input.modulePort,
+      ...(input.rpcTransport ? { rpc_transport: input.rpcTransport } : {}),
       created_at: this.now(),
     }
     await this.writeAtomic(this.recordPath(record.runtime_id), `${JSON.stringify(record, null, 2)}\n`)
@@ -306,6 +310,7 @@ export class ModuleRuntimeRegistry {
       const currentIdentity = await guardedOrphanStep(verify, () => this.probeStartIdentity(record.root_pid))
       if (this.platform === 'win32'
         && currentIdentity !== record.process_start_identity) {
+        if (record.rpc_transport) throw new Error(`Cannot prove detached managed runtime exit for ${record.module_id}/${record.runtime_id}; retained runtime record: ${this.recordPath(record.runtime_id)}`)
         await this.recoverDetachedWindowsRuntime(record, gracefulTimeoutMs, verify)
         continue
       }
@@ -341,7 +346,7 @@ export class ModuleRuntimeRegistry {
             requireOwnedProcess: true,
           }))
       if (this.platform === 'win32'
-        && this.runtimeIdentityMatches(record, await guardedOrphanStep(verify, () => this.probeModuleIdentity(record.module_port)))) {
+        && !record.rpc_transport && this.runtimeIdentityMatches(record, await guardedOrphanStep(verify, () => this.probeModuleIdentity(record.module_port)))) {
         throw new Error(
           `Cannot recover orphan ${record.module_id}/${record.runtime_id}: recorded runtime still responds after terminating root PID ${record.root_pid}; runtime record: ${this.recordPath(record.runtime_id)}`,
         )

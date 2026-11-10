@@ -34,7 +34,7 @@ export async function releaseWorkspaceRecoveryFinalizing({ dataDir, launch, read
   }
   const authorize = async () => {
     local()
-    const rpc = await openPinnedProcessRpc(launch.parent, moduleManagerPort, { timeoutMs: 30000 })
+    const rpc = await openPinnedProcessRpc(launch.parent, moduleManagerPort, { dataDir, timeoutMs: 30000 })
     try {
       local()
       const proof = await rpc.call('verify_workspace_relocation_recovery_release', request, { authorizationBearer: credential })

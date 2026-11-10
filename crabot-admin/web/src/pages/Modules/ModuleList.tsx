@@ -260,7 +260,7 @@ export const ModuleList: React.FC = () => {
                 <th>类型</th>
                 <th>状态</th>
                 <th>PID</th>
-                <th>端口</th>
+                <th>内部地址</th>
                 <th>健康</th>
                 <th>操作</th>
               </tr>

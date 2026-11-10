@@ -10,11 +10,12 @@ export function loopback(address?: string): boolean {
 export function voiceTransport(
   rpc: (req: IncomingMessage, res: ServerResponse) => void,
   connected: (socket: WebSocket) => void,
+  privatePipe = false,
 ): { server: http.Server; close(): void } {
   const server = http.createServer(rpc)
   const ws = new WebSocketServer({ noServer: true, maxPayload: 65536, perMessageDeflate: false })
   server.on('upgrade', (req, socket, head) => {
-    if (!loopback((socket as Socket).remoteAddress) || req.url !== '/voice') { socket.destroy(); return }
+    if ((!privatePipe && !loopback((socket as Socket).remoteAddress)) || req.url !== '/voice') { socket.destroy(); return }
     ws.handleUpgrade(req, socket, head, terminal => ws.emit('connection', terminal, req))
   })
   ws.on('connection', connected)

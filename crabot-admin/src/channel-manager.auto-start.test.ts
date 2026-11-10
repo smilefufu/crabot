@@ -22,6 +22,11 @@ describe('ChannelManager.createInstance auto_start', () => {
   beforeEach(async () => {
     dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'channel-mgr-'))
     await fs.mkdir(path.join(dataDir, 'channel-configs'), { recursive: true })
+    const plugin = path.join(dataDir, 'channel-packages/crabot-channel-feishu/0.1.0/node_modules/crabot-channel-feishu')
+    await fs.mkdir(path.join(plugin, 'dist'), { recursive: true })
+    await fs.writeFile(path.join(plugin, 'package.json'), JSON.stringify({ name: 'crabot-channel-feishu', version: '0.1.0', main: 'dist/main.js' }))
+    await fs.writeFile(path.join(plugin, 'dist/main.js'), '')
+    await fs.writeFile(path.join(plugin, 'crabot-module.yaml'), 'module_id: channel-feishu')
   })
 
   afterEach(async () => {

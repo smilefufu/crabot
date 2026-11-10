@@ -1,5 +1,6 @@
 import { build } from 'esbuild'
 import { mkdir, copyFile, rm } from 'node:fs/promises'
+import { buildRuntimeControl } from '../scripts/desktop/build-runtime-control.mjs'
 import { desktopMaintenanceBootstrap } from '../scripts/lib/desktop-maintenance-bootstrap.mjs'
 await build({ entryPoints: ['src/preload.ts'], outfile: 'dist/preload.cjs', bundle: true,
   platform: 'node', format: 'cjs', target: 'es2022', external: ['electron'], sourcemap: false })
@@ -13,6 +14,8 @@ for (const file of [...desktopMaintenanceBootstrap, 'scripts/lib/desktop-first-l
   await mkdir(destination.slice(0, destination.lastIndexOf('/')), { recursive: true })
   await copyFile('../' + file, destination)
 }
+
+await buildRuntimeControl(build, '..', 'dist/bootstrap/scripts/lib/runtime-control.cjs')
 
 for (const kind of ['installer', 'removal']) await build({ entryPoints: ['src/' + kind + '-preload.ts'], outfile: 'dist/' + kind + '-preload.cjs',
   bundle: true, platform: 'node', format: 'cjs', target: 'es2022', external: ['electron'], sourcemap: false })

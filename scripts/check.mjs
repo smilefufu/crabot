@@ -2,12 +2,16 @@
 
 // Crabot Check — 检查各模块运行状态
 
-import { probeMmModules } from './lib/mm-probe.mjs'
+import { probeMmModules, probeHealthStatus } from './lib/mm-probe.mjs'
+import { resolveCliDataDir } from './lib/instance.mjs'
+import { hasRuntimeControl } from './lib/runtime-control.cjs'
 
 const OFFSET = parseInt(process.env.CRABOT_PORT_OFFSET || '0', 10)
 
+const dataDir = resolveCliDataDir()
+const privateControl = hasRuntimeControl(dataDir)
 const mmPort = 19000 + OFFSET
-const modules = await probeMmModules(mmPort)
+const modules = await probeMmModules(mmPort, undefined, { dataDir })
 const adminPort = modules?.find((m) => m.module_id === 'admin-web')?.port
 const rpcOptions = {
   method: 'POST',
@@ -33,6 +37,11 @@ for (const svc of services) {
     continue
   }
   try {
+    if (svc.options) {
+      const health = await probeHealthStatus(svc.port, undefined, { dataDir })
+      console.log(`  ${health ? green('●') : red('●')} ${svc.name.padEnd(20)} ${privateControl ? 'local IPC' : ':' + svc.port}${health ? ` (${health})` : ' (unreachable)'}`)
+      continue
+    }
     const res = await fetch(`http://localhost:${svc.port}/health`, {
       ...svc.options,
       signal: AbortSignal.timeout(2000),

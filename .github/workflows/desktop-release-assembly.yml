@@ -42,6 +42,13 @@ jobs:
         run: pnpm --dir crabot-admin install --frozen-lockfile --ignore-scripts
       - name: Build actual Admin startup dependency
         run: pnpm --dir crabot-admin run build
+      - name: Build and verify the single-port managed transport and existing Voice gateway
+        run: |
+          pnpm --dir crabot-channel-voice install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-channel-voice run build
+          node --test --test-concurrency=1 scripts/lib/__tests__/runtime-control.test.mjs scripts/lib/__tests__/voice-transport.test.mjs scripts/lib/__tests__/local-auth-transport.test.mjs scripts/lib/__tests__/background-core.test.mjs scripts/lib/__tests__/instance-runtime.test.mjs
+          (cd crabot-core && node node_modules/vitest/vitest.mjs run src/module-manager-ipc.test.ts src/module-runtime-registry.test.ts --maxWorkers=1 --minWorkers=1)
+          (cd crabot-admin && node node_modules/vitest/vitest.mjs run src/voice-gateway.test.ts src/query-module-statuses.test.ts src/channel-package.test.ts --maxWorkers=1 --minWorkers=1)
       - name: Verify original sealed CLI routing, installation compatibility and staging imports
         run: node --test --test-concurrency=1 scripts/lib/__tests__/stage-core-imports.test.mjs scripts/lib/__tests__/desktop-cli-install.test.mjs scripts/lib/__tests__/desktop-update-entry.test.mjs scripts/lib/__tests__/installer-compat.test.mjs
       - name: Verify actual startup entry contracts and original upgrade boundaries

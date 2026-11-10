@@ -31,13 +31,13 @@ const inst = hasInstance(HOME_DIR) ? readInstance(HOME_DIR) : {
 }
 
 const ENDPOINTS = {
-  admin_ui:  { url: `http://localhost:${3000 + OFFSET}`,  label: 'Admin UI' },
+  admin_ui:  { url: `http://localhost:${Number(process.env.CRABOT_ADMIN_WEB_PORT || 3000 + OFFSET)}`,  label: 'Admin UI' },
   mm:        { url: `http://localhost:${19000 + OFFSET}`, label: 'Module Manager' },
   admin_rpc: { url: `http://localhost:${19001 + OFFSET}`, label: 'Admin RPC' },
 }
 
 // 受管实例以真实运行身份判定；模块 RPC 可达性单独报告，不能把暂时不可达当成停机。
-let modules = null, running = false
+let modules = null, running = false, privateControl = false
 try {
   const instance = inspectInstance(DATA_DIR)
   if (instance.state === 'legacy') {
@@ -45,8 +45,10 @@ try {
     modules = await probeMmModules(19000 + OFFSET)
     running = modules !== null
   } else if (instance.state === 'running' && instance.record.mm) {
-    ENDPOINTS.mm.url = `http://localhost:${instance.record.mm_port}`
-    const snapshot = await probeMmModules(instance.record.mm_port)
+    privateControl = instance.record.control_transport === 'pipe'
+    ENDPOINTS.mm.url = privateControl ? null : `http://localhost:${instance.record.mm_port}`
+    if (privateControl) { ENDPOINTS.mm.transport = 'pipe'; ENDPOINTS.admin_rpc.url = null; ENDPOINTS.admin_rpc.transport = 'ipc' }
+    const snapshot = await probeMmModules(instance.record.mm_port, undefined, { dataDir: DATA_DIR })
     const latest = inspectInstance(DATA_DIR)
     if (latest.state === 'running' && latest.record.generation === instance.record.generation) {
       running = true; modules = snapshot
@@ -55,12 +57,12 @@ try {
 } catch (error) { console.error(`[crabot] Cannot verify instance identity: ${error.message}`) }
 const adminModule = modules?.find((m) => (m.module_id ?? m.id) === 'admin-web')
 const adminAlive = adminModule?.status === 'running'
-if (typeof adminModule?.port === 'number') ENDPOINTS.admin_rpc.url = `http://localhost:${adminModule.port}`
+if (!privateControl && typeof adminModule?.port === 'number') ENDPOINTS.admin_rpc.url = `http://localhost:${adminModule.port}`
 
 const health = {
   mm: modules !== null,
   admin_ui: adminAlive,
-  admin_rpc: adminAlive, // admin-web 进程同时暴露 web (3000+OFF) 和 RPC (19001+OFF)
+  admin_rpc: adminAlive,
 }
 
 const logsStdout = resolve(DATA_DIR, 'logs/mm.stdout.log')
@@ -76,7 +78,7 @@ if (JSON_OUT) {
     instance_init: inst.applied_at ?? null,
     running,
     endpoints: Object.fromEntries(
-      Object.entries(ENDPOINTS).map(([k, v]) => [k, { url: v.url, healthy: health[k] }])
+      Object.entries(ENDPOINTS).map(([k, v]) => [k, { url: v.url, healthy: health[k], ...(v.transport ? { transport: v.transport } : {}) }])
     ),
     modules,
     logs: hasLogs ? { stdout: logsStdout, stderr: logsStderr } : null,
@@ -98,7 +100,7 @@ console.log()
 console.log('  ' + c.bold('Endpoints'))
 console.log('  ' + '─'.repeat(54))
 for (const [k, v] of Object.entries(ENDPOINTS)) {
-  console.log(`  ${v.label.padEnd(17)} ${v.url.padEnd(25)} ${dot(health[k])}`)
+  console.log(`  ${v.label.padEnd(17)} ${(v.url ?? v.transport).padEnd(25)} ${dot(health[k])}`)
 }
 console.log()
 if (running && modules) {

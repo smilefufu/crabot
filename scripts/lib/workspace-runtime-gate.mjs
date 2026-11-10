@@ -18,11 +18,15 @@ export const gateMessageBudget = message => Buffer.byteLength(JSON.stringify(mes
 const failure = () => Object.assign(new Error('恢复验证模块的先登记后启动尚未确认，原维护保护已保留；未重试。'), { code: 'CRABOT_WORKSPACE_RUNTIME_GATE' })
 const entry = fileURLToPath(new URL('../workspace-runtime-gate.mjs', import.meta.url))
 
-export function createWorkspaceRuntimeGate() {
+export function createWorkspaceRuntimeGate({ transport } = {}) {
   if (process.versions.electron) throw failure()
   const allowed = new Set(['PATH', 'HOME', 'USERPROFILE', 'SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL', 'LC_CTYPE'])
   const env = Object.fromEntries(Object.entries(process.env).filter(([key, value]) => value !== undefined && allowed.has(key.toUpperCase())))
-  const child = spawn(process.execPath, [entry], { cwd: path.dirname(entry), env, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe', 'ipc'], windowsHide: true })
+  if (transport !== undefined) {
+    if (!['ipc', 'pipe'].includes(transport)) throw failure()
+    env.CRABOT_RUNTIME_GATE_TRANSPORT = transport
+  }
+  const child = spawn(process.execPath, [entry], { cwd: path.dirname(entry), env, detached: process.platform !== 'win32', stdio: [transport === 'pipe' ? 'pipe' : 'ignore', 'pipe', 'pipe', 'ipc'], serialization: 'advanced', windowsHide: true })
   let closed = false, nonce, pending, resolveReady, rejectReady, startPromise, fingerprint, binding
   const ready = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject })
   void ready.catch(() => {})
@@ -35,6 +39,7 @@ export function createWorkspaceRuntimeGate() {
   }
   child.once('exit', close); child.once('error', close); child.once('disconnect', close)
   child.on('message', message => {
+    if (transport === 'ipc' && message?.type === 'crabot:rpc') return
     try {
       if (closed || !gateMessageBudget(message)) throw failure()
       if (!nonce) {

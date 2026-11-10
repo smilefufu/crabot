@@ -22,6 +22,7 @@ import type {
   ListChannelInstancesParams,
   ChannelOnboardingMethod,
 } from './types.js'
+import { ChannelPackageStore } from './channel-package.js'
 import type { OnConflict } from './backup/import/import-types.js'
 
 // ============================================================================
@@ -99,9 +100,11 @@ export class ChannelManager {
   private readonly instancesFilePath: string
   private readonly configsDir: string
   private readonly rpcClient: RpcClient
+  private readonly packageStore: ChannelPackageStore
 
   constructor(dataDir: string, rpcClient: RpcClient) {
     this.dataDir = dataDir
+    this.packageStore = new ChannelPackageStore(path.join(dataDir, 'channel-packages'))
     this.implementationsFilePath = path.join(dataDir, 'channel-implementations.json')
     this.instancesFilePath = path.join(dataDir, 'channel-instances.json')
     this.configsDir = path.join(dataDir, 'channel-configs')
@@ -113,6 +116,25 @@ export class ChannelManager {
     await fs.mkdir(this.configsDir, { recursive: true })
     await this.loadData()
     await this.ensureDefaults()
+  }
+
+  private feishuPackage(): { name: string; version: string } {
+    const manifest = JSON.parse(fsSync.readFileSync(path.resolve(__dirname, '../../crabot-channel-feishu/package.json'), 'utf8'))
+    return { name: manifest.name, version: manifest.version }
+  }
+
+  async prepareOnboarding(implementationId: string, methodId: string): Promise<ChannelImplementation | undefined> {
+    const implementation = this.implementations.get(implementationId)
+    if (implementationId !== 'channel-feishu' || !implementation?.onboarding_methods?.some(method => method.id === methodId)) return undefined
+    const modulePath = await this.packageStore.ensure(this.feishuPackage())
+    return { ...implementation, module_path: modulePath }
+  }
+
+  async onboardingImplementations(): Promise<ChannelImplementation[]> {
+    const items = this.listImplementations().items
+    const installed = await this.packageStore.installed(this.feishuPackage())
+    return items.flatMap(implementation => implementation.id !== 'channel-feishu' ? [implementation]
+      : installed ? [{ ...implementation, module_path: installed }] : [])
   }
 
   // ============================================================================
@@ -288,7 +310,9 @@ export class ChannelManager {
    * 注册 builtin 实现的模块到 Module Manager
    */
   private async registerBuiltinModule(impl: ChannelImplementation, instance: ChannelInstance): Promise<void> {
-    const resolvedModulePath = path.resolve(__dirname, '..', impl.module_path!)
+    const resolvedModulePath = impl.id === 'channel-feishu'
+      ? await this.packageStore.ensure(this.feishuPackage())
+      : path.resolve(__dirname, '..', impl.module_path!)
     const env = await this.buildModuleEnv(instance)
     const entry = impl.id === 'channel-feishu'
       ? `node "${path.resolve(__dirname, '../../crabot-core/dist/channel-host.js')}"`

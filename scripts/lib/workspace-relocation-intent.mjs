@@ -8,6 +8,7 @@ import management from './desktop-management.cjs'
 import workspaceMaintenance from './workspace-maintenance.cjs'
 import knownProcessExit from './known-process-exit.cjs'
 import ownedProcessTree from './owned-process-tree.cjs'
+import { hasRuntimeControl } from './runtime-control.cjs'
 import { cliLockToken } from './cli-lock.mjs'
 import { sha256CanonicalJson } from '../../crabot-shared/dist/canonical-json.js'
 import { publishWorkspaceRoot, inspectPublishedWorkspaceRoot, validateWorkspaceRootPublicationPlan, publishWorkspaceParents, validateWorkspaceParentsPublicationPlan } from './workspace-root-publish.mjs'
@@ -2112,7 +2113,8 @@ function verifyFixedWorkspaceRuntime(fixed, directory) {
     const runtime = JSON.parse(readHealthRuntimeText(fixed.ctx.dataRoot, module.runtime_id))
     const scope = fixed.scopes.find(item => item.module_id === module.module_id)
     if (!native.sameProcess(module.process, native.inspectProcess(module.process.pid))
-      || !fields(runtime, ['schema_version', 'instance_id', 'runtime_id', 'module_id', 'root_pid', 'process_start_identity', 'module_port', 'created_at'])
+      || !fields(runtime, ['schema_version', 'instance_id', 'runtime_id', 'module_id', 'root_pid', 'process_start_identity', 'module_port', 'created_at', ...(runtime?.rpc_transport === undefined ? [] : ['rpc_transport'])])
+      || runtime.rpc_transport !== undefined && !['ipc', 'pipe'].includes(runtime.rpc_transport)
       || runtime.schema_version !== 1 || runtime.instance_id !== fixed.root_proof.instance_id || runtime.runtime_id !== module.runtime_id
       || runtime.module_id !== module.module_id || runtime.root_pid !== module.process.pid || runtime.module_port !== scope.module_port
       || !nonempty(runtime.process_start_identity) || !validDate(runtime.created_at)) fail()
@@ -2210,7 +2212,7 @@ export const readWorkspaceRelocationCompletion = recordGraphReader(function read
   return record
 })
 // Neutral capability checks; callers retain their own current role and fixed material guards.
-async function verifyWorkspaceCapabilities(fixed, directory, verify, authorize, signal) {
+async function verifyWorkspaceCapabilities(dataDir, fixed, directory, verify, authorize, signal) {
   const revalidate = async () => { await authorize(); verify() }
   await revalidate()
   const { openModuleRuntimeRpc } = await import('./module-runtime-rpc.cjs')
@@ -2220,13 +2222,14 @@ async function verifyWorkspaceCapabilities(fixed, directory, verify, authorize, 
     const locate = () => {
       verify()
       const processes = ownedProcessTree.captureOwnedProcessTree([module.process])
-      const listeners = processes.filter(item => native.sameProcess(item, native.inspectProcess(item.pid)) && native.listListeningTcpPorts(item.pid).includes(scope.module_port))
+      const listeners = processes.filter(item => native.sameProcess(item, native.inspectProcess(item.pid))
+        && (hasRuntimeControl(dataDir) ? native.sameProcess(item, module.process) : native.listListeningTcpPorts(item.pid).includes(scope.module_port)))
       verify()
       if (listeners.length !== 1) fail(undefined, 'completion-runtime-listener')
       return listeners[0]
     }
     const listener = locate(), rpc = await openModuleRuntimeRpc(listener, scope.module_port,
-      { instance_id: fixed.root_proof.instance_id, module_id: module.module_id, runtime_id: module.runtime_id }, { signal })
+      { instance_id: fixed.root_proof.instance_id, module_id: module.module_id, runtime_id: module.runtime_id }, { signal, dataDir })
     try {
       await revalidate()
       if (!native.sameProcess(listener, locate())) fail()
@@ -2254,7 +2257,7 @@ export async function prepareWorkspaceRelocationCompletion({ dataDir, id, signal
   verify()
   const selected = await verifyWorkspaceRelocationSelectedRoot({ dataDir, id, signal })
   verify()
-  await verifyWorkspaceCapabilities(fixed, readWorkspaceRelocationRootPublished(dataDir, id).target, verify, async () => verify(), signal)
+  await verifyWorkspaceCapabilities(dataDir, fixed, readWorkspaceRelocationRootPublished(dataDir, id).target, verify, async () => verify(), signal)
   verify()
   const previous = readWorkspaceRelocationCompletion(dataDir, id)
   if (previous) { syncIntent(base.ctx); verify(); return { dispatch: 'observe', completion_sha256: sha256CanonicalJson(previous) } }
@@ -2435,7 +2438,7 @@ export async function verifyWorkspaceRelocationArchivedCapabilities({ dataDir, i
   const closures = await agent.inspectArchivedWorkspaceRelocationClosures({ dataDir, id, signal, verify: current })
   await current(); closures.verify()
   if (closures.worker_commit_sha256 !== state.completion.worker_commit_sha256 || closures.recovery_commit_sha256 !== state.completion.recovery_commit_sha256) fail()
-  await verifyWorkspaceCapabilities(fixed, state.published.target, verify, authorize, signal)
+  await verifyWorkspaceCapabilities(dataDir, fixed, state.published.target, verify, authorize, signal)
   await current(); closures.verify()
   return Object.freeze({ completion_sha256: sha256CanonicalJson(state.completion), selected_sha256: sha256CanonicalJson(state.selected), modules_sha256: sha256CanonicalJson(state.health.modules) })
 }
@@ -2584,7 +2587,7 @@ export async function verifyWorkspaceRelocationReleasedCapabilities({ dataDir, i
   await current()
   if (snapshot.storage_root !== state.intent.target || snapshot.revision < state.selected.catalog_revision) fail()
   // Do not re-demand pre-release ledger/catalog byte versions after lawful new writes.
-  await verifyWorkspaceCapabilities(fixed, state.published.target, verify, authorize, signal)
+  await verifyWorkspaceCapabilities(dataDir, fixed, state.published.target, verify, authorize, signal)
   await current()
   return Object.freeze({ completion_sha256: sha256CanonicalJson(state.completion), finalizing_sha256: releasedHash })
 }

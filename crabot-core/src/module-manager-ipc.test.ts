@@ -5,6 +5,11 @@ import path from 'node:path'
 import http from 'node:http'
 import { pathToFileURL } from 'node:url'
 import ModuleManager from './index.js'
+import { createRequire } from 'node:module'
+const require = createRequire(import.meta.url)
+const control = require('../../scripts/lib/runtime-control.cjs')
+const native = require('../../scripts/lib/process-identity.cjs')
+const { openModuleRuntimeRpc } = require('../../scripts/lib/module-runtime-rpc.cjs')
 
 const active: { mm: any; directory: string }[] = []
 async function waitFor<T>(read: () => T | undefined | Promise<T | undefined>): Promise<T> {
@@ -49,6 +54,7 @@ async function start() {
       cwd: directory, auto_start: false, start_priority: 1,
     })),
   }, directory, { transport: 'ipc' }) as any
+  mm.fixtureDirectory = directory
   active.push({ mm, directory })
   const listener = vi.spyOn(http, 'createServer').mockImplementation(() => { throw new Error('IPC MM opened HTTP') })
   await mm.start()
@@ -60,6 +66,27 @@ async function start() {
   return mm
 }
 describe('actual MM managed IPC integration', () => {
+  it('pins local control calls to the original runtime and rejects replacement routing', async () => {
+    const mm = await start()
+    const a = mm.modules.get('fixture-a')
+    const connection = await control.openRuntimeControl(mm.fixtureDirectory)
+    const runtime = mm.childStates.get(mm.processes.get('fixture-a'))
+    const nativeProcess = native.inspectProcess(a.pid)
+    const rpc = await openModuleRuntimeRpc(nativeProcess, a.port,
+      { instance_id: mm.runtimeRegistry.getInstanceId(), module_id: 'fixture-a', runtime_id: runtime.runtimeId },
+      { dataDir: mm.fixtureDirectory, timeoutMs: 1000 })
+    try {
+      expect(await rpc.call('echo', { text: 'pinned' })).toMatchObject({ text: 'pinned', pid: a.pid })
+      expect(await connection.call({ target: a.port, source: 'fixture', method: 'echo', params: {} })).toMatchObject({ pid: a.pid })
+      await mm.stopModuleProcess('fixture-a', 'shutdown')
+      await mm.handleStartModule({ module_id: 'fixture-a' })
+      await waitFor(() => a.status === 'running' ? true : undefined)
+      await expect(rpc.call('echo', {})).rejects.toMatchObject({ code: 'CRABOT_PROCESS_RPC' })
+      await expect(connection.call({ target: a.port, source: 'fixture', method: 'echo', params: {} })).rejects.toMatchObject({ code: 'STALE_INSTANCE' })
+      expect(await mm.sendToModule(a.port, 'echo', {})).toMatchObject({ pid: a.pid })
+    } finally { rpc.close(); connection.close() }
+  })
+
   it('starts, registers, routes between children and checks real health with no internal HTTP', async () => {
     const mm = await start()
     const a = mm.modules.get('fixture-a')

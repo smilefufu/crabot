@@ -8,6 +8,9 @@ const identity = require('./process-identity.cjs')
 
 class PipeSocket extends Duplex {
   constructor(handle) { super({ allowHalfOpen: false }); this.handle = handle; this.reading = false }
+  setTimeout() { return this }
+  setNoDelay() { return this }
+  setKeepAlive() { return this }
   _read() {
     if (this.reading) return
     this.reading = true
@@ -22,11 +25,12 @@ class PipeSocket extends Duplex {
   _destroy(error, callback) { identity.closePipe(this.handle); callback(error) }
 }
 
-function authAddress(dataDir, server = identity.inspectProcess(process.pid)) {
-  const hash = createHash('sha256').update(server.owner + '\0' + realpathSync(dataDir)).digest('hex')
+function authAddress(dataDir, server = identity.inspectProcess(process.pid), namespace = 'desktop') {
+  if (!['desktop', 'runtime', 'voice'].includes(namespace)) throw new Error('Unknown private transport namespace')
+  const hash = createHash('sha256').update(server.owner + '\0' + realpathSync(dataDir) + (namespace === 'desktop' ? '' : '\0' + namespace)).digest('hex')
   if (process.platform === 'win32') return '\\\\.\\pipe\\crabot-desktop-' + hash
   // macOS sockaddr_un is short; a private, checked directory avoids DATA_DIR length limits.
-  const directory = join('/tmp', 'crabot-auth-' + hash.slice(0, 24))
+  const directory = join('/tmp', (namespace === 'desktop' ? 'crabot-auth-' : 'crabot-' + namespace + '-') + hash.slice(0, 24))
   try { mkdirSync(directory, { mode: 0o700 }) } catch (error) { if (error.code !== 'EEXIST') throw error }
   const stat = lstatSync(directory)
   if (!stat.isDirectory() || stat.isSymbolicLink() || String(stat.uid) !== server.owner || (stat.mode & 0o777) !== 0o700) {

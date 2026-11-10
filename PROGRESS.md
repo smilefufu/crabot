@@ -1,13 +1,12 @@
 # Crabot 项目进度
 
-### Cordis 飞书迁移（2026-11-10，组件验证通过，产品接入未完成）
+### Cordis 飞书迁移（2026-11-10，goal 持续实施，未交付）
 
-- goal 模式持续实施完整单端口实例。Shared/ModuleBase 与 MM 已接受管 IPC；真实 npm 飞书经 MM/Cordis 注册、收发、退出与重启通过，无 Channel TCP；真实 Python Memory 经二进制管道验证凭据、private 可见性、大帧与重启持久化，未启动 uvicorn。Shared 379 通过/2 跳过，Core 40、飞书 292、Admin 21；尚待默认启动、真实 Admin/Agent、npm 添加流程及 CLI/Desktop 完整单端口装配，不作为产品验收。
-
-- 完成交付前不提 PR：默认完整启动与调用链尚未接通，当前版本不能进入主分支。独立 worktree / `research/cordis-validation` 保留；按逐项确认改为飞书 Cordis 单入口，移除旧 HTTP 外壳及 Channel 端口；业务、身份、会话、媒体和错误码保持。添加飞书仅保留现有扫码入口，旧手填链接转向同流程。
-- 飞书原有 285 项基线通过；首轮 290 项（含真实 Cordis 隔离、群媒体、历史和失败清理）、9 项 Web 定向回归及 2 项真实 npm/安装失败验收通过，相关类型检查与 Web 构建通过。发现并修正配置共享引用和 npm shared 间接依赖遗漏。
-- npm 发行包通过空缓存国内源安装，56 项依赖的 resolved 与实际下载均属于 npmmirror registry/CDN；不修改全局 npm 配置、不自动回退国外源。npm 安装目录的双飞书实例在禁止外连的模拟平台夹具中两次启动，只监听宿主一个 Web 端口。
-- [复现与证据](experiments/cordis-feishu/README.md)：插件包 196,477 B，展开 853,700 B；完整安装依赖及缓存另计。未改变正式安装器，未发布 npm、部署或连接真实飞书/模型；不能据此宣称整个 Crabot 已单端口或正式安装包已瘦身。
+- 独立 worktree / `research/cordis-validation` 开发，不触及现有部署；完整验收通过后才提正式 PR。飞书保留 Cordis 单入口、添加仅现有扫码；身份、权限、会话、投递及已有生命周期保持。
+- 正式 Core main 已接通 Node IPC、Python Memory MessagePack 与 OS 核验的本地控制管道；真实 Admin/Agent/Memory 启动、仅 Web 监听、正常停机及运行记录清理通过。CLI 健康、后台启动和固定 runtime 连接回归通过；Windows 数值地址不再充当 listener 归属证据，未能核验的孤儿保留现场。
+- npm 已接入有效扫码 begin 和实例定义加载：精确版本、实例目录、持久缓存、国内 registry/CDN、不改全局配置、不自动转国外源。实际正式安装器空缓存国内源安装通过，安装失败/离线复用/源逃逸回归通过；sealed Core 与旧 Unix/Windows 发行均只保留飞书目录元数据，实际整包差额待构建计量。
+- 已通过 Core 全量 572/16skip、Shared 379/2skip、飞书 292、Memory 34、语音全量 55 及 Admin 定向回归；真实 CLI init/start/status/check/stop、独立 Electron ASAR 和 Node 维护包管道回归通过；当前继续完整全量/跨平台回归与最终人工验收；扫码→真实 Agent→本地模型工具回复、群聊/媒体/历史/飞书重启和 workspace durable IPC gate 均已通过。所有外部服务验证仅本地模拟与合成数据，尚未真人飞书/Provider 验收、未发布 npm、未部署；公共包/国内镜像仍为 404，发布授权是最终必要边界，不将组件通过当作交付。
+- [复现与证据](experiments/cordis-feishu/README.md)：包体和依赖/缓存分别计量，完整产品包瘦身尚未形成最终测量。语音手机 URL 保持，内部 WS 改为 OS 核验的私有管道，真实 Voice child 启动、音频透传及父 IPC 断开清理通过。
 
 ### 后台 Shell 输出留存（2026-11-10，未部署）
 

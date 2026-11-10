@@ -11,6 +11,10 @@ async function openSpawnedModuleRuntimeRpc(child, root, port, expected, options)
   let rpc
   const locate = () => {
     if (!(child instanceof ChildProcess) || child.pid !== root.pid || !native.sameProcess(root, native.inspectProcess(child.pid))) fail()
+    if (options?.transport) {
+      options.transport.verify()
+      return root
+    }
     const listeners = []
     for (const observed of captureSpawnedProcessTree(child)) {
       try {

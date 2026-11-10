@@ -1,4 +1,5 @@
 import path from 'node:path'
+import { createRequire } from 'node:module'
 import { PlaybackReceipts } from './playback-receipts.js'
 import { ReplyPlayback } from './reply-playback.js'
 import { GuidedPlayback } from './guided-playback.js'
@@ -67,11 +68,13 @@ export class VoiceChannel extends ModuleBase {
   private syncTail: Promise<void> = Promise.resolve()
   private heartbeatSyncing = false
   private closeTransport?: () => void
+  private closePrivateTransport?: () => Promise<void>
+  private privateTransport?: unknown
   private heartbeatTimer?: ReturnType<typeof setInterval>
   private stopped = false
   private adminPort?: number
   private readonly createdAt = new Date().toISOString()
-  constructor(config: ModuleConfig, dataDirectory: string, private readonly runtimeBearer: string) {
+  constructor(config: ModuleConfig, private readonly dataDirectory: string, private readonly runtimeBearer: string) {
     super(config)
     this.terminal = new TerminalStore(dataDirectory)
     this.receipts = new PlaybackReceipts(path.join(dataDirectory, 'playback-receipts'))
@@ -102,6 +105,10 @@ export class VoiceChannel extends ModuleBase {
       if (!contact) throw new RpcError('NOT_FOUND', 'Voice contact not found')
       return { platform_user_id: contact.platform_user_id, display_name: contact.display_name }
     })
+    this.registerMethod('get_voice_transport', () => {
+      if (!this.privateTransport) throw new RpcError('SERVICE_UNAVAILABLE', 'Voice transport is unavailable')
+      return this.privateTransport
+    })
     this.registerMethod('get_history', () => { throw new RpcError('CHANNEL_HISTORY_UNAVAILABLE', 'Voice text history is owned by the conversation Manager') })
     this.registerMethod('get_message', () => { throw new RpcError('NOT_FOUND', 'Voice does not keep a second message archive') })
     this.registerMethod('send_message', () => { throw new RpcError('CHANNEL_UNSUPPORTED_FEATURE', '当前语音回复必须使用 voice_reply 标签') })
@@ -117,6 +124,16 @@ export class VoiceChannel extends ModuleBase {
   protected override async onStart(): Promise<void> {
     if (!this.runtimeBearer) throw new Error('Voice runtime bearer is required')
     await this.terminal.load(); await this.refreshConfig()
+    if (process.env.CRABOT_RPC_TRANSPORT === 'ipc') {
+      const root = process.env.CRABOT_HOME
+      if (!root || !path.isAbsolute(root)) throw new Error('Managed Voice installation root is required')
+      const { listenVoiceTransport } = createRequire(import.meta.url)(path.join(root, 'scripts/lib/voice-transport.cjs'))
+      const transport = voiceTransport((_req, res) => { res.writeHead(404); res.end() }, socket => this.connected(socket), true)
+      this.closeTransport = transport.close
+      const listener = await listenVoiceTransport(this.dataDirectory, transport.server)
+      this.privateTransport = listener.description
+      this.closePrivateTransport = listener.close
+    }
     this.heartbeatTimer = setInterval(() => {
       const c = this.connection
       if (c && Date.now() - c.lastHeartbeat > 5000) this.disconnect()
@@ -132,7 +149,9 @@ export class VoiceChannel extends ModuleBase {
   }
   protected override async onStop(): Promise<void> {
     this.stopped = true; if (this.heartbeatTimer) clearInterval(this.heartbeatTimer)
+    this.privateTransport = undefined
     this.disconnect(); this.pairing?.socket?.terminate(); this.pairing = undefined; this.closeTransport?.()
+    await this.closePrivateTransport?.()
   }
   private async admin<P, R>(method: SensitiveRpcMethod, params: P): Promise<R> {
     if (!this.adminPort) { const modules = await this.rpcClient.resolve({ module_type: 'admin' }, this.config.moduleId); if (!modules[0]) throw new Error('Admin is unavailable'); this.adminPort = modules[0].port }

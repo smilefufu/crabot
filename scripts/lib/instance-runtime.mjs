@@ -44,7 +44,7 @@ export function createInstanceRuntime({ dataDir, root, controllerPid = process.p
     schema_version: 1,
     instance_id: createHash('sha256').update(controller.owner + '\0' + dataDir).digest('hex'),
     generation, data_dir: dataDir, install_root: realpathSync(root),
-    controller, mm: null, mm_port: mmPort,
+    controller, mm: null, mm_port: mmPort, control_transport: 'pipe',
   }
   save(dataDir, record)
   writePid(dataDir, controller.pid)

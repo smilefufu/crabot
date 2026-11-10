@@ -29,6 +29,11 @@ describe('ChannelManager.createInstance 实例 id 校验', () => {
   beforeEach(async () => {
     dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'channel-mgr-id-'))
     await fs.mkdir(path.join(dataDir, 'channel-configs'), { recursive: true })
+    const plugin = path.join(dataDir, 'channel-packages/crabot-channel-feishu/0.1.0/node_modules/crabot-channel-feishu')
+    await fs.mkdir(path.join(plugin, 'dist'), { recursive: true })
+    await fs.writeFile(path.join(plugin, 'package.json'), JSON.stringify({ name: 'crabot-channel-feishu', version: '0.1.0', main: 'dist/main.js' }))
+    await fs.writeFile(path.join(plugin, 'dist/main.js'), '')
+    await fs.writeFile(path.join(plugin, 'crabot-module.yaml'), 'module_id: channel-feishu')
   })
 
   afterEach(async () => {
@@ -63,7 +68,7 @@ describe('ChannelManager.createInstance 实例 id 校验', () => {
     expect(definition.entry).toMatch(/crabot-core[/\\]dist[/\\]channel-host\.js/)
     expect(definition.entry).not.toMatch(/crabot-channel-feishu[/\\]dist[/\\]main\.js/)
     expect(definition.env).toMatchObject({ CRABOT_MODULE_ID: '飞书客服',
-      CRABOT_CHANNEL_PLUGIN_PATH: path.resolve(__dirname, '../../crabot-channel-feishu/dist/main.js'),
+      CRABOT_CHANNEL_PLUGIN_PATH: path.resolve(dataDir, 'channel-packages/crabot-channel-feishu/0.1.0/node_modules/crabot-channel-feishu/dist/main.js'),
       FEISHU_APP_ID: 'synthetic-app', FEISHU_APP_SECRET: 'synthetic-secret' })
   })
 
@@ -145,6 +150,11 @@ describe('ChannelManager.upsertInstanceById NFC 归一化', () => {
   beforeEach(async () => {
     dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'channel-mgr-upsert-'))
     await fs.mkdir(path.join(dataDir, 'channel-configs'), { recursive: true })
+    const plugin = path.join(dataDir, 'channel-packages/crabot-channel-feishu/0.1.0/node_modules/crabot-channel-feishu')
+    await fs.mkdir(path.join(plugin, 'dist'), { recursive: true })
+    await fs.writeFile(path.join(plugin, 'package.json'), JSON.stringify({ name: 'crabot-channel-feishu', version: '0.1.0', main: 'dist/main.js' }))
+    await fs.writeFile(path.join(plugin, 'dist/main.js'), '')
+    await fs.writeFile(path.join(plugin, 'crabot-module.yaml'), 'module_id: channel-feishu')
   })
 
   afterEach(async () => {

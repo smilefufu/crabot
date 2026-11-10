@@ -219,7 +219,8 @@ function runtimeStart(coordinator, plan, state, moduleId, record) {
     || !digest(record.definition_sha256) || !date(record.created_at) || !processIdentity(record.parent) || !processIdentity(record.process)
     || hash(record.parent) !== hash(coordinator.launch.parent) || record.process.parent !== record.parent.pid || record.process.owner !== record.parent.owner
     || record.process.executable !== record.parent.executable || record.process.pid === record.parent.pid || !owned.processBirthAtLeast(record.process.started, record.parent.started)
-    || !exact(runtime, ['schema_version', 'instance_id', 'runtime_id', 'module_id', 'root_pid', 'process_start_identity', 'module_port', 'created_at'])
+    || !exact(runtime, ['schema_version', 'instance_id', 'runtime_id', 'module_id', 'root_pid', 'process_start_identity', 'module_port', 'created_at', ...(runtime?.rpc_transport === undefined ? [] : ['rpc_transport'])])
+    || runtime.rpc_transport !== undefined && !['ipc', 'pipe'].includes(runtime.rpc_transport)
     || runtime.schema_version !== 1 || runtime.instance_id !== state.health.root_proof.instance_id || runtime.runtime_id !== target.runtime_id || runtime.module_id !== moduleId
     || runtime.root_pid !== record.process.pid || runtime.module_port !== scope.module_port || typeof runtime.process_start_identity !== 'string'
     || !runtime.process_start_identity || runtime.process_start_identity.includes('\0') || !date(runtime.created_at)) fail()

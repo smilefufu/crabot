@@ -707,10 +707,10 @@ runpy.run_module('src.main',run_name='__main__')
   }
 }
 
-async function verifyRegisteredRuntimeGate({ manager, dataDir, coordinator, preparation, modules, afterClose, python, pythonBinary }: any) {
+async function verifyRegisteredRuntimeGate({ manager, dataDir, coordinator, preparation, modules, afterClose, python, pythonBinary, transport }: any) {
   const recoveryRecords = require('../../scripts/lib/workspace-recovery-records.mjs'), runtimePlan = preparation.plan
   expect(typeof recoveryRecords.commitWorkspaceRecoveryRuntimeStart).toBe('function')
-  const gate = require('../../scripts/lib/workspace-runtime-gate.mjs').createWorkspaceRuntimeGate(), idleModule = gate.child
+  const gate = require('../../scripts/lib/workspace-runtime-gate.mjs').createWorkspaceRuntimeGate({ transport }), idleModule = gate.child
   const idleModuleExit = once(idleModule, 'exit')
   let identity: any, execution: any
   const spies: Array<{ mockRestore(): void }> = []
@@ -723,7 +723,7 @@ async function verifyRegisteredRuntimeGate({ manager, dataDir, coordinator, prep
     await gate.ready()
     identity = require('../../scripts/lib/spawned-process-tree.cjs').captureSpawnedProcessTree(idleModule).find((item: any) => item.pid === idleModule.pid)
     const planned = runtimePlan.modules[0]
-    const runtimeRecord = await manager.runtimeRegistry.recordSpawn({ runtimeId: planned.runtime_id, moduleId: planned.module_id, rootPid: idleModule.pid, modulePort: modules.find((module: any) => module.module_id === planned.module_id).module_port })
+    const runtimeRecord = await manager.runtimeRegistry.recordSpawn({ runtimeId: planned.runtime_id, moduleId: planned.module_id, rootPid: idleModule.pid, modulePort: modules.find((module: any) => module.module_id === planned.module_id).module_port, ...(transport ? { rpcTransport: transport } : {}) })
     const marker = 'gate-module-' + runtimePlan.recovery_id
     const moduleMarker = path.join(dataDir, marker + '.json'), preloadMarker = path.join(dataDir, marker + '-preload'), preload = path.join(dataDir, marker + '-preload.cjs')
     const finishMarker = path.join(dataDir, marker + '-finish')
@@ -735,8 +735,8 @@ print('workspace-gate-python-stdout',flush=True)
 print('workspace-gate-python-stderr',file=sys.stderr,flush=True)
 pathlib.Path(${JSON.stringify(moduleMarker)}).write_text(json.dumps(dict(parent=os.getppid(),pid=os.getpid(),runtime=os.environ['CRABOT_MODULE_RUNTIME_ID'],token=os.environ['TEST_GATE_TOKEN'],executable=sys.executable,cwd=os.getcwd())),encoding='utf-8')
 time.sleep(300)`
-    const invocation = { command: python ?? process.execPath, args: python ? ['-I', '-B', '-c', pythonProgram] : ['-e', `require('node:fs').writeFileSync(${JSON.stringify(moduleMarker)},JSON.stringify({parent:process.ppid,pid:process.pid,runtime:process.env.CRABOT_MODULE_RUNTIME_ID,token:process.env.TEST_GATE_TOKEN}));if(${!afterClose})setInterval(()=>{if(require('node:fs').existsSync(${JSON.stringify(finishMarker)}))process.exit(17)},20);setTimeout(()=>process.exit(0),300000)`],
-      cwd: dataDir, env: { ...Object.fromEntries(Object.entries(process.env).filter(([, value]) => value !== undefined)), CRABOT_MODULE_RUNTIME_ID: planned.runtime_id, TEST_GATE_TOKEN: 'private-gate-fixture-token', NODE_OPTIONS: '--require ' + preload } }
+    const invocation = { command: python ?? process.execPath, args: python ? ['-I', '-B', '-c', pythonProgram] : ['-e', `${transport === 'ipc' ? `const {RuntimeRpcPeer}=require(${JSON.stringify(path.resolve('../crabot-shared/dist/index.js'))});new RuntimeRpcPeer(process).handle(call=>({method:call.method,value:call.params,actual_pid:process.pid}));` : ''}require('node:fs').writeFileSync(${JSON.stringify(moduleMarker)},JSON.stringify({parent:process.ppid,pid:process.pid,runtime:process.env.CRABOT_MODULE_RUNTIME_ID,token:process.env.TEST_GATE_TOKEN}));if(${!afterClose})setInterval(()=>{if(require('node:fs').existsSync(${JSON.stringify(finishMarker)}))process.exit(17)},20);setTimeout(()=>process.exit(0),300000)`],
+      cwd: dataDir, env: { ...Object.fromEntries(Object.entries(process.env).filter(([, value]) => value !== undefined)), CRABOT_MODULE_RUNTIME_ID: planned.runtime_id, TEST_GATE_TOKEN: 'private-gate-fixture-token', ...(transport ? { CRABOT_RPC_TRANSPORT: transport } : {}), NODE_OPTIONS: '--require ' + preload } }
     if (python) for (const key of Object.keys(invocation.env)) if (key.toLowerCase() === 'path') invocation.env[key] = ''
     const input = { dataDir, recoveryId: preparation.plan.recovery_id, moduleId: planned.module_id, process: identity, runtime: runtimeRecord, definitionHash: sha256CanonicalJson(invocation), verify: preparation.verify }
     expect(recoveryRecords.readWorkspaceRecoveryRuntimeStart(dataDir, input.recoveryId, input.moduleId)).toBeNull()
@@ -779,6 +779,12 @@ time.sleep(300)`
     await vi.waitFor(async () => expect(JSON.parse(await fs.readFile(moduleMarker, 'utf8')).runtime).toBe(planned.runtime_id), { timeout: 15000 })
     const actual = JSON.parse(await fs.readFile(moduleMarker, 'utf8'))
     execution = require('../../scripts/lib/process-identity.cjs').inspectProcess(actual.pid)
+    if (transport === 'ipc') {
+      const { RuntimeRpcPeer } = require('../../crabot-shared/dist/index.js')
+      const peer = new RuntimeRpcPeer(idleModule)
+      try { expect(await peer.call({ target: runtimeRecord.module_port, source: 'finite-gate-fixture', method: 'echo', params: { number: 321n } }, 5000)).toEqual({method:'echo',value:{number:321n},actual_pid:actual.pid}) }
+      finally { peer.close() }
+    }
     try { await expect(gate.observe()).resolves.toMatchObject({ kind: 'workspace_runtime_gate_observed', runtime_id: planned.runtime_id }) }
     finally { dropped.mockRestore() }
     expect(gate.start(gateInput)).toBe(firstStart)
@@ -3072,7 +3078,7 @@ describe('normal fixed-job Admin completion preparation', () => {
       expect(runtimePlan.root_selected_sha256).toBe(recoveryFacts.root_selected_sha256)
       expect(runtimePlan.launch_sha256).toBe(sha256CanonicalJson(initialized.launch))
       expect(recoveryRecords.readWorkspaceRecoveryRuntimePlan(f.data, freshRole.request.recovery_id)).toEqual(runtimePlan)
-      await verifyRegisteredRuntimeGate({ manager: cold, dataDir: f.data, coordinator: initialized, preparation: runtimePreparation, modules: archivedState.modules.modules })
+      await verifyRegisteredRuntimeGate({ manager: cold, dataDir: f.data, coordinator: initialized, preparation: runtimePreparation, modules: archivedState.modules.modules, transport: 'ipc' })
       const actualReadyFile = path.join(initialized.launch.control_root.path, 'ready.json'), actualReadyBytes = await fs.readFile(actualReadyFile)
       await fs.writeFile(actualReadyFile, 'null')
       try { expect(() => recoveryRecords.readWorkspaceRecoveryCoordinator(f.data, freshRole.request.recovery_id)).toThrow() }

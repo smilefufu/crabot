@@ -15,6 +15,7 @@ function readInstanceRuntime(dataDir) {
     || !/^[a-f0-9-]{36}$/.test(record.generation) || typeof record.data_dir !== 'string'
     || typeof record.install_root !== 'string' || !validProcess(record.controller)
     || (record.mm !== null && !validProcess(record.mm))
+    || record.control_transport !== undefined && record.control_transport !== 'pipe'
     || !Number.isInteger(record.mm_port) || record.mm_port < 1 || record.mm_port > 65535) fail('运行记录格式不兼容；未终止任何进程。')
   if (record.data_dir !== realpathSync(dataDir)) fail('运行记录的数据目录不匹配。')
   return record

@@ -62,6 +62,20 @@ afterEach(async () => {
 })
 
 describe('ModuleRuntimeRegistry', () => {
+  it.each(['ipc', 'pipe'] as const)('retains an unproven detached Windows %s runtime without probing or killing a coincident TCP listener', async transport => {
+    const identities = new Map<number, string | null>([[71000, 'original-start']])
+    const inspectWindowsPortOwners = vi.fn(async () => [{ pid: 72000, process_name: 'unrelated', process_start_identity: 'other-start' }])
+    const probeRuntimeIdentity = vi.fn(async () => null)
+    const { registry, terminateTree } = makeRegistry(identities, new Set(), { platform: 'win32', inspectWindowsPortOwners, probeRuntimeIdentity })
+    await registry.recordSpawn({ runtimeId: 'managed-runtime', moduleId: 'memory-default', rootPid: 71000, modulePort: 19003, rpcTransport: transport })
+    identities.set(71000, null)
+    await expect(registry.recoverOrphans({ currentRuntimeIds: new Set(), gracefulTimeoutMs: 30000 })).rejects.toThrow('Cannot prove detached managed runtime exit')
+    expect(inspectWindowsPortOwners).not.toHaveBeenCalled()
+    expect(probeRuntimeIdentity).not.toHaveBeenCalled()
+    expect(terminateTree).not.toHaveBeenCalled()
+    expect(await registry.listRecords()).toHaveLength(1)
+  })
+
   it('probes the standard runtime identity RPC envelope', async () => {
     let requestBody: Record<string, unknown> | undefined
     const server = http.createServer((request, response) => {

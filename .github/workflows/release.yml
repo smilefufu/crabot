@@ -183,6 +183,11 @@ jobs:
                      crabot-channel-telegram crabot-channel-wechat crabot-channel-feishu crabot-channel-dingtalk crabot-channel-slack crabot-channel-voice \
                      crabot-mcp-tools; do
             if [ -d "$mod" ]; then
+              if [ "$mod" = crabot-channel-feishu ]; then
+                mkdir -p "/tmp/${DIRNAME}/$mod"
+                cp "$mod/package.json" "$mod/crabot-module.yaml" "/tmp/${DIRNAME}/$mod/"
+                continue
+              fi
               rsync -aH "${COMMON_EXCLUDES[@]}" \
                     --exclude='/src/' --exclude='/test*/' \
                     "$mod/" "/tmp/${DIRNAME}/$mod/"
@@ -272,6 +277,10 @@ jobs:
             if (Test-Path $mod) {
               $dest = Join-Path $TempDir $mod
               New-Item -ItemType Directory -Force -Path $dest | Out-Null
+              if ($mod -eq 'crabot-channel-feishu') {
+                Copy-Item "$mod\package.json", "$mod\crabot-module.yaml" -Destination $dest
+                continue
+              }
               # 构建留下的无效检查链接不是运行时文件，不能让它中断载荷复制。
               Get-ChildItem -LiteralPath $mod -Force |
                 Where-Object { $_.Name -ne 'node_modules_link_check' } |

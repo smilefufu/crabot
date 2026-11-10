@@ -25,8 +25,8 @@ before(async () => {
         this.registerMethod('late', () => new Promise(resolve => setTimeout(() => resolve('late'), 40)))
         this.registerMethod('untransferable', () => ({ fn() {} }))
       }
-      async onStart() {}
-      async onStop() {}
+      async onStart() { this.keepAlive = setInterval(() => {}, 1000) }
+      async onStop() { clearInterval(this.keepAlive) }
       createServer() { throw new Error('IPC module must not create an HTTP server') }
     }
     const module = new Fixture()
@@ -139,7 +139,14 @@ test('shutdown releases the IPC handle so a service can exit normally', async ()
 
 test('disconnect rejects pending calls and never retries them', async () => {
   const pending = call('never', {}, 5000)
+  const exited = once(child, 'exit')
   child.disconnect()
   await assert.rejects(pending, { code: 'SERVICE_UNAVAILABLE' })
   await assert.rejects(call('nested', {}), { code: 'SERVICE_UNAVAILABLE' })
+  let timer: NodeJS.Timeout
+  try {
+    assert.deepEqual(await Promise.race([exited, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('Lost manager did not clean up its module')), 1000)
+    })]), [0, null])
+  } finally { clearTimeout(timer!) }
 })

@@ -26,7 +26,7 @@ async function fixture(t, delay = 100, registrationDelay = 0, { forceRegistratio
   const probe = createServer().listen(0, '127.0.0.1'); await once(probe, 'listening')
   const port = probe.address().port; await new Promise(resolve => probe.close(resolve))
   const child = spawn(process.execPath, [fileURLToPath(new URL('./fixtures/managed-core.mjs', import.meta.url))], {
-    env: { ...process.env, TEST_CORE_ROOT: root, TEST_DATA_DIR: data, TEST_PORT: String(port), TEST_MARKER: marker, TEST_READY: ready, TEST_MODULES_UNAVAILABLE: join(root, 'modules-unavailable'), TEST_STOP_DELAY: String(delay), TEST_REGISTER_DELAY: String(registrationDelay), TEST_IDENTITY_REPORT: join(root, 'identity-report.json'), TEST_FORCE_REGISTRATION_FAILURE: forceRegistrationFailure ? '1' : '', TEST_CONTROLLER_LOG: join(root, 'controller.log') },
+    env: { ...process.env, TEST_CORE_ROOT: root, TEST_DATA_DIR: data, TEST_RUNTIME_CONTROL: new URL('../runtime-control.cjs', import.meta.url).href, TEST_PORT: String(port), TEST_MARKER: marker, TEST_READY: ready, TEST_MODULES_UNAVAILABLE: join(root, 'modules-unavailable'), TEST_STOP_DELAY: String(delay), TEST_REGISTER_DELAY: String(registrationDelay), TEST_IDENTITY_REPORT: join(root, 'identity-report.json'), TEST_FORCE_REGISTRATION_FAILURE: forceRegistrationFailure ? '1' : '', TEST_CONTROLLER_LOG: join(root, 'controller.log') },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   let output = ''; child.stdout.on('data', chunk => { output += chunk }); child.stderr.on('data', chunk => { output += chunk })
@@ -161,8 +161,10 @@ test('status JSON uses the verified MM despite a reused controller PID and never
   }
   const healthy = await status()
   assert.equal(healthy.body.running, true)
-  assert.equal(healthy.body.endpoints.mm.url, `http://localhost:${f.record.mm_port}`)
-  assert.equal(healthy.body.endpoints.admin_rpc.url, 'http://localhost:23456')
+  assert.equal(healthy.body.endpoints.mm.url, null)
+  assert.equal(healthy.body.endpoints.mm.transport, 'pipe')
+  assert.equal(healthy.body.endpoints.admin_rpc.url, null)
+  assert.equal(healthy.body.endpoints.admin_rpc.transport, 'ipc')
   const file = join(f.data, 'instance-runtime.json')
   const forged = JSON.stringify({ ...f.record, controller: { ...f.record.controller, started: 'wrong incarnation' } })
   writeFileSync(file, forged)

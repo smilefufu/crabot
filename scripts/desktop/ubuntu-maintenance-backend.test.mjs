@@ -26,6 +26,10 @@ test('the fixed Node backend loads in an independent private Node without Core o
     const progress=await import(pathToFileURL(path.join(output,'progress.mjs')).href);
     const require=createRequire(pathToFileURL(path.join(output,'probe.cjs')));
     const native=require('./bootstrap/scripts/lib/process-identity.cjs'), asar=require('@electron/asar');
+    const control=(await load('runtime-control.cjs')).default,data=path.join(output,'control-data');fs.mkdirSync(data,{mode:0o700});
+    const server=await control.startRuntimeControl({dataDir:data,root:output,target:19339,dispatch:call=>({value:call.params.value})});
+    try {const reply=await control.callRuntimeControl(data,{target:19339,source:'fixed-maintenance',method:'health',params:{value:'private-pipe'}},{timeoutMs:1500});if(reply.value!=='private-pipe')throw new Error('independent transport failed')}finally{await server.close();fs.rmSync(data,{recursive:true})}
+
     fs.mkdirSync(path.join(output,'sample'));fs.writeFileSync(path.join(output,'sample/value'),'archive probe');
     await asar.createPackage(path.join(output,'sample'),path.join(output,'probe.asar'));
     if(asar.extractFile(path.join(output,'probe.asar'),'value').toString()!=='archive probe')throw new Error('bundled archive reader failed');

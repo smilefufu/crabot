@@ -3,6 +3,7 @@ import path from 'node:path'
 import { promises as fs } from 'node:fs'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
+import { buildRuntimeControl } from './build-runtime-control.mjs'
 import { desktopMaintenanceBootstrap, desktopMaintenanceNodeFiles } from '../lib/desktop-maintenance-bootstrap.mjs'
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const require = createRequire(path.join(repository, 'crabot-desktop/package.json'))
@@ -16,6 +17,7 @@ export async function buildUbuntuMaintenanceBackend(output) {
     await fs.copyFile(path.join(repository, name), target)
   }
   const { build } = require('esbuild')
+  await buildRuntimeControl(build, repository, path.join(output, 'bootstrap/scripts/lib/runtime-control.cjs'))
   await build({ entryPoints: [path.join(repository, 'crabot-desktop/src/ubuntu-removal-progress.ts')], outfile: path.join(output, 'progress.mjs'),
     bundle: true, platform: 'node', format: 'esm', target: 'node22', sourcemap: false, logLevel: 'silent' })
   await build({ entryPoints: [path.join(repository, 'crabot-desktop/src/ubuntu-removal-rules.ts')], outfile: path.join(output, 'rules.mjs'),

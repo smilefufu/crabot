@@ -27,6 +27,7 @@ import { normalizeToolAccessUpdate } from './permission-entries.js'
  * @see crabot-docs/protocols/protocol-admin.md
  */
 
+import { createRequire } from 'node:module'
 import http, { type IncomingMessage, type ServerResponse } from 'node:http'
 import type { Socket, Server as NetServer } from 'node:net'
 import crypto from 'node:crypto'
@@ -864,6 +865,16 @@ export class AdminModule extends ModuleBase {
     this.agentManager = new AgentManager(this.adminConfig.data_dir)
     this.channelManager = new ChannelManager(this.adminConfig.data_dir, this.rpcClient)
     this.voiceGateway = new VoiceGateway({
+      ...(process.env.CRABOT_RPC_TRANSPORT === 'ipc' ? { connect: async (id: string) => {
+        if (this.channelManager.getInstance(id)?.implementation_id !== 'channel-voice') throw new Error('Unknown Voice instance')
+        const module = (await this.rpcClient.resolve({ module_id: id }, this.config.moduleId)).find(item => item.module_id === id && item.module_type === 'channel')
+        if (!module) throw new Error('Voice instance is unavailable')
+        const description = await this.rpcClient.call(module.port, 'get_voice_transport', {}, this.config.moduleId)
+        const root = process.env.CRABOT_HOME
+        if (!root || !path.isAbsolute(root)) throw new Error('Managed installation root is required')
+        const { connectVoiceTransport } = createRequire(__filename)(path.join(root, 'scripts/lib/voice-transport.cjs'))
+        return connectVoiceTransport(path.join(this.adminConfig.data_dir, 'channels', id, 'voice', id), description)
+      } } : {}),
       connection: id => {
         const instance = this.channelManager.getInstance(id)
         if (instance?.implementation_id !== 'channel-voice') return null
@@ -1258,7 +1269,7 @@ export class AdminModule extends ModuleBase {
     if (!this.managementOnly) await this.channelManager.reRegisterInstances()
 
     // 加载 onboarding handler（从 builtin 模块的 yaml 读取 onboarding_methods）
-    this.onboardingManager.loadFromImplementations(this.channelManager.listImplementations().items)
+    this.onboardingManager.loadFromImplementations(await this.channelManager.onboardingImplementations())
 
     // 初始化模块安装器
     await this.moduleInstaller.initialize()
@@ -2801,6 +2812,12 @@ export class AdminModule extends ModuleBase {
       // SSE poll 走 query string token（EventSource 不支持自定义 header），其他三条走标准 Bearer
       if (req.method === 'POST' && pathname === '/api/channels/onboard/begin') {
         const body = await this.readJsonBody<{ implementation_id?: string; method_id?: string; params?: Record<string, unknown> }>(req).catch(() => ({} as { implementation_id?: string; method_id?: string; params?: Record<string, unknown> }))
+        if (body.implementation_id === 'channel-feishu' && !this.onboardingManager.get(body.implementation_id, body.method_id ?? '')) {
+          try {
+            const implementation = await this.channelManager.prepareOnboarding(body.implementation_id, body.method_id ?? '')
+            if (implementation) this.onboardingManager.loadFromImplementations([implementation])
+          } catch { sendJson(res, 503, { error: '飞书插件下载失败，请检查国内 npm 源及当前网络后重试。' }); return }
+        }
         const onboarder = this.resolveOnboarder(res, body.implementation_id, body.method_id)
         if (!onboarder) return
         if (isSlackLocalOnboarding(body.implementation_id, body.method_id)) {
@@ -10140,28 +10157,15 @@ export class AdminModule extends ModuleBase {
   }
 
   private async queryModuleStatuses(): Promise<Map<string, string>> {
-    const mmEndpoint = process.env.CRABT_MM_ENDPOINT || process.env.CRABOT_MM_ENDPOINT || 'http://localhost:19000'
     try {
-      const response = await fetch(`${mmEndpoint}/list_modules`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: generateId(), params: {} }),
-      })
-      const data = (await response.json()) as {
-        success: boolean
-        data?: { modules: Array<{ module_id: string; status: string }> }
-      }
-      if (data.success && data.data) {
-        const map = new Map<string, string>()
-        for (const m of data.data.modules) {
-          map.set(m.module_id, m.status)
-        }
-        return map
-      }
+      const result = await this.rpcClient.call<Record<string, never>, {
+        modules: Array<{ module_id: string; status: string }>
+      }>(this.rpcClient.moduleManagerTargetPort, 'list_modules', {}, this.config.moduleId, undefined, { timeoutMs: 2000 })
+      return new Map(result.modules.map(module => [module.module_id, module.status]))
     } catch {
       // MM 不可用时返回空 map
+      return new Map()
     }
-    return new Map()
   }
 
   private async waitForModuleStatus(
@@ -10205,49 +10209,20 @@ export class AdminModule extends ModuleBase {
       ? undefined
       : await this.resolveModuleStartEnv(params.module_id)
 
-    // 调用 MM 的 start_module，注入配置为 env
-    const mmEndpoint = process.env.CRABT_MM_ENDPOINT || process.env.CRABOT_MM_ENDPOINT || 'http://localhost:19000'
-    const response = await fetch(`${mmEndpoint}/start_module`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        id: generateId(),
-        params: {
-          module_id: params.module_id,
-          ...(mergedConfig ? { env: mergedConfig } : {}),
-        },
-      }),
-    })
-
-    const result = (await response.json()) as { success: boolean; error?: { message: string }; data?: { status: 'accepted'; tracking_id: string } }
-    if (!result.success) {
-      throw new Error(result.error?.message ?? 'start_module failed')
-    }
-    return result.data!
+    return this.rpcClient.callModuleManager('start_module', {
+      module_id: params.module_id,
+      ...(mergedConfig ? { env: mergedConfig } : {}),
+    }, this.config.moduleId)
   }
 
   private async handleStopModuleAdmin(params: {
     module_id: string
     force?: boolean
   }): Promise<{ status: 'accepted'; tracking_id: string }> {
-    const mmEndpoint = process.env.CRABT_MM_ENDPOINT || process.env.CRABOT_MM_ENDPOINT || 'http://localhost:19000'
-    const response = await fetch(`${mmEndpoint}/stop_module`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        id: generateId(),
-        params: {
-          module_id: params.module_id,
-          force: params.force || false,
-        },
-      }),
-    })
-
-    const result = (await response.json()) as { success: boolean; error?: { message: string }; data?: { status: 'accepted'; tracking_id: string } }
-    if (!result.success) {
-      throw new Error(result.error?.message ?? 'stop_module failed')
-    }
-    return result.data!
+    return this.rpcClient.callModuleManager('stop_module', {
+      module_id: params.module_id,
+      force: params.force || false,
+    }, this.config.moduleId)
   }
 
   private async handleRestartModuleAdmin(params: {
@@ -10257,25 +10232,11 @@ export class AdminModule extends ModuleBase {
     const env = params.module_id === 'crabot-agent'
       ? undefined
       : await this.resolveModuleStartEnv(params.module_id)
-    const mmEndpoint = process.env.CRABT_MM_ENDPOINT || process.env.CRABOT_MM_ENDPOINT || 'http://localhost:19000'
-    const response = await fetch(`${mmEndpoint}/restart_module`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        id: generateId(),
-        params: {
-          module_id: params.module_id,
-          force: params.force,
-          ...(env ? { env } : {}),
-        },
-      }),
-    })
-
-    const result = (await response.json()) as { success: boolean; error?: { message: string }; data?: { status: 'accepted'; tracking_id: string } }
-    if (!result.success) {
-      throw new Error(result.error?.message ?? 'restart_module failed')
-    }
-    return result.data!
+    return this.rpcClient.callModuleManager('restart_module', {
+      module_id: params.module_id,
+      force: params.force,
+      ...(env ? { env } : {}),
+    }, this.config.moduleId)
   }
 
   // ============================================================================

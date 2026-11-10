@@ -28,6 +28,12 @@ async function main() {
   assert.equal(typeof native.inspectProgramReferences, 'function')
   const emptyReferences = await native.inspectProgramReferences({ roots: [], files: [] })
   assert.equal(emptyReferences.complete, true); assert.equal(emptyReferences.incomplete, false); assert.deepEqual(emptyReferences.processes, []); assert.deepEqual(emptyReferences.unknown_pids, [])
+  const control = (await load('runtime-control.cjs')).default
+  const controlData = path.join(root, 'pipe-fixture'); await fs.mkdir(controlData)
+  const listener = await control.startRuntimeControl({ dataDir: controlData, root, target: 19000,
+    dispatch: call => ({ method: call.method, value: call.params.value }) })
+  try { assert.deepEqual(await control.callRuntimeControl(controlData, { target: 19000, source: 'fixed-bootstrap-test', method: 'echo', params: { value: 7 } }), { method: 'echo', value: 7 }) }
+  finally { await listener.close() }
   await assert.rejects(fs.lstat(path.join(root, 'crabot-core')), { code: 'ENOENT' })
   const report = { fixed_gui_bootstrap_loaded: true, initial_frame_loaded: true, initial_job_loaded: true, source_exit_verifier_loaded: true, program_inventory_loaded: true, cli_entry_removal_loaded: true, native_helper_loaded: true, native_reference_query_loaded: true, core_present: false, business_mm_started: false,
     stop_called: false, host_executed: false, removal_published: false }

@@ -1,56 +1,35 @@
-# Cordis 飞书独立验证
+# Cordis 完整实例验证
 
-本分支的飞书只有 Cordis 插件入口，不再继承 ModuleBase、监听 Channel HTTP 端口或注册到旧 MM。现有主分支的发布实例不受影响。这里的宿主只验证进程内收发与一个 Web 监听，不替代生产 Admin、Agent 或鉴权链。
+本目录保存单端口迁移的临时数据复现。产品入口已接入真实 Core/Admin/Agent/Memory、Cordis 飞书和实例级 npm 安装；现有部署不变。全部外部业务验证使用合成账号与本地平台/模型夹具，不能冒充真人飞书扫码或真实模型能力验收。当前不发布 npm、不部署、不提未完成 PR。
 
-## 已实现
+## 已有证据
 
-- 复用原飞书业务方法，通过 `channel.methods` 进程内调用；入站仅发布原始 `channel.message_received`，保持平台身份和 Session。配置、输入及结果保留各自对象所有权。
-- 插件实例分别保存账号、ID、数据和连接；Cordis 加载失败及卸载清理本实例的既有连接、定时器，不引入 Agent 任务取消或自动补发。
-- Admin Web 添加飞书只保留现有扫码入口；旧手填链接转向同一扫码流程。已有配置、扫码后的授权/事件订阅指引和其它平台保持。
-- npm 发行包只内置尚未独立发布的 `crabot-shared` 编译产物，并声明其运行依赖；飞书 SDK 固定为基线已测的 1.62.1。宿主提供 Cordis 4.0.0-rc.12。
+- `normal-instance.test.mjs`：正常 managed Core main 启动真实核心模块，OS 逐 PID 仅发现 Admin Web 监听；正常停止、子进程退出并清除运行记录。
+- `product-e2e.test.mjs`：全新实例无飞书预装包，从已认证 Admin 扫码入口触发实际 npm 安装，再通过真实 onboarder 完成二维码、凭据保存和自动认主。原始平台消息经过 Admin 授权、真实 Agent、本地模拟 OpenAI 流与真实 `send_message` 工具投递回平台出口。覆盖私聊、群聊、图片进入模型输入、惰性文件下载、图片/文件发送、远端历史，以及 Web 重启飞书后 canonical session 保留。夹具只替换包来源和外部平台/模型，不模拟 Admin/Agent 授权或投递。
+- 正式 `ChannelPackageStore` 空缓存国内源安装已通过，依赖 lock 与实际 HTTP 下载均为 `registry.npmmirror.com` / `cdn.npmmirror.com`；随后新产物从该缓存断网安装，并经完整实例加载。配置和 cache 属于实例；失败仅清理本次 staging、保留 cache/旧版本；不改全局 npm 配置，不回退国外源。npm 子进程不继承 Admin 凭据或 Node preload。
+- `managed-runtime.test.mjs`：真实 MM、Cordis 与 npm 飞书双实例隔离、原始事件、重启持久化；`memory-runtime.test.mjs`：真实 Python Memory、MessagePack、SQLite、敏感 bearer 拒绝、大帧和两次启动。`full-instance.test.mjs` 是较早的真实核心装配验证。
+- 固定控制连接核验 OS 用户、当前 MM/child/runtime；replacement 不接收旧连接请求。真实 durable workspace gate 在丢失启动确认后不重复启动，IPC 仍能承载二进制/BigInt 测试消息。Windows 路由编号不作为 TCP listener 归属证据。
+
+当前 npm 包 `crabot-channel-feishu@0.1.0`：压缩 202,217 B，展开 879,162 B，227 个文件；SHA-1 `b70213ddc8ebf4122bad5c7bdb29eda3c738b4f8`。SDK/Cordis 等完整安装依赖约 40 MiB，下载 cache 另计；这些数字不是整个 Crabot 安装包大小。Unix/Windows 旧发行和 sealed Core staging 均改为只保留飞书目录元数据，完整发行包差额仍待实际构建计量。
 
 ## 复现
 
-使用 Node 22.22.3，在仓库根目录执行；所有安装源均显式指定，测试不需要真实账号。
+使用项目要求的 Node 22；先构建 shared/client/core/admin/agent、MCP tools、Admin Web、native helper，并准备 Memory 冻结依赖。不要使用现有业务 DATA_DIR。
 
 ```sh
-pnpm --dir crabot-shared install --frozen-lockfile --ignore-scripts --registry=https://registry.npmmirror.com
-pnpm --dir crabot-shared run build
-pnpm --dir crabot-channel-feishu install --frozen-lockfile --ignore-scripts --registry=https://registry.npmmirror.com
-pnpm --dir crabot-channel-feishu run build
-pnpm --dir crabot-channel-feishu exec vitest run --maxWorkers=1 --minWorkers=1
-VALIDATION_ROOT="$(mktemp -d)"
-node experiments/cordis-feishu/pack.mjs "$VALIDATION_ROOT/artifacts"
-node experiments/cordis-feishu/install.mjs "$VALIDATION_ROOT/installed" "$VALIDATION_ROOT/artifacts/crabot-channel-feishu-0.1.0.tgz"
-CORDIS_INSTALL_DIR="$VALIDATION_ROOT/installed" node --test experiments/cordis-feishu/smoke.test.mjs
-node --test experiments/cordis-feishu/install.test.mjs
+node scripts/pack-channel-feishu.mjs <新的产物目录>
+node --test experiments/cordis-feishu/normal-instance.test.mjs
+CORDIS_PLUGIN_TARBALL=<tarball绝对路径> \
+CORDIS_NPM_CACHE_DIR=<已准备的国内npm缓存> \
+node --test experiments/cordis-feishu/product-e2e.test.mjs
 ```
 
-`install.mjs` 也接受精确的 npm 包名与版本；当前未发布，所以验收使用本地 npm tarball，SDK 等依赖由国内 registry 实际下载。默认 `https://registry.npmmirror.com`，逐次传给 npm；独立 user/global config 与缓存，不修改用户全局 npm 配置。只允许写入新目录；失败删除本次新目录，已有安装不被覆盖。核对 lockfile resolved 和 npm 实际 HTTP 下载域名，国内源允许同属镜像的 `cdn.npmmirror.com`，不自动回退国外 registry。包导入成功后才报告安装成功，连接健康仍需另行判断。
+完整收发夹具从本地 npm tarball 和显式离线 cache 安装依赖；平台与模型网络均是模拟。实际空缓存国内下载走正式 `ChannelPackageStore.ensure()`，其组件测试与合成实例验证分别保留，不能拿 cache 命中替代国内下载成功。
 
-smoke 测试从 npm 安装目录加载真实插件，用模拟飞书平台完成两实例收发与两次宿主启动；主动禁止 outbound socket/fetch。只有宿主的一个 loopback Web 监听，插件没有监听端口。这个测试不能替代真实飞书长连接、扫码真人授权或整个 Crabot 的端到端验收。
+旧 `pack.mjs` 仅转发正式打包器；`install.mjs` / `smoke.test.mjs` / `install.test.mjs` 保留最初组件实验，不能替代正式实例证据。最初一次无重试下载曾遇国内 CDN FETCH_ERROR；正式安装器改为保留 cache 并有界重试后，新的空缓存下载实际通过。
 
-## 结果与限制
+## 未完成及发布边界
 
-见 [evidence.json](./evidence.json) 中的运行环境、测试、下载源及包体积。npm 插件 tarball 大小与安装完成后的依赖体积分别记录；正式安装器尚未改变，不能据此报告主安装包已缩小。没有 npm publish、部署、付费模型或真实消息发送。
+Core 全量 572 项通过、16 项平台跳过；Shared 379/2skip、飞书 292、Memory 34、语音 55 通过。真实 CLI init/start/status/check/stop、独立 Electron ASAR / Node 维护包和 Voice 私有管道验证已通过。Admin 两条静态文档断言在未改动基线同样失败，其他隔离定向回归已通过；跨平台运行、完整包构建与最终人工验收仍在收尾。当前 `crabot-channel-feishu@0.1.0` 在官方 npm 和国内镜像均返回 404，不能把本地 tarball 验证说成公共 npm 已可安装。在正式包发布与国内镜像可用之前，不能合入/发行依赖它的半成品。未获发布授权，未新增 npm 自动发布 workflow；自动审批已拒绝该外部发布副作用。包发布、真人扫码/真实客户端验收和现有部署都需要分别确认，不能由本地模拟结果代替。
 
-未纳入：旧 MM 适配、生产 Admin/Agent 同进程接入、其它 Channel/Memory、生产下载 UI、默认预装策略、HMR、升级回滚、完整离线安装、跨平台原生资源和大陆实网可达率。现有关闭行为不保证任意在途任务排空；需要生产化时再按具体场景设计。
-
-## 实际受管运行进展（仍未完成产品交付）
-
-Core 已增加 Cordis Channel 宿主和受管 Node IPC。`managed-runtime.test.mjs` 从真实 npm 安装根加载真实飞书包，只模拟外部飞书 SDK；运行真实 MM、子进程、Cordis、事件、会话存储与重启，并逐 PID 核对无 Channel TCP 监听。执行前构建 Shared、Core、飞书并准备包含 `createConfig` 的新 npm 包：
-
-```sh
-CORDIS_INSTALL_DIR=<npm安装根> node --test experiments/cordis-feishu/managed-runtime.test.mjs
-```
-
-真实 Python Memory 已接管道，通过 MessagePack 双向帧使用同一份授权、配置、存储与维护关闭实现。`memory-runtime.test.mjs` 禁止 Python TCP 与外部模型，验证配置拉取、凭据拒绝、private 可见性、大帧、SQLite 持久化和两次启动；验证器使用合成夹具，不代表真实 Admin 凭据链已验收：
-
-```sh
-# 先在 crabot-memory 完成 uv sync --frozen；可用 CORDIS_MEMORY_PYTHON 指定测试解释器
-node --test experiments/cordis-feishu/memory-runtime.test.mjs
-```
-
-2026-11-10 本阶段：Shared 379 通过、2 跳过；Core 40；飞书 292；Admin 启动相关 21；上述受管飞书与 Memory 各 1 项联合验证通过。使用项目 Node 22.22.3。新包 201,465 B，展开 876,117 B；当前联合验证使用此前国内缓存离线安装的新产物。新一轮空缓存安装实际遭遇 npmmirror CDN FETCH_ERROR，按失败退出；不能用此前成功记录代替这次失败。
-
-尚待完成：默认完整实例启动、真实 Admin/Agent 鉴权与回复链、npm 安装接入实际添加流程、CLI/Desktop/健康/恢复等单端口入口、全量回归及真人扫码验收。正常入口尚未切到最终通信模式；不提 PR、不合并、不部署、不发布 npm。
+不新增停用状态机、任务排空、强杀期限、HMR 或其它 Channel 批量 npm 化；不改变 Provider 直连与配置引用语义。

@@ -11,6 +11,7 @@ import http, { type IncomingMessage, type ServerResponse } from 'node:http'
 import type { Server as NetServer } from 'node:net'
 import fs from 'node:fs'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 import {
   type Request,
   type Response,
@@ -279,13 +280,24 @@ export class RpcClient {
         })
       : null
 
-    const peer = getProcessRpcPeer()
-    if (peer) {
+    const standalone = process.env.CRABOT_RPC_TRANSPORT === 'ipc' && !process.send
+    const peer = standalone ? undefined : getProcessRpcPeer()
+    if (peer || standalone) {
       try {
-        const result = await peer.call<R>({
-          target: targetPort, source, method, params,
+        const call = { target: targetPort, source, method, params,
           ...(options.authorizationBearer ? { metadata: { authorizationBearer: options.authorizationBearer } } : {}),
-        }, options.timeoutMs)
+        }
+        let result: R
+        if (peer) result = await peer.call<R>(call, options.timeoutMs)
+        else {
+          const root = process.env.CRABOT_HOME
+          const dataDir = process.env.CRABOT_RUNTIME_DATA_DIR
+          if (!root || !path.isAbsolute(root) || !dataDir || !path.isAbsolute(dataDir)) {
+            throw new RuntimeRpcError('SERVICE_UNAVAILABLE', 'Managed runtime scope is missing')
+          }
+          const control = await import(pathToFileURL(path.join(root, 'scripts/lib/runtime-control.cjs')).href)
+          result = await control.default.callRuntimeControl(dataDir, call, { timeoutMs: options.timeoutMs })
+        }
         if (span && traceCtx) traceCtx.traceStore.endSpan(traceCtx.traceId, span.span_id, 'completed', {
           target_module: `port:${targetPort}`, target_port: targetPort, method,
           transport: 'ipc', response_summary: JSON.stringify(result).slice(0, 200),
@@ -296,7 +308,10 @@ export class RpcClient {
           target_module: `port:${targetPort}`, target_port: targetPort, method,
           transport: 'ipc', error: error instanceof Error ? error.message : String(error),
         })
-        if (error instanceof RuntimeRpcError) throw new RpcCallError(error.code, error.message, error.details)
+        if (error instanceof RuntimeRpcError || standalone && error instanceof Error && error.name === 'RuntimeRpcError') {
+          const failure = error as RuntimeRpcError
+          throw new RpcCallError(failure.code, failure.message, failure.details)
+        }
         throw error
       }
     }
@@ -533,6 +548,7 @@ interface ResolveParams {
  */
 export abstract class ModuleBase {
   private removeRuntimeHandler?: () => void
+  private removeParentDisconnect?: () => void
   protected readonly config: ModuleConfig
   protected readonly rpcClient: RpcClient
   protected readonly methodHandlers: Map<string, MethodHandler> = new Map()
@@ -579,6 +595,14 @@ export abstract class ModuleBase {
         if (!handler) throw new RpcError(GlobalErrorCode.METHOD_NOT_FOUND, `Method "${method}" not found`)
         return handler(params, { authorizationBearer: metadata?.authorizationBearer })
       })
+      const parentDisconnected = (): void => {
+        void this.stop().catch(() => {
+          console.error(`[${this.config.moduleId}] Cleanup failed after manager disconnected`)
+          process.exitCode = 1
+        })
+      }
+      process.once('disconnect', parentDisconnected)
+      this.removeParentDisconnect = () => process.removeListener('disconnect', parentDisconnected)
       return
     }
 
@@ -621,6 +645,8 @@ export abstract class ModuleBase {
     console.log(`[${this.config.moduleId}] Shutting down...`)
 
     await this.onStop()
+    this.removeParentDisconnect?.()
+    this.removeParentDisconnect = undefined
     if (this.removeRuntimeHandler) {
       this.removeRuntimeHandler()
       this.removeRuntimeHandler = undefined
