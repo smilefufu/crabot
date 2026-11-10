@@ -47,6 +47,10 @@ test('protects recovery records and a swapped directory', async t => {
   assert.equal((await cleanup.removeConfirmed()).removed.includes('releases/' + core), false)
   await fs.writeFile(path.join(root, '.desktop-installing.json'), '{}')
   await assert.rejects(legacyProgramCleanup(root, api), /恢复/)
+  await fs.rm(path.join(root, '.desktop-installing.json'))
+  await fs.mkdir(path.join(root, '.desktop-takeover'))
+  await fs.writeFile(path.join(root, '.desktop-takeover', 'transaction.json'), '{}')
+  await assert.rejects(legacyProgramCleanup(root, api), /恢复依赖无法确认/)
 })
 test('does not follow a redirected releases directory', async t => {
   const { root, api } = await fixture(t); const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'outside-'))

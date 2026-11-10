@@ -25,6 +25,7 @@ export async function legacyProgramCleanup(root, suppliedApi) {
     for (const name of ['.desktop-installing.json', '.desktop-removal.json', '.desktop-reinstall.json', 'data/desktop-maintenance.json']) {
       if (await exists(path.join(root, name))) throw new Error('有安装或恢复尚未完成，保留历史程序。')
     }
+    if (await exists(path.join(root, '.desktop-takeover', 'transaction.json'))) throw new Error('存在历史接管记录，恢复依赖无法确认，保留历史程序。')
     if (original.dataDir && await exists(path.join(original.dataDir, 'desktop-maintenance.json'))) throw new Error('数据恢复尚未完成，保留历史程序。')
   }
   const physical = async relative => {
