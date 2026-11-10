@@ -305,9 +305,15 @@ export function parseOpenAIModels(raw: unknown[]): ModelInfo[] {
   return models
 }
 
+// Preserve the old Agent-only startup override until an explicit Admin setting is saved.
+function legacyRetentionDays(): number {
+  const days = Number.parseInt(process.env.TRACE_RETENTION_DAYS ?? '', 10)
+  return Number.isFinite(days) && days >= 1 ? days : 30
+}
+
 export class ModelProviderManager {
   private providers: Map<string, ModelProvider> = new Map()
-  private globalConfig: GlobalModelConfig = {}
+  private globalConfig: GlobalModelConfig = { observability_retention_days: legacyRetentionDays() }
   private moduleConfigs: Map<string, ModuleModelConfig> = new Map()
   private agentConfigRefsProvider: ((providerId: string) => string[]) | null = null
 
@@ -1115,7 +1121,15 @@ export class ModelProviderManager {
 
   async updateGlobalConfig(config: Partial<GlobalModelConfig>): Promise<GlobalModelConfig> {
     return this.serial(async () => {
+      const retention = config.observability_retention_days
+      if (retention != null && (!Number.isFinite(retention) || retention < 1)) throw new Error('observability_retention_days must be >= 1')
       const updated = { ...this.globalConfig, ...config }
+      delete updated.trace_retention_days
+      delete (updated as Record<string, unknown>).task_retention_count
+      delete (updated as Record<string, unknown>).trace_retention_count
+      if (Object.prototype.hasOwnProperty.call(config, 'observability_retention_days')) updated.observability_retention_days = retention ?? 30
+      const retentionChanged = Object.prototype.hasOwnProperty.call(config, 'observability_retention_days') &&
+        updated.observability_retention_days !== this.globalConfig.observability_retention_days
       const publicBaseUrlChanged = Object.prototype.hasOwnProperty.call(config, 'public_base_url') &&
       config.public_base_url !== this.globalConfig.public_base_url
     const llmChanged = (
@@ -1133,7 +1147,7 @@ export class ModelProviderManager {
     const domains: ConfigDomain[] = [
       ...(llmChanged ? ['models' as const] : []),
       ...(imageChanged ? ['image' as const] : []),
-      ...(publicBaseUrlChanged ? ['behavior' as const] : []),
+      ...((publicBaseUrlChanged || retentionChanged) ? ['behavior' as const] : []),
     ]
     if (domains.length === 0) {
       this.globalConfig = updated
@@ -1207,16 +1221,7 @@ export class ModelProviderManager {
       const data = await fs.readFile(this.globalConfigFilePath, 'utf-8')
       const raw = JSON.parse(data)
       // v3 起 default_embedding_* 字段已移除，老 raw 数据里如有这些字段直接忽略。
-      // spec 2026-06-09 §4.4: trace_retention_count → task_retention_count migration
-      // 旧字段 trace_retention_count 已删；按"每 task 平均 3 条 trace"折算到新单位
-      let taskRetentionCount = raw.task_retention_count ?? null
-      if (taskRetentionCount == null && raw.trace_retention_count != null && raw.trace_retention_count > 0) {
-        taskRetentionCount = Math.max(1, Math.round(raw.trace_retention_count / 3))
-        console.log(
-          `[ModelProviderManager] Migrated trace_retention_count=${raw.trace_retention_count} → ` +
-          `task_retention_count=${taskRetentionCount} (assuming 3 traces/task on average)`,
-        )
-      }
+      const retention = raw.observability_retention_days ?? raw.trace_retention_days ?? legacyRetentionDays()
 
       this.globalConfig = {
         default_llm_provider_id: raw.default_llm_provider_id,
@@ -1226,9 +1231,9 @@ export class ModelProviderManager {
         image_slot_user_set: raw.image_slot_user_set,
         proxy: raw.proxy,
         public_base_url: raw.public_base_url,
-        trace_retention_days: raw.trace_retention_days ?? null,
-        task_retention_count: taskRetentionCount,
+        observability_retention_days: typeof retention === 'number' && Number.isFinite(retention) && retention >= 1 ? retention : 30,
       }
+      if (raw.observability_retention_days !== this.globalConfig.observability_retention_days || ['trace_retention_days', 'task_retention_count', 'trace_retention_count'].some(key => Object.prototype.hasOwnProperty.call(raw, key))) await this.saveGlobalConfig()
       console.log('[ModelProviderManager] Loaded global config')
     } catch {
       console.log('[ModelProviderManager] No existing global config')

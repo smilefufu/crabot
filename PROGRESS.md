@@ -4,7 +4,10 @@
 
 - 当前 main 的请求分帧已解决旧 desktop.23 computer-use 半关闭故障，本次 Mac MCP 全包 47 项通过。报告的 1000 上限仅为 TraceStore 内存驻留，不能当作磁盘配额；默认 dry-run 是预览保护，不改成默认实删。
 - 修复 running 快照在内容不变时仍每 15 秒重写：只在成功替换后记住内容摘要，变化、丢失及写入／替换失败仍正常落盘与重试；不改检查周期、格式、恢复或保留天数。回归先红后绿，相关 90 项和 Agent 类型检查通过；未部署、未打包。
-- 已复现 Manager 全历史副本重复增长且不受旧 TraceStore 清理；正式协议的统一 retention 仍是待补实现。统一过期回收、停写额外副本和用户确认清理旧程序目录分别待许可；复核与短稿见文档仓 `2026-11-11-third-party-issue-audit.md`／`2026-11-11-desktop-footprint-correction-design.md`，本次没有删除真实数据。
+- 按逐项许可补齐统一 retention：默认30天，保留旧配置，启动与每日清理过期 trace/episode/closed Worker 运行记录；同原 Worker/台账锁重查，journal 中断续清。保护非终态、未结算回执、工作区、检查点及未完成反思；反思登记与清理串行，退出停止新删除且不等清理跑完。
+- 新增人类主动“清理旧程序…”：预览本安装可确认的旧 releases/app/releases 及大小，确认后重查证明、目录身份、恢复记录与原生占用；未知或被占用保留、不杀后台进程。未进入安装/升级路径，不处理用户数据。
+- 纠正前次核验：每日反思确实读取 episodes 全文，已撤回默认停写实现。普通模式改存本轮增量证据、调试保留全文的补充方案仍待用户确认；当前保留原写入。复核、单项决策与验收见文档仓同日 audit/spec/implementation。
+- Agent 10套500项、Admin 5套77项、旧程序模块/确认对话框9项通过；Agent/Admin/桌面/Web类型检查与Web构建通过。本地Windows x64 Node（ARM VM/SYSTEM）、Linux x64容器以编译后清理服务和真实临时文件验证4项删除/保护；Ledger/Session/Trace端口为夹具，非安装包或普通用户GUI验收。扩大回归中2个反思loop失败在未改main同样复现，2个Slack媒体夹具缺依赖未完成，未算全绿。未部署、未打包、未删真实数据。
 
 ### v2026.11.10.1 与桌面 .25 公开预览（2026-11-10，未部署本机）
 
@@ -1261,9 +1264,6 @@
 
 ### P6 遗留 follow-up
 
-- **统一 observability retention**：自动回收终态 Worker 的 adapter output/session、events/context、ledger、
-  过期 Manager episode/TraceStore；孤儿 adapter/events 24h grace；output log 10MB cap。所有 workspace
-  零自动删除；workspace 管理和显式删除另行设计。
 - **Worker onboarding / 选择器**：真实 pane 内失效尚缺实现级归因；verification binding 仍按整份 Worker
   配置 revision 失效；operation 占位、断言临时文件、终态时间、403 body、孤儿 Provider、代理出口、
   operation TTL，以及选择器 fence 的 revision/barrier 测试仍需分别评估。

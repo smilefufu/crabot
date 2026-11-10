@@ -37,6 +37,11 @@ export class WorkspaceManager {
   }
   private async storageRoot(): Promise<string> { return (await this.records().snapshot()).storage_root }
 
+  async retentionProtectedPaths(): Promise<string[]> {
+    const snapshot = await this.records().snapshot()
+    return [snapshot.storage_root, ...snapshot.workspaces.map(workspace => workspace.root)]
+  }
+
   /** New dispatch: identify one project, or a task directory inside the single default workspace. */
   async resolve(taskId: string, requested?: string): Promise<Workspace> {
     this.validateTaskId(taskId)

@@ -1,3 +1,4 @@
+import { ObservabilityRetention } from './core/observability-retention'
 import { createSkillTool } from './engine/tools/skill-tool.js'
 import { createWorkspaceInterruptedRootVerifier } from './core/workspace-interrupted-validation.js'
 import { createWorkspaceRelocationStopJournal } from './core/workspace-relocation-stop-journal.js'
@@ -858,7 +859,7 @@ export class UnifiedAgent extends ModuleBase {
   private scheduleScriptRunner: ScheduleScriptRunner
   private lspManager: LSPManager
   private builtinSubagentRunner: BuiltinSubagentRunner
-  private traceCleanupInterval?: ReturnType<typeof setInterval>
+  private observabilityRetention?: ObservabilityRetention
 
   // ── Event loop watchdog ───────────────────────────────────
   // 每秒 tick 一次记录与上次 tick 的时间差。理想 1000ms，多出的就是 event loop
@@ -1974,9 +1975,8 @@ export class UnifiedAgent extends ModuleBase {
 
     // Trace 接口
     // P6-A §9.6：raw v2 trace RPC 退役（get_traces/get_trace/clear_traces/search_traces/
-    // get_trace_tree/cleanup_old_traces_by_count）；保留专用维护面 disk_usage/cleanup_old_traces。
-    this.registerMethod('get_trace_disk_usage', this.handleGetTraceDiskUsage.bind(this))
-    this.registerMethod('cleanup_old_traces', this.handleCleanupOldTraces.bind(this))
+    // get_trace_tree/cleanup_old_traces_by_count）；清理由统一保留期服务负责。
+    this.registerMethod('get_observability_retention_status', async () => this.observabilityRetention?.status() ?? { running: false, removed_workers: 0, removed_episodes: 0, errors: [] })
 
     // Bg-entity admin 接口（Plan 3 Task 1）
     this.registerMethod('list_bg_entities', this.handleListBgEntities.bind(this))
@@ -2193,6 +2193,7 @@ export class UnifiedAgent extends ModuleBase {
   private async applyCurrentPermissions(): Promise<void> {
     if (!this.managerStack) return
     await this.managerStack.refreshPermissions(this.configRevision)
+    this.startObservabilityRetention()
   }
 
   private desktopSetupRequest?: import('crabot-shared').ComputerUseSetupRequest
@@ -5923,26 +5924,6 @@ export class UnifiedAgent extends ModuleBase {
         `[${this.config.moduleId}] ${this.mcpConnector.count} MCP server(s) connected`
       )
     }
-
-    // Startup cleanup of expired JSONL trace files
-    const retentionDays = parseInt(process.env.TRACE_RETENTION_DAYS ?? '30', 10) || 30
-    try {
-      const removed = this.traceStore.cleanupOldFiles(retentionDays)
-      if (removed > 0) {
-        console.log(`[${this.config.moduleId}] Cleaned up ${removed} expired trace file(s) (retention: ${retentionDays}d)`)
-      }
-    } catch { /* best effort */ }
-
-    // Daily cleanup interval
-    const ONE_DAY_MS = 24 * 60 * 60 * 1000
-    this.traceCleanupInterval = setInterval(() => {
-      try {
-        const count = this.traceStore.cleanupOldFiles(retentionDays)
-        if (count > 0) {
-          console.log(`[${this.config.moduleId}] Daily cleanup: removed ${count} expired trace file(s)`)
-        }
-      } catch { /* best effort */ }
-    }, ONE_DAY_MS)
   }
 
   /**
@@ -6020,7 +6001,24 @@ export class UnifiedAgent extends ModuleBase {
         })
         if (this.runtimeClosing) return
         stack.harness.startLivenessSweep()
+        this.startObservabilityRetention()
       })
+  }
+
+  private startObservabilityRetention(): void {
+    const stack = this.managerStack
+    if (!stack || !this.managerReconciliationSettled || !this.configAuthenticated || this.runtimeClosing) return
+    this.observabilityRetention ??= new ObservabilityRetention({
+      agentDir: getAgentDataDir(), ledger: stack.ledger, sessions: stack.store, traces: this.traceStore,
+      retentionDays: () => {
+        if (!this.configAuthenticated || this.runtimeClosing) throw new Error('Retention awaits authenticated configuration')
+        return this.agentConfig?.observability_retention_days ?? 30
+      },
+      removeNativeCopies: id => this.nativeTraceCopyStore().removeWorker(id),
+      protectedPaths: () => stack.workspaces.retentionProtectedPaths(),
+      retireWorker: (id, cutoff, remove) => stack.harness.retireClosedWorker(id, cutoff, remove),
+    })
+    this.observabilityRetention.start()
   }
 
   private desktopEnabled(): boolean {
@@ -6059,6 +6057,7 @@ export class UnifiedAgent extends ModuleBase {
     this.sessionManager.stopCleanup()
     this.attentionScheduler.stopAll()
     this.traceStore.stopFlushTimer()
+    this.observabilityRetention?.stop()
     this.managerStack?.harness.stopLivenessSweep()
     this.managerStack?.harness.stopRecoveryNoticeDelivery()
 
@@ -6080,11 +6079,6 @@ export class UnifiedAgent extends ModuleBase {
     if (this.watchdogInterval) {
       clearInterval(this.watchdogInterval)
       this.watchdogInterval = undefined
-    }
-
-    if (this.traceCleanupInterval) {
-      clearInterval(this.traceCleanupInterval)
-      this.traceCleanupInterval = undefined
     }
 
     // 断开 MCP 和 LSP，限制最长等待时间（避免某个 stdio 进程无响应导致 onStop 卡死）

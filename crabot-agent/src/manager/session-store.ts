@@ -13,6 +13,7 @@ import { writeFileSync, renameSync, unlinkSync, readFileSync } from 'fs'
 import { join, dirname } from 'path'
 import { randomUUID, createHash } from 'crypto'
 import { isDeepStrictEqual } from 'node:util'
+import { retentionPath } from '../core/retention-files'
 import { AsyncMutex } from '../workers/async-mutex'
 import { encodeSegment, decodeSegment } from '../workers/harness/ledger-store'
 import type { ManagerKey, ManagerSessionState } from './types'
@@ -39,6 +40,7 @@ async function writeJsonAtomic(path: string, data: unknown, mode?: number): Prom
 export class ManagerSessionStore {
   private readonly rootDir: string
   private readonly mutexes = new Map<ManagerKey, AsyncMutex>()
+  private readonly retentionMutex = new AsyncMutex()
 
   constructor(rootDir: string) {
     this.rootDir = rootDir
@@ -183,13 +185,13 @@ export class ManagerSessionStore {
     key: ManagerKey,
     update: (current: ManagerSessionState['dailyReflection']) => ManagerSessionState['dailyReflection'],
   ): Promise<ManagerSessionState['dailyReflection']> {
-    return this.getMutex(key).run(async () => {
+    return this.retentionMutex.run(() => this.getMutex(key).run(async () => {
       const state = await this.loadUnlocked(key)
       const dailyReflection = update(state.dailyReflection)
       await fs.mkdir(this.dirFor(key), { recursive: true })
       await writeJsonAtomic(this.statePathFor(key), { ...state, dailyReflection })
       return dailyReflection
-    })
+    }))
   }
 
   /** Same atomic, synchronous turn-boundary flush used by the existing Engine resume path. */
@@ -284,6 +286,52 @@ export class ManagerSessionStore {
       const lines = messages.map((m) => JSON.stringify(m)).join('\n') + '\n'
       await fs.appendFile(filePath, lines, 'utf-8')
     })
+  }
+
+  /** Serialize GC with reflection admission, so new evidence references cannot appear mid-sweep. */
+  withRetentionSweep<T>(action: () => Promise<T>): Promise<T> { return this.retentionMutex.run(action) }
+
+  /** Reflection's frozen manifest can still reference any Manager/Worker evidence. */
+  async hasPendingReflection(): Promise<boolean> {
+    const root = await retentionPath(this.rootDir, [])
+    if (!root) return false
+    for (const entry of await fs.readdir(root, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue
+      const file = await retentionPath(root, [entry.name, STATE_FILE])
+      if (!file) throw new Error('Manager state unavailable; evidence retention deferred')
+      const state = JSON.parse(await fs.readFile(file, 'utf8')) as ManagerSessionState
+      if (state.key !== decodeSegment(entry.name)) throw new Error('Manager state identity mismatch; evidence retention deferred')
+      if (state.dailyReflection && (!state.dailyReflection.result || state.dailyReflection.confirmation_pending)) return true
+    }
+    return false
+  }
+
+  /** Only expired diagnostic files; session memory and recovery checkpoints are never candidates. */
+  async cleanupEpisodeLogs(cutoff: number, activeIds: ReadonlySet<string>): Promise<number> {
+    let removed = 0
+    for (const key of await this.listManagerKeys()) {
+      await this.getMutex(key).run(async () => {
+        const directory = await retentionPath(this.rootDir, [encodeSegment(key), EPISODES_DIR])
+        if (!directory) return
+        let checkpointId: string | undefined
+        const checkpoint = await retentionPath(this.rootDir, [encodeSegment(key), CHECKPOINT_FILE])
+        if (checkpoint) {
+          const raw = JSON.parse(await fs.readFile(checkpoint, 'utf8'))
+          if (typeof raw.episodeId !== 'string') throw new Error('Invalid Manager retention checkpoint')
+          checkpointId = raw.episodeId
+        }
+        for (const name of await fs.readdir(directory)) {
+          if (!name.endsWith('.jsonl')) continue
+          const id = name.slice(0, -6)
+          if (activeIds.has(id) || id === checkpointId) continue
+          const file = await retentionPath(this.rootDir, [encodeSegment(key), EPISODES_DIR, name])
+          if (!file) continue
+          const stat = await fs.lstat(file)
+          if (stat.isFile() && stat.nlink === 1 && stat.mtimeMs < cutoff) { await fs.unlink(file); removed++ }
+        }
+      })
+    }
+    return removed
   }
 
   private getMutex(key: ManagerKey): AsyncMutex {

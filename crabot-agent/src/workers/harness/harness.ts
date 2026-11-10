@@ -7553,6 +7553,11 @@ export class WorkerHarness {
     return true
   }
 
+  /** Retention shares the normal Worker lock; it never stops or closes an execution. */
+  async retireClosedWorker(workerId: string, cutoff: number, removeArtifacts: (worker: LedgerWorker) => Promise<boolean>): Promise<boolean> {
+    return this.withLock(workerId, () => this.deps.ledger.removeClosedWorker(workerId, cutoff, removeArtifacts))
+  }
+
   private withLock<T>(workerId: string, fn: () => Promise<T>): Promise<T> {
     let mutex = this.mutexes.get(workerId)
     if (!mutex) {

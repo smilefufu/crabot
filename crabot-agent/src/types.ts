@@ -109,6 +109,8 @@ export interface SubAgentConfig {
 }
 
 export interface AgentLayerConfig {
+  /** 统一观测历史保留天数，默认30，不清理 workspace。 */
+  observability_retention_days?: number
   /** 实例 ID */
   instance_id: string
   /**

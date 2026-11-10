@@ -1370,22 +1370,11 @@ export interface GlobalModelConfig {
    * 可选；未配置时 resolveTmpPageBaseUrl 退化为 http://localhost:<web_port>。
    */
   public_base_url?: string
-  /**
-   * 自动清理的保留天数；null/undefined = 不按天清理。
-   * trace_retention_days 和 task_retention_count 互斥：同时存在时 days 优先；都为空 = 不自动清理。
-   */
+  /** 统一 Manager episode/trace/Worker runtime history 保留天数；默认30；不适用于 workspace。 */
+  observability_retention_days?: number | null
+  /** @deprecated 仅供读取旧配置时一次迁移。 */
   trace_retention_days?: number | null
-  /**
-   * 自动清理的保留 task 个数；null/undefined = 不按个数清理。
-   *
-   * 按 admin task.completed_at 倒序拉终态 task（status ∈ {completed, failed, cancelled}），
-   * 取第 N 个的 completed_at 所在日期 D，删除 D 之前的 traces-*.jsonl + admin tasks。
-   * 文件粒度按天 → 实际保留 task 数 ≥ N。活跃 task 不计入配额（活跃不能清）。
-   *
-   * spec 2026-06-09-task-trace-tool-unification.md §4.4。旧字段 trace_retention_count 已删；
-   * model-provider-manager 加载配置时做 best-effort 转换（假设每 task 平均 3 条 trace，旧值 / 3）。
-   */
-  task_retention_count?: number | null
+
 }
 
 /**
@@ -1735,6 +1724,7 @@ export interface AgentInstanceConfig {
 
 /** Agent 实例配置的解析后格式（RPC 返回给 Agent，model_config 已从引用解析为连接信息） */
 export interface ResolvedAgentConfig extends Omit<AgentInstanceConfig, 'model_config'> {
+  observability_retention_days?: number
   model_config: Record<string, LLMConnectionInfo>
   /** startup pull 时一并下发已解析的 subagents（与 push 同源），避免 agent 启动期 subagents 空窗 */
   subagents?: SubAgentConfig[]
