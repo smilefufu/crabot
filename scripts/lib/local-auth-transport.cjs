@@ -7,7 +7,11 @@ const { once } = require('node:events')
 const identity = require('./process-identity.cjs')
 
 class PipeSocket extends Duplex {
-  constructor(handle) { super({ allowHalfOpen: false }); this.handle = handle; this.reading = false }
+  constructor(handle) {
+    super({ allowHalfOpen: false }); this.handle = handle; this.reading = false
+    this.exit = () => this.destroy()
+    process.once('exit', this.exit)
+  }
   setTimeout() { return this }
   setNoDelay() { return this }
   setKeepAlive() { return this }
@@ -22,7 +26,7 @@ class PipeSocket extends Duplex {
   _write(bytes, _encoding, callback) {
     identity.writePipe(this.handle, bytes).then(() => callback(), callback)
   }
-  _destroy(error, callback) { identity.closePipe(this.handle); callback(error) }
+  _destroy(error, callback) { process.removeListener('exit', this.exit); identity.closePipe(this.handle); callback(error) }
 }
 
 function authAddress(dataDir, server = identity.inspectProcess(process.pid), namespace = 'desktop') {
@@ -62,6 +66,9 @@ async function listenLocalAuth(address, handler, onError = () => {}) {
     } }
   }
   const server = identity.createPipeServer(address)
+  // Node-API IO workers must be cancelled synchronously before environment teardown.
+  const dispose = () => { closed = true; identity.closePipeServer(server); sockets.forEach(socket => socket.destroy()) }
+  process.once('exit', dispose)
   let accepting
   const loop = async () => {
     try {
@@ -75,7 +82,7 @@ async function listenLocalAuth(address, handler, onError = () => {}) {
   }
   accepting = loop()
   return { close: async () => {
-    closed = true; identity.closePipeServer(server); sockets.forEach(socket => socket.destroy()); await accepting
+    process.removeListener('exit', dispose); dispose(); await accepting
   } }
 }
 

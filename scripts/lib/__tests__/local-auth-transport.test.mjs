@@ -65,3 +65,22 @@ test('private local transport identifies both OS peers across processes, ignorin
   await once(child, 'exit')
   await server.close(); server = null
 })
+
+test('normal process exit cancels native pipe accept and read workers without a shutdown handshake', { timeout: 15000 }, async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'crabot-pipe-exit-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const entry = new URL('../local-auth-transport.cjs', import.meta.url).href
+  const program = `
+    import transport from ${JSON.stringify(entry)};
+    const address=transport.authAddress(${JSON.stringify(directory)});
+    await transport.listenLocalAuth(address,socket=>socket.resume());
+    const client=await transport.connectLocalAuth(address);client.socket.resume();
+    process.send('ready');setTimeout(()=>process.exit(7),25);
+  `
+  const child = spawn(process.execPath, ['--input-type=module', '-e', program], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] })
+  t.after(() => { if (child.exitCode === null) child.kill('SIGKILL') })
+  let output = ''; child.stderr.on('data', bytes => { output += bytes })
+  const exited = once(child, 'exit', { signal: AbortSignal.timeout(10000) })
+  const [code, signal] = await exited
+  assert.equal(code, 7, output); assert.equal(signal, null)
+})

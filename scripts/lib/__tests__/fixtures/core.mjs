@@ -2,7 +2,9 @@
 import { createServer } from 'node:http'
 import { writeFileSync, existsSync } from 'node:fs'
 // A failed fixture setup must not leave its fake HTTP server holding test pipes.
-process.once('disconnect', () => process.exit(0))
+process.once('disconnect', () => { void finish() })
+let privateControl
+async function finish() { await privateControl?.close(); process.exit(0) }
 let stopping = false
 function stop() {
   if (stopping) return
@@ -10,7 +12,7 @@ function stop() {
   writeFileSync(process.env.TEST_MARKER, 'graceful')
   const delay = Number(process.env.TEST_STOP_DELAY || 100)
   console.log('FIXTURE_SHUTDOWN ' + JSON.stringify({ delay_ms: delay }))
-  setTimeout(() => process.exit(0), delay)
+  setTimeout(() => { void finish() }, delay)
 }
 process.on('message', message => {
   if (message?.type === 'crabot-shutdown' && message.generation === process.env.CRABOT_INSTANCE_GENERATION) stop()
@@ -40,7 +42,7 @@ if (process.env.TEST_RUNTIME_CONTROL) {
   const { verifyManagedMmStartup } = await import(new URL('./mm-startup.cjs', process.env.TEST_RUNTIME_CONTROL))
   verifyManagedMmStartup({root:process.env.TEST_CORE_ROOT,dataDir:process.env.TEST_DATA_DIR,generation:process.env.CRABOT_INSTANCE_GENERATION})
   const { startRuntimeControl } = await import(process.env.TEST_RUNTIME_CONTROL)
-  await startRuntimeControl({ dataDir: process.env.TEST_DATA_DIR, root: process.env.TEST_CORE_ROOT, target: Number(process.env.TEST_PORT), dispatch(call) {
+  privateControl = await startRuntimeControl({ dataDir: process.env.TEST_DATA_DIR, root: process.env.TEST_CORE_ROOT, target: Number(process.env.TEST_PORT), dispatch(call) {
     if (call.method === 'health') return { status: process.env.TEST_HEALTH_STATUS || 'healthy' }
     if (call.method === 'list_modules') {
       if (process.env.TEST_MODULES_UNAVAILABLE && existsSync(process.env.TEST_MODULES_UNAVAILABLE)) throw new Error('Unavailable')
