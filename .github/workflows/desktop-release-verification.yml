@@ -1,73 +1,106 @@
-name: Release transport diagnostics
+name: Stage validated desktop.25 release assets
 on:
   workflow_dispatch:
 permissions:
-  contents: read
+  contents: write
+  actions: read
 jobs:
-  packaged-mac:
-    runs-on: macos-15
+  stage:
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
-    permissions:
-      contents: read
-      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v2026.11.10.1
+      - name: Require the fixed tag and successful native acceptance runs
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = 45ac91532d4308c48ec936f4149d7d56ef437eec
+          for run in 42750399454 42750404481 42750408813 42753456320; do
+            test "$(gh run view "$run" --repo smilefufu/crabot --json conclusion --jq .conclusion)" = success
+          done
+          test "$(gh release view v2026.11.10.1 --repo smilefufu/crabot --json isDraft --jq .isDraft)" = true
       - uses: actions/download-artifact@v4
         with:
           name: crabot-darwin-arm64-offline-test-45ac91532d4308c48ec936f4149d7d56ef437eec
           run-id: 42750399454
           github-token: ${{ github.token }}
-          path: candidate
-      - name: Inspect HTTPS using the exact sealed candidate Python and packages
+          path: release-input/darwin-arm64
+      - uses: actions/download-artifact@v4
+        with:
+          name: crabot-darwin-x64-offline-test-45ac91532d4308c48ec936f4149d7d56ef437eec
+          run-id: 42750404481
+          github-token: ${{ github.token }}
+          path: release-input/darwin-x64
+      - uses: actions/download-artifact@v4
+        with:
+          name: crabot-win32-x64-offline-test-45ac91532d4308c48ec936f4149d7d56ef437eec
+          run-id: 42750408813
+          github-token: ${{ github.token }}
+          path: release-input/win32-x64
+      - uses: actions/download-artifact@v4
+        with:
+          name: crabot-linux-x64-deb-test-45ac91532d4308c48ec936f4149d7d56ef437eec
+          run-id: 42753456320
+          github-token: ${{ github.token }}
+          path: release-input/linux-x64
+      - name: Verify exact source, version, manifests and final bytes before draft upload
         shell: bash
         run: |
-          dmg=$(find candidate -name '*candidate.dmg' -print -quit)
-          mount="$RUNNER_TEMP/inspect-candidate"
-          mkdir -p "$mount"
-          hdiutil attach -readonly -nobrowse -mountpoint "$mount" "$dmg"
-          trap 'hdiutil detach "$mount"' EXIT
-          core="$mount/Crabot.app/Contents/Resources/core"
-          runtime=$(node -p 'const fs=require("fs");fs.realpathSync(process.argv[1]+"/"+JSON.parse(fs.readFileSync(process.argv[1]+"/scrapling-runtime.json")).directory)' "$core")
-          "$runtime/python/bin/python3.12" -I -B - "$runtime" <<'PY'
-          import sys, pathlib, hashlib, ssl, urllib.request, socket
-          root=pathlib.Path(sys.argv[1]); sys.path.insert(0,str(root/'packages'))
-          import curl_cffi, curl_cffi.curl, certifi
-          print('PACKAGED_TLS',sys.version,ssl.OPENSSL_VERSION,flush=True)
-          for label,file in [('curl',curl_cffi.curl.DEFAULT_CACERT),('certifi',certifi.where())]:
-            p=pathlib.Path(file); print('PACKAGED_CA',label,str(p),hashlib.sha256(p.read_bytes()).hexdigest(),flush=True)
-          for url in ['https://example.com','https://github.com','https://docs.python.org','https://www.baidu.com']:
-            for label,ca in [('default',True),('certifi',certifi.where())]:
-              try:
-                r=curl_cffi.requests.get(url,verify=ca,timeout=15); print('PACKAGED_CURL',url,label,r.status_code,flush=True)
-              except Exception as e: print('PACKAGED_CURL_ERROR',url,label,str(e),flush=True)
-            try:
-              with urllib.request.urlopen(url,context=ssl.create_default_context(cafile=certifi.where()),timeout=15) as r: print('PACKAGED_URLLIB',url,r.status,flush=True)
-            except Exception as e: print('PACKAGED_URLLIB_ERROR',url,str(e),flush=True)
-            try:
-              host=url.split('/')[2]
-              with socket.create_connection((host,443),timeout=15) as raw, ssl.create_default_context(cafile=certifi.where()).wrap_socket(raw,server_hostname=host) as tls:
-                peer=tls.getpeercert(); print('VERIFIED_PEER',host,peer.get('issuer'),peer.get('notAfter'),flush=True)
-            except Exception as e: print('VERIFIED_PEER_ERROR',url,str(e),flush=True)
+          python3 - <<'PY'
+          import json, hashlib, shutil
+          from pathlib import Path
+          source='45ac91532d4308c48ec936f4149d7d56ef437eec'; version='0.1.0-desktop.25'
+          out=Path('release-out'); out.mkdir()
+          rows=[]
+          targets=[('darwin-arm64','darwin','arm64','*.dmg',42750399454),('darwin-x64','darwin','x64','*.dmg',42750404481),('win32-x64','win32','x64','*.exe',42750408813),('linux-x64','linux','x64','*.deb',42753456320)]
+          def only(root,pattern):
+            values=list(root.rglob(pattern)); assert len(values)==1,(root,pattern,values); return values[0]
+          def digest(file):
+            with file.open('rb') as stream:return hashlib.file_digest(stream,'sha256').hexdigest()
+          for target,platform,arch,pattern,run in targets:
+            root=Path('release-input')/target; package=only(root,pattern)
+            assert package.name.startswith('Crabot-'+version+'-') and 'candidate' in package.name
+            assert package.is_file() and not package.is_symlink()
+            sha=digest(package); size=package.stat().st_size
+            if platform=='linux':
+              provenance=json.loads(only(root,'source.json').read_text()); assert provenance=={'commit':source,'version':version}
+              accepted=json.loads(only(root,'acceptance.json').read_text())
+              assert accepted['package_source']==source and accepted['version']==version
+              assert any(item.get('name')=='stop_overwrite_remove_reinstall_preserves_data_and_admin_configuration' and item.get('passed') for item in accepted['checks'])
+            else:
+              provenance=json.loads(only(root,'runtime-footprint.json').read_text())
+              assert (provenance['commit'],provenance['platform'],provenance['arch'])==(source,platform,arch)
+              log=only(root,'final-dmg-boot.log' if platform=='darwin' else 'windows-payload-boot.log').read_text()
+              accepted=[json.loads(line.split('CRABOT_PACKAGED_BOOT ',1)[1]) for line in log.splitlines() if line.startswith('CRABOT_PACKAGED_BOOT ')]
+              assert len(accepted)==1 and accepted[0]['platform']==platform and accepted[0]['arch']==arch
+              for key in ['packaged_asar_native_auth','installed_core_shared_with_cli','gui_crash_preserves_core','reattach_same_generation','cli_stop_stays_stopped','outside_checkout','registered_bundled_cli']:assert accepted[0][key] is True,key
+              sums=only(root,'SHA256SUMS').read_text().splitlines()
+              assert sha+'  '+package.name in sums
+            manifest=json.loads(only(root,'artifacts.json' if platform=='win32' else 'installers.json').read_text())
+            assert manifest['candidate_only'] is True and manifest['release_signed'] is False
+            if platform=='win32':
+              assert package.name in manifest['files']
+            else:
+              assert (manifest['version'],manifest['platform'],manifest['arch'])==(version,platform,arch)
+              entries=[item for item in manifest['files'] if item['file']==package.name]
+              assert len(entries)==1 and entries[0]['sha256']==sha and entries[0]['bytes']==size
+            shutil.copyfile(package,out/package.name)
+            (out/(package.name+'.sha256')).write_text(sha+'  '+package.name+'\n')
+            rows.append({'target':target,'file':package.name,'bytes':size,'sha256':sha,'source_commit':source,'native_acceptance_run':run})
+          receipt={'tag':'v2026.11.10.1','desktop_version':version,'source_commit':source,'candidate_only':True,'release_signed':False,'environment':'Native GitHub CI. Real-user OS trust prompts, GNOME/Wayland and real model business use are not represented.','https_scope_diagnostic_run':42759268758,'known_limitations':['On the tested macOS15 host, static make_request to example.com fails with its default system CA; browser fetch/stealthy_fetch succeed. All three tools succeed for GitHub, Python docs and Baidu. Product trust policy unchanged.'],'files':rows}
+          (out/'desktop.25-verification.json').write_text(json.dumps(receipt,ensure_ascii=False,indent=2)+'\n')
+          print(json.dumps(receipt,ensure_ascii=False,indent=2))
           PY
-          node --input-type=module - "$core" <<'NODE'
-          import {createRequire} from 'node:module'; import path from 'node:path'; import os from 'node:os'; import fs from 'node:fs/promises';
-          const root=process.argv[2], require=createRequire(path.join(root,'crabot-agent/package.json'));
-          const {Client}=require('@modelcontextprotocol/sdk/client/index.js');
-          const {StdioClientTransport}=require('@modelcontextprotocol/sdk/client/stdio.js');
-          const {resolveScraplingConfig}=require(path.join(root,'scripts/lib/scrapling-runtime.cjs'));
-          const scratch=await fs.mkdtemp(path.join(os.tmpdir(),'release-https-scope-'));
-          const config=resolveScraplingConfig(root,scratch,{is_builtin:true,name:'scrapling',transport:'stdio',command:'scrapling',args:['mcp']},{name:'scrapling'});
-          const transport=new StdioClientTransport({command:config.command,args:config.args,env:{...process.env,...config.env,CRABOT_SCRAPLING_SYSTEM:'1'},stderr:'inherit'});
-          const client=new Client({name:'release-https-scope',version:'1'},{capabilities:{}});
-          try {
-            await client.connect(transport);
-            for(const url of ['https://example.com','https://github.com','https://docs.python.org','https://www.baidu.com']) {
-              for(const name of ['make_request','fetch','stealthy_fetch']) {
-                try {
-                  const args={url,extraction_type:'text',...(name==='make_request'?{}:{google_search:false})};
-                  const result=await client.callTool({name,arguments:args},undefined,{timeout:120000});
-                  console.log('ACTUAL_MCP_HTTPS '+JSON.stringify({url,tool:name,passed:!result.isError,output_bytes:JSON.stringify(result).length}));
-                } catch(error){console.log('ACTUAL_MCP_HTTPS '+JSON.stringify({url,tool:name,passed:false,error:String(error)}))}
-              }
-            }
-          } finally {await client.close();await fs.rm(scratch,{recursive:true,force:true})}
-          NODE
+      - name: Add exact validated desktop packages to the existing draft
+        shell: bash
+        run: |
+          test "$(gh release view v2026.11.10.1 --repo smilefufu/crabot --json isDraft --jq .isDraft)" = true
+          gh release upload v2026.11.10.1 release-out/* --repo smilefufu/crabot
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop.25-release-verification
+          path: release-out/desktop.25-verification.json
+          if-no-files-found: error
