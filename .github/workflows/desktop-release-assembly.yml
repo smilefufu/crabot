@@ -17,12 +17,6 @@ jobs:
           - os: windows-latest
             platform: windows
             arch: x64
-          - os: macos-15-intel
-            platform: darwin
-            arch: x64
-          - os: macos-15
-            platform: darwin
-            arch: arm64
     runs-on: ${{ matrix.os }}
     timeout-minutes: 180
 
@@ -92,6 +86,25 @@ jobs:
           # admin: 后端 build → 前端 build:web（顺序执行，build:web 会进入 web/ 子项目自己 install）
           (cd crabot-admin && pnpm run build && pnpm run build:web)
 
+      - name: Reuse the unchanged locked runtime from its verified published archive
+        if: matrix.platform == 'linux'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cache=$(mktemp -d)
+          trap 'rm -rf "$cache"' EXIT
+          name=crabot-v2026.11.3.1-linux-x64.tar.gz
+          gh release download v2026.11.3.1 --repo smilefufu/crabot --pattern "$name" --pattern "$name.sha256" --dir "$cache"
+          (cd "$cache" && echo 'fe66380a9a319c0eaf6142d6d360df67d972d876855414faec4d5fcf0d0ff8e8  crabot-v2026.11.3.1-linux-x64.tar.gz' | sha256sum -c - && sha256sum -c "$name.sha256")
+          tar -xzf "$cache/$name" -C "$cache"
+          old="$cache/crabot-v2026.11.3.1-linux-x64"
+          runtime=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1]+"/scrapling-runtime.json")).directory' "$old")
+          case "$runtime" in .scrapling-runtime-*) ;; *) exit 1;; esac
+          test "${runtime##*/}" = "$runtime"
+          mv "$old/$runtime" .
+          mv "$old/scrapling-runtime.json" .
+          node scripts/prepare-scrapling.mjs --check
       - name: Prepare portable Scrapling runtime
         shell: bash
         run: |
