@@ -4,6 +4,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { ChannelManager } from './channel-manager.js'
+import { RpcCallError } from 'crabot-shared'
 
 const roots: string[] = []
 afterEach(async () => { for (const root of roots.splice(0)) await fs.rm(root, { recursive: true, force: true }) })
@@ -74,6 +75,17 @@ describe('Channel installation admission', () => {
     expect(restored.getInstance('restore-me')).toMatchObject({ auto_start: true })
     expect(restored.getStartupError('restore-me')).toContain('账号配置已保留')
     expect(restored.getStartupError('restore-me')).not.toContain('synthetic-private')
+  })
+
+  it('accepts the protocol duplicate-definition result when preparing an existing instance for restart or Admin recovery', async () => {
+    const { root, manager, rpc } = await fixture()
+    await installTestChannel(root, 'feishu')
+    const instance = await manager.createInstance({ implementation_id: 'channel-feishu', name: 'existing-feishu', auto_start: false })
+    rpc.registerModuleDefinition.mockRejectedValue(new RpcCallError('MODULE_MANAGER_DUPLICATE_ID', 'Module ID already exists'))
+    await expect(manager.ensureInstanceDefinition(instance.id)).resolves.toBeUndefined()
+    expect(await manager.registerBuiltinInstanceDefinitions()).toEqual([expect.objectContaining({ id: instance.id })])
+    expect(manager.getStartupError(instance.id)).toBeUndefined()
+    expect(rpc.startModule).not.toHaveBeenCalled()
   })
 
   it('preserves saved stopped accounts even when the plugin is not installed', async () => {

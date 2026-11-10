@@ -527,8 +527,8 @@ export class ChannelManager {
 
         console.log(`[ChannelManager] Re-registered: ${instance.id} (${impl.id})`)
       } catch (error: any) {
-        // DUPLICATE_ID 表示 MM 没重启，模块已存在，忽略
-        if (error?.message?.includes('DUPLICATE_ID') || error?.code === 'DUPLICATE_ID') {
+        // 协议重复登记结果表示 MM 仍保留定义；其它错误不得作为成功。
+        if (error instanceof RpcCallError && error.code === 'MODULE_MANAGER_DUPLICATE_ID') {
           registered.push(instance)
           this.startupErrors.delete(instance.id)
           console.log(`[ChannelManager] Already registered (DUPLICATE_ID): ${instance.id}`)
@@ -551,7 +551,7 @@ export class ChannelManager {
       const implementation = await this.installPlugin(instance.implementation_id)
       try { await this.registerBuiltinModule(implementation, instance) }
       catch (error) {
-        if ((error as { code?: string }).code !== 'DUPLICATE_ID' && !(error instanceof Error && error.message.includes('DUPLICATE_ID'))) throw error
+        if (!(error instanceof RpcCallError && error.code === 'MODULE_MANAGER_DUPLICATE_ID')) throw error
       }
       this.startupErrors.delete(id)
     } catch (error) {
