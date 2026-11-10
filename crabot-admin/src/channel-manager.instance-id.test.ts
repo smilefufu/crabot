@@ -53,6 +53,20 @@ describe('ChannelManager.createInstance 实例 id 校验', () => {
     )
   })
 
+  it('registers Feishu through the managed Cordis host while preserving stored credentials', async () => {
+    const rpc = makeRpc()
+    const manager = new ChannelManager(dataDir, rpc as any)
+    await manager.addImplementation(fakeImpl)
+    await manager.createInstance({ implementation_id: fakeImpl.id, name: '飞书客服',
+      env: { FEISHU_APP_ID: 'synthetic-app', FEISHU_APP_SECRET: 'synthetic-secret' } })
+    const [definition] = rpc.registerModuleDefinition.mock.calls[0]
+    expect(definition.entry).toMatch(/crabot-core[/\\]dist[/\\]channel-host\.js/)
+    expect(definition.entry).not.toMatch(/crabot-channel-feishu[/\\]dist[/\\]main\.js/)
+    expect(definition.env).toMatchObject({ CRABOT_MODULE_ID: '飞书客服',
+      CRABOT_CHANNEL_PLUGIN_PATH: path.resolve(__dirname, '../../crabot-channel-feishu/dist/main.js'),
+      FEISHU_APP_ID: 'synthetic-app', FEISHU_APP_SECRET: 'synthetic-secret' })
+  })
+
   it('拒绝含空格、emoji 的实例名', async () => {
     const manager = new ChannelManager(dataDir, makeRpc() as any)
     await manager.addImplementation(fakeImpl)

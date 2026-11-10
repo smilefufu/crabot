@@ -10,6 +10,9 @@ from pathlib import Path
 # 添加父目录到 Python 路径
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+if os.environ.get("CRABOT_RPC_TRANSPORT") == "pipe":
+    sys.stdout = sys.stderr
+
 from src.config import load_config
 from src.module import MemoryModule
 
@@ -21,7 +24,11 @@ async def main():
     config = load_config(config_path)
 
     # 创建模块
-    module = MemoryModule(config)
+    pipe = None
+    if os.environ.get("CRABOT_RPC_TRANSPORT") == "pipe":
+        from src.pipe_rpc import PipeRpcPeer
+        pipe = PipeRpcPeer(config.module_id)
+    module = MemoryModule(config, rpc=pipe)
 
     # 处理退出信号
     def signal_handler(sig, frame):
@@ -55,8 +62,12 @@ async def main():
 
     except Exception as e:
         print(f"Fatal error: {e}")
-        await module.stop()
+        if pipe is None:
+            await module.stop()
         sys.exit(1)
+    finally:
+        if pipe is not None:
+            await module.stop()
 
 
 if __name__ == "__main__":

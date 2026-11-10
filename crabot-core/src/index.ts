@@ -102,6 +102,7 @@ import {
   runtimeToResolved,
 } from './types.js'
 import { PortAllocator } from './port-allocator.js'
+import { MemoryPipeChannel } from './memory-pipe.js'
 import { scheduleRestart } from './restart-policy.js'
 import { checkDiskLow } from './disk-watcher.js'
 import { resolveExecutable } from './executable-resolver.js'
@@ -4805,7 +4806,8 @@ export class ModuleManager {
     const [rawCommand, ...args] = this.parseEntry(entry)
     // 把 uv 这类用户级 installer 装的工具解析成绝对路径，避开 user PATH 传播延迟
     const command = resolveExecutable(rawCommand)
-    const ipc = this.useIpc && !runtime.skip_health_check
+    const pipe = this.useIpc && moduleId === 'memory-default' && runtime.module_type === 'memory'
+    const ipc = this.useIpc && !runtime.skip_health_check && !pipe
     if (ipc && !/^node(?:\.exe)?$/.test(path.basename(command))) {
       runtime.status = 'error'
       throw new RuntimeRpcError('SERVICE_UNAVAILABLE', 'This runtime requires a managed pipe adapter')
@@ -4834,7 +4836,7 @@ export class ModuleManager {
       Crabot_PORT: String(runtime.port),
       CRABOT_INSTANCE_ID: this.runtimeRegistry.getInstanceId(),
       CRABOT_MODULE_RUNTIME_ID: runtimeId,
-      ...(ipc ? { CRABOT_RPC_TRANSPORT: 'ipc' } : {}),
+      ...(ipc || pipe ? { CRABOT_RPC_TRANSPORT: pipe ? 'pipe' : 'ipc' } : {}),
       CRABOT_MM_PORT: String(this.config.port),
       CRABOT_MM_ENDPOINT: `http://localhost:${this.config.port}`,
       ...(adminRpcPort && moduleId !== 'admin-web' ? { CRABOT_ADMIN_ENDPOINT: `http://localhost:${adminRpcPort}` } : {}),
@@ -4873,7 +4875,7 @@ export class ModuleManager {
       } else proc = spawn(command, args, {
         cwd: runtime.cwd,
         env: childEnv,
-        stdio: ipc ? ['ignore', 'pipe', 'pipe', 'ipc'] : ['ignore', 'pipe', 'pipe'],
+        stdio: ipc ? ['ignore', 'pipe', 'pipe', 'ipc'] : [pipe ? 'pipe' : 'ignore', 'pipe', 'pipe'],
         ...(ipc ? { serialization: 'advanced' as const } : {}),
         detached: process.platform !== 'win32',
         windowsHide: true,
@@ -4886,7 +4888,7 @@ export class ModuleManager {
     }
     let admitRuntime!: () => void
     const admitted = new Promise<void>(resolve => { admitRuntime = resolve })
-    const runtimePeer = ipc && !runtimeGate ? new RuntimeRpcPeer(proc) : undefined
+    const runtimePeer = !runtimeGate && (ipc || pipe) ? new RuntimeRpcPeer(pipe ? new MemoryPipeChannel(proc) : proc) : undefined
     if (runtimePeer) {
       this.runtimePeers.set(proc, runtimePeer)
       runtimePeer.handle(async call => {
@@ -4997,7 +4999,7 @@ export class ModuleManager {
     admitRuntime()
 
     // 处理输出：同时落盘 + 终端转发（dev/调试可见）
-    proc.stdout?.on('data', (data: Buffer) => {
+    if (!pipe) proc.stdout?.on('data', (data: Buffer) => {
       if (!childState.logEnded) logStream.write(data)
       console.log(`[${moduleId}] ${data.toString().trim()}`)
     })

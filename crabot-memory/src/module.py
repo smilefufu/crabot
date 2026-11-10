@@ -78,8 +78,9 @@ _MAINTENANCE_ALLOW_LIST = frozenset({
 class MemoryModule:
     """Memory 模块"""
 
-    def __init__(self, config: MemoryConfig):
+    def __init__(self, config: MemoryConfig, rpc=None):
         self.config = config
+        self.rpc = rpc
         self.app = FastAPI(title="Memory Module")
         self.server: Optional[uvicorn.Server] = None
         self.server_task: Optional[asyncio.Task] = None
@@ -166,15 +167,9 @@ class MemoryModule:
         async def handle_request(method: str, request: Request):
             try:
                 body = await request.json()
-                if method in MEMORY_DATA_METHODS:
-                    context = authorize_method(method, body.get("params", {}))
-                    authorization = request.headers.get("Authorization", "")
-                    if not authorization.startswith("Bearer ") or not authorization[7:].strip():
-                        raise MemoryAccessError("UNAUTHORIZED", "Missing Memory credential")
-                    await self._verify_caller(context, authorization[7:])
-                result = await self._dispatch(method, body.get("params", {}))
-                if isinstance(result, dict) and result.get("error") in {"not found", "version not found"}:
-                    raise MemoryAccessError("NOT_FOUND", "Memory not found")
+                authorization = request.headers.get("Authorization", "")
+                bearer = authorization[7:] if authorization.startswith("Bearer ") else None
+                result = await self.handle_call(method, body.get("params", {}), bearer)
                 return JSONResponse({
                     "id": body.get("id"),
                     "success": True,
@@ -212,6 +207,31 @@ class MemoryModule:
                     "timestamp": datetime.utcnow().isoformat() + "Z",
                 }, status_code=500)
 
+    async def handle_call(self, method: str, params: Dict[str, Any], bearer=None):
+        """Shared authenticated business boundary for both transports."""
+        if method in MEMORY_DATA_METHODS:
+            context = authorize_method(method, params)
+            if not bearer or not bearer.strip():
+                raise MemoryAccessError("UNAUTHORIZED", "Missing Memory credential")
+            await self._verify_caller(context, bearer)
+        result = await self._dispatch(method, params)
+        if isinstance(result, dict) and result.get("error") in {"not found", "version not found"}:
+            raise MemoryAccessError("NOT_FOUND", "Memory not found")
+        return result
+
+    async def handle_runtime_call(self, call):
+        if call.get("target") != self.config.port:
+            raise MemoryAccessError("NOT_FOUND", "Runtime target does not match this module")
+        return await self.handle_call(call["method"], call.get("params", {}), call.get("metadata", {}).get("authorizationBearer"))
+
+    @staticmethod
+    def _rpc_target(endpoint):
+        from urllib.parse import urlsplit
+        target = urlsplit(endpoint).port
+        if target is None:
+            raise ValueError("Managed runtime address is missing")
+        return target
+
     async def _verify_caller(self, context, bearer: str) -> None:
         import httpx
         if not self.config.admin_endpoint:
@@ -223,6 +243,21 @@ class MemoryModule:
         }
         if context.actor_kind == "master_request":
             payload["params"]["master_request"] = context.request.model_dump()
+        if self.rpc is not None:
+            from .pipe_rpc import PipeRpcError
+            try:
+                result = await self.rpc.call(self._rpc_target(self.config.admin_endpoint), "verify_memory_access", payload["params"], authorization_bearer=bearer)
+            except PipeRpcError as error:
+                if error.code in {"UNAUTHORIZED", "FORBIDDEN"}:
+                    raise MemoryAccessError(error.code, "Invalid Memory credential") from None
+                raise MemoryAccessError("SERVICE_UNAVAILABLE", "Memory verifier unavailable", retryable=True) from None
+            except Exception:
+                raise MemoryAccessError("SERVICE_UNAVAILABLE", "Memory verifier unavailable", retryable=True) from None
+            if not isinstance(result, dict) or result.get("verified") is not True:
+                raise MemoryAccessError("SERVICE_UNAVAILABLE", "Memory verifier unavailable", retryable=True)
+            if context.actor_kind == "master_request" and result.get("request_verified") is not True:
+                raise MemoryAccessError("SERVICE_UNAVAILABLE", "Memory request verifier unavailable", retryable=True)
+            return
         try:
             async with httpx.AsyncClient(trust_env=False, timeout=10.0) as client:
                 response = await client.post(f"{self.config.admin_endpoint}/verify_memory_access", json=payload, headers={"Authorization": f"Bearer {bearer}"})
@@ -647,6 +682,10 @@ class MemoryModule:
 
     async def start(self):
         """启动模块"""
+        if self.rpc is not None:
+            self.server_task = asyncio.create_task(self.rpc.serve(self.handle_runtime_call))
+            logger.info("Memory module started on managed pipe")
+            return
         logger.info("Starting Memory module on port %d", self.config.port)
         config = uvicorn.Config(
             self.app,
@@ -668,6 +707,8 @@ class MemoryModule:
             except Exception:
                 logger.exception("Maintenance failed while shutdown was waiting")
         await self._protected_requests_idle.wait()
+        if self.rpc is not None:
+            self.rpc.close()
         if self.server:
             self.server.should_exit = True
         if self.server_task:
@@ -691,6 +732,10 @@ class MemoryModule:
             },
             "timestamp": datetime.utcnow().isoformat() + "Z",
         }
+        if self.rpc is not None:
+            await self.rpc.call(self._rpc_target(self.config.module_manager_url), "register", payload["params"])
+            logger.info("Registered to Module Manager")
+            return
         # trust_env=False：内部 RPC 是回环地址，强制不读 HTTP_PROXY/HTTPS_PROXY/ALL_PROXY，
         # 避免系统代理把 localhost:19000 当外网拦截后回 502 Bad Gateway。
         async with httpx.AsyncClient(trust_env=False) as client:
@@ -714,6 +759,13 @@ class MemoryModule:
             "timestamp": datetime.utcnow().isoformat() + "Z",
         }
         try:
+            if self.rpc is not None:
+                data = await self.rpc.call(self._rpc_target(self.config.admin_endpoint), "get_memory_config", payload["params"])
+                config = data.get("config", {})
+                if config:
+                    result = await self._update_config(config)
+                    logger.info("Pulled initial config from Admin: %s", result.get("updated", []))
+                return
             # trust_env=False：admin endpoint 也是回环，统一不读环境代理变量。
             async with httpx.AsyncClient(trust_env=False) as client:
                 resp = await client.post(url, json=payload, timeout=10.0)
@@ -744,6 +796,8 @@ class MemoryModule:
         self.sqlite_store.close()
         self.scene_profile_store.close()
         self._lt_v2_index.close()
+        if self.rpc is not None:
+            self.rpc.close()
         if self.server:
             self.server.should_exit = True
         if self.server_task:

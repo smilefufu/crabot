@@ -289,8 +289,13 @@ export class ChannelManager {
    */
   private async registerBuiltinModule(impl: ChannelImplementation, instance: ChannelInstance): Promise<void> {
     const resolvedModulePath = path.resolve(__dirname, '..', impl.module_path!)
-    const entry = `node ${resolvedModulePath}/dist/main.js`
     const env = await this.buildModuleEnv(instance)
+    const entry = impl.id === 'channel-feishu'
+      ? `node "${path.resolve(__dirname, '../../crabot-core/dist/channel-host.js')}"`
+      : `node ${resolvedModulePath}/dist/main.js`
+    if (impl.id === 'channel-feishu') {
+      env.CRABOT_CHANNEL_PLUGIN_PATH = path.join(resolvedModulePath, 'dist/main.js')
+    }
 
     await this.rpcClient.registerModuleDefinition(
       {

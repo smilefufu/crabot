@@ -48,6 +48,22 @@ afterEach(async () => {
 })
 
 describe('Cordis-only Feishu', () => {
+  it('restores stored env configuration without a Channel port or manual credential flow', () => {
+    const result = plugin.createConfig({ Crabot_MODULE_ID: 'current', CRABOT_MODULE_ID: 'old', DATA_DIR: dir,
+      FEISHU_APP_ID: 'app', FEISHU_APP_SECRET: 'secret', FEISHU_DOMAIN: 'lark', FEISHU_OWNER_OPEN_ID: 'owner',
+      FEISHU_ONLY_RESPOND_TO_MENTIONS: 'FALSE', FEISHU_MARKDOWN_FORMAT: 'off' })
+    expect(result).toEqual({ module_id: 'current', module_type: 'channel', version: '0.1.0', protocol_version: '0.1.0', data_dir: dir,
+      feishu: { app_id: 'app', app_secret: 'secret', domain: 'lark', owner_open_id: 'owner', only_respond_to_mentions: false, markdown_format: 'off' } })
+    expect(plugin.createConfig({ CRABOT_MODULE_ID: 'fallback', FEISHU_APP_ID: 'app', FEISHU_APP_SECRET: 'secret' }).feishu)
+      .toMatchObject({ domain: 'feishu', only_respond_to_mentions: true, markdown_format: 'auto' })
+  })
+
+  it('rejects missing required existing configuration before starting a plugin', () => {
+    expect(() => plugin.createConfig({})).toThrow('Crabot_MODULE_ID is required')
+    expect(() => plugin.createConfig({ CRABOT_MODULE_ID: 'current' })).toThrow('FEISHU_APP_ID is required')
+    expect(() => plugin.createConfig({ CRABOT_MODULE_ID: 'current', FEISHU_APP_ID: 'app' })).toThrow('FEISHU_APP_SECRET is required')
+  })
+
   it('loads two isolated instances without a TCP listener and cleans up its own resources', async () => {
     const listen = vi.spyOn(Server.prototype, 'listen')
     const first = root.plugin(plugin, config('first'))

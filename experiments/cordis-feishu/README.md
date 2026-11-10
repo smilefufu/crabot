@@ -35,3 +35,22 @@ smoke 测试从 npm 安装目录加载真实插件，用模拟飞书平台完成
 见 [evidence.json](./evidence.json) 中的运行环境、测试、下载源及包体积。npm 插件 tarball 大小与安装完成后的依赖体积分别记录；正式安装器尚未改变，不能据此报告主安装包已缩小。没有 npm publish、部署、付费模型或真实消息发送。
 
 未纳入：旧 MM 适配、生产 Admin/Agent 同进程接入、其它 Channel/Memory、生产下载 UI、默认预装策略、HMR、升级回滚、完整离线安装、跨平台原生资源和大陆实网可达率。现有关闭行为不保证任意在途任务排空；需要生产化时再按具体场景设计。
+
+## 实际受管运行进展（仍未完成产品交付）
+
+Core 已增加 Cordis Channel 宿主和受管 Node IPC。`managed-runtime.test.mjs` 从真实 npm 安装根加载真实飞书包，只模拟外部飞书 SDK；运行真实 MM、子进程、Cordis、事件、会话存储与重启，并逐 PID 核对无 Channel TCP 监听。执行前构建 Shared、Core、飞书并准备包含 `createConfig` 的新 npm 包：
+
+```sh
+CORDIS_INSTALL_DIR=<npm安装根> node --test experiments/cordis-feishu/managed-runtime.test.mjs
+```
+
+真实 Python Memory 已接管道，通过 MessagePack 双向帧使用同一份授权、配置、存储与维护关闭实现。`memory-runtime.test.mjs` 禁止 Python TCP 与外部模型，验证配置拉取、凭据拒绝、private 可见性、大帧、SQLite 持久化和两次启动；验证器使用合成夹具，不代表真实 Admin 凭据链已验收：
+
+```sh
+# 先在 crabot-memory 完成 uv sync --frozen；可用 CORDIS_MEMORY_PYTHON 指定测试解释器
+node --test experiments/cordis-feishu/memory-runtime.test.mjs
+```
+
+2026-11-10 本阶段：Shared 379 通过、2 跳过；Core 40；飞书 292；Admin 启动相关 21；上述受管飞书与 Memory 各 1 项联合验证通过。使用项目 Node 22.22.3。新包 201,465 B，展开 876,117 B；当前联合验证使用此前国内缓存离线安装的新产物。新一轮空缓存安装实际遭遇 npmmirror CDN FETCH_ERROR，按失败退出；不能用此前成功记录代替这次失败。
+
+尚待完成：默认完整实例启动、真实 Admin/Agent 鉴权与回复链、npm 安装接入实际添加流程、CLI/Desktop/健康/恢复等单端口入口、全量回归及真人扫码验收。正常入口尚未切到最终通信模式；不提 PR、不合并、不部署、不发布 npm。
