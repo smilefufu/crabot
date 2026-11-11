@@ -77,7 +77,7 @@ describe('视频号入站与查询', () => {
     const channel = new WechatChannel({
       module_id: 'wechat-test', module_type: 'channel', version: '0.0.1',
       protocol_version: '0.1.0', port: 0, data_dir: dataDir,
-      wechat: { connector_url: 'http://localhost:0', api_key: 'test', mode: 'socketio' },
+      wechat: { connector_url: 'http://localhost:0', api_key: 'test' },
     })
     const internals = channel as any
     const session = { id: 'session-1', type: 'private', platform_session_id: 'wxid_sender' }

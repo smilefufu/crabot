@@ -23,7 +23,7 @@ test('Core staging bootstrap does not load the native binary it still needs to b
 })
 
 
-test('sealed Core retains every channel advertised by the current Admin', async () => {
+test('sealed Core provides the managed host while advertised Channels remain npm-only', async () => {
   const strings = async (file, name) => {
     const source = ts.createSourceFile(file.pathname, await fs.readFile(file, 'utf8'), ts.ScriptTarget.Latest, true)
     for (const statement of source.statements) {
@@ -35,7 +35,11 @@ test('sealed Core retains every channel advertised by the current Admin', async 
     }
     assert.fail('Missing module inventory: ' + name)
   }
-  const advertised = await strings(new URL('../../../crabot-admin/src/channel-manager.ts', import.meta.url), 'BUILTIN_MODULE_PATHS')
+  const catalog = await fs.readFile(new URL('../../../crabot-admin/src/channel-catalog.ts', import.meta.url), 'utf8')
+  const javascript = ts.transpileModule(catalog, { compilerOptions: { module: ts.ModuleKind.ES2022 } }).outputText
+  const { CHANNEL_CATALOG } = await import('data:text/javascript;base64,' + Buffer.from(javascript).toString('base64'))
+  assert.equal(CHANNEL_CATALOG.length, 6)
   const packaged = await strings(new URL('../../desktop/stage-core.mjs', import.meta.url), 'modules')
-  for (const module of advertised) assert.ok(packaged.includes(module.replace('../', '')), 'Missing built-in channel in sealed Core: ' + module)
+  assert.ok(packaged.includes('crabot-core'), 'The managed Channel host must ship with Core')
+  for (const item of CHANNEL_CATALOG) assert.equal(packaged.includes(item.package_name), false, 'Channel must be installed from npm: ' + item.package_name)
 })

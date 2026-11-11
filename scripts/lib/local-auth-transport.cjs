@@ -7,26 +7,40 @@ const { once } = require('node:events')
 const identity = require('./process-identity.cjs')
 
 class PipeSocket extends Duplex {
-  constructor(handle) { super({ allowHalfOpen: false }); this.handle = handle; this.reading = false }
+  constructor(handle, stream = false) {
+    super({ allowHalfOpen: false }); this.handle = handle; this.reading = false; this.stream = stream
+    this.exit = () => this.destroy()
+    process.once('exit', this.exit)
+  }
+  setTimeout() { return this }
+  setNoDelay() { return this }
+  setKeepAlive() { return this }
   _read() {
     if (this.reading) return
     this.reading = true
-    identity.readPipe(this.handle).then(bytes => {
+    const read = this.stream ? identity.readPipeStream : identity.readPipe
+    read(this.handle).then(bytes => {
       this.reading = false
       if (!this.destroyed) this.push(bytes)
     }, error => this.destroy(error))
   }
   _write(bytes, _encoding, callback) {
-    identity.writePipe(this.handle, bytes).then(() => callback(), callback)
+    const write = async () => {
+      for (let offset = 0; offset < bytes.length; offset += 65536) {
+        await (this.stream ? identity.writePipeStream : identity.writePipe)(this.handle, bytes.subarray(offset, offset + 65536))
+      }
+    }
+    write().then(() => callback(), callback)
   }
-  _destroy(error, callback) { identity.closePipe(this.handle); callback(error) }
+  _destroy(error, callback) { process.removeListener('exit', this.exit); identity.closePipe(this.handle); callback(error) }
 }
 
-function authAddress(dataDir, server = identity.inspectProcess(process.pid)) {
-  const hash = createHash('sha256').update(server.owner + '\0' + realpathSync(dataDir)).digest('hex')
+function authAddress(dataDir, server = identity.inspectProcess(process.pid), namespace = 'desktop') {
+  if (!['desktop', 'runtime', 'voice'].includes(namespace)) throw new Error('Unknown private transport namespace')
+  const hash = createHash('sha256').update(server.owner + '\0' + realpathSync(dataDir) + (namespace === 'desktop' ? '' : '\0' + namespace)).digest('hex')
   if (process.platform === 'win32') return '\\\\.\\pipe\\crabot-desktop-' + hash
   // macOS sockaddr_un is short; a private, checked directory avoids DATA_DIR length limits.
-  const directory = join('/tmp', 'crabot-auth-' + hash.slice(0, 24))
+  const directory = join('/tmp', (namespace === 'desktop' ? 'crabot-auth-' : 'crabot-' + namespace + '-') + hash.slice(0, 24))
   try { mkdirSync(directory, { mode: 0o700 }) } catch (error) { if (error.code !== 'EEXIST') throw error }
   const stat = lstatSync(directory)
   if (!stat.isDirectory() || stat.isSymbolicLink() || String(stat.uid) !== server.owner || (stat.mode & 0o777) !== 0o700) {
@@ -36,7 +50,7 @@ function authAddress(dataDir, server = identity.inspectProcess(process.pid)) {
   return join(directory, `${server.pid}-${generation}.sock`)
 }
 
-async function listenLocalAuth(address, handler, onError = () => {}) {
+async function listenLocalAuth(address, handler, onError = () => {}, { stream = false } = {}) {
   const sockets = new Set()
   let closed = false
   const accept = (socket, fd = socket._handle.fd) => {
@@ -58,29 +72,32 @@ async function listenLocalAuth(address, handler, onError = () => {}) {
     } }
   }
   const server = identity.createPipeServer(address)
+  // Node-API IO workers must be cancelled synchronously before environment teardown.
+  const dispose = () => { closed = true; identity.closePipeServer(server); sockets.forEach(socket => socket.destroy()) }
+  process.once('exit', dispose)
   let accepting
   const loop = async () => {
     try {
       while (!closed) {
         const handle = await identity.acceptPipe(server)
         let socket
-        try { socket = new PipeSocket(handle); accept(socket, handle) }
+        try { socket = new PipeSocket(handle, stream); accept(socket, handle) }
         catch (error) { if (socket) socket.destroy(); else identity.closePipe(handle); throw error }
       }
     } catch { if (!closed) { closed = true; identity.closePipeServer(server); onError(new Error('Private authentication listener unavailable')) } }
   }
   accepting = loop()
   return { close: async () => {
-    closed = true; identity.closePipeServer(server); sockets.forEach(socket => socket.destroy()); await accepting
+    process.removeListener('exit', dispose); dispose(); await accepting
   } }
 }
 
-async function connectLocalAuth(address) {
+async function connectLocalAuth(address, { stream = false } = {}) {
   let socket, descriptor
   if (process.platform === 'win32') {
     const handle = await identity.connectPipe(address)
     descriptor = handle
-    try { socket = new PipeSocket(handle) }
+    try { socket = new PipeSocket(handle, stream) }
     catch (error) { identity.closePipe(handle); throw error }
   } else {
     socket = connect(address)

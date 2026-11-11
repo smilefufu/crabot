@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, copyFileSy
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
+import { createRequire } from 'node:module'
 import { once } from 'node:events'
 import { createServer } from 'node:net'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -26,7 +27,7 @@ async function fixture(t, delay = 100, registrationDelay = 0, { forceRegistratio
   const probe = createServer().listen(0, '127.0.0.1'); await once(probe, 'listening')
   const port = probe.address().port; await new Promise(resolve => probe.close(resolve))
   const child = spawn(process.execPath, [fileURLToPath(new URL('./fixtures/managed-core.mjs', import.meta.url))], {
-    env: { ...process.env, TEST_CORE_ROOT: root, TEST_DATA_DIR: data, TEST_PORT: String(port), TEST_MARKER: marker, TEST_READY: ready, TEST_MODULES_UNAVAILABLE: join(root, 'modules-unavailable'), TEST_STOP_DELAY: String(delay), TEST_REGISTER_DELAY: String(registrationDelay), TEST_IDENTITY_REPORT: join(root, 'identity-report.json'), TEST_FORCE_REGISTRATION_FAILURE: forceRegistrationFailure ? '1' : '', TEST_CONTROLLER_LOG: join(root, 'controller.log') },
+    env: { ...process.env, TEST_CORE_ROOT: root, TEST_DATA_DIR: data, TEST_RUNTIME_CONTROL: new URL('../runtime-control.cjs', import.meta.url).href, TEST_PORT: String(port), TEST_MARKER: marker, TEST_READY: ready, TEST_MODULES_UNAVAILABLE: join(root, 'modules-unavailable'), TEST_STOP_DELAY: String(delay), TEST_REGISTER_DELAY: String(registrationDelay), TEST_IDENTITY_REPORT: join(root, 'identity-report.json'), TEST_FORCE_REGISTRATION_FAILURE: forceRegistrationFailure ? '1' : '', TEST_CONTROLLER_LOG: join(root, 'controller.log') },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   let output = ''; child.stdout.on('data', chunk => { output += chunk }); child.stderr.on('data', chunk => { output += chunk })
@@ -161,8 +162,10 @@ test('status JSON uses the verified MM despite a reused controller PID and never
   }
   const healthy = await status()
   assert.equal(healthy.body.running, true)
-  assert.equal(healthy.body.endpoints.mm.url, `http://localhost:${f.record.mm_port}`)
-  assert.equal(healthy.body.endpoints.admin_rpc.url, 'http://localhost:23456')
+  assert.equal(healthy.body.endpoints.mm.url, null)
+  assert.equal(healthy.body.endpoints.mm.transport, 'pipe')
+  assert.equal(healthy.body.endpoints.admin_rpc.url, null)
+  assert.equal(healthy.body.endpoints.admin_rpc.transport, 'ipc')
   const file = join(f.data, 'instance-runtime.json')
   const forged = JSON.stringify({ ...f.record, controller: { ...f.record.controller, started: 'wrong incarnation' } })
   writeFileSync(file, forged)
@@ -270,6 +273,9 @@ test('independent common stop settles its exact fixture generation without any C
     filter: file => !file.split(/[\\/]/).some(part => ['__tests__', 'node_modules'].includes(part)) })
   mkdirSync(join(host, 'crabot-native/build/Release'), { recursive: true })
   copyFileSync(new URL('../../../crabot-native/build/Release/crabot-native.node', import.meta.url), join(host, 'crabot-native/build/Release/crabot-native.node'))
+  const { buildRuntimeControl } = await import('../../desktop/build-runtime-control.mjs')
+  const { build } = createRequire(new URL('../../../crabot-desktop/package.json', import.meta.url))('esbuild')
+  await buildRuntimeControl(build, fileURLToPath(new URL('../../../', import.meta.url)), join(host, 'scripts/lib/runtime-control.cjs'))
   const entry = join(host, 'scripts/lib/instance-controller.mjs')
   const source = `const {stopInstance}=await import(process.env.CRABOT_FIXTURE_STOP_ENTRY);await stopInstance(process.env.CRABOT_FIXTURE_STOP_DATA)`
   const stopper = spawn(process.execPath, ['--input-type=module', '-e', source], { env: { ...process.env,
@@ -322,16 +328,15 @@ test('status preserves verified running state when the module RPC is unavailable
 
 
 test('Windows native stop terminates its exact processes after a lost shutdown RPC and the full grace window', { skip: process.platform !== 'win32', timeout: 90000 }, async t => {
-  const f = await fixture(t), fetch = globalThis.fetch
+  const f = await fixture(t)
+  const { renameSync } = await import('node:fs')
+  renameSync(join(f.data, 'runtime-control.json'), join(f.data, 'runtime-control-unavailable.json'))
   const started = Date.now()
-  try {
-    globalThis.fetch = async () => { throw new Error('fixture shutdown connection reset') }
-    await stopInstance(f.data)
-    assert.ok(Date.now() - started >= 70000)
-    assert.equal(identity.sameProcess(f.record.mm, identity.inspectProcess(f.record.mm.pid)), false)
-    assert.equal(identity.sameProcess(f.record.controller, identity.inspectProcess(f.record.controller.pid)), false)
-    assert.equal(readInstanceRuntime(f.data), null)
-  } finally { globalThis.fetch = fetch }
+  await stopInstance(f.data)
+  assert.ok(Date.now() - started >= 70000)
+  assert.equal(identity.sameProcess(f.record.mm, identity.inspectProcess(f.record.mm.pid)), false)
+  assert.equal(identity.sameProcess(f.record.controller, identity.inspectProcess(f.record.controller.pid)), false)
+  assert.equal(readInstanceRuntime(f.data), null)
 })
 
 

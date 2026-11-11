@@ -1,6 +1,6 @@
 module_id: channel-feishu
 name: Feishu (飞书 / Lark)
-version: 0.1.0
+version: 0.1.1
 module_type: channel
 description: 飞书 / Lark Channel 模块，长连接事件订阅，无需公网回调
 
@@ -8,7 +8,7 @@ protocol_version: "0.1.0"
 
 runtime:
   type: nodejs
-  version: ">=20.0.0"
+  version: ">=22.12.0"
 
 install: corepack pnpm install
 build: corepack pnpm run build

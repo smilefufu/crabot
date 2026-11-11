@@ -46,6 +46,7 @@ export function resolveExecutable(cmd: string): string {
     const name = cmd === 'python3' ? 'python' : cmd
     if (Object.prototype.hasOwnProperty.call(runtime.executables, name)) return runtime.executables[name]
   }
+  if (cmd === 'node') return process.execPath
   for (const candidate of knownLocations(cmd)) {
     if (fs.existsSync(candidate)) return candidate
   }

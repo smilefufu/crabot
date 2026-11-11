@@ -195,6 +195,7 @@ struct PipeIo {
   std::vector<char> bytes;
   DWORD transferred = 0;
   bool write;
+  DWORD waitMs = 5000;
   std::string error;
 };
 static void ExecuteIo(napi_env, void* data) {
@@ -207,7 +208,7 @@ static void ExecuteIo(napi_env, void* data) {
   auto error = completed ? ERROR_SUCCESS : GetLastError();
   if (error == ERROR_IO_PENDING) {
     HANDLE events[] = { overlap.hEvent, task->connection->stopped };
-    auto wait = WaitForMultipleObjects(2, events, FALSE, 5000);
+    auto wait = WaitForMultipleObjects(2, events, FALSE, task->waitMs);
     if (wait != WAIT_OBJECT_0) {
       CancelIoEx(task->connection->handle, &overlap);
       GetOverlappedResult(task->connection->handle, &overlap, &task->transferred, TRUE);
@@ -235,7 +236,7 @@ static void CompleteIo(napi_env env, napi_status status, void* data) {
   if (task->connection->closed) task->connection->Close();
   napi_delete_reference(env, task->reference); napi_delete_async_work(env, task->work); delete task;
 }
-static napi_value QueueIo(napi_env env, napi_callback_info info, bool write) {
+static napi_value QueueIo(napi_env env, napi_callback_info info, bool write, bool stream = false) {
   try {
     size_t argc = 2; napi_value args[2]; napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
     if (argc != (write ? 2 : 1)) throw std::runtime_error("Invalid local pipe IO arguments");
@@ -247,7 +248,7 @@ static napi_value QueueIo(napi_env env, napi_callback_info info, bool write) {
       if (!buffer || napi_get_buffer_info(env, args[1], &data, &size) != napi_ok || !size || size > 65536) throw std::runtime_error("Invalid local pipe frame size");
       bytes.assign(static_cast<char*>(data), static_cast<char*>(data) + size);
     }
-    auto task = new PipeIo; task->connection = connection; task->write = write; task->bytes = std::move(bytes);
+    auto task = new PipeIo; task->connection = connection; task->write = write; task->waitMs = stream ? INFINITE : 5000; task->bytes = std::move(bytes);
     napi_value result; napi_create_promise(env, &task->deferred, &result);
     napi_create_reference(env, args[0], 1, &task->reference); connection->active++;
     napi_create_async_work(env, nullptr, String(env, "Crabot local pipe IO"), ExecuteIo, CompleteIo, task, &task->work);
@@ -255,7 +256,9 @@ static napi_value QueueIo(napi_env env, napi_callback_info info, bool write) {
   } catch (const std::exception& error) { napi_throw_error(env, "CRABOT_LOCAL_PIPE", error.what()); return nullptr; }
 }
 static napi_value ReadPipe(napi_env env, napi_callback_info info) { return QueueIo(env, info, false); }
+static napi_value ReadPipeStream(napi_env env, napi_callback_info info) { return QueueIo(env, info, false, true); }
 static napi_value WritePipe(napi_env env, napi_callback_info info) { return QueueIo(env, info, true); }
+static napi_value WritePipeStream(napi_env env, napi_callback_info info) { return QueueIo(env, info, true, true); }
 static napi_value CloseConnection(napi_env env, napi_callback_info info) {
   try {
     size_t argc = 1; napi_value args[1]; napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
@@ -272,7 +275,9 @@ static void RegisterLocalPipe(napi_env env, napi_value exports) {
     {"inspectServerPeer", nullptr, ServerPeer, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"inspectPeer", nullptr, ClientPeer, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"readPipe", nullptr, ReadPipe, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"readPipeStream", nullptr, ReadPipeStream, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"writePipe", nullptr, WritePipe, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"writePipeStream", nullptr, WritePipeStream, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"closePipe", nullptr, CloseConnection, nullptr, nullptr, nullptr, napi_default, nullptr},
   };
   napi_define_properties(env, exports, sizeof(methods) / sizeof(methods[0]), methods);

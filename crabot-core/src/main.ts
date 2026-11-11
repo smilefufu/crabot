@@ -162,6 +162,7 @@ async function main(): Promise<void> {
     modules: CORE_MODULES,
   }, DATA_DIR, {
     confirmOrphanTermination,
+    transport: 'ipc',
   })
 
   // 优雅关闭
@@ -192,7 +193,7 @@ async function main(): Promise<void> {
     process.exit(1)
   })
 
-  console.log(`Module Manager starting on port ${PORT}...`)
+  console.log(`Module Manager starting with managed IPC...`)
 
 }
 

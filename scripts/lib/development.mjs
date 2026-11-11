@@ -31,7 +31,7 @@ export async function ensureDevelopmentDataRoot(root) {
 export async function readDevelopmentStatus(root) {
   const current = await inspectDevelopment(root)
   const { probeHealthStatus } = await import('./mm-probe.mjs')
-  return { ...current, health: current.state === 'running' ? await probeHealthStatus(developmentPorts.mm) : null }
+  return { ...current, health: current.state === 'running' ? await probeHealthStatus(developmentPorts.mm, undefined, { dataDir: current.dataDir }) : null }
 }
 
 // Read only known deployment locations, before changing this source tree.
@@ -60,7 +60,7 @@ export async function assertDevelopmentBuildAllowed(root) {
 }
 
 export async function assertDevelopmentPortsAvailable() {
-  for (const port of Object.values(developmentPorts)) await new Promise((done, fail) => {
+  for (const port of [developmentPorts.web, developmentPorts.vite]) await new Promise((done, fail) => {
     const probe = createServer()
     probe.once('error', () => fail(failure(`开发端口${port}已被占用；未停止任何进程，请检查占用或其它开发工作副本。`)))
     probe.listen(port, '127.0.0.1', () => probe.close(done))
@@ -95,7 +95,7 @@ export async function startDevelopment(root, { foreground = false, lockHeld = fa
       stdio: ['inherit', 'inherit', 'inherit'], cleanup, log })
     const deadline = Date.now() + 30_000
     while (result.mm.exitCode === null && result.mm.signalCode === null && Date.now() < deadline) {
-      if (await probeMmHealthy(developmentPorts.mm)) return result
+      if (await probeMmHealthy(developmentPorts.mm, undefined, { dataDir: env.DATA_DIR })) return result
       await new Promise(done => setTimeout(done, 100))
     }
     throw failure('开发服务尚未就绪；保留运行记录，请用pnpm dev status核对并查看日志。')

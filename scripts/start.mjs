@@ -143,6 +143,9 @@ if (!single.ok) {
   process.exit(1)
 }
 
+const MM_PORT = 19000 + OFFSET
+const WEB_PORT = Number(process.env.CRABOT_ADMIN_WEB_PORT || 3000 + OFFSET)
+
 // 端口预检（避免拿到 EADDRINUSE 才报错）
 async function probePort(port) {
   return await new Promise((res) => {
@@ -152,8 +155,8 @@ async function probePort(port) {
     srv.listen(port, '127.0.0.1')
   })
 }
-if (!await probePort(19000 + OFFSET)) {
-  console.error(`[crabot] port ${19000 + OFFSET} already in use. Check 'lsof -i :${19000 + OFFSET}'.`)
+if (!await probePort(WEB_PORT)) {
+  console.error(`[crabot] port ${WEB_PORT} already in use. Check 'lsof -i :${WEB_PORT}'.`)
   process.exit(1)
 }
 
@@ -164,15 +167,13 @@ if (orphanRecovery.exitCode !== 0) {
   process.exit(1)
 }
 
-const MM_PORT = 19000 + OFFSET
-const WEB_PORT = 3000 + OFFSET
 // tmp-page server 用子模块池尾部保留的 slot（MM 的 PORT_RANGE_END 缩到 19098 给它让位）：
 // 落在 19000 系列段内，跟 OFFSET 走、每租户独占 [19000,19099]+OFFSET，跨租户不撞、不落 ephemeral。
 const TMP_PAGE_PORT = 19099 + OFFSET
 process.env.CRABOT_TMP_PAGE_PORT = String(TMP_PAGE_PORT)
 console.log(`[crabot] Tmp-page proxy target: 127.0.0.1:${TMP_PAGE_PORT}`)
 
-console.log(`[crabot] Starting Module Manager (port ${MM_PORT})...`)
+console.log(`[crabot] Starting Module Manager (local IPC)...`)
 console.log(`[crabot] Admin Web: http://localhost:${WEB_PORT}`)
 
 // Start fallback shares scoped backup, migration and request preparation with upgrade.
@@ -190,7 +191,7 @@ if (!DAEMON_MODE) {
   // Startup owns the operation lock until the actual child opens ingress or finishes.
   const startupDeadline = Date.now() + 30_000
   while (mm.exitCode === null && mm.signalCode === null && Date.now() < startupDeadline) {
-    if (await probeMmHealthy(MM_PORT)) break
+    if (await probeMmHealthy(MM_PORT, undefined, { dataDir: DATA_DIR })) break
     await new Promise(resolve => setTimeout(resolve, 250))
   }
   releaseCliLock(startupLock)
@@ -199,7 +200,7 @@ if (!DAEMON_MODE) {
   try {
     const { record } = await launchBackgroundCore({ root: ROOT, dataDir: DATA_DIR, env: process.env,
       mmPort: MM_PORT, webPort: WEB_PORT, log: message => console.log(`[crabot] ${message}`) })
-    console.log(`[crabot] MM ready (port ${MM_PORT}); Admin Web ready (port ${WEB_PORT}).`)
+    console.log(`[crabot] MM ready (local IPC); Admin Web ready (port ${WEB_PORT}).`)
     console.log(`[crabot] Started. PID ${record.controller.pid}. Run \`crabot status\` to check, \`crabot stop\` to stop.`)
     process.exit(0)
   } catch (error) { console.error(`[crabot] ${error.message}`); process.exit(1) }

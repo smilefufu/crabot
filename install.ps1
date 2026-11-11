@@ -453,6 +453,9 @@ if ($FromSource) {
         }
 
         $runtimeModules = @('crabot-shared','scripts/lib','crabot-core','crabot-admin','crabot-agent','crabot-channel-dingtalk','crabot-channel-slack','crabot-channel-feishu','crabot-channel-telegram','crabot-channel-wechat','crabot-mcp-tools')
+        if (Test-Path -LiteralPath (Join-Path $stageRelease 'crabot-admin/dist/channel-catalog.js') -PathType Leaf) {
+            $runtimeModules = @($runtimeModules | Where-Object { $_ -notlike 'crabot-channel-*' })
+        }
         # Supported public legacy packages predate the Slack module.
         if ($Version -in @('v2026.9.23','v2026.10.12.4') -and
             -not (Test-Path -LiteralPath (Join-Path $stageRelease 'crabot-channel-slack'))) {

@@ -1,8 +1,10 @@
-import { api } from './api'
+import { api, getWebClient } from './api'
+import { z } from 'crabot-client'
 import { storage } from '../utils/storage'
 import { adminUrl, desktopConnection, isDesktop } from './desktop-host'
 import type {
   ChannelImplementation,
+  ChannelPluginCatalogEntry,
   ChannelInstance,
   ChannelConfig,
   CreateChannelInstanceParams,
@@ -13,6 +15,14 @@ import type {
 
 export const channelService = {
   // Implementation
+  listPlugins() {
+    return api.get<{ items: ChannelPluginCatalogEntry[] }>('/channel-plugins')
+  },
+  installPlugin(id: string) {
+    return getWebClient().request(`/channel-plugins/${encodeURIComponent(id)}/install`, z.unknown(), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', timeoutMs: 650_000,
+    }) as Promise<{ implementation: ChannelImplementation }>
+  },
   async listImplementations() {
     return api.get<{ items: ChannelImplementation[]; pagination: any }>('/channel-implementations')
   },

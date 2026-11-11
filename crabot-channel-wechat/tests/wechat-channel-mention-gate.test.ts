@@ -33,7 +33,6 @@ describe('WechatChannel group mention gate', () => {
       wechat: {
         connector_url: 'http://localhost:0',
         api_key: 'wct_test',
-        mode: 'socketio',
         only_respond_to_mentions: opts?.onlyRespondToMentions,
       },
     })
@@ -161,15 +160,15 @@ describe('WechatChannel group mention gate', () => {
       const result = (channel as any).handleGetConfig()
       expect(result.config.credentials.api_key).toBe('***')
       expect(result.config.credentials.connector_url).toBe('http://localhost:0')
-      expect(result.config.credentials.mode).toBe('socketio')
+      expect(result.config.credentials.mode).toBeUndefined()
       expect(result.config.credentials.webhook_secret).toBeUndefined()
       expect(result.config.credentials.webhook_port).toBeUndefined()
       expect(result.config.group.only_respond_to_mentions).toBe(true)
       expect(result.config.crab_platform_user_id).toBe(PUPPET_WXID)
       expect(result.schema['group.only_respond_to_mentions'].hot_reload).toBe(true)
       expect(result.schema['credentials.api_key'].sensitive).toBe(true)
-      expect(result.schema['credentials.mode'].hot_reload).toBe(false)
-      expect(result.schema['credentials.webhook_secret'].sensitive).toBe(true)
+      expect(result.schema['credentials.mode']).toBeUndefined()
+      expect(result.schema['credentials.webhook_secret']).toBeUndefined()
     })
 
     it('get_config：事件到来前 crab_platform_user_id 为空串', () => {
@@ -231,69 +230,10 @@ describe('WechatChannel group mention gate', () => {
       expect((channel as any).client).toBeDefined()
     })
 
-    it('update_config：mode 合法值变更置 requires_restart，非法值忽略', () => {
+    it('update_config：拒绝已移除的 Webhook，不改变账号配置', () => {
       const channel = makeChannel()
-      const ok = (channel as any).handleUpdateConfig({
-        config: { credentials: { mode: 'webhook' } },
-      })
-      expect(ok.requires_restart).toBe(true)
-      expect((channel as any).wechatConfig.mode).toBe('webhook')
-
-      const bad = (channel as any).handleUpdateConfig({
-        config: { credentials: { mode: 'grpc' } },
-      })
-      expect(bad.requires_restart).toBe(false)
-      expect((channel as any).wechatConfig.mode).toBe('webhook')
-    })
-
-    it('update_config：webhook_secret 掩码 *** 跳过，实际变更置 requires_restart', () => {
-      const channel = makeChannel()
-      const skip = (channel as any).handleUpdateConfig({
-        config: { credentials: { webhook_secret: '***' } },
-      })
-      expect(skip.requires_restart).toBe(false)
-
-      const set = (channel as any).handleUpdateConfig({
-        config: { credentials: { webhook_secret: 'whsec_1' } },
-      })
-      expect(set.requires_restart).toBe(true)
-      expect((channel as any).wechatConfig.webhook_secret).toBe('whsec_1')
-
-      const get = (channel as any).handleGetConfig()
-      expect(get.config.credentials.webhook_secret).toBe('***')
-    })
-
-    it('update_config：webhook_port 数值变更置 requires_restart', () => {
-      const channel = makeChannel()
-      const result = (channel as any).handleUpdateConfig({
-        config: { credentials: { webhook_port: 9440 } },
-      })
-      expect(result.requires_restart).toBe(true)
-      expect((channel as any).wechatConfig.webhook_port).toBe(9440)
-    })
-
-    it('update_config：webhook_port 接受 Admin SchemaField 回传的数字字符串', () => {
-      const channel = makeChannel()
-      const result = (channel as any).handleUpdateConfig({
-        config: { credentials: { webhook_port: '9440' } },
-      })
-      expect(result.requires_restart).toBe(true)
-      expect((channel as any).wechatConfig.webhook_port).toBe(9440)
-
-      // get_config 刷回的是 number（未编辑时 Admin 原样回传 number，同样命中）
-      const again = (channel as any).handleUpdateConfig({
-        config: { credentials: { webhook_port: 9440 } },
-      })
-      expect(again.requires_restart).toBe(false)
-    })
-
-    it('update_config：webhook_port 非法字符串忽略，不破坏状态', () => {
-      const channel = makeChannel()
-      const result = (channel as any).handleUpdateConfig({
-        config: { credentials: { webhook_port: 'abc' } },
-      })
-      expect(result.requires_restart).toBe(false)
-      expect((channel as any).wechatConfig.webhook_port).toBeUndefined()
+      expect(() => (channel as any).handleUpdateConfig({ config: { credentials: { mode: 'webhook', api_key: 'must-not-apply' } } })).toThrow('Webhook 已移除')
+      expect((channel as any).wechatConfig.api_key).toBe('wct_test')
     })
 
     it('update_config：非法类型忽略，不破坏状态', () => {

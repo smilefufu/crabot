@@ -57,9 +57,6 @@ describe('TelegramChannel.handleAddReaction', () => {
       data_dir: tmpDir,
       telegram: {
         bot_token: 'tkn',
-        mode: 'polling',
-        webhook_url: undefined,
-        webhook_secret: undefined,
         markdown_format: 'auto',
       },
     })

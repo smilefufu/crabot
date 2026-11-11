@@ -1,12 +1,12 @@
 module_id: channel-slack
 name: Slack
-version: 0.1.0
+version: 0.1.3
 module_type: channel
 description: Slack 私聊与群聊，Socket Mode 长连接
 protocol_version: "0.2.0"
 runtime:
   type: nodejs
-  version: ">=22.0.0"
+  version: ">=22.12.0"
 install: corepack pnpm install --frozen-lockfile
 build: corepack pnpm run build
 entry: dist/main.js

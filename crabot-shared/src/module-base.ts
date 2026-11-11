@@ -11,6 +11,7 @@ import http, { type IncomingMessage, type ServerResponse } from 'node:http'
 import type { Server as NetServer } from 'node:net'
 import fs from 'node:fs'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 import {
   type Request,
   type Response,
@@ -29,6 +30,7 @@ import {
   GlobalErrorCode,
 } from './base-protocol.js'
 import { proxyManager } from './proxy-manager.js'
+import { getProcessRpcPeer, RuntimeRpcError } from './runtime-rpc.js'
 
 // ============================================================================
 // 自定义错误类
@@ -264,8 +266,6 @@ export class RpcClient {
       timestamp: generateTimestamp(),
     }
 
-    const body = JSON.stringify(request)
-
     // 开始 rpc_call span（如果提供了 trace 上下文）
     const span = traceCtx
       ? traceCtx.traceStore.startSpan(traceCtx.traceId, {
@@ -280,6 +280,43 @@ export class RpcClient {
         })
       : null
 
+    const standalone = process.env.CRABOT_RPC_TRANSPORT === 'ipc' && !process.send
+    const peer = standalone ? undefined : getProcessRpcPeer()
+    if (peer || standalone) {
+      try {
+        const call = { target: targetPort, source, method, params,
+          ...(options.authorizationBearer ? { metadata: { authorizationBearer: options.authorizationBearer } } : {}),
+        }
+        let result: R
+        if (peer) result = await peer.call<R>(call, options.timeoutMs)
+        else {
+          const root = process.env.CRABOT_HOME
+          const dataDir = process.env.CRABOT_RUNTIME_DATA_DIR
+          if (!root || !path.isAbsolute(root) || !dataDir || !path.isAbsolute(dataDir)) {
+            throw new RuntimeRpcError('SERVICE_UNAVAILABLE', 'Managed runtime scope is missing')
+          }
+          const control = await import(pathToFileURL(path.join(root, 'scripts/lib/runtime-control.cjs')).href)
+          result = await control.default.callRuntimeControl(dataDir, call, { timeoutMs: options.timeoutMs })
+        }
+        if (span && traceCtx) traceCtx.traceStore.endSpan(traceCtx.traceId, span.span_id, 'completed', {
+          target_module: `port:${targetPort}`, target_port: targetPort, method,
+          transport: 'ipc', response_summary: JSON.stringify(result).slice(0, 200),
+        })
+        return result
+      } catch (error) {
+        if (span && traceCtx) traceCtx.traceStore.endSpan(traceCtx.traceId, span.span_id, 'failed', {
+          target_module: `port:${targetPort}`, target_port: targetPort, method,
+          transport: 'ipc', error: error instanceof Error ? error.message : String(error),
+        })
+        if (error instanceof RuntimeRpcError || standalone && error instanceof Error && error.name === 'RuntimeRpcError') {
+          const failure = error as RuntimeRpcError
+          throw new RpcCallError(failure.code, failure.message, failure.details)
+        }
+        throw error
+      }
+    }
+
+    const body = JSON.stringify(request)
     return new Promise((resolve, reject) => {
       let finished = false
       const req = http.request(
@@ -510,6 +547,8 @@ interface ResolveParams {
  * - 代理配置热更新
  */
 export abstract class ModuleBase {
+  private removeRuntimeHandler?: () => void
+  private removeParentDisconnect?: () => void
   protected readonly config: ModuleConfig
   protected readonly rpcClient: RpcClient
   protected readonly methodHandlers: Map<string, MethodHandler> = new Map()
@@ -547,6 +586,25 @@ export abstract class ModuleBase {
    */
   async start(): Promise<void> {
     await this.onStart()
+
+    const peer = getProcessRpcPeer()
+    if (peer) {
+      this.removeRuntimeHandler = peer.handle(async ({ target, method, params, metadata }) => {
+        if (target !== this.config.port) throw new RpcError('NOT_FOUND', 'Runtime target does not match this module')
+        const handler = this.methodHandlers.get(method)
+        if (!handler) throw new RpcError(GlobalErrorCode.METHOD_NOT_FOUND, `Method "${method}" not found`)
+        return handler(params, { authorizationBearer: metadata?.authorizationBearer })
+      })
+      const parentDisconnected = (): void => {
+        void this.stop().catch(() => {
+          console.error(`[${this.config.moduleId}] Cleanup failed after manager disconnected`)
+          process.exitCode = 1
+        })
+      }
+      process.once('disconnect', parentDisconnected)
+      this.removeParentDisconnect = () => process.removeListener('disconnect', parentDisconnected)
+      return
+    }
 
     this.server = this.createServer((req, res) => {
       this.handleRequest(req, res).catch((error) => {
@@ -587,11 +645,31 @@ export abstract class ModuleBase {
     console.log(`[${this.config.moduleId}] Shutting down...`)
 
     await this.onStop()
+    this.removeParentDisconnect?.()
+    this.removeParentDisconnect = undefined
+    if (this.removeRuntimeHandler) {
+      this.removeRuntimeHandler()
+      this.removeRuntimeHandler = undefined
+      process.channel?.unref()
+    }
 
     if (this.server) {
       await new Promise<void>((resolve) => {
         this.server!.close(() => resolve())
       })
+    }
+  }
+
+  /** Platform business only; the Cordis host owns transport, identity and shutdown. */
+  channelService() {
+    const methods = Object.fromEntries([...this.methodHandlers].filter(([method]) =>
+      !['health', 'get_runtime_identity', 'shutdown'].includes(method)))
+    return {
+      methods,
+      start: () => this.onStart(),
+      stop: () => this.stop(),
+      getHealthDetails: () => this.getHealthDetails(),
+      getHealthStatus: (details: Record<string, unknown>) => this.getHealthStatus(details),
     }
   }
 

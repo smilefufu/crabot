@@ -1,3 +1,4 @@
+import { installTestChannel } from '../tests/helpers/installed-channel.js'
 import { describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs/promises'
 import os from 'node:os'
@@ -11,9 +12,10 @@ describe('workspace management startup channel definitions', () => {
     const rpc = { registerModuleDefinition: vi.fn(async () => ({})), startModule: vi.fn(async () => ({})) }
     const manager = new ChannelManager(dir, rpc as any)
     try {
-      await manager.addImplementation({ id: 'channel-fixture', name: 'fixture', platform: 'fixture', type: 'builtin', module_path: '../fixture-channel', version: '0.1.0', created_at: '', updated_at: '' })
-      const active = await manager.createInstance({ name: 'active', implementation_id: 'channel-fixture', auto_start: true })
-      const inactive = await manager.createInstance({ name: 'inactive', implementation_id: 'channel-fixture', auto_start: false })
+      await installTestChannel(dir, 'telegram')
+      await manager.addImplementation({ id: 'channel-telegram', name: 'fixture', platform: 'telegram', type: 'builtin', module_path: '../fixture-channel', version: '0.1.0', created_at: '', updated_at: '' })
+      const active = await manager.createInstance({ name: 'active', implementation_id: 'channel-telegram', auto_start: true })
+      const inactive = await manager.createInstance({ name: 'inactive', implementation_id: 'channel-telegram', auto_start: false })
       rpc.registerModuleDefinition.mockClear(); rpc.startModule.mockClear()
       const retained = await fs.readFile(path.join(dir, 'channel-instances.json'))
       const definitions = await manager.registerBuiltinInstanceDefinitions()

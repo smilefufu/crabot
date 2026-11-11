@@ -62,8 +62,8 @@ test('a release or other checkout record in developer data is refused without st
   assert.equal(child.exitCode, null); clearInstanceRuntime(data, sameRootRelease.generation)
 })
 test('a real developer port conflict is reported without terminating its owner', async () => {
-  const server = createServer(); server.listen(developmentPorts.temporary, '127.0.0.1'); await once(server, 'listening')
-  try { await assert.rejects(assertDevelopmentPortsAvailable(), /29099/); assert.equal(server.listening, true) }
+  const server = createServer(); server.listen(developmentPorts.web, '127.0.0.1'); await once(server, 'listening')
+  try { await assert.rejects(assertDevelopmentPortsAvailable(), /13000/); assert.equal(server.listening, true) }
   finally { await new Promise(done => server.close(done)) }
 })
 
@@ -86,6 +86,8 @@ test('developer status reports its own real health separately from process owner
     await Promise.race([once(child, 'message'), exited.then(() => { throw new Error('Finite health fixture exited before listening') })])
     record = createInstanceRuntime({ root, dataDir: data, mmPort: 29000 })
     recordMmProcess(data, record.generation, child.pid)
+    const legacy = readInstanceRuntime(data); legacy.schema_version = 1; delete legacy.control_transport
+    writeFileSync(join(data, 'instance-runtime.json'), JSON.stringify(legacy))
     const status = await readDevelopmentStatus(root)
     assert.equal(status.state, 'running'); assert.equal(status.health, 'degraded')
     assert.equal(status.record.generation, record.generation); assert.equal(status.dataDir, data)

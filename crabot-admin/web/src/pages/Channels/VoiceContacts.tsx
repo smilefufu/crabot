@@ -67,7 +67,7 @@ export function VoiceContacts({ channelId, state, onChanged }: { channelId: stri
   }
 
   return <div>
-    <h4>聊天方式联系人与声纹</h4><p>联系人、好友绑定和声纹分别管理。未绑定或未识别的发言按陌生人进入语音群；声纹不授予权限，删除声纹保留联系人与绑定。</p>
+    <h4>协作入口联系人与声纹</h4><p>联系人、好友绑定和声纹分别管理。未绑定或未识别的发言按陌生人进入语音群；声纹不授予权限，删除声纹保留联系人与绑定。</p>
     {error && <p role="alert">{error}</p>}{notice && <p role="status">{notice}</p>}
     <div className="voice-fields"><label>录入名字<input className="input" value={name} maxLength={128} onChange={e => setName(e.target.value)} /></label></div>
     <Button disabled={busy || !state || !name.trim() || !state.connected || !state.foreground || !!state.pending_enrollment} onClick={() => void run(enrollNew)}>登记新联系人</Button>
@@ -83,7 +83,7 @@ export function VoiceContacts({ channelId, state, onChanged }: { channelId: stri
         {contact.friend_id && <Button variant="secondary" disabled={busy} onClick={() => void run(() => unlink(contact))}>解绑好友</Button>}
       </div></div>
     })}
-    <div className="voice-fields"><label>绑定的聊天方式联系人<select className="select" value={contactId} onChange={e => setContactId(e.target.value)}><option value="">选择联系人</option>{contacts.map(c => <option key={c.platform_user_id} value={c.platform_user_id}>{c.display_name}</option>)}</select></label><label>已有好友<select className="select" value={friendId} onChange={e => setFriendId(e.target.value)}><option value="">选择好友</option>{friends.map(f => <option key={f.id} value={f.id}>{f.display_name}</option>)}</select></label></div>
+    <div className="voice-fields"><label>绑定的协作入口联系人<select className="select" value={contactId} onChange={e => setContactId(e.target.value)}><option value="">选择联系人</option>{contacts.map(c => <option key={c.platform_user_id} value={c.platform_user_id}>{c.display_name}</option>)}</select></label><label>已有好友<select className="select" value={friendId} onChange={e => setFriendId(e.target.value)}><option value="">选择好友</option>{friends.map(f => <option key={f.id} value={f.id}>{f.display_name}</option>)}</select></label></div>
     <Button disabled={busy || !identity || !!selected?.friend_id || !friendId} onClick={() => void run(bindExisting)}>绑定已有好友</Button>
     <div className="voice-fields"><label>修改联系人名字<input className="input" value={renameName} maxLength={128} onChange={e => setRenameName(e.target.value)} /></label></div>
     <Button variant="secondary" disabled={busy || !selected || !renameName.trim() || !!state?.pending_enrollment} onClick={() => void run(() => manage({ action: 'rename_contact', platform_user_id: selected!.platform_user_id, display_name: renameName.trim() }))}>修改名字</Button>

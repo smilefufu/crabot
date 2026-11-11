@@ -34,10 +34,12 @@ export class OnboardingManager {
    */
   loadFromImplementations(impls: ChannelImplementation[]): void {
     for (const impl of impls) {
-      if (impl.type !== 'builtin' || !impl.module_path || !impl.onboarding_methods) continue
+      const root = impl.installed_path ?? impl.module_path
+      if (!root || !impl.onboarding_methods) continue
       for (const method of impl.onboarding_methods) {
+        if (this.get(impl.id, method.id)) continue
         try {
-          const handlerPath = path.resolve(__dirname, '..', impl.module_path, method.handler)
+          const handlerPath = path.resolve(__dirname, '..', root, method.handler)
           // eslint-disable-next-line @typescript-eslint/no-var-requires
           const mod = require(handlerPath) as { createOnboarder?: () => Onboarder }
           if (typeof mod.createOnboarder !== 'function') {

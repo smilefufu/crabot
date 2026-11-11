@@ -54,7 +54,7 @@ export async function launchBackgroundCore({ root, dataDir, env, mmPort, webPort
       throw Object.assign(new Error(`Background controller exited; diagnostics: ${bootLog}`), { code: 'CRABOT_START_FAILED' })
     }
     const state = inspectInstance(dataDir)
-    if (state.record?.generation === record.generation && state.record.controller.pid === child.pid && state.record.mm && ['healthy', 'degraded'].includes(await probeHealthStatus(mmPort))) {
+    if (state.record?.generation === record.generation && state.record.controller.pid === child.pid && state.record.mm && ['healthy', 'degraded'].includes(await probeHealthStatus(mmPort, undefined, { dataDir }))) {
       try {
         // This existing unauthenticated API response proves the management Web
         // handler is ready, even before Vite/static UI or a model is configured.

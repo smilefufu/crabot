@@ -30,7 +30,7 @@ export async function releaseWorkspaceInterruptedProtection({ dataDir, recoveryI
     if (hash(readWorkspaceInterruptedRuntimePlan(dataDir, recoveryId)) !== hash(plan)
       || hash(readWorkspaceInterruptedServiceScope(dataDir, recoveryId).marker) !== hash(original.marker)) throw failure()
   }
-  const rpc = await openPinnedProcessRpc(role.launch.parent, moduleManagerPort, { source: 'workspace-interrupted-recovery', timeoutMs: 5000 })
+  const rpc = await openPinnedProcessRpc(role.launch.parent, moduleManagerPort, { dataDir, source: 'workspace-interrupted-recovery', timeoutMs: 5000 })
   try {
     const verify = async () => {
       current()

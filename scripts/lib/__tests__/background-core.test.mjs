@@ -25,7 +25,7 @@ for (const coreHealth of ['healthy', 'degraded']) test('detached shared core ' +
   const locks = new URL('../cli-lock.mjs', import.meta.url).href
   const source = `import {launchBackgroundCore} from ${JSON.stringify(new URL('../background-core.mjs', import.meta.url).href)};import{acquireCliLock,releaseCliLock}from${JSON.stringify(locks)};const lock=await acquireCliLock(process.env.TEST_DATA_DIR,'fixture-start');await launchBackgroundCore({root:process.env.TEST_CORE_ROOT,dataDir:process.env.TEST_DATA_DIR,env:process.env,mmPort:Number(process.env.TEST_PORT),webPort:Number(process.env.TEST_PORT)});releaseCliLock(lock);process.send('ready');setInterval(()=>{},1000)`
   const frontend = spawn(process.execPath, ['--input-type=module', '-e', source], {
-    env: { ...process.env, TEST_CORE_ROOT: root, TEST_DATA_DIR: data, TEST_PORT: String(port), TEST_HEALTH_STATUS: coreHealth, TEST_MARKER: marker, TEST_READY: join(root, 'ready') },
+    env: { ...process.env, TEST_CORE_ROOT: root, TEST_DATA_DIR: data, TEST_RUNTIME_CONTROL: new URL('../runtime-control.cjs', import.meta.url).href, TEST_PORT: String(port), TEST_HEALTH_STATUS: coreHealth, TEST_MARKER: marker, TEST_READY: join(root, 'ready') },
     stdio: ['ignore', 'ignore', 'inherit', 'ipc'],
   })
   t.after(() => {

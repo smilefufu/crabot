@@ -4,6 +4,8 @@ import os from 'node:os'
 import path from 'node:path'
 import http from 'node:http'
 import https from 'node:https'
+import { createRequire } from 'node:module'
+const native = createRequire(import.meta.url)('../../scripts/lib/process-identity.cjs')
 import type { AddressInfo } from 'node:net'
 import { WebSocket, WebSocketServer } from 'ws'
 import { loadVoiceTls } from './voice-tls.js'
@@ -19,8 +21,11 @@ function get(url: string): Promise<string> {
   })
 }
 async function fixture(resolveModule?: () => Promise<{ port: number } | undefined>) {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'admin-voice-gateway-'))
-  cleanup.push(() => fs.rm(dir, { recursive: true, force: true }))
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'admin-voice-gateway-'))
+  cleanup.push(() => fs.rm(root, { recursive: true, force: true }))
+  const dir = path.join(root, 'admin')
+  if (process.platform === 'win32') native.createPrivateDirectory(dir)
+  else await fs.mkdir(dir, { mode: 0o700 })
   const tls = await loadVoiceTls(dir)
   const internal = http.createServer(), terminals = new WebSocketServer({ server: internal, path: '/voice' })
   let receivedHeaders: http.IncomingHttpHeaders | undefined
@@ -51,7 +56,8 @@ describe('Admin port voice gateway', () => {
   it('keeps a stable private Admin certificate and serves HTTP, HTTPS and WSS on one port', async () => {
     const f = await fixture()
     expect((await loadVoiceTls(f.dir)).fingerprint).toBe(f.tls.fingerprint)
-    expect((await fs.stat(path.join(f.dir, 'voice-tls.json'))).mode & 0o777).toBe(0o600)
+    if (process.platform === 'win32') expect(native.isOwnerOnlyFile(path.join(f.dir, 'voice-tls.json'))).toBe(true)
+    else expect((await fs.stat(path.join(f.dir, 'voice-tls.json'))).mode & 0o777).toBe(0o600)
     expect(await get(`http://127.0.0.1:${f.port}/api/test`)).toBe('existing-admin-web')
     expect(await get(`https://127.0.0.1:${f.port}/api/test`)).toBe('existing-admin-web')
     const phone = new WebSocket(`wss://127.0.0.1:${f.port}/ws/voice/${encodeURIComponent('手机')}`, { rejectUnauthorized: false, headers: { Authorization: 'never-forward', Cookie: 'private-admin-cookie' } })

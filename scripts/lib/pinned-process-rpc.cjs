@@ -10,7 +10,23 @@ const remoteCodes = new Set(['INVALID_REQUEST', 'PERMISSION_DENIED', 'METHOD_NOT
 const diagnose = (error, stage) => error?.code === 'CRABOT_PROCESS_RPC' && typeof error.stage === 'string' ? error
   : unavailable(stage, typeof error?.code === 'string' && error.code.length <= 128 && /^(?:ERR_[A-Z_]+|E[A-Z]+|ABORT_ERR)$/.test(error.code) ? { transport_code: error.code } : {})
 
-async function openPinnedProcessRpc(expected, port, { signal, timeoutMs = 5000, source = 'module-manager', maxResponseBytes = 256 * 1024 } = {}) {
+async function openPinnedProcessRpc(expected, port, { signal, timeoutMs = 5000, source = 'module-manager', maxResponseBytes = 256 * 1024, transport, dataDir, moduleRuntime } = {}) {
+  if (transport || dataDir && require('./runtime-control.cjs').hasRuntimeControl(dataDir)) {
+    if (!transport) {
+      const control = await require('./runtime-control.cjs').openRuntimeControl(dataDir, { expectedServer: moduleRuntime ? undefined : expected })
+      transport = {
+        verify() {
+          control.verify()
+          if (moduleRuntime ? expected.parent !== control.server.pid : control.target !== port) throw unavailable('binding-target')
+        },
+        call: (method, params, options) => control.call({ target: port, source, method, params,
+          ...(options.authorizationBearer === undefined ? {} : { metadata: { authorizationBearer: options.authorizationBearer } }),
+        }, { timeoutMs, verifyAfter: options.verifyAfter }),
+        close: control.close,
+      }
+    }
+    return openPinnedRuntimeTransport(expected, port, { signal, timeoutMs, source, maxResponseBytes }, transport)
+  }
   expected = Object.freeze({ ...expected })
   let socket, closed = false, used = false, pending = false, openingStage = 'binding-before-connect'
   const agent = new Agent({ keepAlive: true, maxSockets: 1, maxFreeSockets: 1 })
@@ -84,4 +100,42 @@ async function openPinnedProcessRpc(expected, port, { signal, timeoutMs = 5000, 
   }
   return { call, close }
 }
+
+async function openPinnedRuntimeTransport(expected, port, options, transport) {
+  expected = Object.freeze({ ...expected })
+  let closed = false, pending = false
+  const close = () => { closed = true; transport.close() }
+  const verify = () => {
+    if (closed || options.signal?.aborted || typeof options.source !== 'string' || !options.source || options.source.includes('\0')
+      || !Number.isInteger(port) || port < 1 || port > 65535
+      || !Number.isInteger(options.timeoutMs) || options.timeoutMs < 1 || options.timeoutMs > 2147483647
+      || !Number.isInteger(options.maxResponseBytes) || options.maxResponseBytes < 1 || options.maxResponseBytes > 32 * 1024 * 1024
+      || expected.owner !== identity.inspectProcess(process.pid).owner
+      || !identity.sameProcess(expected, identity.inspectProcess(expected.pid))) throw unavailable()
+    transport.verify()
+  }
+  try { verify() } catch (error) { close(); throw diagnose(error, 'binding-before-connect') }
+  return { close, async call(method, params, { verifyAfter = true, authorizationBearer } = {}) {
+    let abort
+    try {
+      verify()
+      if (pending || typeof method !== 'string' || !/^[a-z][a-z0-9_]*$/.test(method)) throw unavailable('request-input')
+      if (authorizationBearer !== undefined && (typeof authorizationBearer !== 'string' || !authorizationBearer || /[\r\n]/.test(authorizationBearer))) throw unavailable('request-input')
+      pending = true
+      const cancelled = new Promise((_, reject) => {
+        abort = () => reject(unavailable('request-error', { transport_code: 'ABORT_ERR' }))
+        options.signal?.addEventListener('abort', abort, { once: true })
+      })
+      let result
+      try { result = await Promise.race([transport.call(method, params, { authorizationBearer, verifyAfter }), cancelled]) }
+      catch (error) { throw remoteCodes.has(error?.code) ? unavailable('response-rejected', { remote_code: error.code }) : error }
+      if (!result || typeof result !== 'object' || Array.isArray(result)) throw unavailable('response-shape')
+      if (Buffer.byteLength(JSON.stringify(result)) > options.maxResponseBytes) throw unavailable('response-budget')
+      if (verifyAfter) verify()
+      return result
+    } catch (error) { close(); throw diagnose(error, 'request-error') }
+    finally { pending = false; if (abort) options.signal?.removeEventListener('abort', abort) }
+  } }
+}
+
 module.exports = { openPinnedProcessRpc }

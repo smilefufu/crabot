@@ -71,7 +71,6 @@ beforeEach(() => {
     module_type: 'channel',
     version: '0.0.1',
     protocol_version: '0.1.0',
-    port: 0,
     data_dir: tmpDir,
     feishu: {
       app_id: 'a',
@@ -80,7 +79,7 @@ beforeEach(() => {
       only_respond_to_mentions: true,
       markdown_format: 'auto',
     },
-  })
+  }, { publishEvent: async () => {} })
 })
 
 afterEach(() => {
@@ -210,7 +209,7 @@ describe('remote history query', () => {
     const raw = channel as any
     internals.client.getMessage = vi.fn().mockRejectedValue(new Error('must not resolve a cached chat'))
     raw.client.getUser = vi.fn().mockResolvedValue({ name: 'History' })
-    vi.spyOn(raw.rpcClient, 'publishEvent').mockResolvedValue(undefined)
+    vi.spyOn(raw.events, 'publishEvent').mockResolvedValue(undefined)
     await raw.handleMessageReceive({
       sender: { sender_id: { open_id: 'ou_history' }, sender_type: 'user' },
       message: { message_id: 'inbound', chat_id: 'oc_actual', chat_type: 'p2p', message_type: 'text', content: JSON.stringify({ text: 'hi' }), create_time: String(Date.now()) },

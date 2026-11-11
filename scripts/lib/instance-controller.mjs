@@ -112,6 +112,12 @@ const unsettled = process => processState(process) !== 'gone'
 async function shutdownRpc(record) {
   if (!record.mm || processState(record.mm) === 'gone') return
   if (!alive(record.mm)) throw Object.assign(new Error('MM 身份暂时无法核验；未发送停机请求，保留运行记录。'), { code: 'CRABOT_STOP_UNKNOWN' })
+  if (record.control_transport === 'pipe') {
+    const { callRuntimeControl } = await import('./runtime-control.cjs')
+    await callRuntimeControl(record.data_dir, { target: record.mm_port, source: 'instance-controller', method: 'shutdown',
+      params: { expected_generation: record.generation } }, { expectedGeneration: record.generation, timeoutMs: 5000 })
+    return
+  }
   const response = await fetch(`http://127.0.0.1:${record.mm_port}/shutdown`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id: randomUUID(), params: { expected_generation: record.generation } }),

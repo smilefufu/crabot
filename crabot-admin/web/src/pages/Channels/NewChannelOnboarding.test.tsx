@@ -23,7 +23,7 @@ beforeEach(() => {
 function view() {
   render(<MemoryRouter initialEntries={['/channels/new/channel-feishu/scan']}><Routes>
     <Route path="/channels/new/:implId/:methodId" element={<NewChannelOnboarding />} />
-    <Route path="/channels/config" element={<div>聊天方式配置</div>} />
+    <Route path="/channels/config" element={<div>协作入口配置</div>} />
   </Routes></MemoryRouter>)
 }
 describe('扫码实例名称校验', () => {
@@ -35,7 +35,7 @@ describe('扫码实例名称校验', () => {
     expect(toast.error).not.toHaveBeenCalled()
     const onEvent = vi.mocked(channelService.onboardPoll).mock.calls[0][3]
     await act(async () => onEvent({ type: 'success' } as any))
-    await screen.findByText('聊天方式配置')
+    await screen.findByText('协作入口配置')
     expect(channelService.onboardFinish).toHaveBeenCalledWith('channel-feishu', 'scan', 'session', 'AI客服bot')
   })
 

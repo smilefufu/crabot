@@ -9,6 +9,9 @@
 import { readFileSync, existsSync } from 'node:fs'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { resolveCliDataDir } from './lib/instance.mjs'
+import control from './lib/runtime-control.cjs'
+const runtimeDataDir = resolveCliDataDir()
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const PROJECT_ROOT = resolve(__dirname, '..')
@@ -45,6 +48,11 @@ async function rpcCall(port, method, params = {}) {
     timestamp: new Date().toISOString(),
   }
   try {
+    if (control.hasRuntimeControl(runtimeDataDir)) {
+      const data = await control.callRuntimeControl(runtimeDataDir, { target: port, source: 'debug', method, params })
+      return { success: true, data }
+    }
+    if (!existsSync(resolve(runtimeDataDir, 'mm.pid'))) return null
     const res = await fetch(`http://localhost:${port}/${method}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

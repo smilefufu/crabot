@@ -15,6 +15,9 @@ import type { Socket } from 'node:net'
 import {
   type Request,
   type Response,
+  RuntimeRpcPeer,
+  RuntimeRpcError,
+  type RuntimeRpcCall,
   type HealthResult,
   type ModuleId,
   type ModuleDefinition,
@@ -99,6 +102,7 @@ import {
   runtimeToResolved,
 } from './types.js'
 import { PortAllocator } from './port-allocator.js'
+import { MemoryPipeChannel } from './memory-pipe.js'
 import { scheduleRestart } from './restart-policy.js'
 import { checkDiskLow } from './disk-watcher.js'
 import { resolveExecutable } from './executable-resolver.js'
@@ -205,6 +209,7 @@ interface EventSubscription {
 }
 
 export interface ModuleManagerOptions {
+  transport?: 'ipc'
   confirmOrphanTermination?: (candidate: OrphanTerminationCandidate) => Promise<boolean>
 }
 
@@ -254,6 +259,7 @@ interface ManagedChildState {
   resolveFinalized: () => void
   termination?: Promise<void>
   forceTermination?: Promise<void>
+  observedProcesses?: ReadonlyArray<WorkerProcessIdentity>
   logStream: ReturnType<typeof fs.createWriteStream>
   logEnded: boolean
 }
@@ -374,6 +380,8 @@ interface WorkspaceCoordinatorGrant {
 // ============================================================================
 
 export class ModuleManager {
+  private readonly useIpc: boolean
+  private readonly runtimePeers = new WeakMap<ChildProcess, RuntimeRpcPeer>()
   private readonly config: ModuleManagerConfig
   private readonly portAllocator: PortAllocator
   private readonly modules: Map<ModuleId, ModuleRuntime> = new Map()
@@ -433,6 +441,7 @@ export class ModuleManager {
   private cutoverRecord: { schema_version: 1; completed: true; completed_at: string; admin_archive_fingerprint: string; admin_archived_record_count: number; mm_archived_module_ids: ModuleId[]; process_trees_confirmed_stopped: true } | null = null
 
   private server: http.Server | null = null
+  private localControl?: { close(): Promise<void> }
   private healthCheckTimer: NodeJS.Timeout | null = null
   private diskWatcherTimer: NodeJS.Timeout | null = null
   private isShuttingDown = false
@@ -446,6 +455,7 @@ export class ModuleManager {
     options: ModuleManagerOptions = {},
   ) {
     this.config = { ...DEFAULT_CONFIG, ...config }
+    this.useIpc = options.transport === 'ipc'
     if (this.config.hotplug_allowed_types.includes('agent')) {
       throw new Error('Invalid Module Manager config: hotplug_allowed_types must not contain reserved type "agent"')
     }
@@ -552,6 +562,23 @@ export class ModuleManager {
     // newly introduced runnable non-core Agent could hide behind an old marker.
     this.managementOnly = this.modules.has('admin-web') && this.modules.has('crabot-agent')
 
+    if (this.useIpc) {
+      this.localControl = await require('../../scripts/lib/runtime-control.cjs').startRuntimeControl({
+        dataDir: this.dataDir, root: path.resolve(__dirname, '../..'), target: this.config.port,
+        dispatch: (call: RuntimeRpcCall, origin: { pid: number }, bindings: Map<number, { child: ChildProcess; peer: RuntimeRpcPeer }>) => {
+          if (call.target === this.config.port && ['register', 'register_core_agent', 'register_voice_runtime', 'unregister'].includes(call.method)) {
+            const moduleId = (call.params as { module_id?: string })?.module_id
+            if (!moduleId || this.processes.get(moduleId)?.pid !== origin.pid) {
+              throw new RuntimeRpcError('FORBIDDEN', 'Registration requires its managed runtime')
+            }
+          }
+          return this.dispatchRuntimeCall(call, bindings)
+        },
+      })
+      this.startRuntimeServices()
+      return
+    }
+
     // 启动 HTTP 服务器
     this.server = http.createServer((req, res) => {
       this.handleRequest(req, res).catch((error) => {
@@ -577,33 +604,57 @@ export class ModuleManager {
     return new Promise((resolve, reject) => {
       this.server!.listen(this.config.port, () => {
         console.log(`[ModuleManager] Listening on port ${this.config.port}`)
-        this.startHealthCheckTimer()
-
-        // 磁盘水位线监控（每 60s 一次；同状态不重复广播 → 去抖）
-        let lastWasLow = false
-        this.diskWatcherTimer = setInterval(async () => {
-          const r = await checkDiskLow(this.dataDir, 1_000_000_000) // 1GB 阈值
-          if (r.is_low && !lastWasLow && r.payload) {
-            lastWasLow = true
-            this.publishEvent(
-              createSystemDiskLowEvent('module-manager', r.payload)
-            ).catch(console.error)
-            console.warn(
-              `[ModuleManager] DISK LOW: ${(r.available_bytes / 1e9).toFixed(2)}GB free at ${r.payload.path}`
-            )
-          } else if (!r.is_low && lastWasLow) {
-            lastWasLow = false
-            console.log(`[ModuleManager] Disk recovered: ${(r.available_bytes / 1e9).toFixed(2)}GB free`)
-          }
-        }, 60_000)
-
-        // 启动 auto_start 模块
-        this.startAutoStartModules().catch(console.error)
+        this.startRuntimeServices()
 
         resolve()
       })
       this.server!.on('error', reject)
     })
+  }
+
+  private startRuntimeServices(): void {
+    this.startHealthCheckTimer()
+
+    // 磁盘水位线监控（每 60s 一次；同状态不重复广播 → 去抖）
+    let lastWasLow = false
+    this.diskWatcherTimer = setInterval(async () => {
+      const r = await checkDiskLow(this.dataDir, 1_000_000_000) // 1GB 阈值
+      if (r.is_low && !lastWasLow && r.payload) {
+        lastWasLow = true
+        this.publishEvent(
+          createSystemDiskLowEvent('module-manager', r.payload)
+        ).catch(console.error)
+        console.warn(
+          `[ModuleManager] DISK LOW: ${(r.available_bytes / 1e9).toFixed(2)}GB free at ${r.payload.path}`
+        )
+      } else if (!r.is_low && lastWasLow) {
+        lastWasLow = false
+        console.log(`[ModuleManager] Disk recovered: ${(r.available_bytes / 1e9).toFixed(2)}GB free`)
+      }
+    }, 60_000)
+
+    // 启动 auto_start 模块
+    this.startAutoStartModules().catch(console.error)
+  }
+
+  private async dispatchRuntimeCall(call: RuntimeRpcCall, bindings?: Map<number, { child: ChildProcess; peer: RuntimeRpcPeer }>): Promise<unknown> {
+    if (call.target === this.config.port) {
+      const handler = this.methodHandlers.get(call.method)
+      if (!handler) throw new RuntimeRpcError(GlobalErrorCode.METHOD_NOT_FOUND, `Method "${call.method}" not found`)
+      return handler(call.params, { authorizationBearer: call.metadata?.authorizationBearer })
+    }
+    const runtime = Array.from(this.modules.values()).find(module => module.port === call.target)
+    const child = runtime && this.processes.get(runtime.module_id)
+    const peer = child && this.runtimePeers.get(child)
+    if (!peer || !child || !runtime || (runtime.status !== 'running' && runtime.status !== 'starting')) {
+      throw new RuntimeRpcError('SERVICE_UNAVAILABLE', 'Target runtime is unavailable')
+    }
+    const pinned = bindings?.get(call.target)
+    if (pinned && (pinned.child !== child || pinned.peer !== peer)) {
+      throw new RuntimeRpcError('STALE_INSTANCE', 'Pinned module runtime has changed')
+    }
+    bindings?.set(call.target, { child, peer })
+    return peer.call(call)
   }
 
   /**
@@ -664,6 +715,9 @@ export class ModuleManager {
         () => this.stopModuleProcess(moduleId, 'shutdown'),
       )),
     )
+
+    await this.localControl?.close()
+    this.localControl = undefined
 
     // 关闭 HTTP 服务器
     if (this.server) {
@@ -1736,7 +1790,7 @@ export class ModuleManager {
       const native = require('../../scripts/lib/process-identity.cjs'), process = child?.pid && native.inspectProcess(child.pid)
       if (!child || !state || !credential || credential.revoked || credential.child !== child || !process) throw new Error('Original Agent is unavailable')
       const rpc = await require('../../scripts/lib/module-carrier-rpc.cjs').openSpawnedModuleRuntimeRpc(child, process, this.modules.get('crabot-agent')!.port,
-        { instance_id: this.runtimeRegistry.getInstanceId(), module_id: 'crabot-agent', runtime_id: state.runtimeId }, { timeoutMs: 30000 })
+        { instance_id: this.runtimeRegistry.getInstanceId(), module_id: 'crabot-agent', runtime_id: state.runtimeId }, this.runtimeConnectionOptions('crabot-agent', { timeoutMs: 30000 }))
       try {
         const result = await rpc.call(method, current.request, { authorizationBearer: credential.token })
         await current.verify()
@@ -1906,7 +1960,7 @@ export class ModuleManager {
       const runtime = this.modules.get(moduleId)!
       if (!runtime.skip_health_check) {
         const rpc = await openSpawnedModuleRuntimeRpc(owned.child, owned.process, runtime.port,
-          { instance_id: instanceId, module_id: moduleId, runtime_id: owned.state.runtimeId }, { timeoutMs: this.config.health_check_timeout * 1000 })
+          { instance_id: instanceId, module_id: moduleId, runtime_id: owned.state.runtimeId }, this.runtimeConnectionOptions(moduleId, { timeoutMs: this.config.health_check_timeout * 1000 }))
         try {
           const result = await rpc.call('health', {})
           await current.verify()
@@ -1917,7 +1971,7 @@ export class ModuleManager {
     const agent = current.runtimes.get('crabot-agent'), credential = this.runtimeBearers.get('crabot-agent')
     if (!agent || !credential || credential.revoked || credential.child !== agent.child || !native.sameProcess(agent.process, native.inspectProcess(agent.child.pid))) throw new Error('Current restored Agent is unavailable')
     const rpc = await openSpawnedModuleRuntimeRpc(agent.child, agent.process, this.modules.get('crabot-agent')!.port,
-      { instance_id: instanceId, module_id: 'crabot-agent', runtime_id: agent.state.runtimeId }, { timeoutMs: 30000 })
+      { instance_id: instanceId, module_id: 'crabot-agent', runtime_id: agent.state.runtimeId }, this.runtimeConnectionOptions('crabot-agent', { timeoutMs: 30000 }))
     try {
       const actual = await rpc.call('verify_workspace_interrupted_recovery_root', current.request, { authorizationBearer: credential.token })
       const expected = await this.handleVerifyWorkspaceInterruptedRuntime(current.request, credential.token)
@@ -2211,6 +2265,30 @@ export class ModuleManager {
     return { quiesced: true, ...await this.callWorkspaceRelocationAdmin('quiesce_workspace_relocation_web', params, bearer) }
   }
 
+  private runtimeConnectionOptions(moduleId: ModuleId, options: { timeoutMs: number; maxResponseBytes?: number }) {
+    return this.useIpc ? { ...options, transport: this.pinnedRuntimeTransport(moduleId, options.timeoutMs) } : options
+  }
+
+  private pinnedRuntimeTransport(moduleId: ModuleId, timeoutMs: number) {
+    const runtime = this.modules.get(moduleId), child = this.processes.get(moduleId)
+    const peer = child && this.runtimePeers.get(child), state = child && this.childStates.get(child)
+    if (!runtime || !child || !peer || !state) throw new RuntimeRpcError('SERVICE_UNAVAILABLE', 'Managed runtime is unavailable')
+    const port = runtime.port
+    let closed = false
+    return {
+      verify: () => {
+        if (closed || this.modules.get(moduleId) !== runtime || runtime.port !== port
+          || this.processes.get(moduleId) !== child || this.runtimePeers.get(child) !== peer
+          || this.childStates.get(child) !== state || state.finalizeStarted || state.rootExited
+          || child.exitCode !== null || child.signalCode !== null) throw new RuntimeRpcError('STALE_INSTANCE', 'Pinned runtime has changed')
+      },
+      call: (method: string, params: unknown, options: { authorizationBearer?: string }) => peer.call({ target: port, source: 'module-manager', method, params,
+        ...(options.authorizationBearer === undefined ? {} : { metadata: { authorizationBearer: options.authorizationBearer } }),
+      }, timeoutMs),
+      close: () => { closed = true },
+    }
+  }
+
   /** One current Admin carrier/runtime connection only; callers retain authorization and job semantics. */
   private async withCurrentAdminRpc<T>(timeoutMs: number, action: (rpc: CurrentAdminRpc, verify: () => Promise<void>) => Promise<T>): Promise<T> {
     const unavailable = () => Object.assign(new Error('当前Admin固定连接无法确认。'), { code: 'SERVICE_UNAVAILABLE' })
@@ -2237,10 +2315,12 @@ export class ModuleManager {
       const processes: WorkspaceModuleScope['processes'] = captureSpawnedProcessTree(child), root = processes.find(item => item.pid === rootPid)
       if (!root || await probeProcessStartIdentity(rootPid) !== record.process_start_identity) throw unavailable()
       verifyCurrent()
-      const listeners = processes.filter(item => native.sameProcess(item, native.inspectProcess(item.pid)) && native.listListeningTcpPorts(item.pid).includes(port))
+      const listeners = this.useIpc ? [root] : processes.filter(item => native.sameProcess(item, native.inspectProcess(item.pid)) && native.listListeningTcpPorts(item.pid).includes(port))
       if (listeners.length !== 1) throw unavailable()
       const { openModuleRuntimeRpc } = require('../../scripts/lib/module-runtime-rpc.cjs')
-      rpc = await openModuleRuntimeRpc(listeners[0], port, { instance_id: record.instance_id, module_id: 'admin-web', runtime_id: runtimeId }, { timeoutMs })
+      rpc = await openModuleRuntimeRpc(listeners[0], port, { instance_id: record.instance_id, module_id: 'admin-web', runtime_id: runtimeId }, {
+        timeoutMs, ...(this.useIpc ? { transport: this.pinnedRuntimeTransport('admin-web', timeoutMs) } : {}),
+      })
       verifyCurrent()
       const verify = async (): Promise<void> => {
         verifyCurrent()
@@ -2759,7 +2839,7 @@ export class ModuleManager {
           }
           stage = 'module-health'
           const rpc = await openSpawnedModuleRuntimeRpc(this.processes.get(module.module_id), module.process, runtime.port, { instance_id: instanceId, module_id: module.module_id, runtime_id: module.runtime_id },
-            { timeoutMs: this.config.health_check_timeout * 1000 })
+            this.runtimeConnectionOptions(module.module_id, { timeoutMs: this.config.health_check_timeout * 1000 }))
           try {
             assertCurrent()
             const result: HealthResult = await rpc.call('health', {})
@@ -2783,7 +2863,7 @@ export class ModuleManager {
           launch_id: proof.launchId, launch_sha256: proof.launchHash, root_selected_sha256: launched.root_selected_sha256,
           instance_id: instanceId, module_id: 'crabot-agent', runtime_id: agent.runtime_id }
         const rpc = await openSpawnedModuleRuntimeRpc(this.processes.get('crabot-agent'), agent.process, this.modules.get('crabot-agent')!.port,
-          { instance_id: instanceId, module_id: 'crabot-agent', runtime_id: agent.runtime_id }, { timeoutMs: 30000 })
+          { instance_id: instanceId, module_id: 'crabot-agent', runtime_id: agent.runtime_id }, this.runtimeConnectionOptions('crabot-agent', { timeoutMs: 30000 }))
         try {
           assertBearer()
           const result = await rpc.call('verify_workspace_relocation_root', { intent_id: request.intent_id, launch_id: proof.launchId }, { authorizationBearer: credential.token })
@@ -3085,7 +3165,7 @@ export class ModuleManager {
                 const actual = native.inspectProcess(item.process.pid)
                 if (actual && actual.started !== item.process.started) continue
               }
-              if (!await waitForProcessTreeExit(item.process.pid, 0, 25, item.port, () => true)) throw failure()
+              if (!await waitForProcessTreeExit(item.process.pid, 0, 25, this.useIpc ? undefined : item.port, () => true)) throw failure()
               await verify()
             }
           } catch (cause) { active = false; coordinator.close(); throw Object.assign(failure(), { cause }) }
@@ -3120,11 +3200,12 @@ export class ModuleManager {
           try {
             await verify()
             stage = 'owned-listener'
-            const listeners = scope.filter(item => native.sameProcess(item, native.inspectProcess(item.pid)) && native.listListeningTcpPorts(item.pid).includes(runtime.port))
+            const listeners = scope.filter(item => native.sameProcess(item, native.inspectProcess(item.pid))
+              && (this.useIpc ? item.pid === child.pid : native.listListeningTcpPorts(item.pid).includes(runtime.port)))
             if (listeners.length !== 1) throw new Error('Cannot verify the recovery module listener')
             stage = 'runtime-identity'
             rpc = await require('../../scripts/lib/module-shutdown-rpc.cjs').openModuleShutdownRpc(listeners[0], runtime.port,
-              { instance_id: this.runtimeRegistry.getInstanceId(), module_id: moduleId, runtime_id: state.runtimeId }, { timeoutMs })
+              { instance_id: this.runtimeRegistry.getInstanceId(), module_id: moduleId, runtime_id: state.runtimeId }, this.runtimeConnectionOptions(moduleId, { timeoutMs }))
             stage = 'current-role-after-identity'
             await verify()
             stage = 'shutdown'
@@ -3419,14 +3500,14 @@ export class ModuleManager {
         const { openSpawnedModuleRuntimeRpc } = require('../../scripts/lib/module-carrier-rpc.cjs')
         for (const item of cores) {
           const rpc = await openSpawnedModuleRuntimeRpc(item.child, item.process, item.runtime.port,
-            { instance_id: grant.job.instance_id, module_id: item.module_id, runtime_id: item.runtime_id }, { timeoutMs: this.config.health_check_timeout * 1000 })
+            { instance_id: grant.job.instance_id, module_id: item.module_id, runtime_id: item.runtime_id }, this.runtimeConnectionOptions(item.module_id, { timeoutMs: this.config.health_check_timeout * 1000 }))
           try { assertCurrent(); if ((await rpc.call('health', {})).status !== 'healthy') throw failure(); assertCurrent() } finally { rpc.close() }
           await verifyRuntime()
         }
         const agent = cores.find(item => item.module_id === 'crabot-agent'), credential = this.runtimeBearers.get('crabot-agent')
         if (!agent || !credential || credential.revoked || credential.child !== agent.child) throw failure()
         const rpc = await openSpawnedModuleRuntimeRpc(agent.child, agent.process, agent.runtime.port,
-          { instance_id: grant.job.instance_id, module_id: agent.module_id, runtime_id: agent.runtime_id }, { timeoutMs: 30000 })
+          { instance_id: grant.job.instance_id, module_id: agent.module_id, runtime_id: agent.runtime_id }, this.runtimeConnectionOptions(agent.module_id, { timeoutMs: 30000 }))
         try {
           assertCurrent()
           if (sha256CanonicalJson(await rpc.call('verify_workspace_relocation_recovery_root', request, { authorizationBearer: credential.token })) !== sha256CanonicalJson(health.root_verified)) throw failure()
@@ -3688,7 +3769,7 @@ export class ModuleManager {
                 await new Promise(resolve => setTimeout(resolve, 100))
               }
               const rpc = await openSpawnedModuleRuntimeRpc(this.processes.get(module.module_id), module.process, runtime.port,
-                { instance_id: instanceId, module_id: module.module_id, runtime_id: module.runtime_id }, { timeoutMs: this.config.health_check_timeout * 1000 })
+                { instance_id: instanceId, module_id: module.module_id, runtime_id: module.runtime_id }, this.runtimeConnectionOptions(module.module_id, { timeoutMs: this.config.health_check_timeout * 1000 }))
               try {
                 assertCurrent()
                 const health: HealthResult = await rpc.call('health', {})
@@ -3698,7 +3779,7 @@ export class ModuleManager {
               } finally { rpc.close() }
             }
             const rpc = await openSpawnedModuleRuntimeRpc(credential.child, agent.process, this.modules.get('crabot-agent')!.port,
-              { instance_id: instanceId, module_id: 'crabot-agent', runtime_id: agent.runtime_id }, { timeoutMs: 30000 })
+              { instance_id: instanceId, module_id: 'crabot-agent', runtime_id: agent.runtime_id }, this.runtimeConnectionOptions('crabot-agent', { timeoutMs: 30000 }))
             try {
               assertCurrent()
               const result = await rpc.call('verify_workspace_relocation_recovery_root', request, { authorizationBearer: credential.token })
@@ -4008,13 +4089,13 @@ export class ModuleManager {
         const locate = () => {
           verify()
           const listeners = captureSpawnedProcessTree(child).filter((item: WorkerProcessIdentity) => native.sameProcess(item, native.inspectProcess(item.pid))
-            && native.listListeningTcpPorts(item.pid).includes(runtime.port))
+            && (this.useIpc ? item.pid === child.pid : native.listListeningTcpPorts(item.pid).includes(runtime.port)))
           if (listeners.length !== 1) throw failure()
           return listeners[0]
         }
         const listener = locate(), { openModuleRuntimeRpc } = require('../../scripts/lib/module-runtime-rpc.cjs')
         const rpc = await openModuleRuntimeRpc(listener, runtime.port, { instance_id: row.instance_id, module_id: scope.module_id, runtime_id: state.runtimeId },
-          { timeoutMs: this.config.health_check_timeout * 1000 })
+          this.runtimeConnectionOptions(scope.module_id, { timeoutMs: this.config.health_check_timeout * 1000 }))
         try {
           verify()
           if (!native.sameProcess(listener, locate())) throw failure()
@@ -4263,12 +4344,13 @@ export class ModuleManager {
       this.assertWorkspaceCoordinatorGrantCurrent(grant)
       const native = require('../../scripts/lib/process-identity.cjs'), { captureSpawnedProcessTree } = require('../../scripts/lib/spawned-process-tree.cjs')
       const processes: WorkspaceModuleScope['processes'] = captureSpawnedProcessTree(grant.agent.child)
-      const listeners = processes.filter(item => native.sameProcess(item, native.inspectProcess(item.pid)) && native.listListeningTcpPorts(item.pid).includes(grant.agent.port))
+      const listeners = processes.filter(item => native.sameProcess(item, native.inspectProcess(item.pid))
+        && (this.useIpc ? item.pid === grant.agent.child.pid : native.listListeningTcpPorts(item.pid).includes(grant.agent.port)))
       if (listeners.length !== 1) throw new Error('One current Agent listener required')
       const { openModuleRuntimeRpc } = require('../../scripts/lib/module-runtime-rpc.cjs')
       const connection = await openModuleRuntimeRpc(listeners[0], grant.agent.port,
         { instance_id: this.runtimeRegistry.getInstanceId(), module_id: 'crabot-agent', runtime_id: grant.agent.runtimeId },
-        { timeoutMs: 30000, maxResponseBytes: 32 * 1024 * 1024 })
+        this.runtimeConnectionOptions('crabot-agent', { timeoutMs: 30000, maxResponseBytes: 32 * 1024 * 1024 }))
       rpc = connection
       this.assertWorkspaceCoordinatorGrantCurrent(grant)
       return connection
@@ -4642,11 +4724,11 @@ export class ModuleManager {
         assertCurrent()
         if (!runtime.skip_health_check) {
           const listeners = scope.processes.filter(item => native.sameProcess(item, native.inspectProcess(item.pid))
-            && native.listListeningTcpPorts(item.pid).includes(scope.module_port))
+            && (this.useIpc ? item.pid === child.pid : native.listListeningTcpPorts(item.pid).includes(scope.module_port)))
           if (listeners.length !== 1) throw new Error('Cannot verify the fixed module listener')
           rpc = await openModuleShutdownRpc(listeners[0], scope.module_port, {
             instance_id: scope.instance_id, module_id: scope.module_id, runtime_id: scope.runtime_id,
-          }, { timeoutMs })
+          }, this.runtimeConnectionOptions(scope.module_id, { timeoutMs }))
         }
         await stopKnownProcessScope(scope.processes, { timeoutMs,
           onObserved: async (processes: WorkspaceModuleScope['processes']) => { assertCurrent(); await journal.observe(scope.module_id, processes) },
@@ -4774,6 +4856,12 @@ export class ModuleManager {
     const [rawCommand, ...args] = this.parseEntry(entry)
     // 把 uv 这类用户级 installer 装的工具解析成绝对路径，避开 user PATH 传播延迟
     const command = resolveExecutable(rawCommand)
+    const pipe = this.useIpc && moduleId === 'memory-default' && runtime.module_type === 'memory'
+    const ipc = this.useIpc && !runtime.skip_health_check && !pipe
+    if (ipc && !/^node(?:\.exe)?$/.test(path.basename(command))) {
+      runtime.status = 'error'
+      throw new RuntimeRpcError('SERVICE_UNAVAILABLE', 'This runtime requires a managed pipe adapter')
+    }
 
     // 子进程日志同时落盘到 ${DATA_DIR}/logs/<moduleId>.log，
     // 避免子进程崩溃时 console pipe 里的栈被丢失看不到。
@@ -4796,8 +4884,11 @@ export class ModuleManager {
       ...envOverride,
       Crabot_MODULE_ID: moduleId,
       Crabot_PORT: String(runtime.port),
+      CRABOT_HOME: path.resolve(__dirname, '../..'),
+      CRABOT_RUNTIME_DATA_DIR: path.resolve(this.dataDir),
       CRABOT_INSTANCE_ID: this.runtimeRegistry.getInstanceId(),
       CRABOT_MODULE_RUNTIME_ID: runtimeId,
+      ...(ipc || pipe ? { CRABOT_RPC_TRANSPORT: pipe ? 'pipe' : 'ipc' } : {}),
       CRABOT_MM_PORT: String(this.config.port),
       CRABOT_MM_ENDPOINT: `http://localhost:${this.config.port}`,
       ...(adminRpcPort && moduleId !== 'admin-web' ? { CRABOT_ADMIN_ENDPOINT: `http://localhost:${adminRpcPort}` } : {}),
@@ -4831,12 +4922,13 @@ export class ModuleManager {
     try {
       this.assertWorkspaceProcessStartCurrent(moduleId, validationPermit, restorationGuard)
       if (recoveryId) {
-        runtimeGate = require('../../scripts/lib/workspace-runtime-gate.mjs').createWorkspaceRuntimeGate()
+        runtimeGate = require('../../scripts/lib/workspace-runtime-gate.mjs').createWorkspaceRuntimeGate({ transport: pipe ? 'pipe' : ipc ? 'ipc' : undefined })
         proc = runtimeGate!.child
       } else proc = spawn(command, args, {
         cwd: runtime.cwd,
         env: childEnv,
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: ipc ? ['ignore', 'pipe', 'pipe', 'ipc'] : [pipe ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+        ...(ipc ? { serialization: 'advanced' as const } : {}),
         detached: process.platform !== 'win32',
         windowsHide: true,
       })
@@ -4845,6 +4937,23 @@ export class ModuleManager {
       runtime.status = 'error'
       logStream.end(`[${generateTimestamp()}] === spawn failed ${moduleId} ===\n`)
       throw error
+    }
+    let admitRuntime!: () => void
+    const admitted = new Promise<void>(resolve => { admitRuntime = resolve })
+    const runtimePeer = ipc || pipe ? new RuntimeRpcPeer(pipe ? new MemoryPipeChannel(proc) : proc) : undefined
+    if (runtimePeer) {
+      this.runtimePeers.set(proc, runtimePeer)
+      runtimePeer.handle(async call => {
+        await admitted
+        if (this.processes.get(moduleId) !== proc || this.childStates.get(proc)?.finalizeStarted) {
+          throw new RuntimeRpcError('SERVICE_UNAVAILABLE', 'Caller runtime is no longer current')
+        }
+        if (call.target === this.config.port && ['register', 'register_core_agent', 'register_voice_runtime', 'unregister'].includes(call.method)
+          && (call.params as { module_id?: unknown })?.module_id !== moduleId) {
+          throw new RuntimeRpcError('FORBIDDEN', 'Registration must belong to the calling runtime')
+        }
+        return this.dispatchRuntimeCall(call)
+      })
     }
     let spawnError: Error | undefined
     const captureSpawnError = (error: Error): void => { spawnError = error }
@@ -4861,6 +4970,8 @@ export class ModuleManager {
       })
     }
     if (!proc.pid) {
+      runtimePeer?.close()
+      admitRuntime()
       proc.removeListener('error', captureSpawnError)
       clearPendingCredentials()
       runtime.status = 'error'
@@ -4875,15 +4986,18 @@ export class ModuleManager {
         moduleId,
         rootPid: proc.pid,
         modulePort: runtime.port,
+        ...(this.useIpc ? { rpcTransport: pipe ? 'pipe' as const : 'ipc' as const } : {}),
       })
     } catch (error) {
+      runtimePeer?.close()
+      admitRuntime()
       runtimeGate?.close()
       let cleanupError: unknown
       try {
         await terminateProcessTree(proc.pid, {
           gracefulTimeoutMs: 0,
           forceImmediately: true,
-          modulePort: runtime.port,
+          modulePort: this.useIpc ? undefined : runtime.port,
         })
       } catch (terminationError) {
         cleanupError = terminationError
@@ -4935,9 +5049,10 @@ export class ModuleManager {
       logEnded: false,
     }
     this.childStates.set(proc, childState)
+    admitRuntime()
 
     // 处理输出：同时落盘 + 终端转发（dev/调试可见）
-    proc.stdout?.on('data', (data: Buffer) => {
+    if (!pipe) proc.stdout?.on('data', (data: Buffer) => {
       if (!childState.logEnded) logStream.write(data)
       console.log(`[${moduleId}] ${data.toString().trim()}`)
     })
@@ -5107,14 +5222,34 @@ export class ModuleManager {
       // spawn errors with no PID cannot have created an owned process tree.
       return
     }
+    if (this.useIpc && process.platform === 'win32') {
+      await this.stopManagedWindowsScope(state, forceImmediately)
+      return
+    }
     const runtime = this.modules.get(state.moduleId)
     await terminateProcessTree(state.rootPid, {
       gracefulTimeoutMs: this.config.shutdown_timeout * 1000,
       forceImmediately,
-      modulePort: runtime?.port,
+      modulePort: this.useIpc ? undefined : runtime?.port,
       requireOwnedProcess: state.finalReason === 'crashed',
       isRootPidExited: () => state.rootExited,
     })
+  }
+
+  private async stopManagedWindowsScope(state: ManagedChildState, forceImmediately: boolean, graceful?: () => Promise<void>): Promise<void> {
+    const native = require('../../scripts/lib/process-identity.cjs')
+    const scopes = require('../../scripts/lib/owned-process-tree.cjs')
+    if (!state.observedProcesses) {
+      if (state.rootExited || state.child.exitCode !== null || state.child.signalCode !== null) {
+        throw new Error(`Cannot prove managed process scope after root exit: ${state.moduleId}`)
+      }
+      state.observedProcesses = require('../../scripts/lib/spawned-process-tree.cjs').captureSpawnedProcessTree(state.child)
+    } else state.observedProcesses = scopes.recaptureObservedProcessScope(state.observedProcesses)
+    await require('../../scripts/lib/known-process-stop.cjs').stopKnownProcessScope(state.observedProcesses, {
+      timeoutMs: forceImmediately ? 1 : this.config.shutdown_timeout * 1000,
+      onObserved: async (processes: ReadonlyArray<WorkerProcessIdentity>) => { state.observedProcesses = processes },
+      graceful,
+    }, native)
   }
 
   private resetChildFinalizeAfterConfirmedForce(state: ManagedChildState): void {
@@ -5139,6 +5274,12 @@ export class ModuleManager {
     runtime: ModuleRuntime,
   ): Promise<void> {
     const timeoutMs = this.config.shutdown_timeout * 1000
+    if (this.useIpc && process.platform === 'win32') {
+      await this.stopManagedWindowsScope(state, false, async () => {
+        await this.sendToModule(runtime.port, 'shutdown', {}, timeoutMs)
+      })
+      return
+    }
     const deadline = Date.now() + timeoutMs
     try {
       await this.sendToModule<Record<string, never>>(
@@ -5160,13 +5301,13 @@ export class ModuleManager {
       state.rootPid,
       remainingMs,
       25,
-      runtime.port,
+      this.useIpc ? undefined : runtime.port,
       () => state.rootExited,
     )) return
     await terminateProcessTree(state.rootPid, {
       gracefulTimeoutMs: 0,
       forceImmediately: true,
-      modulePort: runtime.port,
+      modulePort: this.useIpc ? undefined : runtime.port,
       isRootPidExited: () => state.rootExited,
     })
   }
@@ -5194,6 +5335,7 @@ export class ModuleManager {
     }
 
     state.finalizeStarted = true
+    this.runtimePeers.get(state.child)?.close()
     state.finalReason = state.intentionalReason ?? 'crashed'
     const runtime = this.modules.get(state.moduleId)
     const bearer = this.runtimeBearers.get(state.moduleId)
@@ -5438,6 +5580,13 @@ export class ModuleManager {
     params: unknown,
     timeoutMs = this.config.health_check_timeout * 1000,
   ): Promise<R> {
+    if (this.useIpc) {
+      const runtime = Array.from(this.modules.values()).find(module => module.port === port)
+      const child = runtime && this.processes.get(runtime.module_id)
+      const peer = child && this.runtimePeers.get(child)
+      if (!peer) throw new RuntimeRpcError('SERVICE_UNAVAILABLE', 'Target runtime is unavailable')
+      return peer.call<R>({ target: port, source: 'module-manager', method, params }, timeoutMs)
+    }
     return new Promise((resolve, reject) => {
       let settled = false
       let absoluteTimer: NodeJS.Timeout | undefined
@@ -5561,7 +5710,7 @@ export class ModuleManager {
         : m.status === 'error' ? '\u274c'
         : m.status === 'schema_mismatch' ? '\ud83d\udd27'
         : '\u2b55'
-      const portInfo = m.status === 'running' ? `:${m.port}` : ''
+      const portInfo = m.status === 'running' && !this.useIpc ? `:${m.port}` : ''
       lines.push(`  ${icon} ${m.module_id} (${m.module_type}) ${m.status}${portInfo}`)
     }
 
@@ -5580,7 +5729,7 @@ export class ModuleManager {
     }
 
     lines.push('')
-    lines.push(`  Module Manager: http://localhost:${this.config.port}`)
+    lines.push(this.useIpc ? '  Module Manager: managed IPC' : `  Module Manager: http://localhost:${this.config.port}`)
 
     const vite = modules.find((m) => m.module_id === 'vite-dev')
     const admin = modules.find((m) => m.module_id === 'admin-web')

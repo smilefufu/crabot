@@ -92,7 +92,7 @@ it('channel 注册的取图 RPC 查询最新记录，保留原消息且不发布
   try {
     const channel = new WechatChannel({
       module_id: 'wechat-images', module_type: 'channel', version: '0.0.1', protocol_version: '0.1.0',
-      port: 0, data_dir: dir, wechat: { connector_url: 'http://localhost:0', api_key: 'test', mode: 'socketio' },
+      port: 0, data_dir: dir, wechat: { connector_url: 'http://localhost:0', api_key: 'test' },
     })
     vi.spyOn((channel as any).sessionManager, 'findById').mockReturnValue({ platform_session_id: 'group' })
     vi.spyOn((channel as any).client, 'getMessageById').mockImplementation(getMessage)

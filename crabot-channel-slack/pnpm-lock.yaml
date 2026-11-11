@@ -19,6 +19,9 @@ importers:
       '@slack/web-api':
         specifier: 8.2.0
         version: 8.2.0
+      cordis:
+        specifier: 4.0.0-rc.12
+        version: 4.0.0-rc.12
       crabot-shared:
         specifier: file:../crabot-shared
         version: file:../crabot-shared
@@ -405,6 +408,9 @@ packages:
     resolution: {integrity: sha512-bIW8/8BLD/HLuHLIA2LfA7AhSokzui4swCbMJuwoRJxn/kzHVla6YEKLvN1nCFHK/DfX7g+4Wj3ess/ZSh/tWQ==}
     engines: {node: '>= 20', npm: '>=9.6.4'}
 
+  '@standard-schema/spec@1.1.0':
+    resolution: {integrity: sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==}
+
   '@types/estree@1.0.9':
     resolution: {integrity: sha512-GhdPgy1el4/ImP05X05Uw4cw2/M93BCUmnEvWZNStlCzEKME4Fkk+YpoA5OiHNQmoS7Cafb8Xa3Pya8m1Qrzeg==}
 
@@ -469,6 +475,21 @@ packages:
 
   confbox@0.1.8:
     resolution: {integrity: sha512-RMtmw0iFkeR4YV+fUOSucriAQNb9g8zFR52MWCtl+cCZOFRNL6zeB395vPzFhEjjn4fMxXudmELnl/KF/WrK6w==}
+
+  cordis@4.0.0-rc.12:
+    resolution: {integrity: sha512-/ZtRivYxr5sffTULPewHuX5kEy5sWi8oADHSpnt0KjAd8uKRIj+kv4fh3lxtutIfVlgwJVFVXWOQp/gYa+kIOQ==}
+    hasBin: true
+    peerDependencies:
+      '@cordisjs/plugin-include': ^1.2.0
+      '@cordisjs/plugin-loader': ^1.0.0-rc.9
+    peerDependenciesMeta:
+      '@cordisjs/plugin-include':
+        optional: true
+      '@cordisjs/plugin-loader':
+        optional: true
+
+  cosmokit@1.8.1:
+    resolution: {integrity: sha512-PDBv4l90xZKrUsZ0vtoycgZpO/j4iFsqJXrAxsyBDsnQRI7ZMJXIjgDJsKNjd5L8jnVnnlrDCdhkFbTncgCVjQ==}
 
   crabot-shared@file:../crabot-shared:
     resolution: {directory: ../crabot-shared, type: directory}
@@ -1079,6 +1100,8 @@ snapshots:
       p-retry: 4.6.2
       retry: 0.13.1
 
+  '@standard-schema/spec@1.1.0': {}
+
   '@types/estree@1.0.9': {}
 
   '@types/node@22.20.5':
@@ -1153,6 +1176,13 @@ snapshots:
       get-func-name: 2.0.2
 
   confbox@0.1.8: {}
+
+  cordis@4.0.0-rc.12:
+    dependencies:
+      '@standard-schema/spec': 1.1.0
+      cosmokit: 1.8.1
+
+  cosmokit@1.8.1: {}
 
   crabot-shared@file:../crabot-shared:
     dependencies:

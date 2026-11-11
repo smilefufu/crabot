@@ -47,7 +47,7 @@ export function VoicePairing({ channelId, running, state, onChanged }: { channel
   return <div>
     <h4>手机配对</h4>
     <p>新设备请先在手机登记本人声纹，再扫描下方二维码。核对时请同时确认设备所有者。</p>
-    <p>{!running ? '请先启动此聊天方式。' : state ? `${state.paired ? '已配对' : '未配对'} · ${state.connected ? '已连接' : '离线'} · ${state.foreground ? '前台' : '非前台'} · 麦克风 ${state.microphone === 'closed' ? '关闭' : state.microphone === 'wake' ? '本地唤醒' : '录音中'}` : '正在等待终端状态。'}</p>
+    <p>{!running ? '请先启动此协作入口。' : state ? `${state.paired ? '已配对' : '未配对'} · ${state.connected ? '已连接' : '离线'} · ${state.foreground ? '前台' : '非前台'} · 麦克风 ${state.microphone === 'closed' ? '关闭' : state.microphone === 'wake' ? '本地唤醒' : '录音中'}` : '正在等待终端状态。'}</p>
     {error && <p role="alert">{error}</p>}
     <div className="voice-fields">
       <label>手机可访问的后台地址<input className="input" list="voice-hosts" value={connection.base_url} placeholder="http://192.168.1.10:3000" onChange={e => {
@@ -65,7 +65,7 @@ export function VoicePairing({ channelId, running, state, onChanged }: { channel
       <Button disabled={busy || !running || !!state?.paired || changed || !preview} onClick={() => void run(async () => { const result = await voiceService.action(channelId, { action: 'create_pairing' }); if (result.action === 'create_pairing') setPairing(result.pairing) })}>生成一次性配对码</Button>
       <Button variant="danger" disabled={busy || !running || (!state?.paired && state?.owner_activation?.status !== 'pending')} onClick={() => void run(async () => { await voiceService.action(channelId, { action: 'revoke_terminal' }); setPairing(undefined) })}>撤销终端</Button>
     </div>
-    {state?.paired && <p>更换连接地址或升级旧配对时，先撤销终端，再用同一聊天方式的新二维码扫码。手机保留同聊天方式的声纹登记。</p>}
-    {pairing && <div className="voice-pairing">{pairingOwner && <p>设备所有者：{pairingOwner.display_name}。{state?.owner_activation?.status === 'completed' ? '本次只重新配对，保留现有联系人和 Master 关联。' : '确认后将关联为当前 CRABOT 的 Master；已有 Master 时保留原好友并追加本聊天方式身份。'}</p>}{qr && <img src={qr} width={220} height={220} alt="手机扫描的一次性语音配对二维码" />}<p>用 Android App 扫码，核对两端均显示 <strong>{pairing.verification_code}</strong> 后确认。有效期至 {new Date(pairing.expires_at).toLocaleTimeString()}。</p><p>地址：{pairing.url}</p><Button disabled={busy || changed || !pairingOwner || state?.pairing_id !== pairing.pairing_id || state?.verification_code !== pairing.verification_code || Date.parse(pairing.expires_at) <= Date.now()} onClick={() => void run(async () => { await voiceService.action(channelId, { action: 'confirm_pairing', pairing_id: pairing.pairing_id }); setPairing(undefined) })}>核对一致，确认配对</Button></div>}
+    {state?.paired && <p>更换连接地址或升级旧配对时，先撤销终端，再用同一协作入口的新二维码扫码。手机保留同协作入口的声纹登记。</p>}
+    {pairing && <div className="voice-pairing">{pairingOwner && <p>设备所有者：{pairingOwner.display_name}。{state?.owner_activation?.status === 'completed' ? '本次只重新配对，保留现有联系人和 Master 关联。' : '确认后将关联为当前 CRABOT 的 Master；已有 Master 时保留原好友并追加本协作入口身份。'}</p>}{qr && <img src={qr} width={220} height={220} alt="手机扫描的一次性语音配对二维码" />}<p>用 Android App 扫码，核对两端均显示 <strong>{pairing.verification_code}</strong> 后确认。有效期至 {new Date(pairing.expires_at).toLocaleTimeString()}。</p><p>地址：{pairing.url}</p><Button disabled={busy || changed || !pairingOwner || state?.pairing_id !== pairing.pairing_id || state?.verification_code !== pairing.verification_code || Date.parse(pairing.expires_at) <= Date.now()} onClick={() => void run(async () => { await voiceService.action(channelId, { action: 'confirm_pairing', pairing_id: pairing.pairing_id }); setPairing(undefined) })}>核对一致，确认配对</Button></div>}
   </div>
 }

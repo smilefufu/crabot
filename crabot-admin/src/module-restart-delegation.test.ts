@@ -3,7 +3,9 @@ import AdminModule from './index.js'
 
 interface AdminUnderTest {
   config: { moduleId: string }
+  rpcClient: { callModuleManager: ReturnType<typeof vi.fn> }
   channelManager: {
+    ensureInstanceDefinition(id: string): Promise<void>
     getInstance(id: string): unknown
     loadLocalConfig(id: string): Promise<Record<string, string> | null>
   }
@@ -18,7 +20,9 @@ interface AdminUnderTest {
 function buildAdmin(): AdminUnderTest {
   const admin = Object.create(AdminModule.prototype) as AdminUnderTest
   admin.config = { moduleId: 'admin-test' }
+  admin.rpcClient = { callModuleManager: vi.fn().mockResolvedValue({status:'accepted',tracking_id:'restart-1'}) }
   admin.channelManager = {
+    ensureInstanceDefinition: vi.fn(async () => {}),
     getInstance: () => undefined,
     loadLocalConfig: vi.fn(),
   }
@@ -39,32 +43,18 @@ afterEach(() => {
 
 describe('Admin restart delegation', () => {
   it('resolves current start env and sends exactly one MM restart request', async () => {
-    const requests: Array<{ url: string; body: any }> = []
-    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
-      requests.push({ url, body: JSON.parse(String(init?.body)) })
-      return {
-        json: async () => ({
-          success: true,
-          data: { status: 'accepted', tracking_id: 'restart-1' },
-        }),
-      }
-    }))
+    vi.stubGlobal('fetch', vi.fn(() => { throw new Error('Internal HTTP is forbidden') }))
     const admin = buildAdmin()
 
     const result = await admin.handleRestartModuleAdmin({ module_id: 'channel-1', force: true })
 
     expect(result).toEqual({ status: 'accepted', tracking_id: 'restart-1' })
-    expect(requests).toHaveLength(1)
-    expect(requests[0].url).toMatch(/\/restart_module$/)
-    expect(requests[0].body.params).toEqual({
-      module_id: 'channel-1',
-      force: true,
-      env: {
-        CHANNEL_TOKEN: 'module-value',
-        MODEL_CONFIG: 'resolved-now',
-        SHARED: 'global',
-      },
-    })
+    expect(admin.rpcClient.callModuleManager).toHaveBeenCalledOnce()
+    expect(admin.rpcClient.callModuleManager).toHaveBeenCalledWith('restart_module', {
+      module_id: 'channel-1', force: true,
+      env: { CHANNEL_TOKEN: 'module-value', MODEL_CONFIG: 'resolved-now', SHARED: 'global' },
+    }, 'admin-test')
+    expect(fetch).not.toHaveBeenCalled()
   })
 
   it('sends no lifecycle request when current env resolution fails', async () => {
@@ -77,16 +67,14 @@ describe('Admin restart delegation', () => {
       'provider resolution failed',
     )
     expect(fetchSpy).not.toHaveBeenCalled()
+    expect(admin.rpcClient.callModuleManager).not.toHaveBeenCalled()
   })
 
   it('loads channel-local config through the same resolver used by start', async () => {
-    const fetchSpy = vi.fn(async (_url: string, init?: RequestInit) => ({
-      json: async () => ({ success: true, data: { status: 'accepted', tracking_id: 'restart-2' } }),
-      requestBody: init?.body,
-    }))
-    vi.stubGlobal('fetch', fetchSpy)
+    vi.stubGlobal('fetch', vi.fn(() => { throw new Error('Internal HTTP is forbidden') }))
     const admin = buildAdmin()
     admin.channelManager = {
+      ensureInstanceDefinition: vi.fn(async () => {}),
       getInstance: () => ({ id: 'channel-1' }),
       loadLocalConfig: vi.fn().mockResolvedValue({ CHANNEL_SECRET: 'current' }),
     }
@@ -94,7 +82,7 @@ describe('Admin restart delegation', () => {
     await admin.handleRestartModuleAdmin({ module_id: 'channel-1' })
 
     expect(admin.channelManager.loadLocalConfig).toHaveBeenCalledWith('channel-1')
-    const body = JSON.parse(String(fetchSpy.mock.calls[0][1]?.body))
-    expect(body.params.env).toMatchObject({ CHANNEL_SECRET: 'current', MODEL_CONFIG: 'resolved-now' })
+    const params = admin.rpcClient.callModuleManager.mock.calls[0][1]
+    expect(params.env).toMatchObject({ CHANNEL_SECRET: 'current', MODEL_CONFIG: 'resolved-now' })
   })
 })

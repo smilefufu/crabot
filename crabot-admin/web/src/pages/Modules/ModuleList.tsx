@@ -7,7 +7,10 @@ import { MainLayout } from '../../components/Layout/MainLayout'
 import { Card } from '../../components/Common/Card'
 import { Button } from '../../components/Common/Button'
 import { Loading } from '../../components/Common/Loading'
-import type { ChannelImplementation } from '../../types'
+import { ExperimentalChannels } from '../Channels/ExperimentalChannels'
+import { isExperimentalChannel } from '../Channels/channel-presentation'
+import '../Channels/collaboration.css'
+import type { ChannelImplementation, ChannelPluginCatalogEntry } from '../../types'
 
 interface RunningModule {
   module_id: string
@@ -99,7 +102,7 @@ const BUILTIN_MEMORY: ModuleItem = {
 const TYPE_LABELS: Record<ModuleType, string> = {
   agent: 'Agent',
   memory: 'Memory',
-  channel: 'Channel',
+  channel: '协作插件',
 }
 
 const TYPE_COLORS: Record<ModuleType, string> = {
@@ -154,6 +157,9 @@ export const ModuleList: React.FC = () => {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [filter, setFilter] = useState<ModuleFilter>('all')
+  const [plugins, setPlugins] = useState<ChannelPluginCatalogEntry[]>([])
+  const [installing, setInstalling] = useState<Set<string>>(new Set())
+  const [installErrors, setInstallErrors] = useState<Record<string, string>>({})
 
   // 运行中模块状态
   const [runningModules, setRunningModules] = useState<RunningModule[]>([])
@@ -206,9 +212,10 @@ export const ModuleList: React.FC = () => {
       setLoading(true)
       setError('')
 
-      const [archiveItems, channelResponse] = await Promise.all([
+      const [archiveItems, channelResponse, pluginResponse] = await Promise.all([
         legacyArchiveService.list().catch(() => [] as LegacyAgentArchiveSummary[]),
-        channelService.listImplementations().catch(() => ({ items: [] as ChannelImplementation[] })),
+        channelService.listImplementations(),
+        channelService.listPlugins(),
       ])
 
       const allModules: ModuleItem[] = [
@@ -219,10 +226,24 @@ export const ModuleList: React.FC = () => {
       ]
 
       setModules(allModules)
+      setPlugins(pluginResponse.items)
     } catch (err) {
       setError(err instanceof Error ? err.message : '加载失败')
     } finally {
       setLoading(false)
+    }
+  }
+
+  const installPlugin = async (id: string) => {
+    setInstalling(previous => new Set(previous).add(id))
+    setInstallErrors(previous => ({ ...previous, [id]: '' }))
+    try {
+      await channelService.installPlugin(id)
+      await loadAllModules()
+    } catch (error) {
+      setInstallErrors(previous => ({ ...previous, [id]: error instanceof Error ? error.message : '安装失败，请重试' }))
+    } finally {
+      setInstalling(previous => { const next = new Set(previous); next.delete(id); return next })
     }
   }
 
@@ -233,6 +254,19 @@ export const ModuleList: React.FC = () => {
   const countByType = (type: ModuleType) =>
     modules.filter((m) => m.module_type === type).length
 
+  const renderPlugin = (plugin: ChannelPluginCatalogEntry) => <Card key={plugin.implementation_id}>
+    <div className="collaboration-plugin-heading">
+      <div><strong>{plugin.name}</strong><span style={{ marginLeft: '0.75rem', color: 'var(--text-secondary)' }}>v{plugin.version}</span></div>
+      <div className="collaboration-plugin-actions">
+        <Button variant="secondary" disabled={plugin.installed || installing.has(plugin.implementation_id)} onClick={() => installPlugin(plugin.implementation_id)}>
+          {plugin.installed ? '已安装' : installing.has(plugin.implementation_id) ? '安装中…' : '安装插件'}
+        </Button>
+        {plugin.installed && <Button aria-label={`添加${plugin.name}协作入口`} onClick={() => navigate(`/channels/new?implementation_id=${encodeURIComponent(plugin.implementation_id)}`)}>添加协作入口</Button>}
+      </div>
+    </div>
+    {installErrors[plugin.implementation_id] && <p role="alert" className="error-message">{installErrors[plugin.implementation_id]}</p>}
+  </Card>
+
   if (loading) return <MainLayout><Loading /></MainLayout>
 
   return (
@@ -240,7 +274,7 @@ export const ModuleList: React.FC = () => {
       <div style={{ marginBottom: '2rem' }}>
         <h1 style={{ fontSize: '2rem', fontWeight: 700, marginBottom: '1rem' }}>模块管理</h1>
         <p style={{ color: 'var(--text-secondary)' }}>
-          管理所有已安装的 Agent、Memory 和 Channel 实现
+          管理所有已安装的 Agent、Memory 和协作插件
         </p>
       </div>
 
@@ -260,7 +294,7 @@ export const ModuleList: React.FC = () => {
                 <th>类型</th>
                 <th>状态</th>
                 <th>PID</th>
-                <th>端口</th>
+                <th>内部地址</th>
                 <th>健康</th>
                 <th>操作</th>
               </tr>
@@ -322,12 +356,21 @@ export const ModuleList: React.FC = () => {
         </div>
       )}
 
+      <section aria-label="可安装的协作插件" style={{ marginBottom: '2rem' }}>
+        <h2 style={{ fontSize: '1.25rem', fontWeight: 600, marginBottom: '0.75rem' }}>可安装的协作插件</h2>
+        <p className="collaboration-muted" style={{ marginBottom: '1rem' }}>安装插件后添加协作入口，完成账号设置。在熟悉的平台上与 CRABOT 协作。</p>
+        <div style={{ display: 'grid', gap: '0.75rem' }}>{plugins.filter(plugin => !isExperimentalChannel(plugin.implementation_id)).map(renderPlugin)}</div>
+        <ExperimentalChannels count={plugins.filter(plugin => isExperimentalChannel(plugin.implementation_id)).length}>
+          <div style={{ display: 'grid', gap: '0.75rem' }}>{plugins.filter(plugin => isExperimentalChannel(plugin.implementation_id)).map(renderPlugin)}</div>
+        </ExperimentalChannels>
+      </section>
+
       {/* 已安装模块列表 */}
       <div style={{ marginBottom: '1rem' }}>
         <h2 style={{ fontSize: '1.25rem', fontWeight: 600, marginBottom: '0.75rem' }}>已安装模块</h2>
       </div>
 
-      <div style={{ marginBottom: '1.5rem', display: 'flex', gap: '0.5rem' }}>
+      <div style={{ marginBottom: '1.5rem', display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
         <Button
           variant={filter === 'all' ? 'primary' : 'secondary'}
           onClick={() => setFilter('all')}
@@ -350,7 +393,7 @@ export const ModuleList: React.FC = () => {
           variant={filter === 'channel' ? 'primary' : 'secondary'}
           onClick={() => setFilter('channel')}
         >
-          Channel ({countByType('channel')})
+          协作插件 ({countByType('channel')})
         </Button>
       </div>
 
@@ -366,9 +409,9 @@ export const ModuleList: React.FC = () => {
         <div style={{ display: 'grid', gap: '1rem' }}>
           {filteredModules.map((item) => (
             <Card key={`${item.module_type}-${item.id}`}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start' }}>
-                <div style={{ flex: 1 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '0.5rem' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start', flexWrap: 'wrap', gap: '1rem' }}>
+                <div style={{ flex: '1 1 240px', minWidth: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '0.75rem', marginBottom: '0.5rem' }}>
                     <h3 style={{ fontSize: '1.25rem', fontWeight: 600 }}>{item.name}</h3>
                     <span
                       className="badge"

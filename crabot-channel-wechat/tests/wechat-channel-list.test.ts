@@ -12,7 +12,6 @@ function makeChannel(): WechatChannel {
     wechat: {
       connector_url: 'http://localhost:0',
       api_key: 'wct_test',
-      mode: 'socketio',
     },
   })
 }

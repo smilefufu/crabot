@@ -293,6 +293,15 @@ export interface ChannelOnboardingMethod {
   handler: string
 }
 
+export interface ChannelPluginCatalogEntry {
+  implementation_id: string
+  name: string
+  platform: string
+  package_name: string
+  version: string
+  installed: boolean
+}
+
 export interface ChannelImplementation {
   id: string
   name: string
@@ -345,6 +354,7 @@ export interface ChannelInstance {
   auto_start: boolean
   start_priority: number
   module_registered: boolean
+  runtime_error?: string
   runtime_status?: 'stopped' | 'starting' | 'running' | 'stopping' | 'failed' | 'unknown'
   created_at: string
   updated_at: string

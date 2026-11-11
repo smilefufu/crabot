@@ -25,6 +25,7 @@ describe('required product executable resolution', () => {
   it('retains explicit executable paths and ordinary source command resolution', () => {
     delete process.env.CRABOT_PRODUCT_ROOT
     expect(resolveExecutable(process.execPath)).toBe(process.execPath)
+    expect(resolveExecutable('node')).toBe(process.execPath)
     expect(resolveExecutable('crabot-fixture-no-host-command')).toBe('crabot-fixture-no-host-command')
   })
 })

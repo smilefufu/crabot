@@ -48,12 +48,7 @@ export interface WechatRawEvent {
 /**
  * Webhook 信封（wechat-connector 推送给 Bot 的外层结构）
  */
-export interface WebhookEnvelope {
-  event_type: 'wechat_message'
-  data: WechatRawEvent
-  timestamp: number
-  signature: string
-}
+
 
 // ============================================================================
 // Crabot Channel 协议类型（对齐 crabot-docs/protocols/protocol-channel.md）
@@ -248,12 +243,6 @@ export interface WechatChannelConfig {
   connector_url: string
   /** Bot API Key */
   api_key: string
-  /** Webhook 签名密钥（Webhook 模式需要） */
-  webhook_secret?: string
-  /** 推送模式 */
-  mode: 'socketio' | 'webhook'
-  /** Webhook 模式下本地监听端口 */
-  webhook_port?: number
   /** 群聊仅响应定向消息（@ Crabot 或引用/回复 Crabot 发言；true 时不发布其余群消息事件。缺省 false=发布所有消息） */
   only_respond_to_mentions?: boolean
 }

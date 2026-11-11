@@ -25,9 +25,6 @@ beforeEach(() => {
     data_dir: tmpDir,
     telegram: {
       bot_token: 'token-secret',
-      mode: 'polling',
-      webhook_url: undefined,
-      webhook_secret: undefined,
       markdown_format: 'auto',
     },
   })
@@ -102,9 +99,8 @@ describe('handleUpdateConfig', () => {
     expect(result.config.markdown_format).toBe('on')
   })
 
-  it('改 mode 触发 requires_restart=true', () => {
-    const result = (channel as any).handleUpdateConfig({ config: { mode: 'webhook' } })
-    expect(result.requires_restart).toBe(true)
+  it('拒绝已移除的 Webhook 模式', () => {
+    expect(() => (channel as any).handleUpdateConfig({ config: { mode: 'webhook' } })).toThrow('Webhook 已移除')
   })
 
   it('credentials.bot_token 写入新值时触发 requires_restart=true', () => {

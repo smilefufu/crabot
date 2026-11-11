@@ -180,7 +180,6 @@ jobs:
 
           # TS 模块：src/ 是源码，构建产物在 dist/，可排除 src/
           for mod in crabot-client crabot-shared crabot-core crabot-agent \
-                     crabot-channel-telegram crabot-channel-wechat crabot-channel-feishu crabot-channel-dingtalk crabot-channel-slack crabot-channel-voice \
                      crabot-mcp-tools; do
             if [ -d "$mod" ]; then
               rsync -aH "${COMMON_EXCLUDES[@]}" \
@@ -266,7 +265,6 @@ jobs:
 
           # TS 模块：src/ 是源码，构建产物在 dist/，可排除 src/
           $tsModules = @('crabot-client','crabot-shared','crabot-admin','crabot-core','crabot-agent',
-                         'crabot-channel-telegram','crabot-channel-wechat','crabot-channel-feishu','crabot-channel-dingtalk','crabot-channel-slack','crabot-channel-voice',
                          'crabot-mcp-tools')
           foreach ($mod in $tsModules) {
             if (Test-Path $mod) {

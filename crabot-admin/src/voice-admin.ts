@@ -388,7 +388,7 @@ export class VoiceAdmin {
     } catch (error) {
       if (!res.writableEnded) {
         const code = (error as { code?: string }).code
-        json(code === 'UNAUTHORIZED' ? 401 : code === 'FORBIDDEN' ? 403 : code === 'SERVICE_UNAVAILABLE' ? 503 : 400, { error: error instanceof Error ? error.message : 'Voice request failed' })
+        json(code === 'UNAUTHORIZED' ? 401 : code === 'FORBIDDEN' ? 403 : code === 'SERVICE_UNAVAILABLE' ? 503 : code === 'CHANNEL_NOT_INSTALLED' ? 409 : code === 'NOT_FOUND' ? 404 : 400, { ...(code ? { code } : {}), error: error instanceof Error ? error.message : 'Voice request failed' })
       }
     }
     return true

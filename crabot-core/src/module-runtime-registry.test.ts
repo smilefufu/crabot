@@ -62,6 +62,35 @@ afterEach(async () => {
 })
 
 describe('ModuleRuntimeRegistry', () => {
+  it.each([undefined, 'ipc', 'pipe'] as const)('reads the exact version for %s transport and rejects mismatches without recovery actions', async transport => {
+    const { dataDir, registry, terminateTree } = makeRegistry(new Map([[71000, 'original-start']]))
+    const record = await registry.recordSpawn({ runtimeId: 'version-runtime', moduleId: 'memory-default', rootPid: 71000, modulePort: 19003, rpcTransport: transport })
+    expect(record.schema_version).toBe(transport ? 2 : 1)
+    expect(await registry.listRecords()).toEqual([record])
+    const recordPath = path.join(dataDir, 'module-runtime-registry/records/version-runtime.json')
+    for (const [schema_version, rpc_transport] of [[1, 'ipc'], [1, 'pipe'], [2, undefined], [2, 'http'], [3, 'ipc']]) {
+      const bytes = JSON.stringify({ ...record, schema_version, rpc_transport })
+      await fs.writeFile(recordPath, bytes)
+      await expect(registry.recoverOrphans({ currentRuntimeIds: new Set(), gracefulTimeoutMs: 30000 })).rejects.toThrow('Invalid module runtime record')
+      expect(terminateTree).not.toHaveBeenCalled()
+      expect(await fs.readFile(recordPath, 'utf8')).toBe(bytes)
+    }
+  })
+
+  it.each(['ipc', 'pipe'] as const)('retains an unproven detached Windows %s runtime without probing or killing a coincident TCP listener', async transport => {
+    const identities = new Map<number, string | null>([[71000, 'original-start']])
+    const inspectWindowsPortOwners = vi.fn(async () => [{ pid: 72000, process_name: 'unrelated', process_start_identity: 'other-start' }])
+    const probeRuntimeIdentity = vi.fn(async () => null)
+    const { registry, terminateTree } = makeRegistry(identities, new Set(), { platform: 'win32', inspectWindowsPortOwners, probeRuntimeIdentity })
+    await registry.recordSpawn({ runtimeId: 'managed-runtime', moduleId: 'memory-default', rootPid: 71000, modulePort: 19003, rpcTransport: transport })
+    identities.set(71000, null)
+    await expect(registry.recoverOrphans({ currentRuntimeIds: new Set(), gracefulTimeoutMs: 30000 })).rejects.toThrow('Cannot prove detached managed runtime exit')
+    expect(inspectWindowsPortOwners).not.toHaveBeenCalled()
+    expect(probeRuntimeIdentity).not.toHaveBeenCalled()
+    expect(terminateTree).not.toHaveBeenCalled()
+    expect(await registry.listRecords()).toHaveLength(1)
+  })
+
   it('probes the standard runtime identity RPC envelope', async () => {
     let requestBody: Record<string, unknown> | undefined
     const server = http.createServer((request, response) => {

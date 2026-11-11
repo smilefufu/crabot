@@ -2,7 +2,7 @@
  * TelegramChannel - Crabot Channel 模块主类
  *
  * 通过 Telegram Bot API 接入 Telegram：
- * - 收消息：Long Polling (getUpdates) 或 Webhook
+ * - 收消息：Long Polling (getUpdates)
  * - 发消息：sendMessage / sendPhoto / sendDocument
  *
  * 对齐：protocol-channel.md 所有端点
@@ -10,7 +10,6 @@
 
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import type { IncomingMessage, ServerResponse } from 'node:http'
 import {
   ModuleBase,
   type ModuleConfig,
@@ -108,6 +107,7 @@ export class TelegramChannel extends ModuleBase {
 
     super(moduleConfig)
 
+    if ((config.telegram as { mode?: string }).mode === 'webhook') throw new RpcError('INVALID_PARAMS', 'Telegram Webhook 已移除，请改用 polling')
     this.telegramConfig = config.telegram
     this.dataDir = config.data_dir
     this.client = new TelegramClient(config.telegram.bot_token)
@@ -158,11 +158,7 @@ export class TelegramChannel extends ModuleBase {
     this.messageStore.startCleanup()
     this.mediaCleaner.startCleanup()
 
-    if (this.telegramConfig.mode === 'polling') {
-      await this.startPolling()
-    } else if (this.telegramConfig.mode === 'webhook') {
-      await this.setupWebhook()
-    }
+    await this.startPolling()
   }
 
   protected override async onStop(): Promise<void> {
@@ -170,13 +166,7 @@ export class TelegramChannel extends ModuleBase {
     this.messageStore.stopCleanup()
     this.mediaCleaner.stopCleanup()
 
-    if (this.telegramConfig.mode === 'webhook') {
-      try {
-        await this.client.deleteWebhook()
-      } catch (error) {
-        console.warn('[TelegramChannel] Failed to delete webhook on shutdown:', error)
-      }
-    }
+
   }
 
   // ============================================================================
@@ -225,54 +215,7 @@ export class TelegramChannel extends ModuleBase {
   }
 
   // ============================================================================
-  // Webhook
-  // ============================================================================
-
-  private async setupWebhook(): Promise<void> {
-    const { webhook_url, webhook_secret } = this.telegramConfig
-    if (!webhook_url) {
-      throw new Error('TELEGRAM_WEBHOOK_URL is required for webhook mode')
-    }
-
-    await this.client.setWebhook(webhook_url, webhook_secret)
-    console.log(`[TelegramChannel] Webhook set to: ${webhook_url}`)
-  }
-
-  protected override async onRawRequest(
-    req: IncomingMessage,
-    res: ServerResponse,
-    method: string,
-    body: string
-  ): Promise<boolean> {
-    if (method !== 'telegram/webhook') return false
-
-    if (this.telegramConfig.webhook_secret) {
-      const headerSecret = req.headers['x-telegram-bot-api-secret-token']
-      if (headerSecret !== this.telegramConfig.webhook_secret) {
-        res.writeHead(401)
-        res.end('Invalid secret token')
-        return true
-      }
-    }
-
-    try {
-      const update = JSON.parse(body) as TgUpdate
-      res.writeHead(200)
-      res.end('OK')
-
-      this.handleUpdate(update).catch((error) => {
-        console.error('[TelegramChannel] Error handling webhook update:', error)
-      })
-    } catch {
-      res.writeHead(400)
-      res.end('Bad Request')
-    }
-
-    return true
-  }
-
-  // ============================================================================
-  // Update 处理（polling 和 webhook 共用）
+  // Update 处理
   // ============================================================================
 
   private async handleUpdate(update: TgUpdate): Promise<void> {
@@ -822,10 +765,7 @@ export class TelegramChannel extends ModuleBase {
       platform: 'telegram',
       credentials: {
         bot_token: '***',
-        ...(this.telegramConfig.webhook_secret ? { webhook_secret: '***' } : {}),
       },
-      mode: this.telegramConfig.mode,
-      ...(this.telegramConfig.webhook_url ? { webhook_url: this.telegramConfig.webhook_url } : {}),
       markdown_format: this.telegramConfig.markdown_format,
       crab_platform_user_id: this.botUser ? String(this.botUser.id) : '',
     }
@@ -833,9 +773,6 @@ export class TelegramChannel extends ModuleBase {
       config: cfg,
       schema: {
         'credentials.bot_token': { sensitive: true, hot_reload: false, description: 'Bot Token，变更需重启' },
-        'credentials.webhook_secret': { sensitive: true, hot_reload: false, description: 'Webhook 签名密钥，变更需重启' },
-        'mode': { hot_reload: false, description: '消息接收模式 polling / webhook，变更需重启' },
-        'webhook_url': { hot_reload: false, description: 'Webhook 模式回调地址，变更需重启' },
         'markdown_format': { hot_reload: true, description: 'Markdown 渲染开关：auto / on / off' },
       },
     }
@@ -843,13 +780,12 @@ export class TelegramChannel extends ModuleBase {
 
   private handleUpdateConfig(params: {
     config?: {
-      credentials?: { bot_token?: string; webhook_secret?: string }
-      mode?: 'polling' | 'webhook'
-      webhook_url?: string
+      credentials?: { bot_token?: string }
       markdown_format?: MarkdownFormat
     }
   }): { config: Record<string, unknown>; requires_restart: boolean } {
     const incoming = params.config ?? {}
+    if ((incoming as { mode?: string }).mode === 'webhook') throw new RpcError('INVALID_PARAMS', 'Telegram Webhook 已移除，请改用 polling')
     let requiresRestart = false
 
     const creds = incoming.credentials ?? {}
@@ -857,18 +793,6 @@ export class TelegramChannel extends ModuleBase {
     // 真要清掉敏感字段请走"停模块 + 改 env"，避免一次保存意外擦掉凭证）
     if (typeof creds.bot_token === 'string' && creds.bot_token && creds.bot_token !== '***') {
       this.telegramConfig.bot_token = creds.bot_token
-      requiresRestart = true
-    }
-    if (typeof creds.webhook_secret === 'string' && creds.webhook_secret && creds.webhook_secret !== '***') {
-      this.telegramConfig.webhook_secret = creds.webhook_secret
-      requiresRestart = true
-    }
-    if (incoming.mode && incoming.mode !== this.telegramConfig.mode) {
-      this.telegramConfig.mode = incoming.mode
-      requiresRestart = true
-    }
-    if (typeof incoming.webhook_url === 'string' && incoming.webhook_url !== this.telegramConfig.webhook_url) {
-      this.telegramConfig.webhook_url = incoming.webhook_url || undefined
       requiresRestart = true
     }
     if (incoming.markdown_format && MARKDOWN_FORMAT_VALUES.includes(incoming.markdown_format)) {
@@ -887,7 +811,6 @@ export class TelegramChannel extends ModuleBase {
     return {
       platform: 'telegram',
       platform_connected: this.botUser !== null,
-      mode: this.telegramConfig.mode,
       bot_username: this.botUser?.username ?? null,
       active_sessions: this.sessionManager.listSessions().length,
       polling_active: this.pollingActive,

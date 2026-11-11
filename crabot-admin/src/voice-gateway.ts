@@ -5,6 +5,7 @@ import type { VoiceConnectionConfig } from 'crabot-shared'
 
 interface VoiceGatewayDeps {
   connection(id: string): VoiceConnectionConfig | null
+  connect?(id: string): Promise<Socket>
   resolve(id: string): Promise<{ port: number } | undefined>
 }
 function loopback(address?: string): boolean { return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1' }
@@ -31,16 +32,23 @@ export class VoiceGateway {
     this.channels.set(id, entries); entries.add(close)
     const timeout = setTimeout(close, 5000)
     socket.once('error', close); socket.once('close', close)
-    const module = await this.deps.resolve(id)
-    if (socket.destroyed) { close(); return true }
-    if (!module || !Number.isInteger(module.port) || module.port < 1 || module.port > 65535) { close(); return true }
+    let privateSocket: Socket | undefined
+    const module = this.deps.connect ? undefined : await this.deps.resolve(id)
+    if (this.deps.connect) {
+      try { privateSocket = await this.deps.connect(id) }
+      catch { close(); return true }
+    }
+    if (socket.destroyed) { privateSocket?.destroy(); close(); return true }
+    if (!privateSocket && (!module || !Number.isInteger(module.port) || module.port < 1 || module.port > 65535)) { close(); return true }
+    upstream = privateSocket
     // Never forward Admin cookies, Authorization, forwarded headers or a client-provided upstream.
     const headers: Record<string, string> = { Connection: 'Upgrade', Upgrade: 'websocket' }
     for (const key of ['sec-websocket-key', 'sec-websocket-version']) {
       const value = req.headers[key]
       if (typeof value === 'string') headers[key] = value
     }
-    request = http.request({ host: '127.0.0.1', port: module.port, path: '/voice', method: 'GET', headers })
+    request = http.request({ host: '127.0.0.1', port: module?.port, path: '/voice', method: 'GET', headers,
+      ...(privateSocket ? { createConnection: () => privateSocket! } : {}) })
     request.once('error', close); request.once('response', close)
     request.once('upgrade', (response, internal, internalHead) => {
       clearTimeout(timeout); upstream = internal

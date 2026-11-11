@@ -1,7 +1,6 @@
-// MM 探活探针。MM 的 RPC 路由是 POST /<method_name>（见 protocol-module-manager.md），
-// GET 会被 405 拒掉；响应统一包在 {id, success, data} 信封里。
-// 这两点 CLI 侧曾经都搞错过（start -d 用 GET 探 /health 永远超时、
-// status 读顶层 data.modules 永远 null），改动前先看 __tests__/mm-probe.test.mjs。
+// Current instances use their OS-verified private pipe. HTTP remains only for legacy records.
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 
 const POST_OPTS = {
   method: 'POST',
@@ -25,8 +24,14 @@ export function parseListModulesResponse(body) {
  * 探 MM 的 list_modules：成功返回模块数组，MM 不可达 / 响应异常返回 null。
  * 一举两得：MM 存活判定 + 模块列表（admin UI 模块管理页同款数据源）。
  */
-export async function probeMmModules(mmPort, fetchImpl = fetch) {
+export async function probeMmModules(mmPort, fetchImpl = fetch, { dataDir } = {}) {
   try {
+    if (dataDir) {
+      const control = (await import('./runtime-control.cjs')).default
+      if (control.hasRuntimeControl(dataDir)) return parseListModulesResponse(await control.callRuntimeControl(dataDir,
+        { target: mmPort, source: 'cli-probe', method: 'list_modules', params: {} }, { timeoutMs: 2000 }))
+      if (!existsSync(join(dataDir, 'mm.pid'))) return null
+    }
     const r = await fetchImpl(`http://127.0.0.1:${mmPort}/list_modules`, {
       ...POST_OPTS,
       signal: AbortSignal.timeout(2000),
@@ -41,15 +46,23 @@ export async function probeMmModules(mmPort, fetchImpl = fetch) {
 /**
  * 探 MM 的 /health：仅当 HTTP 2xx 且 data.status === 'healthy' 返回 true。
  */
-export async function probeMmHealthy(mmPort, fetchImpl = fetch) {
-  return await probeHealthStatus(mmPort, fetchImpl) === 'healthy'
+export async function probeMmHealthy(mmPort, fetchImpl = fetch, options = {}) {
+  return await probeHealthStatus(mmPort, fetchImpl, options) === 'healthy'
 }
 
 // Common bounded health RPC only. Callers separately decide whether a degraded
 // management process is operational; this grants no model/business admission.
-export async function probeHealthStatus(port, fetchImpl = fetch) {
+export async function probeHealthStatus(port, fetchImpl = fetch, { dataDir } = {}) {
   if (!Number.isInteger(port) || port < 1 || port > 65535) return null
   try {
+    if (dataDir) {
+      const control = (await import('./runtime-control.cjs')).default
+      if (control.hasRuntimeControl(dataDir)) {
+        const body = await control.callRuntimeControl(dataDir, { target: port, source: 'cli-probe', method: 'health', params: {} }, { timeoutMs: 1500 })
+        return ['healthy', 'degraded', 'unhealthy'].includes(body?.status) ? body.status : null
+      }
+      if (!existsSync(join(dataDir, 'mm.pid'))) return null
+    }
     const r = await fetchImpl(`http://127.0.0.1:${port}/health`, {
       ...POST_OPTS,
       signal: AbortSignal.timeout(1500),

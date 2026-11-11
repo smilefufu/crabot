@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { randomUUID } from 'node:crypto'
-import { createInstanceRuntime, recordMmProcess, readInstanceRuntime } from '../instance-runtime.mjs'
+import { createInstanceRuntime, recordMmProcess, readInstanceRuntime, clearInstanceRuntime } from '../instance-runtime.mjs'
 
 async function fixture(t) {
   const root = fs.realpathSync(fs.mkdtempSync(join(tmpdir(), 'crabot-runtime-write-中文 ')))
@@ -75,4 +75,59 @@ test('an unrelated Windows I/O failure is returned immediately without another r
   assert.throws(() => recordMmProcess(f.root, f.record.generation, f.child.pid), { code: 'ENOSPC' })
   assert.equal(attempts, 1); assert.deepEqual(fs.readFileSync(f.file), f.before)
   assert.deepEqual(fs.readdirSync(f.root), ['instance-runtime.json', 'mm.pid'])
+})
+
+
+test('runtime versions distinguish new pipe records from upgrade-time HTTP records', async t => {
+  const f = await fixture(t)
+  assert.equal(f.record.schema_version, 2)
+  assert.equal(f.record.control_transport, 'pipe')
+  const legacy = { ...f.record, schema_version: 1 }
+  delete legacy.control_transport
+  fs.writeFileSync(f.file, JSON.stringify(legacy))
+  assert.deepEqual(readInstanceRuntime(f.root), legacy)
+  for (const [schema_version, control_transport] of [[1, 'pipe'], [2, undefined], [2, 'http'], [3, 'pipe']]) {
+    const bytes = JSON.stringify({ ...f.record, schema_version, control_transport })
+    fs.writeFileSync(f.file, bytes)
+    assert.throws(() => readInstanceRuntime(f.root), { code: 'CRABOT_INSTANCE_UNVERIFIED' })
+    assert.equal(fs.readFileSync(f.file, 'utf8'), bytes)
+  }
+})
+
+
+test('concurrent cleanup of the same generation tolerates only an already removed runtime record', async t => {
+  const f = await fixture(t), unlink = fs.unlinkSync
+  t.mock.method(fs, 'unlinkSync', target => {
+    if (target === f.file) unlink(target)
+    return unlink(target)
+  })
+  syncBuiltinESMExports()
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports() })
+  assert.equal(clearInstanceRuntime(f.root, f.record.generation), true)
+  assert.equal(readInstanceRuntime(f.root), null)
+})
+
+test('cleanup still reports other runtime record removal errors and retains the record', async t => {
+  const f = await fixture(t), unlink = fs.unlinkSync
+  t.mock.method(fs, 'unlinkSync', target => {
+    if (target === f.file) throw Object.assign(new Error('controlled removal refusal'), { code: 'EPERM' })
+    return unlink(target)
+  })
+  syncBuiltinESMExports()
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports() })
+  assert.throws(() => clearInstanceRuntime(f.root, f.record.generation), { code: 'EPERM' })
+  assert.deepEqual(fs.readFileSync(f.file), f.before)
+})
+
+
+test('concurrent cleanup may remove mm.pid after its presence check without preventing runtime cleanup', async t => {
+  const f = await fixture(t), read = fs.readFileSync, pidFile = join(f.root, 'mm.pid')
+  t.mock.method(fs, 'readFileSync', (target, ...args) => {
+    if (target === pidFile) fs.unlinkSync(target)
+    return read(target, ...args)
+  })
+  syncBuiltinESMExports()
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports() })
+  assert.equal(clearInstanceRuntime(f.root, f.record.generation), true)
+  assert.equal(readInstanceRuntime(f.root), null)
 })

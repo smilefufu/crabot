@@ -13,16 +13,15 @@ const { probeProcessStartIdentity: probeModuleStartIdentity } = require('../../s
   probeProcessStartIdentity: (pid: number) => Promise<string | null>
 }
 
-const SCHEMA_VERSION = 1
-
 export interface ModuleRuntimeRecord {
-  schema_version: typeof SCHEMA_VERSION
+  schema_version: 1 | 2
   instance_id: string
   runtime_id: string
   module_id: string
   root_pid: number
   process_start_identity: string
   module_port: number
+  rpc_transport?: 'ipc' | 'pipe'
   created_at: string
 }
 
@@ -50,6 +49,7 @@ interface RecordSpawnInput {
   moduleId: string
   rootPid: number
   modulePort: number
+  rpcTransport?: 'ipc' | 'pipe'
 }
 
 interface RecoverOrphansInput {
@@ -183,7 +183,8 @@ export function formatOrphanTerminationCandidate(candidate: OrphanTerminationCan
 function isRuntimeRecord(value: unknown): value is ModuleRuntimeRecord {
   if (!value || typeof value !== 'object') return false
   const record = value as Partial<ModuleRuntimeRecord>
-  return record.schema_version === SCHEMA_VERSION
+  return (record.schema_version === 1 && record.rpc_transport === undefined
+    || record.schema_version === 2 && ['ipc', 'pipe'].includes(record.rpc_transport ?? ''))
     && typeof record.instance_id === 'string'
     && typeof record.runtime_id === 'string'
     && typeof record.module_id === 'string'
@@ -248,13 +249,14 @@ export class ModuleRuntimeRegistry {
       throw new Error(`Cannot capture process start identity for module ${input.moduleId} PID ${input.rootPid}`)
     }
     const record: ModuleRuntimeRecord = {
-      schema_version: SCHEMA_VERSION,
+      schema_version: input.rpcTransport ? 2 : 1,
       instance_id: this.getInstanceId(),
       runtime_id: input.runtimeId,
       module_id: input.moduleId,
       root_pid: input.rootPid,
       process_start_identity: processStartIdentity,
       module_port: input.modulePort,
+      ...(input.rpcTransport ? { rpc_transport: input.rpcTransport } : {}),
       created_at: this.now(),
     }
     await this.writeAtomic(this.recordPath(record.runtime_id), `${JSON.stringify(record, null, 2)}\n`)
@@ -306,6 +308,7 @@ export class ModuleRuntimeRegistry {
       const currentIdentity = await guardedOrphanStep(verify, () => this.probeStartIdentity(record.root_pid))
       if (this.platform === 'win32'
         && currentIdentity !== record.process_start_identity) {
+        if (record.rpc_transport) throw new Error(`Cannot prove detached managed runtime exit for ${record.module_id}/${record.runtime_id}; retained runtime record: ${this.recordPath(record.runtime_id)}`)
         await this.recoverDetachedWindowsRuntime(record, gracefulTimeoutMs, verify)
         continue
       }
@@ -341,7 +344,7 @@ export class ModuleRuntimeRegistry {
             requireOwnedProcess: true,
           }))
       if (this.platform === 'win32'
-        && this.runtimeIdentityMatches(record, await guardedOrphanStep(verify, () => this.probeModuleIdentity(record.module_port)))) {
+        && !record.rpc_transport && this.runtimeIdentityMatches(record, await guardedOrphanStep(verify, () => this.probeModuleIdentity(record.module_port)))) {
         throw new Error(
           `Cannot recover orphan ${record.module_id}/${record.runtime_id}: recorded runtime still responds after terminating root PID ${record.root_pid}; runtime record: ${this.recordPath(record.runtime_id)}`,
         )

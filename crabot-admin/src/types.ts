@@ -2150,6 +2150,15 @@ export interface ChannelOnboardingMethod {
 /**
  * Channel 实现
  */
+export interface ChannelPluginCatalogEntry {
+  implementation_id: string
+  name: string
+  platform: string
+  package_name: string
+  version: string
+  installed: boolean
+}
+
 export interface ChannelImplementation {
   id: string
   name: string

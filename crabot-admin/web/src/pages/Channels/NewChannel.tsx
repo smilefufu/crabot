@@ -1,149 +1,156 @@
-/**
- * 新建 Channel 入口页
- *
- * 数据驱动：从 /channel-implementations 读取实现列表 + 每个实现声明的 onboarding_methods，
- * 每个 (implementation, method) 渲一张卡片。点击进入 /channels/new/:implId/:methodId。
- *
- * 没有声明 onboarding_methods 的实现额外提供"手动填写"入口（指向 /channels/config 旧表单）。
- */
-
-import React, { useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { MainLayout } from '../../components/Layout/MainLayout'
 import { Loading } from '../../components/Common/Loading'
+import { Button } from '../../components/Common/Button'
 import { channelService } from '../../services/channel'
-import type { ChannelImplementation } from '../../types'
+import type { ChannelImplementation, ChannelPluginCatalogEntry } from '../../types'
+import { ExperimentalChannels } from './ExperimentalChannels'
+import { collaborationDescription, isExperimentalChannel } from './channel-presentation'
+import './collaboration.css'
 
-interface CardEntry {
-  key: string
-  title: string
-  description: string
-  badge?: string
-  onClick: () => void
+function configurationActions(impl: ChannelImplementation) {
+  const actions = (impl.onboarding_methods ?? []).map(method => ({
+    label: impl.id === 'channel-feishu' ? '扫码连接飞书' : method.name,
+    to: `/channels/new/${encodeURIComponent(impl.id)}/${encodeURIComponent(method.id)}`,
+  }))
+  if (impl.id !== 'channel-feishu') actions.push({
+    label: impl.id === 'channel-voice' ? '设置语音协作' : '手动填写',
+    to: impl.id === 'channel-voice' ? '/channels/new/voice' : `/channels/config?implementation_id=${encodeURIComponent(impl.id)}`,
+  })
+  return actions
 }
 
-export const NewChannel: React.FC = () => {
+export function NewChannel() {
   const navigate = useNavigate()
+  const [search] = useSearchParams()
+  const requested = search.get('implementation_id')
   const [impls, setImpls] = useState<ChannelImplementation[]>([])
+  const [plugins, setPlugins] = useState<ChannelPluginCatalogEntry[]>([])
+  const [prepared, setPrepared] = useState<Record<string, ChannelImplementation>>({})
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [catalogOpen, setCatalogOpen] = useState(false)
+  const [installing, setInstalling] = useState<Set<string>>(new Set())
+  const pending = useRef(new Set<string>())
+  const [installErrors, setInstallErrors] = useState<Record<string, string>>({})
+  const [choosing, setChoosing] = useState<string | null>(null)
+  const selected = useRef<HTMLElement>(null)
 
-  useEffect(() => {
-    channelService.listImplementations()
-      .then((r) => setImpls(r.items))
-      .catch((e) => setError(e instanceof Error ? e.message : '加载失败'))
-      .finally(() => setLoading(false))
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError('')
+    try {
+      const [implementations, catalog] = await Promise.all([channelService.listImplementations(), channelService.listPlugins()])
+      setImpls(implementations.items)
+      setPlugins(catalog.items.filter(plugin => !plugin.installed && !implementations.items.some(impl => impl.id === plugin.implementation_id)))
+      setCatalogOpen(implementations.items.length === 0)
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : '无法读取协作入口，请重试')
+    } finally { setLoading(false) }
   }, [])
 
-  const cards: CardEntry[] = []
-
-  for (const impl of impls) {
-    if (impl.onboarding_methods && impl.onboarding_methods.length > 0) {
-      for (const method of impl.onboarding_methods) {
-        cards.push({
-          key: `${impl.id}:${method.id}`,
-          title: `${impl.name} · ${method.name}`,
-          description: method.description ?? '交互式配置入口',
-          badge: '推荐',
-          onClick: () => navigate(`/channels/new/${encodeURIComponent(impl.id)}/${encodeURIComponent(method.id)}`),
-        })
-      }
+  useEffect(() => { void load() }, [load])
+  useEffect(() => {
+    if (!loading && requested) {
+      selected.current?.scrollIntoView?.({ block: 'center' })
+      selected.current?.focus()
     }
+  }, [loading, requested])
 
-    // 始终提供"手动填写"入口
-    cards.push({
-      key: `${impl.id}:schema`,
-      title: `${impl.name} · ${impl.id === 'channel-voice' ? '手机扫码配对' : '手动填写'}`,
-      description: methodFallbackDescription(impl),
-      onClick: () => navigate(impl.id === 'channel-voice' ? '/channels/new/voice' : `/channels/config?implementation_id=${encodeURIComponent(impl.id)}`),
-    })
+  const install = async (id: string) => {
+    if (pending.current.has(id)) return
+    pending.current.add(id)
+    setInstalling(new Set(pending.current))
+    setInstallErrors(previous => ({ ...previous, [id]: '' }))
+    try {
+      const { implementation } = await channelService.installPlugin(id)
+      setPrepared(previous => ({ ...previous, [id]: implementation }))
+    } catch (failure) {
+      setInstallErrors(previous => ({ ...previous, [id]: failure instanceof Error ? failure.message : '插件安装失败，请重试' }))
+    } finally {
+      pending.current.delete(id)
+      setInstalling(new Set(pending.current))
+    }
   }
 
-  return (
-    <MainLayout>
-      <div style={{ padding: '1.5rem 2rem', maxWidth: 900, margin: '0 auto' }}>
-        <div style={{ marginBottom: '1.5rem' }}>
-          <h1 style={{ fontFamily: 'var(--font-display)', fontSize: '1.375rem', fontWeight: 700, color: 'var(--text-primary)' }}>
-            新增聊天方式
-          </h1>
-          <p style={{ fontSize: '0.8125rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
-            选择平台 + 入口方式。"推荐"标签的入口由模块自带交互式流程（如扫码授权），手动填写适合已有凭证的场景。
-          </p>
-        </div>
+  const actions = (impl: ChannelImplementation) => <div className="collaboration-actions" role="group" aria-label={`选择 ${impl.name} 的配置方式`}>
+    {configurationActions(impl).map((action, index) => <Button key={action.to} type="button" variant={index === 0 ? 'primary' : 'secondary'} onClick={() => navigate(action.to)}>{action.label}</Button>)}
+  </div>
 
-        {error && <div className="error-message">{error}</div>}
+  const readyCard = (impl: ChannelImplementation) => <section key={impl.id} aria-label={`${impl.name} 配置`} ref={impl.id === requested ? selected : undefined} tabIndex={impl.id === requested ? -1 : undefined} className={`collaboration-card${impl.id === requested ? ' collaboration-card--selected' : ''}`}>
+    <h3>{impl.name}</h3>
+    <p className="collaboration-description">{collaborationDescription(impl.platform)}</p>
+    <p className="collaboration-ready">插件已就绪，下一步设置账号</p>
+    {actions(impl)}
+  </section>
 
-        {loading ? (
-          <Loading />
-        ) : (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '1rem' }}>
-            {cards.map((card) => (
-              <button
-                key={card.key}
-                type="button"
-                onClick={card.onClick}
-                style={{
-                  background: 'var(--surface)',
-                  border: '1px solid var(--border)',
-                  borderRadius: 8,
-                  padding: '1.25rem',
-                  textAlign: 'left',
-                  cursor: 'pointer',
-                  transition: 'border-color .15s',
-                }}
-                onMouseEnter={(e) => { e.currentTarget.style.borderColor = 'var(--accent)' }}
-                onMouseLeave={(e) => { e.currentTarget.style.borderColor = 'var(--border)' }}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
-                  <h3 style={{ fontSize: '1rem', fontWeight: 700, color: 'var(--text-primary)' }}>
-                    {card.title}
-                  </h3>
-                  {card.badge && (
-                    <span style={{
-                      fontSize: '0.6875rem',
-                      fontWeight: 600,
-                      color: 'var(--success, #16a34a)',
-                      background: 'rgba(22, 163, 74, 0.12)',
-                      padding: '2px 8px',
-                      borderRadius: 999,
-                    }}>
-                      {card.badge}
-                    </span>
-                  )}
-                </div>
-                <p style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
-                  {card.description}
-                </p>
-              </button>
-            ))}
-          </div>
-        )}
-
-        <div style={{ marginTop: '1.5rem', textAlign: 'right' }}>
-          <button
-            type="button"
-            onClick={() => navigate('/channels/config')}
-            style={{
-              background: 'transparent',
-              border: 'none',
-              color: 'var(--text-muted)',
-              fontSize: '0.8125rem',
-              cursor: 'pointer',
-              textDecoration: 'underline',
-            }}
-          >
-            ← 返回 聊天方式列表
-          </button>
-        </div>
+  const pluginCard = (plugin: ChannelPluginCatalogEntry) => {
+    const id = plugin.implementation_id
+    const impl = prepared[id]
+    const busy = installing.has(id)
+    const failed = installErrors[id]
+    let status = '接入前需要准备插件'
+    let label = id === 'channel-voice' ? '设置语音协作' : `接入${/^[A-Za-z]/.test(plugin.name) ? ' ' : ''}${plugin.name}`
+    let accessibleLabel = label
+    if (busy) {
+      status = '正在安装所需插件，完成后继续设置'
+      label = '正在准备…'
+      accessibleLabel = `正在准备 ${plugin.name}`
+    } else if (impl) {
+      status = '插件已就绪，下一步设置账号'
+    } else if (failed) {
+      label = '重试接入'
+      accessibleLabel = `重试接入 ${plugin.name}`
+    }
+    return <article className="collaboration-card" key={id}>
+      <h3>{plugin.name}</h3>
+      <p className="collaboration-description">{collaborationDescription(plugin.platform)}</p>
+      <p className={impl ? 'collaboration-ready' : 'collaboration-muted'} role="status">{status}</p>
+      {failed && <p role="alert" className="error-message">{failed}</p>}
+      <div className="collaboration-actions">
+        {impl ? <Button type="button" aria-label={`继续设置 ${plugin.name}`} onClick={() => {
+          const options = configurationActions(impl)
+          if (options.length === 1) navigate(options[0].to)
+          else setChoosing(id)
+        }}>继续设置 →</Button> : <Button type="button" variant="secondary" disabled={busy} aria-label={accessibleLabel} onClick={() => void install(id)}>
+          {label}
+        </Button>}
       </div>
-    </MainLayout>
-  )
-}
+      {impl && choosing === id && actions(impl)}
+    </article>
+  }
 
-function methodFallbackDescription(impl: ChannelImplementation): string {
-  if (impl.id === 'channel-voice') return '在创建向导中选择语音服务、用手机扫码、配置联系人与群权限；全部检查通过后启用。'
-  const required = impl.config_schema?.required ?? []
-  if (required.length > 0) return `手动填入：${required.slice(0, 3).join(' / ')}${required.length > 3 ? ' 等' : ''}`
-  return '手动填入凭证后启动'
-}
+  const ready = impls.filter(impl => !isExperimentalChannel(impl.id))
+  const experimentalReady = impls.filter(impl => isExperimentalChannel(impl.id))
+  const available = plugins.filter(plugin => !isExperimentalChannel(plugin.implementation_id))
+  const experimentalAvailable = plugins.filter(plugin => isExperimentalChannel(plugin.implementation_id))
 
+  return <MainLayout><div className="collaboration-page">
+    <p className="collaboration-breadcrumb">协作入口 / 添加入口</p>
+    <header className="collaboration-header">
+      <h1>在哪里与 CRABOT 协作？</h1>
+      <p className="collaboration-description">连接你日常使用的平台，在熟悉的地方交流、处理任务。</p>
+    </header>
+    {loading ? <Loading /> : error ? <div><p role="alert" className="error-message">{error}</p><Button variant="secondary" onClick={() => void load()}>重新加载</Button></div> : <>
+      {requested && !impls.some(impl => impl.id === requested) && <p role="status" className="collaboration-muted">指定的协作插件尚未就绪，请先选择平台完成接入。</p>}
+      {impls.length > 0 && <section aria-label="可直接设置的协作入口">
+        <h2>可直接设置</h2>
+        <div className="collaboration-grid">{ready.map(readyCard)}</div>
+        <ExperimentalChannels count={experimentalReady.length} initiallyOpen={experimentalReady.some(impl => impl.id === requested)}><div className="collaboration-grid">{experimentalReady.map(readyCard)}</div></ExperimentalChannels>
+      </section>}
+      {impls.length === 0 && <p className="collaboration-muted">选择你常用的平台，准备插件后继续设置账号。</p>}
+      {plugins.length > 0 && <>
+        <button type="button" className="btn btn-secondary collaboration-discover" aria-expanded={catalogOpen} aria-controls="collaboration-catalog" onClick={() => setCatalogOpen(!catalogOpen)}>
+          <span><strong>在其他平台上与 CRABOT 协作</strong><small>{catalogOpen ? '收起平台列表' : '选择平台，在这里完成接入和账号设置'}</small></span><span aria-hidden="true">{catalogOpen ? '⌃' : '⌄'}</span>
+        </button>
+        {catalogOpen && <section id="collaboration-catalog" className="collaboration-catalog" aria-label="其他协作平台">
+          <p className="collaboration-muted">首次接入会安装所需插件，完成后继续设置账号。</p>
+          <div className="collaboration-grid">{available.map(pluginCard)}</div>
+          <ExperimentalChannels count={experimentalAvailable.length}><div className="collaboration-grid">{experimentalAvailable.map(pluginCard)}</div></ExperimentalChannels>
+        </section>}
+      </>}
+    </>}
+    <footer className="collaboration-footer"><p className="collaboration-muted">完成账号设置后，可在“协作入口”中查看连接状态、管理账号。</p><Button type="button" variant="secondary" onClick={() => navigate('/channels/config')}>← 返回协作入口</Button></footer>
+  </div></MainLayout>
+}
