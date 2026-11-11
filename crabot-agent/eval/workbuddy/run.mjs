@@ -36,7 +36,9 @@ if (!scripted) {
 const config = { ...base, module_id: 'eval-agent', port: 0,
   agent_config: { ...stored, instance_id: 'eval-instance', roles: ['front', 'worker'],
     system_prompt: stored.system_prompt ?? '', model_config: modelConfig, mcp_servers: [], subagents: [],
-    skills: [{ id: 'tmp-page', name: 'tmp-page', description: '临时页面', skill_dir: '/opt/crabot-eval/skills/tmp-page' }],
+    skills: ['tmp-page', 'browser-interaction-test-check', 'web-page-visual-check', 'pptx-source-to-delivery'].map(name => ({
+      id: name, name, description: name, skill_dir: '/opt/crabot-eval/skills/' + name,
+    })),
   }, runtime_config_authenticated: true,
 }
 const privateKeys = Object.values(modelConfig).map(c => c.apikey)
@@ -60,7 +62,7 @@ if (!scripted) {
     sourceCommit: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim(),
     model: modelConfig.powerful.model_id, thinking: modelConfig.powerful.thinking_level, limit: TOTAL_BUDGET,
     priorTokens: inputUsed(), unknownReserve: Number(process.env.WORKBUDDY_UNKNOWN_RESERVE ?? 0), endpointHost: hostname, egress: addresses,
-    differences: ['isolated channel and empty private memory', 'standard tmp-page skill only; no external MCP or child profiles'],
+    differences: ['isolated channel and empty private memory', 'product mainline Skills; no external MCP or child profiles'],
   }, null, 2), { mode: 0o600 })
 }
 function inputUsed() { return Number(process.env.WORKBUDDY_PRIOR_TOKENS ?? 0) }

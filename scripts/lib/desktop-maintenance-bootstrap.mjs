@@ -20,6 +20,7 @@ export const desktopMaintenanceBootstrap = Object.freeze([
   'scripts/lib/desktop-removal-job.mjs',
   'scripts/lib/desktop-removal-source.mjs',
   'scripts/lib/desktop-installation.cjs',
+  'scripts/lib/desktop-legacy-cleanup.mjs',
   'scripts/lib/desktop-maintenance-bootstrap.mjs',
   'scripts/lib/desktop-management.cjs',
   'scripts/lib/mac-app-binding.cjs',

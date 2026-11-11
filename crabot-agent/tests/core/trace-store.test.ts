@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
@@ -52,6 +52,87 @@ describe('TraceStore', () => {
     function makeTempDir(): string {
       return fs.mkdtempSync(path.join(os.tmpdir(), 'trace-store-flush-'))
     }
+
+    it('does not rewrite an unchanged snapshot on successive 15-second ticks', () => {
+      const dir = makeTempDir()
+      const store = new TraceStore(10, dir)
+      vi.useFakeTimers()
+      try {
+        store.startTrace({ module_id: 'agent-1', trigger: { type: 'task', summary: 'waiting' } })
+        store.flushRunningTraces()
+        const file = path.join(dir, 'traces-running.jsonl')
+        const savedTime = new Date('2000-01-01T00:00:00.000Z')
+        fs.utimesSync(file, savedTime, savedTime)
+        store.startFlushTimer()
+        vi.advanceTimersByTime(120_000)
+        expect(fs.statSync(file).mtimeMs).toBe(savedTime.getTime())
+      } finally {
+        store.stopFlushTimer()
+        vi.useRealTimers()
+        fs.rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it('persists changed content and restores a missing snapshot without extending the flush interval', () => {
+      const dir = makeTempDir()
+      try {
+        const store = new TraceStore(10, dir)
+        const trace = store.startTrace({ module_id: 'agent-1', trigger: { type: 'task', summary: 'working' } })
+        store.flushRunningTraces()
+        store.startSpan(trace.trace_id, { type: 'llm_call', details: { iteration: 1 } })
+        store.flushRunningTraces()
+        const file = path.join(dir, 'traces-running.jsonl')
+        const updated = fs.readFileSync(file, 'utf8')
+        expect(JSON.parse(updated).spans).toHaveLength(1)
+        fs.unlinkSync(file)
+        store.flushRunningTraces()
+        expect(fs.readFileSync(file, 'utf8')).toBe(updated)
+        const recovered = new TraceStore(10, dir).getTrace(trace.trace_id)
+        expect(recovered?.spans.some(span => span.type === 'llm_call')).toBe(true)
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it('retries the same snapshot after writing the temporary file fails', () => {
+      const dir = makeTempDir()
+      const store = new TraceStore(10, dir)
+      const trace = store.startTrace({ module_id: 'agent-1', trigger: { type: 'task', summary: 'working' } })
+      store.flushRunningTraces()
+      const file = path.join(dir, 'traces-running.jsonl')
+      const before = fs.readFileSync(file, 'utf8')
+      store.startSpan(trace.trace_id, { type: 'llm_call', details: { iteration: 1 } })
+      fs.mkdirSync(`${file}.tmp`)
+      try {
+        expect(() => store.flushRunningTraces()).toThrow()
+        expect(fs.readFileSync(file, 'utf8')).toBe(before)
+        fs.rmdirSync(`${file}.tmp`)
+        store.flushRunningTraces()
+        expect(JSON.parse(fs.readFileSync(file, 'utf8')).spans).toHaveLength(1)
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it('retries a snapshot that could not replace the previous file', () => {
+      const dir = makeTempDir()
+      try {
+        const store = new TraceStore(10, dir)
+        const trace = store.startTrace({ module_id: 'agent-1', trigger: { type: 'task', summary: 'working' } })
+        store.flushRunningTraces()
+        const file = path.join(dir, 'traces-running.jsonl')
+        fs.renameSync(file, `${file}.previous`)
+        fs.mkdirSync(file)
+        store.startSpan(trace.trace_id, { type: 'llm_call', details: { iteration: 1 } })
+        expect(() => store.flushRunningTraces()).toThrow()
+        fs.rmdirSync(file)
+        fs.renameSync(`${file}.previous`, file)
+        store.flushRunningTraces()
+        expect(JSON.parse(fs.readFileSync(file, 'utf8')).spans).toHaveLength(1)
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true })
+      }
+    })
 
     it('uses a configured v3 running file without loading or changing the legacy running file', () => {
       const dir = makeTempDir()

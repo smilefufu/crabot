@@ -13,6 +13,8 @@ import { writeFileSync, renameSync, unlinkSync, readFileSync } from 'fs'
 import { join, dirname } from 'path'
 import { randomUUID, createHash } from 'crypto'
 import { isDeepStrictEqual } from 'node:util'
+import type { DailyReflectionState } from './daily-reflection-types'
+import { retentionPath } from '../core/retention-files'
 import { AsyncMutex } from '../workers/async-mutex'
 import { encodeSegment, decodeSegment } from '../workers/harness/ledger-store'
 import type { ManagerKey, ManagerSessionState } from './types'
@@ -36,9 +38,24 @@ async function writeJsonAtomic(path: string, data: unknown, mode?: number): Prom
   }
 }
 
+/** Retain a complete call/results group if any of its messages belongs to this episode. */
+function incrementalEpisodeMessages(messages: ReadonlyArray<EngineMessage>, historicalIds: ReadonlySet<string>): EngineMessage[] {
+  const selected = new Set(messages.filter(message => !historicalIds.has(message.id)).map(message => message.id))
+  for (let index = 0; index < messages.length; index++) {
+    const message = messages[index]
+    if (message.role !== 'assistant' || !message.content.some(block => block.type === 'tool_use')) continue
+    const group = [message.id]
+    while (index + 1 < messages.length && 'toolResults' in messages[index + 1]) group.push(messages[++index].id)
+    if (group.some(id => selected.has(id))) group.forEach(id => selected.add(id))
+  }
+  return messages.filter(message => selected.has(message.id))
+}
+
 export class ManagerSessionStore {
+  readonly debugEpisodeLogs = process.env.CRABOT_DEBUG === '1'
   private readonly rootDir: string
   private readonly mutexes = new Map<ManagerKey, AsyncMutex>()
+  private readonly retentionMutex = new AsyncMutex()
 
   constructor(rootDir: string) {
     this.rootDir = rootDir
@@ -183,13 +200,13 @@ export class ManagerSessionStore {
     key: ManagerKey,
     update: (current: ManagerSessionState['dailyReflection']) => ManagerSessionState['dailyReflection'],
   ): Promise<ManagerSessionState['dailyReflection']> {
-    return this.getMutex(key).run(async () => {
+    return this.retentionMutex.run(() => this.getMutex(key).run(async () => {
       const state = await this.loadUnlocked(key)
       const dailyReflection = update(state.dailyReflection)
       await fs.mkdir(this.dirFor(key), { recursive: true })
       await writeJsonAtomic(this.statePathFor(key), { ...state, dailyReflection })
       return dailyReflection
-    })
+    }))
   }
 
   /** Same atomic, synchronous turn-boundary flush used by the existing Engine resume path. */
@@ -268,22 +285,77 @@ export class ManagerSessionStore {
     return checkpoints
   }
 
-  /** 完整工具组的 episode 消息落盘(崩溃后可诊断,不参与 load);目录不存在自动创建 */
+  /** Reflection evidence; default incremental, debug full. Session/recovery state is separate. */
   async appendEpisodeLog(
     key: ManagerKey,
     episodeId: string,
-    messages: ReadonlyArray<EngineMessage>
+    messages: ReadonlyArray<EngineMessage>,
+    historicalIds: ReadonlySet<string> = new Set(),
   ): Promise<void> {
     if (messages.length === 0) return
     assertToolMessageIntegrity(messages)
+    const evidence = this.debugEpisodeLogs ? messages : incrementalEpisodeMessages(messages, historicalIds)
+    if (!evidence.length) return
+    assertToolMessageIntegrity(evidence)
     const mutex = this.getMutex(key)
     await mutex.run(async () => {
       const episodesDir = join(this.dirFor(key), EPISODES_DIR)
       await fs.mkdir(episodesDir, { recursive: true })
       const filePath = join(episodesDir, `${episodeId}.jsonl`)
-      const lines = messages.map((m) => JSON.stringify(m)).join('\n') + '\n'
+      const lines = evidence.map((m) => JSON.stringify(m)).join('\n') + '\n'
       await fs.appendFile(filePath, lines, 'utf-8')
     })
+  }
+
+  /** Serialize GC with reflection admission, so new evidence references cannot appear mid-sweep. */
+  withRetentionSweep<T>(action: () => Promise<T>): Promise<T> { return this.retentionMutex.run(action) }
+
+  /** Read without history repair; unknown state is not deletion authority. */
+  async reflectionStates(): Promise<DailyReflectionState[]> {
+    const root = await retentionPath(this.rootDir, [])
+    if (!root) return []
+    const states: DailyReflectionState[] = []
+    for (const entry of await fs.readdir(root, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue
+      const file = await retentionPath(root, [entry.name, STATE_FILE])
+      if (!file) throw new Error('Manager state unavailable; evidence retention deferred')
+      const state = JSON.parse(await fs.readFile(file, 'utf8')) as ManagerSessionState
+      if (state.key !== decodeSegment(entry.name)) throw new Error('Manager state identity mismatch; evidence retention deferred')
+      if (state.dailyReflection) states.push(state.dailyReflection)
+    }
+    return states
+  }
+
+  async hasPendingReflection(): Promise<boolean> {
+    return (await this.reflectionStates()).some(state => state.result?.outcome !== 'completed' || state.confirmation_pending === true)
+  }
+
+  /** Only expired diagnostic files; session memory and recovery checkpoints are never candidates. */
+  async cleanupEpisodeLogs(cutoff: number, activeIds: ReadonlySet<string>): Promise<number> {
+    let removed = 0
+    for (const key of await this.listManagerKeys()) {
+      await this.getMutex(key).run(async () => {
+        const directory = await retentionPath(this.rootDir, [encodeSegment(key), EPISODES_DIR])
+        if (!directory) return
+        let checkpointId: string | undefined
+        const checkpoint = await retentionPath(this.rootDir, [encodeSegment(key), CHECKPOINT_FILE])
+        if (checkpoint) {
+          const raw = JSON.parse(await fs.readFile(checkpoint, 'utf8'))
+          if (typeof raw.episodeId !== 'string') throw new Error('Invalid Manager retention checkpoint')
+          checkpointId = raw.episodeId
+        }
+        for (const name of await fs.readdir(directory)) {
+          if (!name.endsWith('.jsonl')) continue
+          const id = name.slice(0, -6)
+          if (activeIds.has(id) || id === checkpointId) continue
+          const file = await retentionPath(this.rootDir, [encodeSegment(key), EPISODES_DIR, name])
+          if (!file) continue
+          const stat = await fs.lstat(file)
+          if (stat.isFile() && stat.nlink === 1 && stat.mtimeMs < cutoff) { await fs.unlink(file); removed++ }
+        }
+      })
+    }
+    return removed
   }
 
   private getMutex(key: ManagerKey): AsyncMutex {

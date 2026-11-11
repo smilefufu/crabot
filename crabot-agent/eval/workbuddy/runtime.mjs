@@ -31,6 +31,11 @@ const originalFetch = globalThis.fetch
 let requestQueue = Promise.resolve()
 let scriptedSpawned = false, scriptedWritten = false, scriptedAck = false, scriptedFinal = false, scriptedRead = false
 function script(body) {
+  if (body.messages?.some(message => typeof message.content === 'string' && message.content.startsWith('DELEGATION_FIDELITY_REVIEW\n'))) {
+    return new Response('data: ' + JSON.stringify({ choices: [{ index: 0, delta: { content: '{"verdict":"allow","issues":[]}' }, finish_reason: 'stop' }] })
+      + '\n\ndata: ' + JSON.stringify({ choices: [], usage: { prompt_tokens: 100, completion_tokens: 20 } })
+      + '\n\ndata: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } })
+  }
   if (input.scriptedError || (input.scriptedRecover && requests === 1)) return new Response('data: {"choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}\n\ndata: {"error":{"message":"synthetic overloaded","type":"upstream_error","code":502}}\n\n', { headers: { 'content-type': 'text/event-stream' } })
   const names = (body.tools ?? []).map(t => t.function.name)
   let name, args, text = ''
@@ -62,7 +67,8 @@ globalThis.fetch = async (url, options = {}) => {
   try { budget.begin(id) } catch (error) { fatal = String(error); release(); throw error }
   requests = id; active++; lastChange = Date.now()
   const body = JSON.parse(options.body)
-  const role = body.tools?.some(t => t.function.name === 'finish_task') ? 'worker' : body.tools?.length ? 'manager' : 'compression'
+  const role = body.messages?.some(message => typeof message.content === 'string' && message.content.startsWith('DELEGATION_FIDELITY_REVIEW\n'))
+    ? 'delegation_review' : body.tools?.some(t => t.function.name === 'finish_task') ? 'worker' : body.tools?.length ? 'manager' : 'compression'
   emit({ type: 'request', id, role, model: body.model, body })
   let ended = false
   const settle = receipt => {

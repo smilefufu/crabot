@@ -1,3 +1,4 @@
+import { showLegacyProgramCleanup } from './legacy-program-cleanup.js'
 import { readRemovalHostRequest } from './removal-request.js'
 import { startDesktopRemovalHost } from './removal-host.js'
 import { revealWorkspaceFolder, selectWorkspaceDirectory } from './workspace-folder.js'
@@ -40,6 +41,7 @@ let artifacts: ArtifactWindows | undefined
 let updates: UpdateDialog | undefined
 let updateRequested = process.argv.includes('--check-updates')
 let installingCli = false
+let cleaningLegacyPrograms = false
 let verifyBinding: (() => void) | undefined
 let cancelRemovalHost: (() => void) | undefined
 let uninstallRequested = process.platform === 'win32' && process.argv.includes('--uninstall')
@@ -504,20 +506,28 @@ async function boot() {
         detail: '可以再次从此菜单继续安装。服务和业务数据保留。', buttons: ['知道了'] })
     } finally { installingCli = false; if (!quitting) updateMenus() }
   }
+  async function cleanupLegacyPrograms() {
+    if (!installation || cleaningLegacyPrograms) return
+    cleaningLegacyPrograms = true; updateMenus()
+    try { await showLegacyProgramCleanup(installation.root, dialog) }
+    finally { cleaningLegacyPrograms = false; updateMenus() }
+  }
   function updateMenus() {
+    const legacyCleanupItems = () => installation ? [{ label: cleaningLegacyPrograms ? '正在检查旧程序…' : '清理旧程序…',
+      enabled: !cleaningLegacyPrograms && !pendingUninstall && !quitting, click: () => { void cleanupLegacyPrograms() } }] : []
     const cliItems = () => ubuntuDeb ? [] : [{ label: installingCli ? '正在安装 crabot 命令…' : '安装 crabot 命令…',
       enabled: app.isPackaged && !installingCli && controller?.host.snapshot().phase !== 'migration_required', click: () => { void installCli() } }]
     const uninstallItems = () => ubuntuDeb || process.platform === 'darwin' && !installation ? [] : [{ label: pendingUninstall ? '正在卸载 CRABOT…' : '卸载 CRABOT…',
-      enabled: !!requestUninstall && !pendingUninstall && !quitting, click: () => { void requestUninstall?.() } }]
+      enabled: !!requestUninstall && !pendingUninstall && !cleaningLegacyPrograms && !quitting, click: () => { void requestUninstall?.() } }]
     const startupItem = () => ({ label: '登录后在后台启动' + (startupState.approvalRequired ? '（待系统允许）' : ''), type: 'checkbox' as const,
       checked: startupState.enabled || startupState.approvalRequired, enabled: startupState.supported && controller?.host.snapshot().phase !== 'migration_required',
       click: (item: Electron.MenuItem) => { void changeStartup(item.checked) } })
     tray?.setContextMenu(Menu.buildFromTemplate([{ label: '打开 CRABOT', click: show }, { type: 'separator' },
       { label: '启动服务', click: () => { void controller!.start() } }, { label: '停止服务', click: () => { void controller!.stop() } },
-      { type: 'separator' }, startupItem(), ...cliItems(), ...uninstallItems(), { label: '检查更新…', click: () => { void updates!.open() } }, { label: '退出 CRABOT', click: () => { void quit() } }]))
+      { type: 'separator' }, startupItem(), ...cliItems(), ...legacyCleanupItems(), ...uninstallItems(), { label: '检查更新…', click: () => { void updates!.open() } }, { label: '退出 CRABOT', click: () => { void quit() } }]))
     Menu.setApplicationMenu(Menu.buildFromTemplate([
       { label: 'CRABOT', submenu: [{ label: '打开 CRABOT', click: show }, startupItem(),
-        ...cliItems(), ...uninstallItems(),
+        ...cliItems(), ...legacyCleanupItems(), ...uninstallItems(),
         { label: '检查更新…', click: () => { void updates!.open() } }, { type: 'separator' }, { label: '退出 CRABOT', accelerator: 'CommandOrControl+Q', click: () => { void quit() } }] },
       { label: '文件', submenu: [{ label: '保存当前附件…', accelerator: 'CommandOrControl+S', enabled: artifacts?.hasFocused(), click: () => { artifacts?.saveFocused() } }] },
       { role: 'editMenu' }, { role: 'viewMenu' }, { role: 'windowMenu' },

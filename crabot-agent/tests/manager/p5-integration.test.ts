@@ -1,3 +1,4 @@
+import { DELEGATION_REVIEW_PROMPT } from '../../src/manager/delegation-review-prompt.js'
 /**
  * P5 集成（Task 6）—— manager 栈的**启动接线**。
  *
@@ -96,7 +97,11 @@ function makeManagerLLM(
 ): LLMAdapter {
   let i = 0
   return {
-    async *stream() {
+    async *stream(params) {
+      if (params.systemPrompt === DELEGATION_REVIEW_PROMPT) {
+        yield* chunksFromContent([{ type: 'text', text: '{"verdict":"allow","issues":[]}' }], 'end_turn')
+        return
+      }
       const r = scripts[i++] ?? { text: '(收工)', stopReason: 'end_turn' as const }
       const content: unknown[] = []
       if (r.text) content.push({ type: 'text', text: r.text })

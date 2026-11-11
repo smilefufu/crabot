@@ -1,6 +1,8 @@
+> 最新冻结30题及首次有效技术重测见 [2026-11-10 基线](baselines/2026-11-10/README.md)。下文保留早期三题校准入口及当时授权，不是当前付费运行许可。
+
 # WorkBuddy 端到端基线
 
-本入口只测当前生产 UnifiedAgent 的普通人类请求 → Manager → builtin Worker → 实际产物 → 本地渠道答复。标准配置只包含 tmp-page Skill，不连接业务 MCP、不带用户私有历史和子 Agent profile；这是隔离基线，不代表全部个人生产配置。
+本入口只测当前生产 UnifiedAgent 的普通人类请求 → Manager → builtin Worker → 实际产物 → 本地渠道答复。当前标准配置包含 tmp-page 及产品三项主线验证 Skill，不连接业务 MCP、不带用户私有历史和子 Agent profile；这是隔离基线，不代表全部个人生产配置。
 
 依据文档仓 `2026-10-28-crabot-workbuddy-baseline-design.md`，首批只执行冻结的三题校准。用户批准的整体总预算为 120M token，包括所有模型、缓存输入、执行、裁判和重试。三题后暂停，不自动扩量。
 
@@ -9,7 +11,7 @@
 - 固定 Crabot 基线、WorkBuddy 源码 `b516950be5b56eb3be406c2f76ee1c5111dcb57f` 和数据 `3e8ad839685c589d83a1dd60fe2d15eabb75f27a`，校验官方 SHA256SUMS。
 - 按原始 task Dockerfile 构建 amd64 镜像；环境在 ARM 主机上经 Docker 模拟运行，时间结果不能与原生 x64 直接比较。
 - `node budget.test.mjs` 应用 Node test runner：`node --test budget.test.mjs`。
-- `node build.mjs "$BUILD_DIRECTORY"` 打包实际生产源码及 tmp-page，输出不包含运行凭据。
+- `node build.mjs "$BUILD_DIRECTORY"` 打包实际生产源码及 tmp-page，输出包含上述产品 Skill，不包含运行凭据。
 - 题目镜像另加 Linux 版 ripgrep、iptables、util-linux 和打包文件。`launch.sh` 作为入口，启动时只放行原生 Provider IPv4 的 443 出站及 loopback，禁用 IPv6、代理环境及 DNS 出站，随后撤销所有 capabilities。文件、进程和项目上下文均在容器内原生执行。
 - `node check-smoke.mjs "$WORKBUDDY_OUTPUT"` 检查真实产物、普通消息来源、权限快照、Worker归属、消息查询及最终投递。
 - `--smoke` 使用脚本化 HTTP 响应，走真实 SDK、工具、权限和投递链路，无收费模型；检查真实文件、任务来源、固定权限、目标和 Manager 消费结果后的答复。

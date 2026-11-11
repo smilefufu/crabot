@@ -35,6 +35,9 @@ const MAX_FILE_SIZE_BYTES = 1 * 1024 * 1024  // 1MB 单文件上限
 const MAX_TOTAL_SIZE_BYTES = 5 * 1024 * 1024 // 5MB 总大小上限
 const SNAPSHOT_SKIPPED_NAMES = new Set(['SKILL.md', '.skill_dir', '.DS_Store'])
 const NON_DISABLEABLE_BUILTIN_SKILL_NAMES = new Set([
+  'browser-interaction-test-check',
+  'web-page-visual-check',
+  'pptx-source-to-delivery',
   'tmp-page',
   'scrapling-official',
 ])

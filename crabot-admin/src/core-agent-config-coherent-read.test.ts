@@ -83,6 +83,7 @@ describe('core Agent config coherent reads', () => {
     subject.rpcClient.callModuleManagerSensitive = vi.fn().mockResolvedValue({ verified: true })
     subject.rpcClient.callModuleManager = vi.fn().mockResolvedValue({ module_id: 'crabot-agent', module_type: 'agent', port: 19002 })
     subject.agentManager.configs.set('crabot-agent', { instance_id: 'crabot-agent', model_config: { powerful: { provider_id: 'p', model_id: 'm' } } })
+    subject.modelProviderManager.getGlobalConfig = vi.fn(() => ({ observability_retention_days: 17 }))
     const epochs = [
       { revision: 1, generation: 0 },
       { revision: 2, generation: 2 },
@@ -97,6 +98,7 @@ describe('core Agent config coherent reads', () => {
     subject.skillManager.list = vi.fn().mockReturnValue([])
     subject.subAgentManager.listEnabled = vi.fn().mockReturnValue([])
     const result = await subject.handleGetAgentConfig({ instance_id: 'crabot-agent' }, { authorizationBearer: 'runtime' })
+    expect(result.config.agent_config.observability_retention_days).toBe(17)
     expect(result.config_revision).toBe(2)
     expect(result.config.agent_config.model_config.powerful).toMatchObject({ endpoint: 'https://new.example', apikey: 'new' })
     expect(result.config).not.toHaveProperty('essential_tools')

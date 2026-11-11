@@ -286,7 +286,6 @@ import {
 import { getBuiltinSkills } from './builtin-skills.js'
 import { groupSessionConfigKey, parseGroupSessionConfig, parseGroupSessionConfigRecord, loadGroupSessionConfigs, serializeGroupSessionConfigs, quarantineGroupSessionConfigs } from './group-session-config.js'
 import { getBuiltinSubAgents } from './builtin-subagents.js'
-import { parseCleanupParams } from './trace-cleanup-cron.js'
 import {
   resolveTaskByShortIdPrefix,
   formatGoalShowResponse,
@@ -794,8 +793,6 @@ export class AdminModule extends ModuleBase {
   private static readonly WAITING_HUMAN_TIMEOUT_MS = 24 * 60 * 60 * 1000  // 24h
   private static readonly WAITING_HUMAN_SCAN_INTERVAL_MS = 5 * 60 * 1000  // 5min
   private waitingHumanScanTimer?: NodeJS.Timeout
-  private stopTraceCleanupCron?: () => void
-  private agentMaintenanceStarted = false
 
   // Task/Trace 状态对账（SSOT 重整 2026-06-09 兜底层）
   /** task 距上次更新 < 此阈值 = 跳过对账（防误判刚 spawn 的 task） */
@@ -1032,7 +1029,6 @@ export class AdminModule extends ModuleBase {
     this.registerMethod('get_task', this.handleGetTask.bind(this))
     this.registerMethod('list_tasks', this.handleListTasks.bind(this))
     // spec 2026-06-09-task-trace-tool-unification.md §4.3 + §4.4
-    this.registerMethod('cleanup_old_tasks_by_count', this.handleCleanupOldTasksByCount.bind(this))
     this.registerMethod('update_task_status', this.handleUpdateTaskStatus.bind(this))
     this.registerMethod('consume_daily_reflection_trigger', this.handleConsumeDailyReflectionTrigger.bind(this))
     this.registerMethod('complete_daily_reflection', this.handleCompleteDailyReflection.bind(this))
@@ -1368,14 +1364,6 @@ export class AdminModule extends ModuleBase {
       this.scheduleEngine.startAll(allSchedules)
       console.log(`[Admin] ScheduleEngine started with ${allSchedules.filter(s => s.enabled).length} active schedules`)
       this.cutoverActivated = true
-      try {
-        await this.startAgentDependentMaintenance()
-      } catch (error) {
-        this.cutoverActivated = false
-        this.configInvalidationPublicationEnabled = false
-        this.scheduleEngine.stop()
-        throw error
-      }
     }
 
     // 启动 Web 服务器
@@ -1408,34 +1396,6 @@ export class AdminModule extends ModuleBase {
     )
   }
 
-  private async startAgentDependentMaintenance(): Promise<void> {
-    if (this.agentMaintenanceStarted) return
-    this.agentMaintenanceStarted = true
-    try {
-      // P6-A §9.7：legacy task-trace reconciliation 已随 get_trace_tree 退役删除；
-      // v3 恢复职责由 agent 侧 reconcileManagerStack 承担，这里不再起 timer/RPC。
-      const { startTraceCleanupCron } = await import('./trace-cleanup-cron.js')
-      this.stopTraceCleanupCron = startTraceCleanupCron({
-        getGlobalConfig: () => this.modelProviderManager.getGlobalConfig(),
-        callCleanup: async (days: number) => {
-          return this.callAgentRpc<
-            { days: number; dry_run: boolean },
-            { affected_count: number; affected_bytes: number; deleted_trace_ids: string[] }
-          >('cleanup_old_traces', { days, dry_run: false })
-        },
-        callCleanupByTaskCount: async (maxCount: number) => {
-          return this.handleCleanupOldTasksByCount({ max_count: maxCount, dry_run: false })
-        },
-      })
-      console.log('[Admin] Trace cleanup cron started')
-    } catch (error) {
-      this.stopTraceCleanupCron?.()
-      this.stopTraceCleanupCron = undefined
-      this.agentMaintenanceStarted = false
-      throw error
-    }
-  }
-
   protected override async onStop(): Promise<void> {
     const onboardingStop = this.onboardingManager.shutdown()
     void onboardingStop.catch(() => {})
@@ -1454,11 +1414,6 @@ export class AdminModule extends ModuleBase {
 
     // 停止 waiting_human 超时扫描器
     if (this.waitingHumanScanTimer) clearInterval(this.waitingHumanScanTimer)
-
-
-    // 停止 trace 自动清理 cron
-    this.stopTraceCleanupCron?.()
-    this.agentMaintenanceStarted = false
 
     // 停止调度引擎
     this.scheduleEngine.stop()
@@ -2957,16 +2912,6 @@ export class AdminModule extends ModuleBase {
           this.onboardingManager.get(body.implementation_id, body.method_id)?.cancel(body.session_id)
         }
         sendJson(res, 200, { ok: true })
-        return
-      }
-
-      // Agent trace 维护面（P6-A §9.6 后只保留这两个；raw trace 内容 API 全部退役）。
-      if (pathname === '/api/agent/traces/disk-usage' && req.method === 'GET') {
-        await this.handleGetTraceDiskUsageApi(req, res)
-        return
-      }
-      if (pathname === '/api/agent/traces/old' && req.method === 'DELETE') {
-        await this.handleCleanupOldTracesApi(req, res, url)
         return
       }
 
@@ -8309,7 +8254,7 @@ export class AdminModule extends ModuleBase {
     await step(() => this.ensureBuiltinSchedules())
     await step(() => this.publishCurrentAgentConfigInvalidation())
     try {
-      await step(() => this.startAgentDependentMaintenance())
+      await verify?.()
     } catch (error) {
       this.configInvalidationPublicationEnabled = false
       throw error
@@ -8511,6 +8456,7 @@ export class AdminModule extends ModuleBase {
       ...config,
       model_config: resolvedModelConfig,
       tmp_page_base_url: tmpPageBaseUrl,
+      observability_retention_days: this.modelProviderManager.getGlobalConfig().observability_retention_days ?? 30,
       mcp_servers: mcpServerConfigs,
       skills: this.skillManager.list()
         .filter((s) => {
@@ -10091,6 +10037,7 @@ export class AdminModule extends ModuleBase {
         default_image_model_id: global.default_image_model_id ?? null,
         image_slot_user_set: global.image_slot_user_set ?? null,
         public_base_url: global.public_base_url ?? null,
+        observability_retention_days: global.observability_retention_days ?? 30,
       },
       providers,
       mcp_servers: this.mcpServerManager.runtimeSemanticEntries(),
@@ -12170,26 +12117,6 @@ export class AdminModule extends ModuleBase {
     }
   }
 
-  private async handleGetTraceDiskUsageApi(
-    _req: IncomingMessage,
-    res: ServerResponse,
-  ): Promise<void> {
-    await this.proxyAgentRpc(res, 'get_trace_disk_usage', {})
-  }
-
-  private async handleCleanupOldTracesApi(
-    _req: IncomingMessage,
-    res: ServerResponse,
-    url: URL,
-  ): Promise<void> {
-    const parsed = parseCleanupParams(url)
-    if ('error' in parsed) {
-      sendJson(res, 400, { error: parsed.error })
-      return
-    }
-    const { days, dryRun } = parsed
-    await this.proxyAgentRpc(res, 'cleanup_old_traces', { days, dry_run: dryRun })
-  }
 
   private async handleListModulesApi(_req: IncomingMessage, res: ServerResponse): Promise<void> {
     try {

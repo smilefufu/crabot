@@ -17,6 +17,23 @@
 - 干净macOS ARM候选v8：归档441,399,176 B、展开1,123,310,154 B；解包启动/CLI/国内公开安装/扫码/真实Agent合成收发/重启及六包受管往返4/4通过，前后seal完整。[复现、摘要和证据](experiments/cordis-feishu/README.md)。
 - 已把v8归档接回原55885隔离实例：四模块running、飞书已连接、Agent模型ready，仅55885监听；原Provider/全局/飞书配置哈希保持，生产3000身份未变。浏览器已安装Channel(1)仅飞书、新增仅飞书扫码、聊天已同步；零安装/双插件/无Webhook表单另在临时实例验证并停机。正式协议已同步独立文档仓；产品分支保持独立，最终真人收发验收后才提正式PR，不自行合并。
 
+### 已测通用工作规则与派工复核接入（2026-11-11，未部署）
+
+- 将冻结30题使用的主控轻量派工模板、主线 Worker 通用验证/证据/数据口径规则及三项 Skill 接入正式装配；builtin、Claude Code、Codex 主线共享正文，独立子 Agent 和每日反思保留既有边界。
+- 普通主控按同一响应完整派工批次做无工具语义复核，沿用实际模型和原生重试；来源来自宿主已接纳人类消息并随原历史保存，复核不改写派工或批准权限。语义修订与接口失败分别留证，整批派工暂缓，原工具授权及日志路径保留。
+- 原始来源跨普通完成、模型失败、压缩与重建保留；主控/原生CLI装配、整批拒绝、调用归属、原权限链和原生重试热更新均有定向回归。扩大回归仍有 main 已复现的失败及并行超时，单列验证，不标全绿；未部署或用真实模型重测接入后的版本。
+- 冻结成绩及hash单独归档：29份原有效结果＋用户授权的1份首次有效技术重测，Code78.76/Web90.00/Office87.48，整体85.41。未改原评分、未追加优化或付费重跑；有复核漏检和评分口径限制，不作因果提分或已部署结论。
+
+### 第三方磁盘／computer-use 评估复核（2026-11-11）
+
+- 当前 main 的请求分帧已解决旧 desktop.23 computer-use 半关闭故障，本次 Mac MCP 全包 47 项通过。报告的 1000 上限仅为 TraceStore 内存驻留，不能当作磁盘配额；默认 dry-run 是预览保护，不改成默认实删。
+- 修复 running 快照在内容不变时仍每 15 秒重写：只在成功替换后记住内容摘要，变化、丢失及写入／替换失败仍正常落盘与重试；不改检查周期、格式、恢复或保留天数。回归先红后绿，相关 90 项和 Agent 类型检查通过；未部署、未打包。
+- 按逐项许可补齐统一 retention：默认30天，保留旧配置，启动与每日清理过期 trace/episode/closed Worker 运行记录；同原 Worker/台账锁重查，journal 中断续清。保护非终态、未结算回执、工作区、检查点及未完成反思；反思登记与清理串行，退出停止新删除且不等清理跑完。
+- 新增人类主动“清理旧程序…”：预览本安装可确认的旧 releases/app/releases 及大小，确认后重查证明、目录身份、恢复记录与原生占用；未知或被占用保留、不杀后台进程。未进入安装/升级路径，不处理用户数据。
+- 第②项后续单项许可已实施：普通模式按消息ID去除旧历史，保留本轮输入及完整工具组；CRABOT_DEBUG=1本次启动保存全文，来源记在原trace细节，重启不误删调试文件。反思completed且Admin确认窗口后，核实冻结内容/字节、结束时间及引用再删原文；partial、未知/跨窗口/检查点保留。启动/每日从持久完成状态重试，删除失败不撤销反思、不重跑模型；旧原文不改写，state/记忆/trace保持。
+- 第②项9套372项定向回归通过，扩展bootstrap另51通过、2项Slack夹具缺依赖未完成；loop-trace另21通过、2个已复现基线失败仍保留。Agent编译通过。Mac ARM、Win x64 Node（ARM VM/SYSTEM）、Linux x64容器用生产Store/Evidence/TraceStore/Retention代码及合成文件验证4项；20轮普通20行2330字节、调试全文210行24415字节，约90.5%减少仅属该样例，不是用户总磁盘估算。未部署/发包/清理真实数据。
+- ①③初轮验收：Agent 10套500项、Admin 5套77项、旧程序模块/确认对话框9项通过；Agent/Admin/桌面/Web类型检查与Web构建通过。本地Windows x64 Node（ARM VM/SYSTEM）、Linux x64容器以编译后清理服务和真实临时文件验证4项删除/保护；Ledger/Session/Trace端口为夹具，非安装包或普通用户GUI验收。扩大回归中2个反思loop失败在未改main同样复现，2个Slack媒体夹具缺依赖未完成，未算全绿。未部署、未打包、未删真实数据。
+
 ### v2026.11.10.1 与桌面 .25 公开预览（2026-11-10，未部署本机）
 
 - 从 `main` 的 `45ac9153` 固定打 tag，发布 macOS ARM／Intel、Windows x64、Ubuntu x64 四个桌面 `.25` 安装包及四个独立 CLI 归档：[Release](https://github.com/smilefufu/crabot/releases/tag/v2026.11.10.1)。八个最终包均通过原生 CI 安装／启动及各自的健康、停止、重连或升级检查。
@@ -1272,9 +1289,6 @@
 
 ### P6 遗留 follow-up
 
-- **统一 observability retention**：自动回收终态 Worker 的 adapter output/session、events/context、ledger、
-  过期 Manager episode/TraceStore；孤儿 adapter/events 24h grace；output log 10MB cap。所有 workspace
-  零自动删除；workspace 管理和显式删除另行设计。
 - **Worker onboarding / 选择器**：真实 pane 内失效尚缺实现级归因；verification binding 仍按整份 Worker
   配置 revision 失效；operation 占位、断言临时文件、终态时间、403 body、孤儿 Provider、代理出口、
   operation TTL，以及选择器 fence 的 revision/barrier 测试仍需分别评估。

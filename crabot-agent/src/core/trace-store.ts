@@ -6,6 +6,7 @@
 
 import * as fs from 'fs'
 import * as path from 'path'
+import { createHash } from 'node:crypto'
 import type { AgentTrace, AgentSpan, AgentSpanType, AgentSpanDetails, TokenUsage } from '../types.js'
 import { aggregateUsage } from './trace-usage.js'
 import {
@@ -110,6 +111,7 @@ export class TraceStore {
   // 进程重启后 rebuildIndex 把上次 running 的 trace 重新加载到 this.traces，
   // searchTraces 的现有合并逻辑（line 107-112）能直接展示出来。
   private flushTimer?: ReturnType<typeof setInterval>
+  private lastRunningSnapshotHash?: string
   private readonly runningFlushFile: string
   private readonly archiveFilePrefix: string
   private readonly readableArchiveFilePrefixes: readonly string[]
@@ -368,9 +370,12 @@ export class TraceStore {
     }
     const content = lines.length > 0 ? lines.join('\n') + '\n' : ''
     const finalPath = path.join(this.persistDir, this.runningFlushFile)
+    const hash = createHash('sha256').update(content).digest('hex')
+    if (hash === this.lastRunningSnapshotHash && fs.existsSync(finalPath)) return
     const tmpPath = finalPath + '.tmp'
     fs.writeFileSync(tmpPath, content, 'utf-8')
     fs.renameSync(tmpPath, finalPath)
+    this.lastRunningSnapshotHash = hash
   }
 
   /**
@@ -1123,6 +1128,8 @@ export class TraceStore {
     return /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : undefined
   }
 
+  activeManagerEpisodeIds(): ReadonlySet<string> { return new Set(this.runningManagerEpisodeIds) }
+
   /**
    * 删除 dateStr 严格小于 cutoffStr 的当前实例 archive 文件。
    * 其他 readable archive 前缀（如只读 legacy traces）不会被删除。
@@ -1146,6 +1153,8 @@ export class TraceStore {
       for (const file of files) {
         const dateStr = this.archiveDate(file)
         if (!dateStr || dateStr >= cutoffStr) continue
+        if ([...this.runningManagerEpisodeIds].some(id => this.managerEpisodeDates.get(id) === dateStr)
+          || [...this.traces.values()].some(trace => trace.status === 'running' && trace.started_at.slice(0, 10) === dateStr)) continue
         const filePath = path.join(this.persistDir, file)
         const stat = fs.statSync(filePath)
         affectedBytes += stat.size

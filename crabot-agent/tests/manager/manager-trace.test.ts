@@ -3,7 +3,7 @@
  * start/flush/rebuild/finish/restart reconcile、legacy 无 kind 行兼容、
  * manager 索引隔离、单次收口、cleanup 不删 running、敏感字段不落盘。
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
@@ -45,6 +45,21 @@ describe('TraceStore manager episode traces', () => {
   afterEach(() => {
     store.stopFlushTimer()
     fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('keeps an archive containing a still-running episode even beyond the retention cutoff', () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(new Date('2020-01-01T12:00:00Z'))
+      store.startManagerEpisode('old-running', KEY_A, TRIGGER)
+      vi.setSystemTime(new Date('2026-11-11T12:00:00Z'))
+      store.cleanupOldTraces(30, false)
+      const file = path.join(dir, 'traces-v3-2020-01-01.jsonl')
+      expect(fs.existsSync(file)).toBe(true)
+      store.finishManagerEpisode('old-running', { status: 'completed', outcome: { summary: 'done' } })
+      store.cleanupOldTraces(30, false)
+      expect(fs.existsSync(file)).toBe(false)
+    } finally { vi.useRealTimers() }
   })
 
   it('start creates a persisted running episode; finish closes it exactly once with outcome/usage', () => {
