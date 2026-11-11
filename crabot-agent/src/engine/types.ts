@@ -59,6 +59,8 @@ export interface LLMTokenUsage {
 // --- Messages ---
 
 export interface EngineUserMessage {
+  /** Host-admitted Manager source; audit context only, never an authorization credential. */
+  readonly managerHumanSource?: ReadonlyArray<import('../types.js').ChannelMessage>
   readonly id: string
   readonly role: 'user'
   readonly content: string | ContentBlock[]
@@ -419,7 +421,24 @@ export type EndTurnGateResult =
   | { readonly kind: 'fail'; readonly reason: string }
   | null
 
+export interface ToolBatchContext {
+  readonly systemPrompt: string
+  readonly messages: ReadonlyArray<EngineMessage>
+  readonly tools: ReadonlyArray<ToolDefinition>
+  readonly calls: ReadonlyArray<ToolUseBlock>
+  readonly callIds: ReadonlyMap<string, string>
+  readonly adapter: import('./llm-adapter.js').LLMAdapter
+  readonly model: string
+  readonly thinking?: import('./llm-adapter-types.js').LLMThinkingConfig
+  readonly signal?: AbortSignal
+  readonly configChangedSignal?: AbortSignal
+  readonly configGeneration?: () => number
+  readonly onConfigChanged?: () => Promise<import('./llm-adapter-types.js').LLMConfigSwap | void>
+}
+
 export interface EngineOptions {
+  /** Per-run admission hook; replacement tools still pass the original permission/hook pipeline. */
+  readonly prepareToolBatch?: (context: ToolBatchContext) => Promise<ReadonlyArray<ToolDefinition>>
   readonly onRequestLifecycle?: (event: LLMRequestEvent, purpose: 'inference' | 'compaction') => void
   readonly unavailableToolResult?: ToolCallContext['unavailableToolResult']
   readonly systemPrompt: Resolvable<string>

@@ -1,0 +1,19 @@
+{
+  "evaluated_main_commit": "45ac91532d4308c48ec936f4149d7d56ef437eec",
+  "evaluated_plan_sha256": "29390b2e7a8abf7f774da438a5fb9fbeb45865c073587204a9d99b9d0dc7385d",
+  "evaluated_runtime_sha256": "08cead73e3888160958c6c3ac49b17a3e2b43c7386f0fd2eb69474ba1b68f6be",
+  "original_audited_results_sha256": "06113f2b264270c84f51040ae9ff2f6bda7e568cee55bf488b79b8b4c7f68b91",
+  "recovered_results_sha256": "0fbf6e8c3754ffd06a298ef3cc863209f0acb157ddda5934396bfc04a15a61e9",
+  "inputs": {
+    "harness/latest/manager.md": "500c00795912b9ea54eb4366e306cd48923a51d6ac1ebfb6685106939e96845f",
+    "harness/latest/worker.md": "e5a4325b14c11ab76ce0f2e896fa71b1995399ebf8c7f9094bf8371516da9549",
+    "harness/latest/options.json": "e71242bfba12c42045c451e4dc523f0a0358a8a0994a8258c6625996ff3d5fcb",
+    "reviewer.txt": "1e7f6c5a87f5b1456ecac2d9ae2f465fb8810ad44f13881ca330b0bafd8f2212",
+    "delegation-review.cjs": "01cca957a4235637bd389d5486f841138da6ddad580f892cfa58089ce84ff5e3",
+    "review.test.cjs": "312ea41290a686435f51214444af1a5333db608e9256c05d4fb9d0bb9f3c3e54",
+    "harness/latest/skills/browser-interaction-test-check/SKILL.md": "4cddbb97350f6b0bc8230834323e171240e8f431b1633b21a12c573312acd6f1",
+    "harness/latest/skills/pptx-source-to-delivery/SKILL.md": "55407805a2417ed49c7ded05007e3ec9af23da30c22f279660f1e7d434d6e5d6",
+    "harness/latest/skills/web-page-visual-check/SKILL.md": "611f19bb499bd183935d6eb17ba9dfb61a4504d0e941b6fb24e60e4a436e9445",
+    "results.json": "a9b494844bb294733c0447f97877137929135a1b7e01896918639fbabf037021"
+  }
+}

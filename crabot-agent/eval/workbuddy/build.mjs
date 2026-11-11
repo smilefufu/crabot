@@ -16,4 +16,6 @@ for (const [entry, outfile] of [
   external: ['sharp', '@vscode/ripgrep', 'ts-node/register/transpile-only'],
   nodePaths: [path.join(repo, 'crabot-agent/node_modules'), path.join(repo, 'node_modules')],
 })
-fs.cpSync(path.join(repo, 'crabot-admin/builtins/skills/tmp-page'), path.join(output, 'skills/tmp-page'), { recursive: true })
+for (const name of ['tmp-page', 'browser-interaction-test-check', 'web-page-visual-check', 'pptx-source-to-delivery']) {
+  fs.cpSync(path.join(repo, 'crabot-admin/builtins/skills', name), path.join(output, 'skills', name), { recursive: true })
+}

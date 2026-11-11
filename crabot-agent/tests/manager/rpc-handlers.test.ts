@@ -1,3 +1,4 @@
+import { DELEGATION_REVIEW_PROMPT } from '../../src/manager/delegation-review-prompt.js'
 /**
  * agent 侧五个 v3 RPC handler(P5 Task 4)—— protocol-agent-v3.md §8.2 / §8.3。
  *
@@ -162,7 +163,11 @@ function makeManagerLLM(
 ): LLMAdapter {
   let i = 0
   return {
-    async *stream() {
+    async *stream(params) {
+      if (params.systemPrompt === DELEGATION_REVIEW_PROMPT) {
+        yield* chunksFromContent([{ type: 'text', text: '{"verdict":"allow","issues":[]}' }], 'end_turn')
+        return
+      }
       const r = scripts[i++] ?? { text: '(收工)', stopReason: 'end_turn' as const }
       const content: unknown[] = []
       if (r.text) content.push({ type: 'text', text: r.text })

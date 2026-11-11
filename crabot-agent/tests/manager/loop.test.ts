@@ -1,3 +1,4 @@
+import { DELEGATION_REVIEW_PROMPT } from '../../src/manager/delegation-review-prompt.js'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { promises as fs, readFileSync } from 'fs'
 import { tmpdir } from 'os'
@@ -26,6 +27,10 @@ import { HttpResponseError } from '../../src/engine/retry-utils.js'
 import { chunksFromContent } from '../engine/helpers/mock-stream.js'
 
 // --- Fixtures / helpers ---
+
+/** Source metadata is retained for review, not a second visible input. */
+const visibleHistoryJson = (messages: ReadonlyArray<EngineMessage>) =>
+  JSON.stringify(messages, (key, value) => key === 'managerHumanSource' ? undefined : value)
 
 const KEY: ManagerKey = 'wechat::sess-loop'
 const FIXED_RECEIVED_AT = '2026-01-01T08:00:00+08:00'
@@ -100,10 +105,12 @@ interface TurnScript {
 function makeAdapter(opts: { autoSettleAssistantTextReminder?: boolean } = {}): {
   readonly adapter: LLMAdapter
   readonly calls: LLMStreamParams[]
+  readonly reviewCalls: LLMStreamParams[]
   readonly foldCalls: LLMStreamParams[]
   readonly queue: TurnScript[]
   readonly foldQueue: string[]
 } {
+  const reviewCalls: LLMStreamParams[] = []
   const calls: LLMStreamParams[] = []
   const foldCalls: LLMStreamParams[] = []
   const queue: TurnScript[] = []
@@ -114,6 +121,11 @@ function makeAdapter(opts: { autoSettleAssistantTextReminder?: boolean } = {}): 
       // query-loop 内 messages 是同一个数组跨轮次原地 push——这里必须浅拷贝快照,
       // 否则事后读 calls[i].messages 会看到"未来轮次"的内容(引用同一底层数组)。
       const snapshot: LLMStreamParams = { ...params, messages: [...params.messages] }
+      if (params.systemPrompt === DELEGATION_REVIEW_PROMPT) {
+        reviewCalls.push(snapshot)
+        yield* chunksFromContent([{ type: 'text', text: '{"verdict":"allow","issues":[]}' }], 'end_turn')
+        return
+      }
       calls.push(snapshot)
       if (params.systemPrompt.includes(FOLD_SYSTEM_PROMPT_MARKER)) {
         foldCalls.push(snapshot)
@@ -135,7 +147,7 @@ function makeAdapter(opts: { autoSettleAssistantTextReminder?: boolean } = {}): 
     updateConfig: () => {},
   }
 
-  return { adapter, calls, foldCalls, queue, foldQueue }
+  return { adapter, calls, reviewCalls, foldCalls, queue, foldQueue }
 }
 
 function makeChannelMessage(text: string): ChannelMessage {
@@ -194,6 +206,42 @@ describe('ManagerLoop', () => {
 
   afterEach(async () => {
     await fs.rm(dataDir, { recursive: true, force: true })
+  })
+
+  it('reviews ordinary dispatch using real human source, including a later Worker wake after loop recreation', async () => {
+    const { adapter, queue, reviewCalls } = makeAdapter()
+    const dispatch = vi.fn(async () => ({ output: 'created' }))
+    const tool = defineTool({ name: 'spawn_worker', description: 'spawn', inputSchema: {}, call: dispatch })
+    const deps = baseDeps({ store, adapter, toolFace: () => [tool] })
+    queue.push({ toolCalls: [{ id: 'first', name: 'spawn_worker', input: { prompt: '调查' } }], stopReason: 'tool_use' }, { stopReason: 'end_turn' })
+    const human = makeChannelMessage('先调查，保留原始接口')
+    await new ManagerLoop(deps).wakeUp(timed({ kind: 'human_messages', messages: [human] }))
+    expect(dispatch).toHaveBeenCalledTimes(1)
+    const first = JSON.parse(String(reviewCalls[0].messages[0].content))
+    expect(first.originalSource).toContainEqual(human)
+    expect(first.proposedCalls[0].id).toBe('first')
+    queue.push({ toolCalls: [{ id: 'next', name: 'spawn_worker', input: { prompt: '整合' } }], stopReason: 'tool_use' }, { stopReason: 'end_turn' })
+    await new ManagerLoop(deps).wakeUp(workerEventWake('first-worker'))
+    expect(dispatch).toHaveBeenCalledTimes(2)
+    expect(JSON.parse(String(reviewCalls[1].messages[0].content)).originalSource).toContainEqual(human)
+    expect(reviewCalls.every(call => call.tools.length === 0)).toBe(true)
+  })
+
+  it('retains the admitted original source after inference failure before any dispatch', async () => {
+    const { adapter, queue, reviewCalls } = makeAdapter()
+    const stream = adapter.stream.bind(adapter)
+    let first = true
+    adapter.stream = async function* (params) {
+      if (first) { first = false; throw new Error('permanent fixture failure') }
+      yield* stream(params)
+    }
+    const tool = defineTool({ name: 'spawn_worker', description: 'spawn', inputSchema: {}, call: async () => ({ output: 'created' }) })
+    const deps = baseDeps({ store, adapter, toolFace: () => [tool] })
+    const human = makeChannelMessage('原始要求不能在接口失败后丢失')
+    expect((await new ManagerLoop(deps).wakeUp(timed({ kind: 'human_messages', messages: [human] }))).outcome).toBe('failed')
+    queue.push({ toolCalls: [{ id: 'after-failure', name: 'spawn_worker', input: { prompt: '继续' } }], stopReason: 'tool_use' }, { stopReason: 'end_turn' })
+    await new ManagerLoop(deps).wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('继续')] }))
+    expect(JSON.parse(String(reviewCalls[0].messages[0].content)).originalSource).toContainEqual(human)
   })
 
   it('only exposes the committed current input window, filtering duplicates and clearing between episodes', async () => {
@@ -327,7 +375,7 @@ describe('ManagerLoop', () => {
     }
     const saved = await store.load(KEY)
     expect(saved.foldedCount).toBeGreaterThan(0)
-    expect(saved.recent).toContainEqual(firstInput)
+    expect(saved.recent).toContainEqual(expect.objectContaining(firstInput))
     expect(JSON.stringify(saved.recent)).toContain('completed directory pages')
   })
 
@@ -385,7 +433,7 @@ describe('ManagerLoop', () => {
     const saved = await store.load(KEY)
     expect(saved.rollingSummary).toBe('old history summarized')
     expect(saved.foldedCount).toBeGreaterThan(0)
-    expect(JSON.stringify(saved.recent).split('unique-supplement')).toHaveLength(2)
+    expect(saved.recent.filter(message => message.role === 'user' && 'content' in message && String(message.content).includes('unique-supplement'))).toHaveLength(1)
     expect(JSON.stringify(saved.recent)).toContain('## Guidance: manager.workboard')
   })
 
@@ -1094,7 +1142,7 @@ describe('ManagerLoop', () => {
     expect(second.consumedEvents).toBe(true)
 
     const finalState = await store.load(KEY)
-    const serialized = JSON.stringify(finalState.recent)
+    const serialized = visibleHistoryJson(finalState.recent)
     expect(serialized).toContain('重要的话只能说一次') // 来自已提交的历史
     expect(serialized).toContain('received_at=\\"2026-01-01T08:12:34+08:00\\"')
     expect(serialized).toContain('新的话') // 本次新事件
@@ -1202,7 +1250,7 @@ describe('ManagerLoop', () => {
     expect(second.consumedEvents).toBe(true)
 
     const finalState = await store.load(KEY)
-    const serialized = JSON.stringify(finalState.recent)
+    const serialized = visibleHistoryJson(finalState.recent)
     expect(serialized).toContain('sched-fail')
     expect(serialized).toContain('失败前注入的事件')
     expect(serialized).toContain('新的话')
@@ -1279,7 +1327,7 @@ describe('ManagerLoop', () => {
     expect(second.consumedEvents).toBe(true)
 
     const finalState = await store.load(KEY)
-    const serialized = JSON.stringify(finalState.recent)
+    const serialized = visibleHistoryJson(finalState.recent)
     expect(serialized).toContain('sched-carried') // 唤醒前已在邮箱的内容(carriedTexts)
     expect(serialized).toContain('sched-throw') // mid-episode 注入(currentEpisodeInjected)
     expect(serialized).toContain('触发超限并在折叠时抛错') // 本次唤醒事件(eventText)
@@ -1352,7 +1400,7 @@ describe('ManagerLoop', () => {
     expect(second.outcome).toBe('completed')
 
     const finalState = await store.load(KEY)
-    const serialized = JSON.stringify(finalState.recent)
+    const serialized = visibleHistoryJson(finalState.recent)
     expect(serialized).toContain('抛错前注入的指令')
     expect(serialized).toContain('新的话')
     // 「抛错前注入的指令」全历史只出现一次(tailMessages 引用同一份 recent,不重复追加)
@@ -1648,7 +1696,11 @@ describe('ManagerLoop', () => {
     expect(calls[1].systemPrompt).toBe(calls[0].systemPrompt)
     expect(buildPromptCacheKey(calls[1].model, calls[1].systemPrompt))
       .toBe(buildPromptCacheKey(calls[0].model, calls[0].systemPrompt))
-    expect(calls[1].messages.slice(0, history.length)).toEqual(history)
+    expect(calls[1].messages.slice(0, history.length)).toEqual(history.map(message => {
+      if (message.role !== 'user' || !('content' in message)) return message
+      const { managerHumanSource: _source, ...visible } = message
+      return visible
+    }))
     if (guide) expect(calls[1].messages.filter(m => 'content' in m && m.content === guide)).toHaveLength(1)
     else expect(JSON.stringify(calls[1].messages)).not.toContain('## Guidance:')
     if (guide) expect(JSON.stringify((await store.load(KEY)).recent)).toContain(guide.split('\n')[0])
@@ -1996,8 +2048,8 @@ describe('ManagerLoop', () => {
     expect(accepted).toHaveBeenCalledTimes(1)
     const state = await store.load(KEY)
     expect(state.committedHumanMessageIds).toContain(supplement.platform_message_id)
-    expect(JSON.stringify(state.recent).split('persisted supplement')).toHaveLength(2)
-    expect(JSON.stringify(state.recent).split('earlier in batch')).toHaveLength(2)
+    expect(visibleHistoryJson(state.recent).split('persisted supplement')).toHaveLength(2)
+    expect(visibleHistoryJson(state.recent).split('earlier in batch')).toHaveLength(2)
   })
 
   it('does not confirm injected input when its context checkpoint fails', async () => {
@@ -2154,7 +2206,7 @@ describe('ManagerLoop', () => {
     expect(second.outcome).toBe('completed')
 
     const finalState = await store.load(KEY)
-    const serialized = JSON.stringify(finalState.recent)
+    const serialized = visibleHistoryJson(finalState.recent)
     expect(serialized).toContain('失败前的人类指令')
     expect(serialized).toContain('新的话')
     expect(accepted).toHaveBeenCalledTimes(1)
@@ -2346,7 +2398,7 @@ describe('ManagerLoop', () => {
     const secondCall = calls[calls.length - 1]
     expect(JSON.stringify(secondCall.messages)).toContain('滞留指令')
     const finalState = await store.load(KEY)
-    const finalText = JSON.stringify(finalState.recent)
+    const finalText = visibleHistoryJson(finalState.recent)
     expect(finalText).toContain('滞留指令')
     expect(finalText).toContain('新的话')
     expect(finalState.committedHumanMessageIds?.length).toBe(3) // 主 wake + 滞留 + 新的话
@@ -2729,7 +2781,7 @@ describe('ManagerLoop', () => {
     expect(result.turns).toBe(3) // 首次尝试 1 turn(max_tokens)+ 重试 2 turn
 
     const finalState = await store.load(KEY)
-    const occurrences = (JSON.stringify(finalState.recent).match(/sched-during-fold/g) ?? []).length
+    const occurrences = (visibleHistoryJson(finalState.recent).match(/sched-during-fold/g) ?? []).length
     expect(occurrences).toBe(1) // 折叠期间到达的内容只应出现一次,不应因 retry 的 turn 边界
     // drain 与显式追加的 currentEpisodeInjected 重复计入
   })
@@ -3380,7 +3432,7 @@ describe('ManagerLoop', () => {
       if (compact) {
         expect(state.rollingSummary).toBe('continuation summary')
         expect(state.foldedCount).toBeGreaterThan(0)
-        expect(JSON.stringify(state.recent).split('复核期间注入的指令')).toHaveLength(2)
+        expect(visibleHistoryJson(state.recent).split('复核期间注入的指令')).toHaveLength(2)
         expect(state.committedHumanMessageIds).toContain('pm-injected-recheck')
       } else {
         expect(JSON.stringify(state.recent)).not.toContain('复核期间注入的指令')
