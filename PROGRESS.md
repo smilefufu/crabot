@@ -1,5 +1,12 @@
 # Crabot 项目进度
 
+### v2026.11.11.1 与桌面 .26 公开预览（2026-11-11，已发布，未部署本机）
+
+- 从 main 的 `74dec3c5` 固定源码发布 [v2026.11.11.1](https://github.com/smilefufu/crabot/releases/tag/v2026.11.11.1)：包含单端口 IPC／按需协作插件与新接入页、派工复核及工作规则、增量记录／反思后回收／旧程序清理；桌面版本为 `0.1.0-desktop.26`。
+- macOS ARM／Intel、Windows x64、Ubuntu x64 四个桌面最终包及四个 CLI 最终归档均通过原生 CI 安装、启动和对应重装／升级检查。公开旧 .25 到 .26 的四平台 GUI 实际覆盖、版本替换和数据保留通过；Windows 额外核对完成页启动、开始菜单及两轮启停。原夹具失败、专项复验与各自证据范围见发行说明，不宣称全仓测试全绿。
+- [发布前完整核验](https://github.com/smilefufu/crabot/actions/runs/42994715768) 与 [发布后匿名核验](https://github.com/smilefufu/crabot/actions/runs/42995311204) 均通过：17 附件匿名 HTTP 200，实际 SHA-256、sidecar、GitHub 摘要一致，tag 指向固定源码。各平台下载／程序体积及原生验收来源见公开 `desktop.26-verification.json`。
+- 桌面继续为未正式签名／公证的公开预览，应用内自动更新关闭；不等同普通用户真机或真实模型业务验收。旧账号首次补装插件需要网络；默认过期清理会处理历史积累，旧程序清理仍须主动确认。没有升级本机实例或清理真实业务数据。
+
 ### 协作入口 UX（2026-11-11，用户已验收，准备整体正式 PR）
 
 - 按用户确认的[第二版设计](crabot-docs/superpowers/specs/2026-11-11-channel-installation-ux-design.md)，正式文案统一 CRABOT / 协作入口；添加页围绕“在哪里与 CRABOT 协作”，显式同页准备插件、原位重试、成功后继续现有账号设置。模块页安装后提供定位该平台的添加出口；安装就绪不冒充平台连接。
