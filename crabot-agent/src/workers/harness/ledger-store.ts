@@ -195,6 +195,28 @@ export class LedgerStore {
     return result
   }
 
+  /** Retention only: artifacts must be removed before committing the ledger deletion. */
+  async removeClosedWorker(workerId: string, cutoff: number, removeArtifacts: (worker: LedgerWorker) => Promise<boolean>): Promise<boolean> {
+    await this.init()
+    return this.getWorkerMutex(workerId).run(async () => {
+      const key = this.workerIndex.get(workerId)
+      if (!key) return false
+      return this.getMutex(key).run(async () => {
+        this.invalidateCache(key)
+        const ledger = await this.readLedgerFileStrict(key)
+        const worker = ledger.workers.find(item => item.worker_id === workerId)
+        if (!worker || worker.task.status !== 'closed' || !(Date.parse(worker.updated_at) < cutoff)
+          || worker.incarnations.some(item => item.state !== 'exited')
+          || worker.recovery_notices?.some(item => item.status === 'pending')) return false
+        if (!await removeArtifacts(structuredClone(worker))) return false
+        ledger.workers = ledger.workers.filter(item => item.worker_id !== workerId)
+        await this.writeLedgerFile(key, ledger)
+        this.workerIndex.delete(workerId)
+        return true
+      })
+    })
+  }
+
   private getMutex(key: ManagerKey): AsyncMutex {
     let mutex = this.mutexes.get(key)
     if (!mutex) { mutex = new AsyncMutex(); this.mutexes.set(key, mutex) }

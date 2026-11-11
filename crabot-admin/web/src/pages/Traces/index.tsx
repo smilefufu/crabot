@@ -1,13 +1,12 @@
 /**
  * P6-A §10：/traces 主入口 —— v3 Managers / Workers 双 tab。
- * legacy conversation-unit / raw trace 主视图已退役；trace 清理走专用维护面（CleanupDialogs）。
+ * legacy raw trace 清理入口已退役；磁盘生命周期由 Agent 统一 retention 负责。
  */
 import React, { useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { MainLayout } from '../../components/Layout/MainLayout'
 import { ManagersView } from './ManagersView'
 import { WorkersView } from './WorkersView'
-import { ManualCleanupDialog } from './CleanupDialogs'
 import './TraceOverview.css'
 
 type Tab = 'managers' | 'workers'
@@ -15,14 +14,12 @@ type Tab = 'managers' | 'workers'
 export const Traces: React.FC = () => {
   const [searchParams] = useSearchParams()
   const [tab, setTab] = useState<Tab>(searchParams.get('tab') === 'workers' ? 'workers' : 'managers')
-  const [cleanupOpen, setCleanupOpen] = useState(false)
 
   return (
     <MainLayout>
       <div className="trace-overview">
         <header className="trace-overview__heading">
           <h1>运行记录</h1>
-          <button className="trace-overview__cleanup" type="button" onClick={() => setCleanupOpen(true)}>清理记录</button>
         </header>
         <div className="trace-overview__tabs" role="tablist" aria-label="运行记录视图">
           <button className={tab === 'managers' ? 'is-active' : ''} type="button" role="tab" aria-selected={tab === 'managers'} onClick={() => setTab('managers')}>
@@ -36,7 +33,6 @@ export const Traces: React.FC = () => {
           {tab === 'managers' ? <ManagersView /> : <WorkersView />}
         </div>
       </div>
-      <ManualCleanupDialog open={cleanupOpen} onClose={() => setCleanupOpen(false)} onDeleted={() => setCleanupOpen(false)} />
     </MainLayout>
   )
 }

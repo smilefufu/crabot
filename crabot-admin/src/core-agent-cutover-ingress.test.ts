@@ -127,7 +127,7 @@ describe('management-only Admin ingress gate', () => {
       fetch(`http://localhost:${port}/api/agent/traces/old?days=30`, { method: 'DELETE', headers }),
     ])
     expect([rebuild, workers, managers, managerEpisodes, entities, entityLog, killEntity, diskUsage, cleanup].map((response) => response.status))
-      .toEqual([503, 503, 503, 503, 503, 503, 503, 503, 503])
+      .toEqual([503, 503, 503, 503, 503, 503, 503, 404, 404])
     expect(rpc).not.toHaveBeenCalled()
   })
 

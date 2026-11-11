@@ -71,14 +71,9 @@ export interface GlobalModelConfig {
    * 可选；未配置时后端退化为 http://localhost:<web_port>。
    */
   public_base_url?: string
-  /** 自动清理保留天数；null = 不按天清理。与 task_retention_count 互斥，同时存在时 days 优先 */
-  trace_retention_days?: number | null
-  /**
-   * 自动清理保留 task 个数；null = 不按个数清理。
-   * spec 2026-06-09-task-trace-tool-unification.md §4.4：单位从 trace 改 task，跟用户心智一致
-   * （"保留最近 N 个对话"）。活跃 task 不计入配额。
-   */
-  task_retention_count?: number | null
+  /** 统一观测历史保留天数，默认30，不清理工作区。 */
+  observability_retention_days?: number | null
+
 }
 
 export interface ModelConnectionInfo {

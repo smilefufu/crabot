@@ -672,15 +672,16 @@ describe('Admin Web API', () => {
       }
     })
 
-    it('维护面端点保留：disk-usage / traces/old 透传 agent RPC', async () => {
+    it('旧维护端点退役：disk-usage / traces/old 返回404且不调用清理RPC', async () => {
       const token = await loginAndGetToken()
-      const spy = vi.spyOn(admin['rpcClient'], 'call')
-      spy.mockResolvedValueOnce({ total_bytes: 0, trace_count: 0 })
+      const spy = vi.spyOn(admin['rpcClient'], 'call').mockResolvedValue({} as never)
       const usage = await makeWebRequest(TEST_WEB_PORT, '/api/agent/traces/disk-usage', 'GET', null, token)
-      expect(usage.statusCode).toBe(200)
-      spy.mockResolvedValueOnce({ affected_count: 0, affected_bytes: 0, deleted_trace_ids: [] })
+      expect(usage.statusCode).toBe(404)
       const cleanup = await makeWebRequest(TEST_WEB_PORT, '/api/agent/traces/old?days=30', 'DELETE', null, token)
-      expect(cleanup.statusCode).toBe(200)
+      expect(cleanup.statusCode).toBe(404)
+      const methods = spy.mock.calls.map(([, method]) => method)
+      expect(methods).not.toContain('get_trace_disk_usage')
+      expect(methods).not.toContain('cleanup_old_traces')
     })
   })
 

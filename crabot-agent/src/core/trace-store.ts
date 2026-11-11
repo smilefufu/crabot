@@ -1128,6 +1128,8 @@ export class TraceStore {
     return /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : undefined
   }
 
+  activeManagerEpisodeIds(): ReadonlySet<string> { return new Set(this.runningManagerEpisodeIds) }
+
   /**
    * 删除 dateStr 严格小于 cutoffStr 的当前实例 archive 文件。
    * 其他 readable archive 前缀（如只读 legacy traces）不会被删除。
@@ -1151,6 +1153,8 @@ export class TraceStore {
       for (const file of files) {
         const dateStr = this.archiveDate(file)
         if (!dateStr || dateStr >= cutoffStr) continue
+        if ([...this.runningManagerEpisodeIds].some(id => this.managerEpisodeDates.get(id) === dateStr)
+          || [...this.traces.values()].some(trace => trace.status === 'running' && trace.started_at.slice(0, 10) === dateStr)) continue
         const filePath = path.join(this.persistDir, file)
         const stat = fs.statSync(filePath)
         affectedBytes += stat.size

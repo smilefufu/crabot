@@ -49,6 +49,37 @@ async function ready(host: DailyReflection) {
 }
 
 describe('DailyReflection host', () => {
+  it('cleans evidence only after a durable completed result and successful Admin confirmation', async () => {
+    const { host, deps, store } = await setup(0)
+    const cleanup = vi.fn(async () => {
+      expect((await store.load(key)).dailyReflection).toMatchObject({ confirmation_pending: false, result: { outcome: 'completed' } })
+    })
+    deps.onConfirmed = cleanup
+    await ready(host)
+    await host.finish(completion())
+    expect(cleanup).toHaveBeenCalledTimes(1)
+  })
+  it('does not clean on lost confirmation, and retries cleanup without reverting completion or invoking the model', async () => {
+    const { host, deps, store } = await setup(0)
+    deps.onConfirmed = vi.fn().mockRejectedValueOnce(new Error('busy')).mockResolvedValue(undefined)
+    vi.mocked(deps.confirm).mockRejectedValueOnce(new Error('lost confirmation'))
+    await ready(host); await host.finish(completion())
+    expect(deps.onConfirmed).not.toHaveBeenCalled()
+    await host.recover()
+    expect((await store.load(key)).dailyReflection).toMatchObject({ confirmation_pending: false, result: { outcome: 'completed' } })
+    expect(deps.onConfirmed).toHaveBeenCalledTimes(1)
+    const restarted = new DailyReflection(deps)
+    await restarted.recover()
+    expect(deps.onConfirmed).toHaveBeenCalledTimes(2)
+    expect(deps.confirm).toHaveBeenCalledTimes(2)
+  })
+  it('does not clean a partial reflection', async () => {
+    const { host, deps } = await setup(0); deps.onConfirmed = vi.fn()
+    await ready(host)
+    await host.finish(completion({ outcome: 'partial', pending_items: ['unfinished'] }))
+    await host.recover()
+    expect(deps.onConfirmed).not.toHaveBeenCalled()
+  })
   it('continuation: traverses 15010 frozen records in bounded hundred-record pages without gaps or duplicates', async () => {
     const { deps, store, records } = await setup(15010)
     let session = await store.load(key)

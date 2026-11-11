@@ -11,11 +11,13 @@ import type { ManagerSessionStore } from './session-store.js'
 import type { ManagerEpisodeTrace } from './trace-types.js'
 import type { ManagerKey } from './types.js'
 import type { DailyReflectionState, ReflectionEvidence, ReflectionManifest, ReflectionRecord, ReflectionSource, ReflectionWindow, ReflectionWorkerTrace } from './daily-reflection-types.js'
+import { retentionPath } from '../core/retention-files.js'
 import { reflectionDigest } from './daily-reflection.js'
 import { isWorkerRuntimeEvent } from '../workers/builtin/runtime-observation.js'
 
 export interface ReflectionEvidenceDeps {
   managersDir: string
+  isClosing?: () => boolean
   store: ManagerSessionStore
   ledger: LedgerStore
   canReadWorker?: (workerId: string) => Promise<boolean>
@@ -82,6 +84,52 @@ export class DailyReflectionEvidence {
       }
       return [...unique.values()]
     } finally { await file.close() }
+  }
+
+  /** Confirmed manifests are the deletion authority; unknown/active/cross-window files remain. */
+  async cleanupConfirmed(): Promise<number> {
+    return this.deps.store.withRetentionSweep(async () => {
+      const states = await this.deps.store.reflectionStates()
+      if (states.some(state => state.result?.outcome !== 'completed' || state.confirmation_pending !== false)) return 0
+      let removed = 0
+      for (const state of states) {
+        if (this.deps.isClosing?.()) return removed
+        const start = Date.parse(state.window_start), end = Date.parse(state.window_end)
+        if (!Number.isFinite(start) || !Number.isFinite(end) || start >= end || state.result?.validation_errors.length !== 0) continue
+        for (const record of state.manifest?.records ?? []) {
+          if (this.deps.isClosing?.()) return removed
+          const source = record.source
+          if (source.kind !== 'manager_episode' || record.gaps.length || record.skipped || state.read_records[record.record_ref] !== true) continue
+          try {
+            this.episodePath(source.manager_key, source.episode_id) // Validate the host-owned ID before building a physical path.
+            const trace = await this.deps.traces.readManagerEpisode(source.episode_id)
+            const modes = trace?.spans.map(span => span.details as { kind?: string; mode?: string } | undefined)
+              .filter(detail => detail?.kind === 'episode_log').map(detail => detail!.mode) ?? []
+            if (!trace || trace.manager_key !== source.manager_key || trace.status === 'running'
+              || !(Date.parse(trace.started_at) >= start && Date.parse(trace.ended_at ?? '') < end)
+              || !modes.includes('incremental') || modes.some(mode => mode !== 'incremental')) continue
+            if (await retentionPath(this.deps.managersDir, [encodeSegment(source.manager_key), 'running.json'])) continue
+            const file = await retentionPath(this.deps.managersDir, [encodeSegment(source.manager_key), 'episodes', `${source.episode_id}.jsonl`])
+            if (!file) continue
+            const before = await fs.lstat(file)
+            if (!before.isFile() || before.nlink !== 1 || before.size !== source.log_bytes) continue
+            const messages = await this.messages(source)
+            if (!messages.length || messages.some(message => !inWindow(message.timestamp, state))) continue
+            // Full frozen evidence must still match; never delete an edited source or appended tail.
+            const evidence = await this.read(record, state)
+            if (!record.digest || evidence.gaps.length || reflectionDigest(evidence.content) !== record.digest) continue
+            const current = await fs.lstat(file)
+            if (current.dev !== before.dev || current.ino !== before.ino || current.size !== before.size || current.mtimeMs !== before.mtimeMs) continue
+            if (this.deps.isClosing?.()) return removed
+            await fs.unlink(file)
+            removed++
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') console.warn('[DailyReflection] evidence cleanup deferred:', error instanceof Error ? error.message : error)
+          }
+        }
+      }
+      return removed
+    })
   }
 
   async capture(state: DailyReflectionState): Promise<ReflectionManifest> {

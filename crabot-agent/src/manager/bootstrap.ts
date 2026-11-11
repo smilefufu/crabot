@@ -138,6 +138,7 @@ export interface ManagerStack {
   startContinuationReconciliation(): Promise<void>
   refreshPermissions(configRevision: number): Promise<void>
   readonly dailyReflectionFor: (key: ManagerKey) => DailyReflection
+  cleanupReflectedEpisodes(): Promise<number>
   readonly ledger: LedgerStore
   /** Manager session 持久化（P6-A 读模型用：disk session keys 枚举）。 */
   readonly store: ManagerSessionStore
@@ -685,7 +686,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
   }
   const reflectionTurns = new WorkerTurnStore(workersDir)
   const reflectionEvidence = deps.reflectionEvidence ? new DailyReflectionEvidence({
-    ...deps.reflectionEvidence, managersDir, store: sessionStore, ledger, harness, turns: reflectionTurns,
+    ...deps.reflectionEvidence, managersDir, store: sessionStore, ledger, harness, turns: reflectionTurns, isClosing: deps.isClosing,
     canReadWorker: async id => {
       try { const bound = await requestGuard.load(id); return !bound || bound.worker.origin.request!.execution_scope === 'group' } catch { return false }
     },
@@ -706,6 +707,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
               || turns.some(turn => turn.disposition.status === 'pending') }
           }))
         },
+        onConfirmed: () => reflectionEvidence?.cleanupConfirmed() ?? Promise.resolve(0),
         confirm: params => deps.confirmDailyReflection ? deps.confirmDailyReflection(params) : Promise.reject(new Error('Reflection confirmation unavailable')),
       })
       reflectionHosts.set(key, host)
@@ -1242,6 +1244,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     builtinDataDir,
     store: sessionStore,
     dailyReflectionFor,
+    cleanupReflectedEpisodes: () => reflectionEvidence?.cleanupConfirmed() ?? Promise.resolve(0),
     workboard: workboardStore,
     dispose,
   }

@@ -1177,6 +1177,11 @@ export class ManagerLoop {
           ...(toolFaceDetails ?? {}),
         },
       })
+      this.deps.traceWriter?.appendSpan(episodeId, {
+        span_id: `episode-log-${randomUUID()}`, type: 'decision', status: 'completed',
+        started_at: new Date().toISOString(), ended_at: new Date().toISOString(),
+        details: { kind: 'episode_log', mode: this.deps.store.debugEpisodeLogs ? 'debug_full' : 'incremental' },
+      })
       if (recovery) {
         for (const response of recovery.responses) this.recordLlmResponse(episodeId, response)
         for (const turn of recovery.turns) this.recordTurnSpans(episodeId, turn)
@@ -1358,6 +1363,7 @@ export class ManagerLoop {
       const text = this.renderEnvelope(item)
       reusedTexts.set(text, (reusedTexts.get(text) ?? 0) + 1)
     }
+    const episodeHistoryIds = new Set(initialState.recent.slice(0, protectedStart).map(message => message.id))
     protectedTail = initialState.recent.slice(protectedStart)
     if (this.resumeCheckpoint && protectedTail.length > 0) {
       this.resumeCheckpoint = { ...this.resumeCheckpoint, protectedTailMessageId: protectedTail[0].id }
@@ -1538,7 +1544,8 @@ export class ManagerLoop {
       return [m]
     })
 
-    await this.deps.store.appendEpisodeLog(this.deps.key, episodeId, persistedFinalMessages)
+    if (attempt.hasSummaryMarker && persistedFinalMessages[0]) episodeHistoryIds.add(persistedFinalMessages[0].id)
+    await this.deps.store.appendEpisodeLog(this.deps.key, episodeId, persistedFinalMessages, episodeHistoryIds)
 
     // 只有真正跑完 turn(completed / max_turns)才算"处理过"这批事件;
     // failed / aborted 一律不消费,交回邮箱下次重投。

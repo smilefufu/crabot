@@ -100,6 +100,26 @@ describe('ManagerLoop episode trace wiring', () => {
     await fs.rm(dataDir, { recursive: true, force: true })
   })
 
+  it.each([false, true])('writes current episode evidence while preserving full session history (debug=%s)', async debug => {
+    const previous = process.env.CRABOT_DEBUG
+    try {
+      if (debug) process.env.CRABOT_DEBUG = '1'; else delete process.env.CRABOT_DEBUG
+      store = new ManagerSessionStore(join(dataDir, 'manager-sessions'))
+      const { adapter } = makeAdapter()
+      const loop = new ManagerLoop(deps(adapter, traceWriter))
+      await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeMessage('first-only-history')] }))
+      const result = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeMessage('second-current-input')] }))
+      const file = join(dataDir, 'manager-sessions', 'wechat%3A%3Asess-trace', 'episodes', result.episodeId + '.jsonl')
+      const text = await fs.readFile(file, 'utf8')
+      expect(text).toContain('second-current-input')
+      expect(text.includes('first-only-history')).toBe(debug)
+      expect(JSON.stringify((await store.load(KEY)).recent)).toContain('first-only-history')
+      expect(traceStore.getManagerEpisode(result.episodeId)?.spans).toContainEqual(expect.objectContaining({
+        details: { kind: 'episode_log', mode: debug ? 'debug_full' : 'incremental' },
+      }))
+    } finally { if (previous === undefined) delete process.env.CRABOT_DEBUG; else process.env.CRABOT_DEBUG = previous }
+  })
+
   it.each([false, true])('persists mid-episode human inputs through reload (failure=%s)', async (fail) => {
     const messages = ['继续', '现在修复吧', '我不是说了让你现在修复吗？！'].map((text, index) => ({ ...makeMessage(text), platform_timestamp: `2026-09-20T14:0${index}:00.000Z` }))
     let loop: ManagerLoop

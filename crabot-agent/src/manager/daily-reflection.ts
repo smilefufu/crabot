@@ -58,6 +58,7 @@ export interface DailyReflectionDeps {
   read: (record: ReflectionRecord, state: DailyReflectionState) => Promise<ReflectionEvidence>
   analysisWorkers: (episodeIds: string[]) => Promise<Array<{ worker_id: string; pending: boolean }>>
   confirm: (params: CompleteDailyReflectionParams) => Promise<CompleteDailyReflectionResult>
+  onConfirmed?: () => Promise<unknown>
 }
 
 export function reflectionDigest(content: string): string {
@@ -130,7 +131,13 @@ export class DailyReflection {
     await this.mutex.run(async () => {
       const state = (await this.deps.store.load(this.deps.key)).dailyReflection
       if (state?.confirmation_pending) await this.confirm(state)
+      else if (state?.result?.outcome === 'completed' && state.confirmation_pending === false) await this.cleanupConfirmed()
     })
+  }
+
+  private async cleanupConfirmed(): Promise<void> {
+    try { await this.deps.onConfirmed?.() }
+    catch (error) { console.warn('[DailyReflection] completed evidence cleanup deferred:', error instanceof Error ? error.message : error) }
   }
 
   private async confirm(state: DailyReflectionState): Promise<void> {
@@ -148,7 +155,9 @@ export class DailyReflection {
       state.confirmation_error = error instanceof Error ? error.message : String(error)
       await this.save(state)
       console.error(`[DailyReflection] watermark confirmation failed; run=${state.run_id}; pending result retained for reconciliation`)
+      return
     }
+    await this.cleanupConfirmed()
   }
 
   private legacyDirectoryPage(state: DailyReflectionState): { start: number; end: number } {
