@@ -370,7 +370,7 @@ export const ModuleList: React.FC = () => {
         <h2 style={{ fontSize: '1.25rem', fontWeight: 600, marginBottom: '0.75rem' }}>已安装模块</h2>
       </div>
 
-      <div style={{ marginBottom: '1.5rem', display: 'flex', gap: '0.5rem' }}>
+      <div style={{ marginBottom: '1.5rem', display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
         <Button
           variant={filter === 'all' ? 'primary' : 'secondary'}
           onClick={() => setFilter('all')}
@@ -409,9 +409,9 @@ export const ModuleList: React.FC = () => {
         <div style={{ display: 'grid', gap: '1rem' }}>
           {filteredModules.map((item) => (
             <Card key={`${item.module_type}-${item.id}`}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start' }}>
-                <div style={{ flex: 1 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '0.5rem' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start', flexWrap: 'wrap', gap: '1rem' }}>
+                <div style={{ flex: '1 1 240px', minWidth: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '0.75rem', marginBottom: '0.5rem' }}>
                     <h3 style={{ fontSize: '1.25rem', fontWeight: 600 }}>{item.name}</h3>
                     <span
                       className="badge"

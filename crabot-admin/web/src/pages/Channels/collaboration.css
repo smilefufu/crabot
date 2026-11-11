@@ -4,7 +4,7 @@
 .collaboration-header h1 { font-family: var(--font-display); font-size: 1.375rem; font-weight: 600; margin-bottom: .5rem; }
 .collaboration-page h2 { font-size: .9375rem; font-weight: 600; }
 .collaboration-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .875rem; margin-top: .75rem; }
-.collaboration-card { background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius-md); padding: 1.125rem; min-width: 0; }
+.collaboration-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 1.125rem; min-width: 0; }
 .collaboration-card--selected { border-color: var(--accent); }
 .collaboration-card h3 { font-size: 1rem; font-weight: 600; margin-bottom: .5rem; }
 .collaboration-description, .collaboration-muted { font-size: .8125rem; color: var(--text-secondary); line-height: 1.6; }

@@ -19,7 +19,7 @@ const PAGE_NAMES: { path: string; name: string }[] = [
   { path: '/mcp-servers', name: '工具与应用' },
   { path: '/skills', name: '技能' },
   { path: '/subagents', name: '专长助手' },
-  { path: '/channels', name: '聊天方式' },
+  { path: '/channels', name: '协作入口' },
   { path: '/traces', name: '运行记录' },
   { path: '/settings', name: '全局设置' },
 ]
