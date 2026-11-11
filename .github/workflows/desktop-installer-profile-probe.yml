@@ -1,6 +1,11 @@
 name: Release desktop.25 to desktop.26 upgrade acceptance
 on:
   workflow_dispatch:
+    inputs:
+      macs_only:
+        description: 'Repeat only Mac upgrade fixtures; keep already completed Windows and Ubuntu evidence'
+        type: boolean
+        default: false
 permissions:
   contents: read
   actions: read
@@ -9,31 +14,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - target: win32-x64
-            os: windows-latest
-            run: 42986079303
-            artifact: offline-test
-            pattern: '*offline-candidate.exe'
-            baseline: Crabot-0.1.0-desktop.25-win-x64-offline-candidate.exe
-          - target: darwin-arm64
-            os: macos-15
-            run: 42986083675
-            artifact: offline-test
-            pattern: '*candidate.dmg'
-            baseline: Crabot-0.1.0-desktop.25-mac-arm64-candidate.dmg
-          - target: darwin-x64
-            os: macos-15-intel
-            run: 42986088193
-            artifact: offline-test
-            pattern: '*candidate.dmg'
-            baseline: Crabot-0.1.0-desktop.25-mac-x64-candidate.dmg
-          - target: linux-x64
-            os: ubuntu-24.04
-            run: 42986092889
-            artifact: deb-test
-            pattern: '*candidate.deb'
-            baseline: Crabot-0.1.0-desktop.25-linux-amd64-candidate.deb
+        include: ${{ fromJSON(inputs.macs_only && '[{"target":"darwin-arm64","os":"macos-15","run":42986083675,"artifact":"offline-test","pattern":"*candidate.dmg","baseline":"Crabot-0.1.0-desktop.25-mac-arm64-candidate.dmg"},{"target":"darwin-x64","os":"macos-15-intel","run":42986088193,"artifact":"offline-test","pattern":"*candidate.dmg","baseline":"Crabot-0.1.0-desktop.25-mac-x64-candidate.dmg"}]' || '[{"target":"win32-x64","os":"windows-latest","run":42986079303,"artifact":"offline-test","pattern":"*offline-candidate.exe","baseline":"Crabot-0.1.0-desktop.25-win-x64-offline-candidate.exe"},{"target":"darwin-arm64","os":"macos-15","run":42986083675,"artifact":"offline-test","pattern":"*candidate.dmg","baseline":"Crabot-0.1.0-desktop.25-mac-arm64-candidate.dmg"},{"target":"darwin-x64","os":"macos-15-intel","run":42986088193,"artifact":"offline-test","pattern":"*candidate.dmg","baseline":"Crabot-0.1.0-desktop.25-mac-x64-candidate.dmg"},{"target":"linux-x64","os":"ubuntu-24.04","run":42986092889,"artifact":"deb-test","pattern":"*candidate.deb","baseline":"Crabot-0.1.0-desktop.25-linux-amd64-candidate.deb"}]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     defaults:

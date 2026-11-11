@@ -57,7 +57,8 @@ async function boot(version) {
 }
 async function stop() {
   await cli('stop'); assert.equal(JSON.parse(await cli('status','--json')).running,false)
-  if(gui&&gui.exitCode===null&&gui.signalCode===null){const exited=once(gui,'exit',{signal:AbortSignal.timeout(30000)});gui.kill('SIGTERM');await exited}
+  // The service is already proven stopped. Dispose only this fixture's GUI, as in the existing packaged-App harness.
+  if(gui&&gui.exitCode===null&&gui.signalCode===null){const exited=once(gui,'exit',{signal:AbortSignal.timeout(30000)});gui.kill('SIGKILL');await exited}
   gui=undefined
 }
 try {
