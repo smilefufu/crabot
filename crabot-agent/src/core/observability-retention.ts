@@ -19,6 +19,7 @@ interface Deps {
   sessions: ManagerSessionStore
   traces: TraceStore
   removeNativeCopies?: (id: string) => Promise<void>
+  cleanupReflectedEpisodes?: () => Promise<number>
   retentionDays: () => number
   protectedPaths: () => Promise<string[]>
   retireWorker: (id: string, cutoff: number, remove: (worker: LedgerWorker) => Promise<boolean>) => Promise<boolean>
@@ -47,7 +48,12 @@ export class ObservabilityRetention {
   }
   run(): Promise<void> {
     if (this.closing) return Promise.resolve()
-    return this.pending ??= this.deps.sessions.withRetentionSweep(() => this.sweep()).finally(() => { this.pending = undefined })
+    return this.pending ??= (async () => {
+      let reflectedEpisodes = 0
+      try { reflectedEpisodes = await this.deps.cleanupReflectedEpisodes?.() ?? 0 }
+      catch (error) { console.warn('[ObservabilityRetention] reflection cleanup deferred:', error) }
+      if (!this.closing) await this.deps.sessions.withRetentionSweep(() => this.sweep(reflectedEpisodes))
+    })().finally(() => { this.pending = undefined })
   }
   private async journal(id: string, value?: Journal): Promise<void> {
     const directory = path.join(this.deps.agentDir, 'observability-cleanup')
@@ -91,8 +97,8 @@ export class ObservabilityRetention {
     }
     return true
   }
-  private async sweep(): Promise<void> {
-    this.lastResult = { ran_at: new Date().toISOString(), removed_workers: 0, removed_episodes: 0, errors: [] }
+  private async sweep(reflectedEpisodes = 0): Promise<void> {
+    this.lastResult = { ran_at: new Date().toISOString(), removed_workers: 0, removed_episodes: reflectedEpisodes, errors: [] }
     const recordError = (error: unknown) => {
       const message = error instanceof Error ? error.message : String(error)
       if (this.lastResult.errors.length < 50) this.lastResult.errors.push(message.slice(0, 300))
@@ -169,7 +175,7 @@ export class ObservabilityRetention {
         }
       }
       if (this.closing) return
-      this.lastResult.removed_episodes = await this.deps.sessions.cleanupEpisodeLogs(cutoff, this.deps.traces.activeManagerEpisodeIds())
+      this.lastResult.removed_episodes += await this.deps.sessions.cleanupEpisodeLogs(cutoff, this.deps.traces.activeManagerEpisodeIds())
       if (!this.closing) this.deps.traces.cleanupOldTraces(days, false)
     } catch (error) { recordError(error) }
   }

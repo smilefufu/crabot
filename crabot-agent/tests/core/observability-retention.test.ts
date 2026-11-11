@@ -99,6 +99,8 @@ describe('unified observability retention', () => {
     await fs.writeFile(file, JSON.stringify(state)); await retention.run()
     expect(await ledger.findWorker('w-evidence')).toBeDefined()
     expect(retention.status().errors[0]).toContain('unfinished daily reflection')
+    await fs.writeFile(file, JSON.stringify({ ...state, dailyReflection: { ...state.dailyReflection, result: { outcome: 'partial' } } }))
+    await retention.run(); expect(await ledger.findWorker('w-evidence')).toBeDefined()
     await fs.writeFile(file, JSON.stringify({ ...state, dailyReflection: { ...state.dailyReflection, result: { outcome: 'completed' } } }))
     await retention.run(); expect(await ledger.findWorker('w-evidence')).toBeUndefined()
   })
@@ -150,6 +152,18 @@ describe('unified observability retention', () => {
     expect(await ledger.findWorker('w-stop')).toBeDefined()
     expect(await fs.readFile(join(root, 'workers', 'w-stop', 'events.jsonl'), 'utf8')).toBe('original')
     await retention.run(); expect(await ledger.findWorker('w-stop')).toBeDefined()
+  })
+  it('retries confirmed reflection cleanup on startup outside the evidence lock, without blocking ordinary retention on failure', async () => {
+    await save('w-old')
+    const sessions = new ManagerSessionStore(join(root, 'managers'))
+    let visits = 0
+    retention = new ObservabilityRetention({ agentDir: root, ledger, sessions,
+      traces: new TraceStore(100, join(root, 'traces')), retentionDays: () => 30, protectedPaths: async () => protectedPaths,
+      cleanupReflectedEpisodes: () => sessions.withRetentionSweep(async () => { visits++; throw new Error('busy evidence') }),
+      retireWorker: (id, cutoff, remove) => ledger.removeClosedWorker(id, cutoff, remove) })
+    retention.start(); await retention.run()
+    expect(visits).toBe(1)
+    expect(await ledger.findWorker('w-old')).toBeUndefined()
   })
   it('cleans obsolete diagnostic episodes but preserves checkpoint and state', async () => {
     const dir = join(root, 'managers', 'fixture%3A%3Aretention'); await fs.mkdir(join(dir, 'episodes'), { recursive: true })

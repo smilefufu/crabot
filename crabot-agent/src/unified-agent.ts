@@ -6014,6 +6014,7 @@ export class UnifiedAgent extends ModuleBase {
         if (!this.configAuthenticated || this.runtimeClosing) throw new Error('Retention awaits authenticated configuration')
         return this.agentConfig?.observability_retention_days ?? 30
       },
+      cleanupReflectedEpisodes: () => stack.cleanupReflectedEpisodes(),
       removeNativeCopies: id => this.nativeTraceCopyStore().removeWorker(id),
       protectedPaths: () => stack.workspaces.retentionProtectedPaths(),
       retireWorker: (id, cutoff, remove) => stack.harness.retireClosedWorker(id, cutoff, remove),

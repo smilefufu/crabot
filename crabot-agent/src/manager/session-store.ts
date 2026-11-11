@@ -13,6 +13,7 @@ import { writeFileSync, renameSync, unlinkSync, readFileSync } from 'fs'
 import { join, dirname } from 'path'
 import { randomUUID, createHash } from 'crypto'
 import { isDeepStrictEqual } from 'node:util'
+import type { DailyReflectionState } from './daily-reflection-types'
 import { retentionPath } from '../core/retention-files'
 import { AsyncMutex } from '../workers/async-mutex'
 import { encodeSegment, decodeSegment } from '../workers/harness/ledger-store'
@@ -37,7 +38,21 @@ async function writeJsonAtomic(path: string, data: unknown, mode?: number): Prom
   }
 }
 
+/** Retain a complete call/results group if any of its messages belongs to this episode. */
+function incrementalEpisodeMessages(messages: ReadonlyArray<EngineMessage>, historicalIds: ReadonlySet<string>): EngineMessage[] {
+  const selected = new Set(messages.filter(message => !historicalIds.has(message.id)).map(message => message.id))
+  for (let index = 0; index < messages.length; index++) {
+    const message = messages[index]
+    if (message.role !== 'assistant' || !message.content.some(block => block.type === 'tool_use')) continue
+    const group = [message.id]
+    while (index + 1 < messages.length && 'toolResults' in messages[index + 1]) group.push(messages[++index].id)
+    if (group.some(id => selected.has(id))) group.forEach(id => selected.add(id))
+  }
+  return messages.filter(message => selected.has(message.id))
+}
+
 export class ManagerSessionStore {
+  readonly debugEpisodeLogs = process.env.CRABOT_DEBUG === '1'
   private readonly rootDir: string
   private readonly mutexes = new Map<ManagerKey, AsyncMutex>()
   private readonly retentionMutex = new AsyncMutex()
@@ -270,20 +285,24 @@ export class ManagerSessionStore {
     return checkpoints
   }
 
-  /** 完整工具组的 episode 消息落盘(崩溃后可诊断,不参与 load);目录不存在自动创建 */
+  /** Reflection evidence; default incremental, debug full. Session/recovery state is separate. */
   async appendEpisodeLog(
     key: ManagerKey,
     episodeId: string,
-    messages: ReadonlyArray<EngineMessage>
+    messages: ReadonlyArray<EngineMessage>,
+    historicalIds: ReadonlySet<string> = new Set(),
   ): Promise<void> {
     if (messages.length === 0) return
     assertToolMessageIntegrity(messages)
+    const evidence = this.debugEpisodeLogs ? messages : incrementalEpisodeMessages(messages, historicalIds)
+    if (!evidence.length) return
+    assertToolMessageIntegrity(evidence)
     const mutex = this.getMutex(key)
     await mutex.run(async () => {
       const episodesDir = join(this.dirFor(key), EPISODES_DIR)
       await fs.mkdir(episodesDir, { recursive: true })
       const filePath = join(episodesDir, `${episodeId}.jsonl`)
-      const lines = messages.map((m) => JSON.stringify(m)).join('\n') + '\n'
+      const lines = evidence.map((m) => JSON.stringify(m)).join('\n') + '\n'
       await fs.appendFile(filePath, lines, 'utf-8')
     })
   }
@@ -291,19 +310,24 @@ export class ManagerSessionStore {
   /** Serialize GC with reflection admission, so new evidence references cannot appear mid-sweep. */
   withRetentionSweep<T>(action: () => Promise<T>): Promise<T> { return this.retentionMutex.run(action) }
 
-  /** Reflection's frozen manifest can still reference any Manager/Worker evidence. */
-  async hasPendingReflection(): Promise<boolean> {
+  /** Read without history repair; unknown state is not deletion authority. */
+  async reflectionStates(): Promise<DailyReflectionState[]> {
     const root = await retentionPath(this.rootDir, [])
-    if (!root) return false
+    if (!root) return []
+    const states: DailyReflectionState[] = []
     for (const entry of await fs.readdir(root, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue
       const file = await retentionPath(root, [entry.name, STATE_FILE])
       if (!file) throw new Error('Manager state unavailable; evidence retention deferred')
       const state = JSON.parse(await fs.readFile(file, 'utf8')) as ManagerSessionState
       if (state.key !== decodeSegment(entry.name)) throw new Error('Manager state identity mismatch; evidence retention deferred')
-      if (state.dailyReflection && (!state.dailyReflection.result || state.dailyReflection.confirmation_pending)) return true
+      if (state.dailyReflection) states.push(state.dailyReflection)
     }
-    return false
+    return states
+  }
+
+  async hasPendingReflection(): Promise<boolean> {
+    return (await this.reflectionStates()).some(state => state.result?.outcome !== 'completed' || state.confirmation_pending === true)
   }
 
   /** Only expired diagnostic files; session memory and recovery checkpoints are never candidates. */
