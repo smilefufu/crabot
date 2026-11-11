@@ -5,6 +5,7 @@ import path from 'node:path'
 import { spawn, execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { once } from 'node:events'
+import control from '../../scripts/lib/runtime-control.cjs'
 import { createHash, randomBytes } from 'node:crypto'
 import { pipeline } from 'node:stream/promises'
 import { Readable } from 'node:stream'
@@ -73,14 +74,14 @@ async function healthyModules() {
   let failure
   while (Date.now() < deadline) {
     try {
-      const modules = await probeMmModules(19000), result = []
+      const modules = await probeMmModules(19000, undefined, { dataDir: data }), result = []
       for (const id of ['admin-web', 'crabot-agent', 'memory-default']) {
         const module = modules?.find(item => item.module_id === id)
         assert.equal(module?.status, 'running', id + ' has not registered')
-        const response = await fetch(`http://127.0.0.1:${module.port}/health`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(5000) })
-        const value = await response.json()
-        assert.ok(response.ok && value.success && ['healthy', 'degraded'].includes(value.data.status), id + ' is not ready')
-        result.push({ module: id, health: value.data.status })
+        const value = await control.callRuntimeControl(data,
+          { target: module.port, source: 'release-acceptance', method: 'health', params: {} }, { timeoutMs: 5000 })
+        assert.ok(['healthy', 'degraded'].includes(value.status), id + ' is not ready')
+        result.push({ module: id, health: value.status })
       }
       return result
     } catch (error) { failure = error; await pause(500) }

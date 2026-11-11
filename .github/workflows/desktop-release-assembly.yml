@@ -1,81 +1,401 @@
-name: Desktop release assembly
+name: Release pinned CLI packages
+
 on:
   workflow_dispatch:
 permissions:
-  contents: read
+  contents: write
+
 jobs:
-  host:
+  build:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-2022]
+        include:
+          - os: ubuntu-24.04
+            platform: linux
+            arch: x64
+          - os: windows-latest
+            platform: windows
+            arch: x64
+          - os: macos-15
+            platform: darwin
+            arch: arm64
+          - os: macos-15-intel
+            platform: darwin
+            arch: x64
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    env:
-      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
-    defaults:
-      run:
-        shell: bash
+    timeout-minutes: 180
+
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: 74dec3c55d7b17196ea851ca994c2e12e805f151
+
       - uses: pnpm/action-setup@v4
+        # 不传 version，从根 package.json 的 packageManager 字段读取
+
       - uses: actions/setup-node@v4
         with:
-          node-version: '22.22.3'
-      - name: Build this checkout's actual SDK, Shared, Native and internal host
-        run: |
-          pnpm --dir crabot-client install --frozen-lockfile --ignore-scripts
-          pnpm --dir crabot-client run build
-          pnpm --dir crabot-shared install --frozen-lockfile --ignore-scripts
-          pnpm --dir crabot-shared run build
-          pnpm install --frozen-lockfile --ignore-scripts
-          pnpm run build:cli
-          pnpm --dir scripts/lib install --frozen-lockfile --ignore-scripts
-          node scripts/build-native.mjs
-          pnpm --dir crabot-core install --frozen-lockfile --ignore-scripts
-          pnpm --dir crabot-core run build
-          pnpm --dir crabot-agent install --frozen-lockfile --ignore-scripts
-          pnpm --dir crabot-agent run build
-          pnpm --dir crabot-desktop install --frozen-lockfile --ignore-scripts
-          pnpm --dir crabot-desktop run build
-      - name: Install original publisher fixture dependency
-        run: pnpm --dir crabot-admin install --frozen-lockfile --ignore-scripts
-      - name: Build actual Admin startup dependency
-        run: pnpm --dir crabot-admin run build
-      - name: Verify actual public Channel packages independently of platform networks
-        timeout-minutes: 12
-        # CI uses official npm; mainland npmmirror provenance is separately verified locally.
-        env:
-          CORDIS_TEST_NPM_REGISTRY: 'https://registry.npmjs.org'
-        run: node --test experiments/cordis-feishu/public-channel-packages.test.mjs
-      - name: Verify native pipe streams and existing Voice gateway
-        timeout-minutes: 5
-        # These fixtures co-locate both ends of multiple native pipes in one Node process.
-        env:
-          UV_THREADPOOL_SIZE: '8'
-        run: |
-          pnpm --dir crabot-channel-voice install --frozen-lockfile --ignore-scripts
-          pnpm --dir crabot-channel-voice run build
-          node --test --test-concurrency=1 scripts/lib/__tests__/runtime-control.test.mjs scripts/lib/__tests__/voice-transport.test.mjs scripts/lib/__tests__/local-auth-transport.test.mjs
-      - name: Verify exact managed runtimes and Admin contracts
-        timeout-minutes: 5
-        env:
-          UV_THREADPOOL_SIZE: '8'
-        run: |
-          (cd crabot-core && node node_modules/vitest/vitest.mjs run src/module-manager-ipc.test.ts src/module-runtime-registry.test.ts src/channel-host.test.ts --maxWorkers=1 --minWorkers=1)
-          (cd crabot-admin && node node_modules/vitest/vitest.mjs run src/voice-gateway.test.ts src/query-module-statuses.test.ts src/channel-package.test.ts src/channel-manager.installation.test.ts src/channel-installation-http.test.ts --maxWorkers=1 --minWorkers=1)
-      - name: Verify real controller and background shutdown fixtures
-        timeout-minutes: 5
-        env:
-          UV_THREADPOOL_SIZE: '8'
-        run: node --test --test-concurrency=1 scripts/lib/__tests__/background-core.test.mjs scripts/lib/__tests__/instance-runtime.test.mjs scripts/lib/__tests__/instance-runtime-write.test.mjs experiments/cordis-feishu/legacy-compatibility-repro.test.mjs
-      - name: Verify original sealed CLI routing, installation compatibility and staging imports
-        run: node --test --test-concurrency=1 scripts/lib/__tests__/stage-core-imports.test.mjs scripts/lib/__tests__/desktop-cli-install.test.mjs scripts/lib/__tests__/desktop-update-entry.test.mjs scripts/lib/__tests__/installer-compat.test.mjs
-      - name: Verify actual startup entry contracts and original upgrade boundaries
-        working-directory: scripts/upgrade-lib
-        run: node ../../node_modules/vitest/vitest.mjs run --config vitest.config.mjs __tests__/startup-entry.test.mjs --maxWorkers=1 --minWorkers=1
+          node-version: '22'
+          cache: 'pnpm'
+
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
-      - name: Verify original finite browser-resource download retry budget
-        run: python -m unittest discover -s scripts/scrapling/__tests__ -p test_build.py
+          python-version: '3.11'
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.13.0'
+
+      - name: Install dependencies (with devDeps for build)
+        shell: bash
+        run: |
+          node scripts/build-native.mjs
+          pnpm --dir crabot-client install --frozen-lockfile
+          pnpm --dir crabot-client run build
+          pnpm install
+
+          # crabot-shared 必须先 install + build，其他模块通过 file: 引用它。
+          # pnpm 对 file: 依赖在 install 时做快照复制，所以其他模块必须在
+          # crabot-shared 已有 dist/ 之后再 install，否则拿到的是空快照。
+          (cd crabot-shared && pnpm install && pnpm run build)
+
+          # 其他模块并行 install（pnpm store 缓存共享，并发安全）
+          pids=()
+          for mod in crabot-core crabot-agent \
+                     crabot-mcp-tools crabot-admin; do
+            if [ -d "$mod" ]; then
+              (cd "$mod" && pnpm install) &
+              pids+=($!)
+            fi
+          done
+          for pid in "${pids[@]}"; do wait "$pid" || exit 1; done
+
+      - name: Build all modules in parallel
+        shell: bash
+        run: |
+          pids=()
+          for mod in crabot-core crabot-agent \
+                     crabot-mcp-tools; do
+            if [ -d "$mod" ]; then
+              (cd "$mod" && pnpm run build) &
+              pids+=($!)
+            fi
+          done
+          # 根 CLI 构建独立
+          pnpm run build:cli &
+          pids+=($!)
+          for pid in "${pids[@]}"; do wait "$pid" || exit 1; done
+
+          # admin: 后端 build → 前端 build:web（顺序执行，build:web 会进入 web/ 子项目自己 install）
+          (cd crabot-admin && pnpm run build && pnpm run build:web)
+
+      - name: Reuse the unchanged locked runtime from its verified published archive
+        if: matrix.platform == 'linux'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cache=$(mktemp -d)
+          trap 'rm -rf "$cache"' EXIT
+          name=crabot-v2026.11.3.1-linux-x64.tar.gz
+          gh release download v2026.11.3.1 --repo smilefufu/crabot --pattern "$name" --pattern "$name.sha256" --dir "$cache"
+          (cd "$cache" && echo 'fe66380a9a319c0eaf6142d6d360df67d972d876855414faec4d5fcf0d0ff8e8  crabot-v2026.11.3.1-linux-x64.tar.gz' | sha256sum -c - && sha256sum -c "$name.sha256")
+          tar -xzf "$cache/$name" -C "$cache"
+          old="$cache/crabot-v2026.11.3.1-linux-x64"
+          runtime=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1]+"/scrapling-runtime.json")).directory' "$old")
+          case "$runtime" in .scrapling-runtime-*) ;; *) exit 1;; esac
+          test "${runtime##*/}" = "$runtime"
+          mv "$old/$runtime" .
+          mv "$old/scrapling-runtime.json" .
+          node scripts/prepare-scrapling.mjs --check
+      - name: Prepare portable Scrapling runtime
+        shell: bash
+        run: |
+          node scripts/prepare-scrapling.mjs --release="v2026.11.11.1"
+          node scripts/prepare-computer-use.mjs
+
+      - name: Configure current curl CA trust only for isolated Mac CI
+        if: matrix.platform == 'darwin'
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs/promises'; import path from 'node:path'; import {createHash} from 'node:crypto';
+          const pointer=JSON.parse(await fs.readFile('scrapling-runtime.json','utf8'));
+          const bytes=await fs.readFile(path.join(pointer.directory,'packages/certifi/cacert.pem'));
+          if(createHash('sha256').update(bytes).digest('hex')!=='9cc2a774b5198dcff14d9be1e66091f538975d867ce029a96bce15a55dfd730f') throw new Error('Unexpected locked CI CA bundle');
+          const ca=path.join(process.env.RUNNER_TEMP,'release-ci-ca.pem'); await fs.writeFile(ca,bytes);
+          await fs.appendFile(process.env.GITHUB_ENV,'CURL_CA_BUNDLE='+ca+'\n');
+          const {uvTransport}=await import('./scripts/lib/install-network.mjs');
+          await uvTransport('uv',process.cwd(),{...process.env,CURL_CA_BUNDLE:ca});
+          console.log('Isolated CI curl uses the current unchanged locked CA bundle; product default trust rules and bytes remain unchanged. Original default-host fixture failure is retained separately.');
+          NODE
+
+      - name: Prune to production-only dependencies
+        shell: bash
+        run: |
+          # Windows Copy-Item/zip 不保留 pnpm 链接语义，发行依赖使用实体 hoisted 布局。
+          prod_flags=(--prod --prefer-offline)
+          if [ "${{ matrix.platform }}" = windows ]; then prod_flags+=(--node-linker=hoisted); fi
+
+          # build 已完成，dist 产物保留。重装去 devDeps（typescript / vitest / tsx 等）。
+          # native 模块 (better-sqlite3) 用 prebuild 二进制，不需现场编译。
+          # file: 消费者在 install 时做快照，先准备本地 SDK 和 Shared。
+          (cd crabot-client && rm -rf node_modules && pnpm install "${prod_flags[@]}")
+          (cd crabot-shared && rm -rf node_modules && pnpm install "${prod_flags[@]}")
+
+          # 其他模块和 root 并行 prune
+          pids=()
+          (rm -rf node_modules && pnpm install "${prod_flags[@]}") &
+          pids+=($!)
+          for mod in crabot-core crabot-agent \
+                     crabot-mcp-tools crabot-admin; do
+            if [ -d "$mod" ]; then
+              (cd "$mod" && rm -rf node_modules && pnpm install "${prod_flags[@]}") &
+              pids+=($!)
+            fi
+          done
+          # scripts/lib 是独立 package（依赖 proper-lockfile 等），不属于 root workspace
+          if [ -d "scripts/lib" ]; then
+            (cd scripts/lib && rm -rf node_modules && pnpm install "${prod_flags[@]}") &
+            pids+=($!)
+          fi
+          for pid in "${pids[@]}"; do wait "$pid" || exit 1; done
+
+      - name: Package (Unix)
+        if: matrix.platform != 'windows'
+        run: |
+          VERSION=v2026.11.11.1
+          if [ "${{ github.event_name }}" = "pull_request" ]; then VERSION="pr-${{ github.event.number }}"; fi
+          DIRNAME="crabot-${VERSION}-${{ matrix.platform }}-${{ matrix.arch }}"
+          mkdir -p "/tmp/${DIRNAME}"
+
+          # 复制运行时文件
+          cp cli.mjs crabot.cmd package.json install.sh install.ps1 LICENSE "/tmp/${DIRNAME}/"
+          cp -r dist "/tmp/${DIRNAME}/"
+          mkdir -p "/tmp/${DIRNAME}/crabot-native/build/Release"
+          cp crabot-native/build/Release/crabot-native.node "/tmp/${DIRNAME}/crabot-native/build/Release/"
+
+          # rsync -H 保留 pnpm store 单模块内的 hardlink，避免每个文件被 inflate 成独立副本。
+          # 第三方包广泛用 src/ 作运行时入口（如 ecdsa-sig-formatter 的 main = src/...js），
+          # 不能 unanchored 排除 src/，必须用 /src/ 锚定到模块自身根目录。
+          COMMON_EXCLUDES=(
+            --exclude='node_modules/.cache/'
+            --exclude='.venv/'
+            --exclude='.env'
+            --exclude='.git/'
+            --exclude='.github/'
+            --exclude='.gitignore'
+            --exclude='.npmignore'
+            --exclude='.editorconfig'
+            --exclude='.eslintrc*'
+            --exclude='.prettierrc*'
+            --exclude='*.md'
+            --exclude='*.markdown'
+            --exclude='*.map'
+            --exclude='*.ts'
+            --exclude='__tests__/'
+            --exclude='*.test.*'
+            --exclude='*.spec.*'
+            --exclude='tsconfig*.json'
+            --exclude='*.tsbuildinfo'
+          )
+
+          # 根 node_modules（已 prune）
+          rsync -aH "${COMMON_EXCLUDES[@]}" node_modules "/tmp/${DIRNAME}/"
+
+          # scripts/（含 lib/、upgrade-lib/）
+          # scripts/lib/ 是独立 package，运行时需要 proper-lockfile 等 prod deps，必须连 node_modules 一起打入
+          # scripts/lib/__tests__/、vitest.config 是 dev-only
+          rsync -aH "${COMMON_EXCLUDES[@]}" \
+                --exclude='lib/__tests__/' \
+                --exclude='vitest.config.*' \
+                scripts "/tmp/${DIRNAME}/"
+
+          # TS 模块：src/ 是源码，构建产物在 dist/，可排除 src/
+          for mod in crabot-client crabot-shared crabot-core crabot-agent \
+                     crabot-mcp-tools; do
+            if [ -d "$mod" ]; then
+              rsync -aH "${COMMON_EXCLUDES[@]}" \
+                    --exclude='/src/' --exclude='/test*/' \
+                    "$mod/" "/tmp/${DIRNAME}/$mod/"
+            fi
+          done
+
+          # crabot-admin：额外排 web/（前端源码 + 构建依赖；构建产物已在 dist/web/）
+          # 两处 skill 载荷的 *.md 都是运行时内容（SkillManager 读 SKILL.md 及 references/），
+          # include 必须在 *.md exclude 之前：
+          #   builtin-skills/   → seedBuiltinSkills 的 superpowers snapshot
+          #   builtins/skills/  → registerBuiltins 扫描的 Crabot 自有 skill（memory-curate 等）
+          if [ -d "crabot-admin" ]; then
+            rsync -aH \
+                  --include='builtin-skills/' \
+                  --include='builtin-skills/**' \
+                  --include='builtins/' \
+                  --include='builtins/**' \
+                  "${COMMON_EXCLUDES[@]}" \
+                  --exclude='/src/' --exclude='/test*/' --exclude='/web/' \
+                  "crabot-admin/" "/tmp/${DIRNAME}/crabot-admin/"
+          fi
+
+          # Python 模块（crabot-memory）：src/ 是运行时代码，必须保留
+          if [ -d "crabot-memory" ]; then
+            rsync -aH \
+                  --exclude='/test*/' \
+                  --exclude='node_modules/.cache/' \
+                  --exclude='.venv/' --exclude='.env' \
+                  --exclude='.git/' --exclude='.github/' \
+                  --exclude='__pycache__/' \
+                  --exclude='*.md' --exclude='*.markdown' \
+                  "crabot-memory/" "/tmp/${DIRNAME}/crabot-memory/"
+          fi
+
+          # 独立顶层版本目录：旧 release 解包不会删除其它正在使用的环境。
+          RUNTIME_DIR=$(node -p "require('./scrapling-runtime.json').directory")
+          cp -R "$RUNTIME_DIR" "/tmp/${DIRNAME}/"
+          cp scrapling-runtime.json "/tmp/${DIRNAME}/"
+          cp -R .computer-use-runtime "/tmp/${DIRNAME}/"
+
+          # 打包前校验运行时载荷齐全（防止 exclude 规则漏掉 skill 等运行时文件）
+          node .github/scripts/verify-release-payload.mjs "/tmp/${DIRNAME}"
+          node .github/scripts/smoke-scrapling.mjs "/tmp/${DIRNAME}"
+
+          # 打包（tar 默认保留 staging 目录内的 hardlink）
+          python3 .github/scripts/package-release.py "/tmp/${DIRNAME}"
+          cd /tmp
+          shasum -a 256 "${DIRNAME}.tar.gz" > "${DIRNAME}.tar.gz.sha256"
+
+          # 移回 workspace
+          mv "${DIRNAME}.tar.gz" "${DIRNAME}.tar.gz.sha256" "$GITHUB_WORKSPACE/"
+
+          # Intel 必须用最终 archive 在不同目录的实际解压结果验收。
+          if [ "${{ matrix.platform }}-${{ matrix.arch }}" = darwin-x64 ]; then
+            UNPACKED=$(mktemp -d)
+            trap 'rm -rf "$UNPACKED"' EXIT
+            tar -xzf "$GITHUB_WORKSPACE/${DIRNAME}.tar.gz" -C "$UNPACKED"
+            cd "$GITHUB_WORKSPACE"
+            node .github/scripts/verify-release-payload.mjs "$UNPACKED/${DIRNAME}"
+            node .github/scripts/smoke-scrapling.mjs "$UNPACKED/${DIRNAME}"
+          fi
+
+      - name: Package (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $Version = "v2026.11.11.1"
+          if ("${{ github.event_name }}" -eq "pull_request") { $Version = "pr-${{ github.event.number }}" }
+          $DirName = "crabot-${Version}-windows-x64"
+          $TempDir = "$env:TEMP\$DirName"
+          New-Item -ItemType Directory -Force -Path $TempDir
+
+          Copy-Item cli.mjs, crabot.cmd, package.json, install.sh, install.ps1, LICENSE $TempDir
+          Copy-Item -Recurse dist, scripts, node_modules $TempDir
+          $NativeDir = Join-Path $TempDir 'crabot-native/build/Release'
+          New-Item -ItemType Directory -Force -Path $NativeDir | Out-Null
+          Copy-Item 'crabot-native/build/Release/crabot-native.node', 'crabot-native/build/Release/crabot-hidden-console.exe' $NativeDir
+          # 清理 scripts/lib/__tests__ 等 dev-only 测试目录；scripts/lib/node_modules 是运行时依赖必须保留
+          Get-ChildItem -Path "$TempDir\scripts" -Recurse -Directory -Filter '__tests__' -ErrorAction SilentlyContinue |
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+
+          # TS 模块：src/ 是源码，构建产物在 dist/，可排除 src/
+          $tsModules = @('crabot-client','crabot-shared','crabot-admin','crabot-core','crabot-agent',
+                         'crabot-channel-telegram','crabot-channel-wechat','crabot-channel-feishu','crabot-channel-dingtalk','crabot-channel-slack','crabot-channel-voice',
+                         'crabot-mcp-tools')
+          foreach ($mod in $tsModules) {
+            if (Test-Path $mod) {
+              $dest = Join-Path $TempDir $mod
+              New-Item -ItemType Directory -Force -Path $dest | Out-Null
+              # 构建留下的无效检查链接不是运行时文件，不能让它中断载荷复制。
+              Get-ChildItem -LiteralPath $mod -Force |
+                Where-Object { $_.Name -ne 'node_modules_link_check' } |
+                Copy-Item -Destination $dest -Recurse
+              Remove-Item -Recurse -Force "$dest\src" -ErrorAction SilentlyContinue
+              Remove-Item -Recurse -Force "$dest\test*" -ErrorAction SilentlyContinue
+              Remove-Item -Recurse -Force "$dest\.venv" -ErrorAction SilentlyContinue
+              # crabot-admin 额外排 web/（前端源码+构建依赖，产物已在 dist/web/）
+              if ($mod -eq 'crabot-admin') {
+                Remove-Item -Recurse -Force "$dest\web" -ErrorAction SilentlyContinue
+              }
+            }
+          }
+
+          # Python 模块（crabot-memory）：src/ 是运行时代码，必须保留
+          if (Test-Path 'crabot-memory') {
+            $dest = Join-Path $TempDir 'crabot-memory'
+            Copy-Item -Recurse 'crabot-memory' $dest
+            Remove-Item -Recurse -Force "$dest\test*" -ErrorAction SilentlyContinue
+            Remove-Item -Recurse -Force "$dest\.venv" -ErrorAction SilentlyContinue
+            Remove-Item -Recurse -Force "$dest\__pycache__" -ErrorAction SilentlyContinue
+          }
+
+          # 清理无用文件（递归扫整个 staging 目录）
+          # crabot-admin 下两处 skill 载荷的 *.md 是运行时内容，必须保留：
+          #   builtin-skills/  → seedBuiltinSkills 的 superpowers snapshot
+          #   builtins/skills/ → registerBuiltins 扫描的 Crabot 自有 skill（memory-curate 等）
+          $filePatterns = @('*.md','*.markdown','*.map','*.ts','tsconfig*.json',
+                            '*.tsbuildinfo','.eslintrc*','.prettierrc*','.editorconfig',
+                            '.gitignore','.npmignore')
+          foreach ($pat in $filePatterns) {
+            Get-ChildItem -Path $TempDir -Recurse -File -Filter $pat -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -notmatch '[\\/](builtin-skills|builtins)[\\/]' } |
+              Remove-Item -Force -ErrorAction SilentlyContinue
+          }
+          $dirPatterns = @('__tests__','.github')
+          foreach ($pat in $dirPatterns) {
+            Get-ChildItem -Path $TempDir -Recurse -Directory -Filter $pat -ErrorAction SilentlyContinue |
+              Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+          }
+          # *.test.* / *.spec.* 用 -Include（多 pattern）
+          Get-ChildItem -Path $TempDir -Recurse -File -Include '*.test.*','*.spec.*' -ErrorAction SilentlyContinue |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+
+          # 打包前校验运行时载荷齐全（防止清理规则漏掉 skill 等运行时文件）
+          $Runtime = (Get-Content scrapling-runtime.json -Raw | ConvertFrom-Json).directory
+          Copy-Item -Recurse $Runtime $TempDir
+          Copy-Item scrapling-runtime.json $TempDir
+          Copy-Item -Recurse .computer-use-runtime $TempDir
+
+          node .github/scripts/verify-release-payload.mjs "$TempDir"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Compress-Archive -Path $TempDir -DestinationPath "$DirName.zip"
+          (Get-FileHash "$DirName.zip" -Algorithm SHA256).Hash | Out-File "$DirName.zip.sha256"
+
+          # 用最终 zip 的真实解压结果验收，覆盖链接/隐藏文件的封装损失。
+          $Expanded = Join-Path $env:RUNNER_TEMP 'release-unpacked'
+          Expand-Archive -Path "$DirName.zip" -DestinationPath $Expanded
+          $Unpacked = Join-Path $Expanded $DirName
+          node .github/scripts/verify-release-payload.mjs "$Unpacked"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node .github/scripts/smoke-scrapling.mjs "$Unpacked"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Load IPC-aware acceptance harness only after final archive creation
+        shell: bash
+        run: |
+          git fetch origin '${{ github.sha }}' --depth=1
+          git show '${{ github.sha }}:.github/scripts/smoke-installer.mjs' > .github/scripts/smoke-installer.mjs
+
+      - name: Install and boot the exact final archive in an isolated home
+        timeout-minutes: 100
+        shell: bash
+        env:
+          CRABOT_CI_SKIP_SOURCE: '1'
+        run: |
+          archive="crabot-v2026.11.11.1-${{ matrix.platform }}-${{ matrix.arch }}.tar.gz"
+          if [ "${{ matrix.platform }}" = windows ]; then
+            archive="crabot-v2026.11.11.1-windows-x64.zip"
+            node .github/scripts/smoke-installer.mjs "$archive" powershell.exe
+          else
+            node .github/scripts/smoke-installer.mjs "$archive"
+          fi
+
+      - name: Upload Release Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          tag_name: v2026.11.11.1
+          files: |
+            crabot-*.tar.gz
+            crabot-*.tar.gz.sha256
+            crabot-*.zip
+            crabot-*.zip.sha256

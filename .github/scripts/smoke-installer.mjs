@@ -8,6 +8,7 @@ import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createHash } from 'node:crypto'
+import control from '../../scripts/lib/runtime-control.cjs'
 import { verifyReleasePackage } from '../../scripts/lib/release-package.mjs'
 
 const repo = resolve(fileURLToPath(new URL('../..', import.meta.url)))
@@ -97,16 +98,18 @@ main
     }
   }
 }
+async function rpc(port, method) {
+  if (control.hasRuntimeControl(data)) return control.callRuntimeControl(data,
+    { target: port, source: 'release-acceptance', method, params: {} }, { timeoutMs: 5000 })
+  const response = await fetch(`http://127.0.0.1:${port}/${method}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(5000),
+  })
+  const result = await response.json()
+  if (!response.ok || result.success !== true) throw new Error(`${port}/${method}: ${JSON.stringify(result)}`)
+  return result.data
+}
 let ownedRuntimePids = []
 async function assertServicesStarted() {
-  const rpc = async (port, method) => {
-    const response = await fetch(`http://127.0.0.1:${port}/${method}`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(5000),
-    })
-    const result = await response.json()
-    if (!response.ok || result.success !== true) throw new Error(`${port}/${method}: ${JSON.stringify(result)}`)
-    return result.data
-  }
   // An empty instance retries its missing model configuration for 60s before degraded registration.
   const deadline = Date.now() + 120_000
   let reason
@@ -158,8 +161,8 @@ try {
   started = true
   await run(process.execPath, [join(product, 'cli.mjs'), 'start', '-d'])
   await assertServicesStarted()
-  const health = await fetch('http://127.0.0.1:19000/health', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).then(r => r.json())
-  if (health.data?.status !== 'healthy') throw new Error(`installed MM health: ${JSON.stringify(health)}`)
+  const health = await rpc(19000, 'health')
+  if (health.status !== 'healthy') throw new Error(`installed MM health: ${JSON.stringify(health)}`)
   let runningRejected = false
   try { await install() } catch { runningRejected = true }
   if (!runningRejected) throw new Error('installer did not report rejection of the running instance')
@@ -185,8 +188,8 @@ try {
   const uiStatus = JSON.parse(await fs.readFile(join(data, 'admin/upgrade-status.json'), 'utf8'))
   if (uiStatus.phase !== 'done' || uiStatus.to_version !== version) throw new Error(`UI upgrade failed: ${JSON.stringify(uiStatus)}`)
   await assertServicesStarted()
-  const uiHealth = await fetch('http://127.0.0.1:19000/health', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).then(r => r.json())
-  if (uiHealth.data?.status !== 'healthy') throw new Error(`UI upgrade core health: ${JSON.stringify(uiHealth)}`)
+  const uiHealth = await rpc(19000, 'health')
+  if (uiHealth.status !== 'healthy') throw new Error(`UI upgrade core health: ${JSON.stringify(uiHealth)}`)
   await stopAndAssert()
   started = false
   // Main installer must accept the real old public package without future Cua helpers.
