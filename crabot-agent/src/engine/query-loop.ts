@@ -724,7 +724,12 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
       }
 
       // Execute tools
-      const batches = partitionToolCalls(processed.toolUseBlocks, currentTools)
+      const executionTools = options.prepareToolBatch ? await options.prepareToolBatch({
+        systemPrompt: currentSystemPrompt, messages, tools: currentTools, calls: processed.toolUseBlocks,
+        callIds: toolCallIds, adapter, model: options.model, thinking: options.thinking, signal: abortSignal,
+        configChangedSignal: options.configChangedSignal, configGeneration: options.configGeneration, onConfigChanged,
+      }) : currentTools
+      const batches = partitionToolCalls(processed.toolUseBlocks, executionTools)
       // Live progress: tools about to start
       if (options.onLiveProgress) {
         options.onLiveProgress({
@@ -735,7 +740,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
           })),
         })
       }
-      const toolResults = await executeToolBatches(batches, currentTools, {
+      const toolResults = await executeToolBatches(batches, executionTools, {
         abortSignal,
         unavailableToolResult: options.unavailableToolResult,
         ...(options.timezone ? { timezone: options.timezone } : {}),

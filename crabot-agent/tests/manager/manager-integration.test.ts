@@ -1,3 +1,4 @@
+import { DELEGATION_REVIEW_PROMPT } from '../../src/manager/delegation-review-prompt.js'
 /**
  * Manager loop 端到端集成测试(P4 Task 10)——protocol-agent-v3.md §4。
  *
@@ -130,6 +131,10 @@ function makeManagerAdapter(): {
   const foldCalls: LLMStreamParams[] = []
   const adapter: LLMAdapter = {
     async *stream(params: LLMStreamParams) {
+      if (params.systemPrompt === DELEGATION_REVIEW_PROMPT) {
+        yield* chunksFromContent([{ type: 'text', text: '{"verdict":"allow","issues":[]}' }], 'end_turn')
+        return
+      }
       const snapshot: LLMStreamParams = { ...params, messages: [...params.messages] }
       calls.push(snapshot)
       if (params.systemPrompt.includes(FOLD_SYSTEM_PROMPT_MARKER)) {

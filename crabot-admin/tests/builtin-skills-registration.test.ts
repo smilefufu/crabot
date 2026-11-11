@@ -59,7 +59,7 @@ describe('SkillManager.registerBuiltins', () => {
   })
 
   it('主线必备 builtin Skill 始终启用且不能被禁用', async () => {
-    const requiredNames = ['tmp-page', 'scrapling-official']
+    const requiredNames = ['tmp-page', 'scrapling-official', 'browser-interaction-test-check', 'web-page-visual-check', 'pptx-source-to-delivery']
     for (const name of [...requiredNames, 'review-skill']) writeSkill(builtinsDir, name)
 
     await mgr.registerBuiltins(builtinsDir)
@@ -147,6 +147,7 @@ describe('仓库 builtins/skills 载荷', () => {
         ...getBuiltinSkills().map((skill) => skill.name),
         ...mgr.list().map((skill) => skill.name),
       ].sort()).toEqual([
+        'browser-interaction-test-check', 'web-page-visual-check', 'pptx-source-to-delivery',
         'tmp-page',
         'scrapling-official',
         'writing-plans',

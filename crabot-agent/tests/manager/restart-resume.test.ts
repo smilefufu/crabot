@@ -734,7 +734,7 @@ describe('Manager restart continuation', () => {
     expect(summaries.length).toBeGreaterThan(0)
     expect(summaries.some(text => text.includes('Original long request'))).toBe(false)
     expect(inputs).toHaveLength(1)
-    expect(inputs[0].messages).toContainEqual(original)
+    expect(inputs[0].messages).toContainEqual(JSON.parse(JSON.stringify(original, (key, value) => key === 'managerHumanSource' ? undefined : value)))
     expect(JSON.stringify(inputs[0].messages)).toContain('directory progress retained after restart')
     expect(read).toHaveBeenCalledTimes(24)
     expect(trace.getManagerEpisode(checkpoint.episodeId)?.status).toBe('completed')

@@ -1,11 +1,12 @@
 import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import type { MCPServerConfig } from '../types.js'
+import { WORKER_WORKFLOW_GUIDANCE } from '../prompts/workflow-guidance.js'
 import { BUILTIN_WORKER_PROMPT } from '../prompts/builtin-worker.js'
 import { guidanceCatalog } from './catalog.js'
 
 export const GUIDANCE_MCP_SERVER_NAME = 'crabot-guidance'
-export const WORKER_TASK_INSTRUCTIONS = [BUILTIN_WORKER_PROMPT, guidanceCatalog('worker')].join('\n\n')
+export const WORKER_TASK_INSTRUCTIONS = [BUILTIN_WORKER_PROMPT, WORKER_WORKFLOW_GUIDANCE, guidanceCatalog('worker')].join('\n\n')
 
 /** Static product text only: no execution identity, credentials, RPC or workspace access. */
 export function createGuidanceMcpServerConfig(computerUse = false): MCPServerConfig {
@@ -22,7 +23,7 @@ export function createGuidanceMcpServerConfig(computerUse = false): MCPServerCon
 }
 
 export function workerTaskInstructions(computerUse: boolean): string {
-  return [BUILTIN_WORKER_PROMPT, guidanceCatalog('worker', { computerUse })].join('\n\n')
+  return [BUILTIN_WORKER_PROMPT, WORKER_WORKFLOW_GUIDANCE, guidanceCatalog('worker', { computerUse })].join('\n\n')
 }
 
 export function workspaceWorkerTaskInstructions(root: string): string {

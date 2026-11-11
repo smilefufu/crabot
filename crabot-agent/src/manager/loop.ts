@@ -1,3 +1,4 @@
+import { attachManagerHumanSources, createDelegationReview } from './delegation-review.js'
 import { requestInputsForMessages, type TrustedHumanInput } from './trusted-human-input.js'
 import { findVoiceDelivery, TaggedVoiceOutput, type VoiceOutputPort } from './voice-output.js'
 /**
@@ -1515,7 +1516,7 @@ export class ManagerLoop {
     // 文本逐字一致)。
     const transientPromptCounts = this.transientPromptCounts()
     const durableIds = new Set(initialState.recent.map((message) => message.id))
-    const persistedFinalMessages = attempt.result.finalMessages.flatMap((m) => {
+    const persistedFinalMessages = attachManagerHumanSources(attempt.result.finalMessages.flatMap((m) => {
       if (this.resumeCheckpoint?.transientMessageIds.includes(m.id)) return []
       // 系统提示只服务当前 LLM 请求。只在本次动态尾部之后按数量剔除，避免误删旧 history
       // 中恰好同文的人类消息；Worker/任务板正文从未进入这里。
@@ -1536,7 +1537,7 @@ export class ManagerLoop {
         if (first && first.type === 'text') return [{ ...m, content: first.text }]
       }
       return [m]
-    })
+    }), this.humanSourcesForReview())
 
     await this.deps.store.appendEpisodeLog(this.deps.key, episodeId, persistedFinalMessages)
 
@@ -1642,7 +1643,8 @@ export class ManagerLoop {
       for (const { message } of newEntries) committedIds.add(message.platform_message_id)
       const projected = projectHumanEnvelope(envelope, newEntries)
       if (projected.voice_reply_context) this.currentVoiceReplyContext = projected.voice_reply_context
-      const rendered = createUserMessage(this.renderEnvelope(projected))
+      const rendered = { ...createUserMessage(this.renderEnvelope(projected)),
+        managerHumanSource: structuredClone(newEntries.map(({ message }) => message)) }
       committedMessages.push(rendered)
       humanInputEnvelopes.push(projected)
       // 记录本批消息的入站图片引用(轻量引用,见 image-vision.ts 文件头)
@@ -1932,7 +1934,7 @@ export class ManagerLoop {
     return `llm-${episodeId}-${responseId}`
   }
 
-  private observeAdapter(episodeId: string, adapter: LLMAdapter, purpose: 'inference' | 'compaction'): LLMAdapter {
+  private observeAdapter(episodeId: string, adapter: LLMAdapter, purpose: 'inference' | 'compaction' | 'delegation_review'): LLMAdapter {
     const writer = this.deps.traceWriter
     if (!writer) return adapter
     const mode = this.currentToolFaceState?.mode ?? 'progressive'
@@ -2298,6 +2300,11 @@ export class ManagerLoop {
     return counts
   }
 
+  private humanSourcesForReview() {
+    return [...this.currentEpisodeEnvelopes, ...(this.currentEpisodeInjected ?? [])].flatMap(envelope =>
+      isHumanWake(envelope.wake) ? [{ text: this.renderEnvelope(envelope), messages: envelope.wake.messages }] : [])
+  }
+
   /** 跑一次 runEngine(可能是首次尝试,也可能是 max_tokens 兜底的重试)。
    *  adapter/model 由调用方(runEpisodeBody)按本次 episode 的快照传入,不在此处重新解析。 */
   private async runAttempt(
@@ -2344,6 +2351,7 @@ export class ManagerLoop {
       for (const tool of face) readOnlyTools.set(tool.name, tool.isReadOnly)
       return face
     }
+    const humanSources = () => this.humanSourcesForReview()
     const messagesRef = { current: initialMessages as ReadonlyArray<EngineMessage> }
     this.guidanceMessages = () => messagesRef.current
     const initialIds = new Set(initialMessages.map((message) => message.id))
@@ -2357,7 +2365,7 @@ export class ManagerLoop {
     const durableMessage = (message: EngineMessage): EngineMessage => {
       if (message.role === 'user' && 'content' in message && Array.isArray(message.content)) {
         const original = state.recent.find((item) => item.id === message.id)
-        if (original) return original
+        if (original) return { ...original, ...(message.managerHumanSource ? { managerHumanSource: message.managerHumanSource } : {}) }
         const first = message.content[0]
         if (first?.type === 'text') return { ...message, content: first.text }
       }
@@ -2367,10 +2375,10 @@ export class ManagerLoop {
     const checkpoint = (): void => {
       if (this.checkpointError) throw this.checkpointError
       const originals = new Map(state.recent.map((message) => [message.id, message]))
-      const recent = messagesRef.current.slice(hasSummaryMarker ? 1 : 0).map((message) => {
+      const recent = attachManagerHumanSources(messagesRef.current.slice(hasSummaryMarker ? 1 : 0), humanSources()).map((message) => {
         if (message.role !== 'user' || !('content' in message) || !Array.isArray(message.content)) return message
         const original = originals.get(message.id)
-        if (original) return original
+        if (original) return { ...original, ...(message.managerHumanSource ? { managerHumanSource: message.managerHumanSource } : {}) }
         const first = message.content[0]
         return first?.type === 'text' ? { ...message, content: first.text } : message
       })
@@ -2406,20 +2414,44 @@ export class ManagerLoop {
       : undefined
     const inferenceAdapter = (current: LLMAdapter): LLMAdapter => {
       const observed = this.observeAdapter(episodeId, current, 'inference')
-      if (!groupImages) return observed
       const imageRefs = () => this.resumeCheckpoint?.state.imageRefs ?? state.imageRefs ?? []
       return {
         traceIdentity: observed.traceIdentity,
         onRequestLifecycle: observed.onRequestLifecycle?.bind(observed),
         updateConfig: (config) => observed.updateConfig(config),
         async *stream(params) {
-          const messages = await groupImages.project(params.messages, imageRefs())
+          const projected = groupImages ? await groupImages.project(params.messages, imageRefs()) : params.messages
+          const messages = projected.map(message => {
+            if (message.role !== 'user' || !('content' in message)) return message
+            const { managerHumanSource: _source, ...visible } = message
+            return visible
+          })
           yield* observed.stream({ ...params, messages })
         },
       }
     }
 
+    const reviewTools = createDelegationReview({
+      sources: humanSources,
+      inputRevision: () => JSON.stringify([...this.currentHumanInputs.keys()]),
+      observe: observation => {
+        const now = new Date().toISOString()
+        this.deps.traceWriter?.appendSpan(episodeId, {
+          span_id: `delegation-review-${randomUUID()}`, parent_span_id: `root-${episodeId}`,
+          type: 'decision', status: observation.technical_error ? 'failed' : 'completed',
+          started_at: now, ended_at: now, duration_ms: 0,
+          details: { kind: 'delegation_review', ...observation },
+        })
+      },
+    })
     const options: EngineOptions = {
+      ...(isBuiltinDailyReflection ? {} : { prepareToolBatch: (context: import('../engine/types.js').ToolBatchContext) =>
+        reviewTools({ ...context, adapter: this.observeAdapter(episodeId, context.adapter, 'delegation_review'),
+          onConfigChanged: context.onConfigChanged ? async () => {
+            const update = await context.onConfigChanged!()
+            return update && { ...update, ...(update.adapter ? { adapter: this.observeAdapter(episodeId, update.adapter, 'delegation_review') } : {}) }
+          } : undefined,
+        }) }),
       supportsVision: this.deps.supportsVision?.() ?? false,
       systemPrompt,
       tools,
@@ -2474,7 +2506,7 @@ export class ManagerLoop {
             protectedMessageIds,
             immutableMessageIds,
             onBatchApplied: async (batch) => {
-              const recent = [...batch.state.history, ...batch.state.protectedTail].map(durableMessage)
+              const recent = attachManagerHumanSources([...batch.state.history, ...batch.state.protectedTail], humanSources()).map(durableMessage)
               const next = { ...state,
                 committedHumanMessageIds: this.resumeCheckpoint?.state.committedHumanMessageIds ?? state.committedHumanMessageIds,
                 imageRefs: this.resumeCheckpoint?.state.imageRefs ?? state.imageRefs,

@@ -7,6 +7,9 @@ import type { CapabilityBundle, WorkerImplId } from './types.js'
 import { createWorkspaceGitMcpServerConfig, WORKSPACE_GIT_MCP_SERVER_NAME } from './workspace-git-capability.js'
 
 export const CRABOT_BUILTIN_SKILL_NAMES: ReadonlySet<string> = new Set([
+  'browser-interaction-test-check',
+  'web-page-visual-check',
+  'pptx-source-to-delivery',
   'tmp-page',
   'scrapling-official',
   'writing-plans',
@@ -17,6 +20,9 @@ export const CRABOT_BUILTIN_SKILL_NAMES: ReadonlySet<string> = new Set([
 ])
 
 export const REQUIRED_MAINLINE_WORKER_SKILL_NAMES = [
+  'browser-interaction-test-check',
+  'web-page-visual-check',
+  'pptx-source-to-delivery',
   'tmp-page',
 ] as const
 
@@ -33,6 +39,9 @@ export function filterNonAgentCrabotSkills(
 }
 
 export const MAINLINE_ONLY_CRABOT_SKILL_NAMES: ReadonlySet<string> = new Set([
+  'browser-interaction-test-check',
+  'web-page-visual-check',
+  'pptx-source-to-delivery',
   'tmp-page',
   'workspace-context-maintenance', // Preserve the existing child boundary, including historical catalogs.
 ])

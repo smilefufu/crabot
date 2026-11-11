@@ -1,3 +1,4 @@
+import { MANAGER_WORKFLOW_GUIDANCE } from '../prompts/workflow-guidance.js'
 import { executionResourceContext } from '../engine/tool-resources.js'
 import type { ManagerKey } from './types.js'
 import { assembleDailyReflectionPrompt } from './daily-reflection-prompt.js'
@@ -96,7 +97,7 @@ export function assembleManagerSystemPrompt(inputs: PromptInputs): string {
   const voice = inputs.voice === true && !inputs.isBuiltinDailyReflection && !inputs.isSystemThread
   const requestMode = inputs.isGroup && !inputs.isSystemThread && !inputs.isBuiltinDailyReflection ? inputs.requestAuthorization : undefined
   let identity = MANAGER_IDENTITY
-  let collaboration = MANAGER_EXECUTOR_COLLABORATION
+  let collaboration = MANAGER_EXECUTOR_COLLABORATION + '\n\n' + MANAGER_WORKFLOW_GUIDANCE
   if (requestMode === 'shared') {
     identity = identity.replace(LATEST_HUMAN_REQUIREMENTS, SHARED_LATEST_REQUIREMENTS)
     collaboration = collaboration.replace(EXECUTION_ORGANIZATION, SHARED_EXECUTION_ORGANIZATION)

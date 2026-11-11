@@ -71,8 +71,9 @@ function bundle(impl: WorkerImplId, mcpSkill = true) {
 }
 
 describe('mainline Worker capability policy', () => {
-  it('策略清单精确覆盖 spec 中的迁移后七个 Crabot 内置 Skill', () => {
+  it('策略清单精确覆盖 spec 中的当前 Crabot 内置 Skill', () => {
     expect([...CRABOT_BUILTIN_SKILL_NAMES]).toEqual([
+      'browser-interaction-test-check', 'web-page-visual-check', 'pptx-source-to-delivery',
       'tmp-page',
       'scrapling-official',
       'writing-plans',
@@ -91,6 +92,7 @@ describe('mainline Worker capability policy', () => {
     expect(namesByImpl[1]).toEqual(namesByImpl[0])
     expect(namesByImpl[2]).toEqual(namesByImpl[0])
     expect(namesByImpl[0]).toEqual([
+      'browser-interaction-test-check', 'web-page-visual-check', 'pptx-source-to-delivery',
       'tmp-page',
       'scrapling-official',
       'user-skill',
@@ -101,6 +103,7 @@ describe('mainline Worker capability policy', () => {
     const result = bundle('codex', false)
 
     expect(result.skills.map((skill) => skill.name)).toEqual([
+      'browser-interaction-test-check', 'web-page-visual-check', 'pptx-source-to-delivery',
       'tmp-page',
     ])
     expect(result.mcp_servers.map((server) => server.name)).toEqual([TMP_PAGE_MCP_SERVER_NAME, 'crabot-guidance', WORKSPACE_GIT_MCP_SERVER_NAME])
