@@ -50,7 +50,7 @@ jobs:
         shell: bash
         run: |
           python3 - <<'PY'
-          import json, hashlib, shutil
+          import json, hashlib, shutil, subprocess
           from pathlib import Path
           source='74dec3c55d7b17196ea851ca994c2e12e805f151'; version='0.1.0-desktop.26'
           out=Path('release-out'); out.mkdir()
@@ -89,7 +89,8 @@ jobs:
               assert len(entries)==1 and entries[0]['sha256']==sha and entries[0]['bytes']==size
             shutil.copyfile(package,out/package.name)
             (out/(package.name+'.sha256')).write_text(sha+'  '+package.name+'\n')
-            rows.append({'target':target,'file':package.name,'bytes':size,'sha256':sha,'source_commit':source,'native_acceptance_run':run})
+            footprint={'deb_installed_size_kib':int(subprocess.check_output(['dpkg-deb','-f',str(package),'Installed-Size'],text=True).strip())} if platform=='linux' else {'program_regular_file_bytes':provenance['program_regular_file_bytes']}
+            rows.append({'footprint':footprint,'target':target,'file':package.name,'bytes':size,'sha256':sha,'source_commit':source,'native_acceptance_run':run})
           receipt={'tag':'v2026.11.11.1','desktop_version':version,'source_commit':source,'candidate_only':True,'release_signed':False,'environment':'Native GitHub CI. Real-user OS trust prompts, GNOME/Wayland and real model business use are not represented.','https_scope_diagnostic_run':42759268758,'known_limitations':['On the tested macOS15 host, static make_request to example.com fails with its default system CA; browser fetch/stealthy_fetch succeed. All three tools succeed for GitHub, Python docs and Baidu. Product trust policy unchanged.'],'files':rows}
           (out/'desktop.26-verification.json').write_text(json.dumps(receipt,ensure_ascii=False,indent=2)+'\n')
           print(json.dumps(receipt,ensure_ascii=False,indent=2))
