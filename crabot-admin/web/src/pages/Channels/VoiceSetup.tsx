@@ -23,7 +23,7 @@ export function VoiceSetup() {
     let active = true
     void channelService.getInstance(id).then(async ({ instance }) => {
       if (!active) return
-      if (instance.implementation_id !== 'channel-voice') throw new Error('请选择语音聊天方式实例')
+      if (instance.implementation_id !== 'channel-voice') throw new Error('请选择语音协作入口实例')
       if (instance.voice_setup?.status === 'complete') { navigate(`/channels/config?selected=${encodeURIComponent(id)}`, { replace: true }); return }
       setName(instance.name)
       setOwnerRequired(instance.voice_setup?.owner_activation_required === true)
@@ -53,11 +53,11 @@ export function VoiceSetup() {
     else setStep(value => value + 1)
   }
   return <MainLayout><div className="voice-config" style={{ maxWidth: 960, margin: '1.5rem auto', padding: '1.5rem' }}>
-    <h1>{id ? `继续配置：${name}` : '新建语音聊天方式'}</h1>
+    <h1>{id ? `继续配置：${name}` : '新建语音协作入口'}</h1>
     <ol>{steps.map((label, index) => <li key={label} aria-current={step === index ? 'step' : undefined}>{index === step ? '→ ' : ''}{label}</li>)}</ol>
     <p>完成前保留为创建草稿，业务语音尚未启用。请先在手机登记本人声纹，配对确认后自动关联 Master，无需再手动绑定本人。无需公网地址，也无需提前购买硬件。</p>
     {error && <p role="alert">{error}</p>}
-    {step === 0 ? <><label>聊天方式名称<input className="input" disabled={!!id || busy} value={name} onChange={e => setName(e.target.value)} placeholder="如：手机语音" /></label><VoiceServices key={id || 'new'} channelId={id || undefined} onChange={setConfig} /></> : <VoiceConfigCard channelId={id} running={running} stage={step === 1 ? 'phone' : step === 2 ? 'contacts' : 'summary'} ownerRequired={ownerRequired} onState={setState} onDirty={setPermissionDirty} />}
+    {step === 0 ? <><label>协作入口名称<input className="input" disabled={!!id || busy} value={name} onChange={e => setName(e.target.value)} placeholder="如：手机语音" /></label><VoiceServices key={id || 'new'} channelId={id || undefined} onChange={setConfig} /></> : <VoiceConfigCard channelId={id} running={running} stage={step === 1 ? 'phone' : step === 2 ? 'contacts' : 'summary'} ownerRequired={ownerRequired} onState={setState} onDirty={setPermissionDirty} />}
     {step === 3 && <p>ASR：{config.asr?.model_id} · TTS：{config.tts?.model_id} · 手机唤醒词：{config.wake_word}</p>}
     {permissionDirty && <p role="status">群权限有未保存的修改，请先保存群权限再继续。</p>}
     <div className="voice-actions">

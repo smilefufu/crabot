@@ -26,13 +26,13 @@ beforeEach(() => {
   vi.mocked(voiceService.finish).mockRejectedValue(new Error('手机已断线，草稿保留'))
 })
 function view(url = '/channels/new/voice') {
-  render(<StrictMode><MemoryRouter initialEntries={[url]}><Routes><Route path="/channels/new/voice" element={<VoiceSetup />} /><Route path="/channels/config" element={<div>聊天方式列表</div>} /></Routes></MemoryRouter></StrictMode>)
+  render(<StrictMode><MemoryRouter initialEntries={[url]}><Routes><Route path="/channels/new/voice" element={<VoiceSetup />} /><Route path="/channels/config" element={<div>协作入口列表</div>} /></Routes></MemoryRouter></StrictMode>)
 }
 describe('Voice creation wizard', () => {
   it('retains the same draft and stays on services when the first-step ASR test fails', async () => {
     vi.mocked(voiceService.test).mockResolvedValueOnce({ ok: false })
     view()
-    fireEvent.change(screen.getByLabelText('聊天方式名称'), { target: { value: '手机' } })
+    fireEvent.change(screen.getByLabelText('协作入口名称'), { target: { value: '手机' } })
     fireEvent.click(screen.getByRole('button', { name: '选择服务' }))
     fireEvent.click(screen.getByRole('button', { name: '下一步' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('ASR 测试未通过')
@@ -46,7 +46,7 @@ describe('Voice creation wizard', () => {
   })
   it('creates once, prepares the phone automatically, blocks unsaved permissions and retains failed finish', async () => {
     view()
-    fireEvent.change(screen.getByLabelText('聊天方式名称'), { target: { value: '手机' } })
+    fireEvent.change(screen.getByLabelText('协作入口名称'), { target: { value: '手机' } })
     expect(screen.getByRole('button', { name: '下一步' })).toBeDisabled()
     fireEvent.click(screen.getByRole('button', { name: '选择服务' }))
     fireEvent.click(screen.getByRole('button', { name: '下一步' }))
@@ -62,14 +62,14 @@ describe('Voice creation wizard', () => {
     fireEvent.click(await screen.findByRole('button', { name: '检查并完成创建' }))
     await screen.findByRole('alert')
     expect(screen.getByText('手机已断线，草稿保留')).toBeTruthy()
-    expect(voiceService.finish).toHaveBeenCalledWith('手机'); expect(screen.queryByText('聊天方式列表')).toBeNull()
+    expect(voiceService.finish).toHaveBeenCalledWith('手机'); expect(screen.queryByText('协作入口列表')).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: '保存并退出' }))
     await waitFor(() => expect(voiceService.pause).toHaveBeenCalledWith('手机'))
   })
   it('does not pass the new phone step while owner association is pending', async () => {
     ownerStatus = 'pending'
     view()
-    fireEvent.change(screen.getByLabelText('聊天方式名称'), { target: { value: '手机' } })
+    fireEvent.change(screen.getByLabelText('协作入口名称'), { target: { value: '手机' } })
     fireEvent.click(screen.getByRole('button', { name: '选择服务' }))
     fireEvent.click(screen.getByRole('button', { name: '下一步' }))
     await screen.findByText('阶段：phone')
@@ -78,7 +78,7 @@ describe('Voice creation wizard', () => {
   })
   it('continues the same persisted ID without another creation', async () => {
     view('/channels/new/voice?instance_id=old-phone')
-    expect(screen.getByLabelText('聊天方式名称')).toBeDisabled()
+    expect(screen.getByLabelText('协作入口名称')).toBeDisabled()
     fireEvent.click(screen.getByRole('button', { name: '选择服务' }))
     fireEvent.click(screen.getByRole('button', { name: '下一步' }))
     await screen.findByText('阶段：phone')

@@ -1,0 +1,29 @@
+.collaboration-page { padding: 1.5rem 2rem; max-width: 900px; margin: 0 auto; }
+.collaboration-breadcrumb { color: var(--text-secondary); font-size: .75rem; margin-bottom: 1.25rem; }
+.collaboration-header { margin-bottom: 1.75rem; }
+.collaboration-header h1 { font-family: var(--font-display); font-size: 1.375rem; font-weight: 600; margin-bottom: .5rem; }
+.collaboration-page h2 { font-size: .9375rem; font-weight: 600; }
+.collaboration-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .875rem; margin-top: .75rem; }
+.collaboration-card { background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius-md); padding: 1.125rem; min-width: 0; }
+.collaboration-card--selected { border-color: var(--accent); }
+.collaboration-card h3 { font-size: 1rem; font-weight: 600; margin-bottom: .5rem; }
+.collaboration-description, .collaboration-muted { font-size: .8125rem; color: var(--text-secondary); line-height: 1.6; }
+.collaboration-card > p { margin-bottom: .5rem; }
+.collaboration-ready { font-size: .75rem; color: var(--success); line-height: 1.6; }
+.collaboration-actions { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .875rem; }
+.collaboration-actions .btn { white-space: normal; max-width: 100%; }
+.collaboration-discover.btn { display: flex; justify-content: space-between; align-items: center; gap: 1rem; width: 100%; margin-top: 1.5rem; padding: 1rem; text-align: left; white-space: normal; }
+.collaboration-discover strong { display: block; font-size: .9375rem; font-weight: 600; }
+.collaboration-discover small { display: block; margin-top: .25rem; font-size: .75rem; color: var(--text-secondary); font-weight: 400; }
+.collaboration-catalog { margin-top: 1rem; }
+.collaboration-experimental { margin-top: .875rem; }
+.collaboration-experimental > .btn { white-space: normal; flex-wrap: wrap; }
+.collaboration-experimental > div { margin-top: .75rem; }
+.collaboration-footer { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: .875rem; padding-top: 1rem; margin-top: 1.5rem; border-top: 1px solid var(--border); }
+.collaboration-footer .btn { white-space: normal; }
+.collaboration-plugin-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: .75rem; }
+.collaboration-plugin-actions { display: flex; flex-wrap: wrap; gap: .5rem; }
+@media (max-width: 600px) {
+  .collaboration-page { padding: 1.25rem 1rem; }
+  .collaboration-grid { grid-template-columns: minmax(0, 1fr); }
+}

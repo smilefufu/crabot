@@ -166,12 +166,12 @@ const StandardChannelOnboarding: React.FC = () => {
 
   const finishOnboarding = async (sessionId: string) => {
     const instanceName = nameRef.current
-    setStatus((s) => ({ ...s, step: 'creating', message: '正在创建聊天方式…' }))
+    setStatus((s) => ({ ...s, step: 'creating', message: '正在创建协作入口…' }))
     try {
       const r = await channelService.onboardFinish(implId, methodId, sessionId, instanceName)
       sessionIdRef.current = null
       const instanceId = r.instance?.id
-      toast.success(`聊天方式 "${instanceName}" 创建成功`)
+      toast.success(`协作入口 "${instanceName}" 创建成功`)
       // 统一收口：onboarding 完成后弹"确认主人昵称"卡片。同时承载 push_sent /
       // scope_grant_url 的状态展示 + 完成按钮的 navigate。
       // master_friend_id 缺失（非飞书等无认主的 channel）就直接 navigate。
@@ -497,7 +497,7 @@ const ClaimMasterNameCard: React.FC<ClaimMasterNameCardProps> = ({
           autoFocus
         />
         <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.375rem' }}>
-          这是 CRABOT 跟你说话时用的称呼。{initialDisplayName ? '已自动用其他聊天方式现有昵称预填，可改。' : '留空也可以，之后在「好友」页面也能改。'}
+          这是 CRABOT 跟你说话时用的称呼。{initialDisplayName ? '已自动用其他协作入口现有昵称预填，可改。' : '留空也可以，之后在「好友」页面也能改。'}
         </p>
       </div>
 

@@ -20,7 +20,7 @@ beforeEach(() => {
 async function start() {
   render(<MemoryRouter><SlackLocalOnboarding /></MemoryRouter>)
   expect(channelService.onboardBegin).not.toHaveBeenCalled()
-  fireEvent.change(screen.getByLabelText('聊天方式名称'), { target: { value: 'slack-one' } })
+  fireEvent.change(screen.getByLabelText('协作入口名称'), { target: { value: 'slack-one' } })
   fireEvent.click(screen.getByRole('button', { name: '开始授权' }))
   await screen.findByLabelText('一次性验证码')
 }
@@ -54,8 +54,8 @@ describe('Slack local setup experience', () => {
 
   it('explains channel-based naming and that CLI authorization does not add the Bot to the originating group', async () => {
     render(<MemoryRouter><SlackLocalOnboarding /></MemoryRouter>)
-    expect(screen.getByText(/App 和 Bot 使用此聊天方式名称/)).toHaveTextContent('(local)')
-    fireEvent.change(screen.getByLabelText('聊天方式名称'), { target: { value: 'slack-team' } })
+    expect(screen.getByText(/App 和 Bot 使用此协作入口名称/)).toHaveTextContent('(local)')
+    fireEvent.change(screen.getByLabelText('协作入口名称'), { target: { value: 'slack-team' } })
     fireEvent.click(screen.getByRole('button', { name: '开始授权' }))
     await screen.findByLabelText('一次性验证码')
     expect(screen.getByText(/建议在目标 Slack 工作区与自己的私聊/)).toHaveTextContent('任意私聊或群聊也可以')
@@ -64,7 +64,7 @@ describe('Slack local setup experience', () => {
 
   it('preserves uppercase instance names when starting authorization, matching the updated contract', async () => {
     render(<MemoryRouter><SlackLocalOnboarding /></MemoryRouter>)
-    fireEvent.change(screen.getByLabelText('聊天方式名称'), { target: { value: 'Slack-one' } })
+    fireEvent.change(screen.getByLabelText('协作入口名称'), { target: { value: 'Slack-one' } })
     fireEvent.click(screen.getByRole('button', { name: '开始授权' }))
     await screen.findByLabelText('一次性验证码')
     expect(channelService.onboardBegin).toHaveBeenCalledWith('channel-slack', 'local-cli', { instance_name: 'Slack-one' })
@@ -98,7 +98,7 @@ describe('Slack local setup experience', () => {
     expect(friendService.listFriends).not.toHaveBeenCalled()
     expect(friendService.linkIdentity).not.toHaveBeenCalled()
     expect(channelService.onboardFinish).toHaveBeenCalledTimes(1)
-    expect(screen.getByRole('button', { name: '完成并查看聊天方式' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: '完成并查看协作入口' })).toBeEnabled()
     expect(screen.getByText(/可选.*测试/)).toBeTruthy()
     expect(screen.getByText(/真实消息收发尚未验证/)).toBeTruthy()
   })
@@ -126,7 +126,7 @@ describe('Slack local setup experience', () => {
     let resolve!: (value: any) => void
     vi.mocked(channelService.onboardBegin).mockReturnValue(new Promise(r => { resolve = r }))
     const view = render(<MemoryRouter><SlackLocalOnboarding /></MemoryRouter>)
-    fireEvent.change(screen.getByLabelText('聊天方式名称'), { target: { value: 'slack-one' } })
+    fireEvent.change(screen.getByLabelText('协作入口名称'), { target: { value: 'slack-one' } })
     fireEvent.click(screen.getByRole('button', { name: '开始授权' }))
     view.unmount()
     await act(async () => { resolve({ session_id: 'late-session', ui_mode: 'challenge_code' }) })

@@ -20,8 +20,8 @@ export const navigationGroups: NavigationGroup[] = [
     { to: '/providers', label: '模型服务' }, { to: '/skills', label: '技能' },
     { to: '/mcp-servers', label: '工具与应用' }, { to: '/subagents', label: '专长助手' },
   ], advanced: [{ to: '/agents/config', label: '模型分工与能力设置' }, { to: '/agents/workers', label: '执行方式' }] },
-  { id: 'social', label: '社交', hint: '聊天方式、联系人与权限', items: [
-    { to: '/dialog-objects', label: '联系人与群聊' }, { to: '/channels/config', match: '/channels', label: '聊天方式' },
+  { id: 'social', label: '社交', hint: '协作入口、联系人与权限', items: [
+    { to: '/dialog-objects', label: '联系人与群聊' }, { to: '/channels/config', match: '/channels', label: '协作入口' },
     { to: '/permission-templates', label: '访问规则' },
   ] },
   { id: 'settings', label: '设置', hint: '设备、数据与运行维护', items: [

@@ -7,6 +7,9 @@ import { MainLayout } from '../../components/Layout/MainLayout'
 import { Card } from '../../components/Common/Card'
 import { Button } from '../../components/Common/Button'
 import { Loading } from '../../components/Common/Loading'
+import { ExperimentalChannels } from '../Channels/ExperimentalChannels'
+import { isExperimentalChannel } from '../Channels/channel-presentation'
+import '../Channels/collaboration.css'
 import type { ChannelImplementation, ChannelPluginCatalogEntry } from '../../types'
 
 interface RunningModule {
@@ -99,7 +102,7 @@ const BUILTIN_MEMORY: ModuleItem = {
 const TYPE_LABELS: Record<ModuleType, string> = {
   agent: 'Agent',
   memory: 'Memory',
-  channel: 'Channel',
+  channel: '协作插件',
 }
 
 const TYPE_COLORS: Record<ModuleType, string> = {
@@ -251,6 +254,19 @@ export const ModuleList: React.FC = () => {
   const countByType = (type: ModuleType) =>
     modules.filter((m) => m.module_type === type).length
 
+  const renderPlugin = (plugin: ChannelPluginCatalogEntry) => <Card key={plugin.implementation_id}>
+    <div className="collaboration-plugin-heading">
+      <div><strong>{plugin.name}</strong><span style={{ marginLeft: '0.75rem', color: 'var(--text-secondary)' }}>v{plugin.version}</span></div>
+      <div className="collaboration-plugin-actions">
+        <Button variant="secondary" disabled={plugin.installed || installing.has(plugin.implementation_id)} onClick={() => installPlugin(plugin.implementation_id)}>
+          {plugin.installed ? '已安装' : installing.has(plugin.implementation_id) ? '安装中…' : '安装插件'}
+        </Button>
+        {plugin.installed && <Button aria-label={`添加${plugin.name}协作入口`} onClick={() => navigate(`/channels/new?implementation_id=${encodeURIComponent(plugin.implementation_id)}`)}>添加协作入口</Button>}
+      </div>
+    </div>
+    {installErrors[plugin.implementation_id] && <p role="alert" className="error-message">{installErrors[plugin.implementation_id]}</p>}
+  </Card>
+
   if (loading) return <MainLayout><Loading /></MainLayout>
 
   return (
@@ -258,7 +274,7 @@ export const ModuleList: React.FC = () => {
       <div style={{ marginBottom: '2rem' }}>
         <h1 style={{ fontSize: '2rem', fontWeight: 700, marginBottom: '1rem' }}>模块管理</h1>
         <p style={{ color: 'var(--text-secondary)' }}>
-          管理所有已安装的 Agent、Memory 和 Channel 实现
+          管理所有已安装的 Agent、Memory 和协作插件
         </p>
       </div>
 
@@ -340,20 +356,13 @@ export const ModuleList: React.FC = () => {
         </div>
       )}
 
-      <section aria-label="可安装的 Channel" style={{ marginBottom: '2rem' }}>
-        <h2 style={{ fontSize: '1.25rem', fontWeight: 600, marginBottom: '0.75rem' }}>可安装的 Channel</h2>
-        <p style={{ color: 'var(--text-secondary)', marginBottom: '1rem' }}>先安装插件，再添加账号。安装后仍需完成平台配置。</p>
-        <div style={{ display: 'grid', gap: '0.75rem' }}>
-          {plugins.map(plugin => <Card key={plugin.implementation_id}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem' }}>
-              <div><strong>{plugin.name}</strong><span style={{ marginLeft: '0.75rem', color: 'var(--text-secondary)' }}>v{plugin.version}</span></div>
-              <Button variant="secondary" disabled={plugin.installed || installing.has(plugin.implementation_id)} onClick={() => installPlugin(plugin.implementation_id)}>
-                {plugin.installed ? '已安装' : installing.has(plugin.implementation_id) ? '安装中…' : '安装'}
-              </Button>
-            </div>
-            {installErrors[plugin.implementation_id] && <p role="alert" className="error-message">{installErrors[plugin.implementation_id]}</p>}
-          </Card>)}
-        </div>
+      <section aria-label="可安装的协作插件" style={{ marginBottom: '2rem' }}>
+        <h2 style={{ fontSize: '1.25rem', fontWeight: 600, marginBottom: '0.75rem' }}>可安装的协作插件</h2>
+        <p className="collaboration-muted" style={{ marginBottom: '1rem' }}>安装插件后添加协作入口，完成账号设置。在熟悉的平台上与 CRABOT 协作。</p>
+        <div style={{ display: 'grid', gap: '0.75rem' }}>{plugins.filter(plugin => !isExperimentalChannel(plugin.implementation_id)).map(renderPlugin)}</div>
+        <ExperimentalChannels count={plugins.filter(plugin => isExperimentalChannel(plugin.implementation_id)).length}>
+          <div style={{ display: 'grid', gap: '0.75rem' }}>{plugins.filter(plugin => isExperimentalChannel(plugin.implementation_id)).map(renderPlugin)}</div>
+        </ExperimentalChannels>
       </section>
 
       {/* 已安装模块列表 */}
@@ -384,7 +393,7 @@ export const ModuleList: React.FC = () => {
           variant={filter === 'channel' ? 'primary' : 'secondary'}
           onClick={() => setFilter('channel')}
         >
-          Channel ({countByType('channel')})
+          协作插件 ({countByType('channel')})
         </Button>
       </div>
 
