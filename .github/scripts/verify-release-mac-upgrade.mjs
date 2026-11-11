@@ -57,7 +57,7 @@ async function boot(version) {
 }
 async function stop() {
   await cli('stop'); assert.equal(JSON.parse(await cli('status','--json')).running,false)
-  if(gui&&gui.exitCode===null&&gui.signalCode===null){const exited=once(gui,'exit');gui.kill('SIGTERM');await exited}
+  if(gui&&gui.exitCode===null&&gui.signalCode===null){const exited=once(gui,'exit',{signal:AbortSignal.timeout(30000)});gui.kill('SIGTERM');await exited}
   gui=undefined
 }
 try {
