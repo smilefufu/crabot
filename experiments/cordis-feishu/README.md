@@ -4,7 +4,7 @@
 
 ## 当前行为
 
-- 主包不预装 Channel。模块页显式从国内 npm 源安装，只有完整安装成功的插件出现在已安装分类和新增实例列表；API 同样校验，安装本身不创建账号、不启动、不发消息。
+- 主包不预装 Channel。Admin Web 的添加页或模块页显式从国内 npm 源安装，只有完整安装成功的插件出现在已安装分类和新增实例列表；API 同样校验，安装本身不创建账号、不启动、不发消息。
 - 六个精确官方包：飞书 `crabot-channel-feishu@0.1.1`；微信、Telegram、钉钉、Slack、语音 `crabot-channel-<platform>@0.1.3`。目录不消费 `latest`。此前候选不覆盖、不删除；五个新入口的真实受管回归发现 Cordis 会把普通 function 当构造函数，修正版使用 async apply 并同步包及模块版本。
 - 国内源 `https://registry.npmmirror.com`，只允许该 registry 与国内 CDN；不改全局 npm 配置，不静默回退国外。失败清理本次 stage，保留缓存、旧版和账号；完整精确版本可离线重启。
 - 已有实例保留 ID、配置、会话与自动启动选择；缺包恢复失败显示错误、不启动未登记实例。新账号先安装。飞书添加仅扫码；Telegram 仅 polling，微信仅 Socket.IO，二者 Webhook 已移除；其余 WebSocket 链路保留。
@@ -31,6 +31,14 @@ node --test --test-concurrency=1 experiments/cordis-feishu/normal-instance.test.
 `managed-package-fixture.mjs` 使用实际 npm 业务代码、Cordis 和 IPC，只替换外部平台客户端；验证初始化完成、入站事件、canonical session、回复目标、Slack 断连健康、语音敏感注册和私有通道、单 IPC listener、无 Channel TCP、正常退出及无凭据日志。`product-e2e` 则串联显式安装、飞书扫码、Admin 权限、真实 Agent、本地模拟模型与真实投递工具，覆盖私聊、群聊、图片、文件、历史和重启持久化。SDK 导入成功不能替代这些运行验证。
 
 本轮 Core 全量 576 pass/16 skip、Shared 380/2 skip、飞书 292、Slack 138/5 skip、语音 55、Admin 增量 75及最新安装组 65、相关 Web 13通过；微信 118、钉钉58通过，Telegram 37通过及原基线已复现的1条 reaction 断言失败。六个本地真实 tgz 的受管合成往返已通过。公开精确版本六包空缓存国内安装、断网复用及真实受管往返通过；官方与国内镜像12份元数据的SHA-512均与发布tgz一致。刚发布时国内安装用元数据曾短暂滞后并返回ETARGET，镜像缓存同步后实际安装成功，未切换国外源。[最终四平台原生CI](https://github.com/smilefufu/crabot/actions/runs/42847959084)在生产提交 `75345346` 全部通过：Windows、Linux、macOS ARM/Intel，包含实际公开包安装/受管往返和完整退出组。
+
+## 协作入口 UX 增量（2026-11-11）
+
+用户确认第二版“协作入口”设计后，添加页改为同页显式准备插件及继续现有账号设置；微信/语音的新增入口和插件目录默认折叠，已有账号/安装记录仍可见；模块页安装后可定位到平台配置入口。正式产品名 CRABOT，代码/API/包名不改。先复现10项缺口，局部简化并完成浏览器修正后，相关12文件74项前端回归、TypeScript和Vite构建通过。日志 `/private/tmp/crabot-collaboration-final-tests.log`、`/private/tmp/crabot-collaboration-vite.log`。
+
+最终UI源码 `0a86d6e2`，候选 `.desktop-build/cordis-collaboration-20261111-v10`，版本 `2026.11.11-cordis.10`。基于已验证v8核心，先后制作v9/v10；每次完整核验基础候选，只替换Web产物与版本元数据，比较清单确认没有后台/依赖文件变动，重新生成完整性清单，运行后再次核验通过。v10清单25,291文件、1,123,586,075 B。没有为这个UI增量重新发布npm、生成四平台归档或重跑六平台业务；原v8归档与原生CI证据仍限原提交，不冒充本次新增验证。证明 `/private/tmp/crabot-collaboration-v10-proof-20261111.json`。
+
+原55885数据就地保留，沿正常 `start -d` 后台入口切换；启动命令退出后控制器归属于系统父进程，Admin/Agent就绪、飞书连接、聊天同步，受管树仍只监听55885。Provider、全局模型和全部现有Channel配置切换前后哈希一致，生产3000进程身份未变。浏览器验证已安装/待接入实验入口折叠、模块页添加后定位平台、320px添加页和模块页无横向溢出；临时54010前端预览已关闭，原飞书和Telegram账号保留运行。未发真实测试消息或重新授权。部署证据 `/private/tmp/crabot-collaboration-v10-deployed-20261111.json`，截图 `/private/tmp/crabot-collaboration-final-20261111.png`。最终真人体验验收后才创建整体正式PR。
 
 ## 本轮完整归档（2026-11-10）
 
