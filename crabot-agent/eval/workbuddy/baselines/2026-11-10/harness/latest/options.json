@@ -1,0 +1,8 @@
+{
+  "toolkits": [
+    "browser-tests",
+    "presentation",
+    "excel",
+    "python-tests"
+  ]
+}

@@ -1,0 +1,261 @@
+{
+  "composition": "29 first valid results from 2026-11-10 plus one explicitly authorized first valid technical retest on 2026-11-11",
+  "original_round": {
+    "technical_valid": 29,
+    "technical_invalid": 1,
+    "invalid_score_retained": "85.13",
+    "invalid_score_not_used": true
+  },
+  "count": 30,
+  "category_scores": {
+    "code": "78.76",
+    "web": "90.00",
+    "office": "87.48"
+  },
+  "overall": "85.41",
+  "unrounded_overall": "85.4140",
+  "rows": [
+    {
+      "task": "testing-medium-format_errors",
+      "subset": "code",
+      "score": "100.0",
+      "score_sha256": "b117785bb4491484a643420582d02c964cc7f94f459dfba0b8655b19aabab211",
+      "source": "original30_20261110",
+      "terminal_audit_sha256": "f6634741695f06a999173fde6c90e55960a9478f040aa8fe47a60d112b5aae8d"
+    },
+    {
+      "task": "rollout-support-static-page-L2-058",
+      "subset": "web",
+      "score": "100.0",
+      "score_sha256": "dc26f525b24d9d1dab66a6bb6836590e330134c32bed6fc56be28299fba4e88c",
+      "source": "original30_20261110",
+      "terminal_audit_sha256": "849fc8fac36dd674d9e90b9327671742b9c4e2d87f50cf73ab6db8467cfe23de"
+    },
+    {
+      "task": "news-event-multifile-extract-L4-013",
+      "subset": "office",
+      "score": "85.9200",
+      "score_sha256": "23418865980b273fc63f74217540a5291914538cf4ff7331770134aab34f2d0a",
+      "source": "original30_20261110",
+      "terminal_audit_sha256": "178dc39690cb06ac8e9f46c0f0e78df9ad1ef63e9e42b325cd0ebc90c4252087"
+    },
+    {
+      "task": "bug_fix-medium-error_key_uses_data_key",
+      "subset": "code",
+      "score": "75.00",
+      "score_sha256": "20d3ab68c4b364b97db0421220f3d91c9a4c7540d753409cc6eb57b62a2b3346",
+      "source": "original30_20261110",
+      "terminal_audit_sha256": "c18995dc71197c476500b667a36b17748e8aac638399a3423b807a2feb86bde2"
+    },
+    {
+      "task": "portfolio-showcase-L2-032",
+      "subset": "web",
+      "score": "100.0",
+      "score_sha256": "7222be521e89d81485c7b47ca90b0fb51983887e458d07367140b244a6034c88",
+      "source": "original30_20261110",
+      "terminal_audit_sha256": "16c324034d10cec1244234221be274f9dd70e506dd5ef4fc1bae7a396b9a2f0f"
+    },
+    {
+      "task": "deepep-api-source-anchor-explain",
+      "subset": "office",
+      "score": "67.8100",
+      "score_sha256": "c3dcb3481c58ada2944edafbaf12c1f7e2ec8e45bf09d6fe811e8560802800af",
+      "source": "original30_20261110",
+      "terminal_audit_sha256": "058ea5035f8e86a3bdbaf01e28123d8e9ec1ed217005c9f453519f3c06102ff2"
+    },
+    {
+      "task": "reliability-hard-ack_after_success",
+      "subset": "code",
+      "score": "84.6200",
+      "score_sha256": "56e7b211a50a44aa35b871590f18729152725ecf4bd7c55b0a99069f538417b4",
+      "source": "original30_20261110",
+      "terminal_audit_sha256": "fb0a309c0433bdb21d8a8d101fc59522d39879cd2686a1763d0dd5c9252fdecc"
+    },
+    {
+      "task": "fixture-and-golden-tests-L4-017",
+      "subset": "web",
+      "score": "70.0",
+      "score_sha256": "71b6b87cb982deffbd750a6ab02ca8fa8779ce2d57430fc35eedcdb2d4b5ba0b",
+      "source": "original30_20261110",
+      "terminal_audit_sha256": "c264ed32dbce333f7f31998d83917ea76eaaaee0ec14ef07afdd4b715b024116"
+    },
+    {
+      "task": "drug-inventory-split-L2-006",
+      "subset": "office",
+      "score": "100.0",
+      "score_sha256": "c6d4f07ac36ed4801bb73ea4bafeeba14df00177a887e6bc4e711322757ba3dc",
+      "source": "original30_20261110",
+      "terminal_audit_sha256": "38d3558f58b02984f021f9565b6cba3c00765588bb5c88320b934ed6bcb31abf"
+    },
+    {
+      "task": "security_hardening-hard-redirect_validation",
+      "subset": "code",
+      "score": "91.6700",
+      "score_sha256": "1b61f9d117bc0f6ec3a80b22f0ee27018b3bab7f7e1d9967b31a94350bc477f2",
+      "source": "original30_20261110",
+      "terminal_audit_sha256": "82f9412bcfcefb8a345b0daf5bc84f6b44fc04db475957d58acc35c941420caa"
+    },
+    {
+      "task": "miniprogram-source-structure-L2-041",
+      "subset": "web",
+      "score": "100.0",
+      "score_sha256": "ee1b0d437161cd0c3cf1de86fe3eb1dfd36d41a02e7db2f95df0741ae796cdcd",
+      "source": "original30_20261110",
+      "terminal_audit_sha256": "b17a48b6c0d9199664541e3db5dffd5730fb38b8bfe2ff672e718a954f91c942"
+    },
+    {
+      "task": "xmind-screenshot-template-ppt",
+      "subset": "office",
+      "score": "80.5700",
+      "score_sha256": "35e8feee154a924128ef9347a257b6425f9308600fbb35b16bdabd7edc58cd4f",
+      "source": "original30_20261110",
+      "terminal_audit_sha256": "71775c52eb97bbdfb168972ae61e74ad3e8e75b328ee2e9596ca86bef82ac0ab"
+    },
+    {
+      "task": "product_policy-medium-coupon_eligibility",
+      "subset": "code",
+      "score": "53.8500",
+      "score_sha256": "03c32c02a4dbecfc70c098bec0f93d0d7fead714e2f5692cb86fdbd7d01d3702",
+      "source": "original30_20261110",
+      "terminal_audit_sha256": "e8f4191a566dab88e496bb3fb748e1186b1f7343d373b06bced59b5b527b5ee6"
+    },
+    {
+      "task": "root-cause-localization-L3-015",
+      "subset": "web",
+      "score": "100.0",
+      "score_sha256": "f773e728ef32ecc5089ae5780fe5a62899466ebbe81527092d72b777982d5bdf",
+      "source": "original30_20261110",
+      "terminal_audit_sha256": "eacf20f6a40bfce4635545f5daa8c66fa7e5bb5a5d06ca2599e7748057695f07"
+    },
+    {
+      "task": "priority-sync-notification-pipeline",
+      "subset": "office",
+      "score": "93.600",
+      "score_sha256": "a8d50f68de1fd5697e9d872e4310fb6f7fa67ec4d11d7f8dae25f4d275ed2b1f",
+      "source": "original30_20261110",
+      "terminal_audit_sha256": "9c568cd9274adc651608620d901841371bc62c207c22ac8e1688c04acbb32db8"
+    },
+    {
+      "task": "testing-medium-request_builder",
+      "subset": "code",
+      "score": "100.0",
+      "score_sha256": "28ef8ad31728947594124a9e9e3fbe27be9b92a1895fec2e90cdbfa6ceb78911",
+      "source": "original30_20261110",
+      "terminal_audit_sha256": "668815b9205583726b97f0a16138ad8030fb0481b45d941e9773c203b17df8a3"
+    },
+    {
+      "task": "data-storytelling-L4-034",
+      "subset": "web",
+      "score": "100.0",
+      "score_sha256": "92eee68e507b78d936288a221d5792febb2ae863c9b9ddf63106c9e9f5c20088",
+      "source": "original30_20261110",
+      "terminal_audit_sha256": "410b0206a52582f4281180b17ed96492f8ccdb021e6f1530f92de86786d5d62a"
+    },
+    {
+      "task": "channel-period-compare-L4-017",
+      "subset": "office",
+      "score": "92.2700",
+      "score_sha256": "fafc68b2ec5f86d7055bcef0e4aa87530dafce6666a34dffe7612cd879b2e094",
+      "source": "original30_20261110",
+      "terminal_audit_sha256": "bd1bab07ba44fef7df5a6c956200f3aad593275cff36ec2a32fa600fb80fc6ae"
+    },
+    {
+      "task": "data_quality-hard-label_conflicts",
+      "subset": "code",
+      "score": "69.2300",
+      "score_sha256": "e93692931fc8fadb3d0cef38475c0a231e97d143e8db20abd90efd244c57cf33",
+      "source": "original30_20261110",
+      "terminal_audit_sha256": "e984c07a8672500511e597bffc5b6e416efa5870202e0acaef2c254e11797d8f"
+    },
+    {
+      "task": "document-table-to-web-L3-021",
+      "subset": "web",
+      "score": "70.0",
+      "score_sha256": "4fec0d8dfb5402ab0a7f15b8903cbc8422f50f8f2de0e6702ee45b300468244a",
+      "source": "original30_20261110",
+      "terminal_audit_sha256": "65b42a981aa6778f3b4a0ecb53978afcbe1a59666c91e4f2d9d4aa808438eed5"
+    },
+    {
+      "task": "furniture-refinish-L3-016",
+      "subset": "office",
+      "score": "97.8600",
+      "score_sha256": "cace3e96b8afb4347a1e7fe081fe82abe4f13fd579b2762eba3b5217c61f0b32",
+      "source": "original30_20261110",
+      "terminal_audit_sha256": "57021415b2fa30c7b7c5795b321b50e59392691a743b27193d453a6bddbc1471"
+    },
+    {
+      "task": "bug_fix-medium-permission_error_skip_continue",
+      "subset": "code",
+      "score": "25.00",
+      "score_sha256": "4d709d62930447ba6ec11708712038bd7e57ba0178f1b8a696177814abe815ea",
+      "source": "original30_20261110",
+      "terminal_audit_sha256": "b907cdb7711970f570c797dbc0c3e61658afadc0d64bbf3da3d75f7051628664"
+    },
+    {
+      "task": "ui-state-rebuild-L3-007",
+      "subset": "web",
+      "score": "80.0",
+      "score_sha256": "2ee92f10be5b2388d1cdc0eb874db3761a2a9c55f89bc45078be02ae7d80d7a3",
+      "source": "original30_20261110",
+      "terminal_audit_sha256": "e56beeb5aea5e8db4df6f32117f25bbac06d48964de3edfed89b7fa50c94f791"
+    },
+    {
+      "task": "calendar-dida-sync-state",
+      "subset": "office",
+      "score": "82.3800",
+      "score_sha256": "8b93b35afd9bdf33ccc37c1d7a0663624610610c43573f5c5f8ae76f93c249a7",
+      "source": "original30_20261110",
+      "terminal_audit_sha256": "2c0443c12227a7ba243d015aba32242a6385e8d6d07e3bdcb86369cf2bab304e"
+    },
+    {
+      "task": "repo_understanding-hard-request_architecture",
+      "subset": "code",
+      "score": "88.2400",
+      "score_sha256": "e7ddfca21c23f97bf361dad4bbdbf70c938e19d572c7dc85d799b1fb372cc527",
+      "source": "original30_20261110",
+      "terminal_audit_sha256": "06afa357d29df9118e35260969454a338a927e42b45e72c6ae5d5ba286d0f0b2"
+    },
+    {
+      "task": "mobile-product-detail-design-L3-047",
+      "subset": "web",
+      "score": "80.0",
+      "score_sha256": "395ba254e18e468c84496e2f38de7c2f6e47ce5ea9cc52d3854e31f70722fd11",
+      "source": "original30_20261110",
+      "terminal_audit_sha256": "b9e8444f39bece478348e41e60bfb79d7747af7b5bbd8db707b7b08f801837b3"
+    },
+    {
+      "task": "data_reporting-hard-support_sla",
+      "subset": "code",
+      "score": "100.0",
+      "score_sha256": "54cae73a4f4d3260f5bb7bf6dd9586db1e7a67eac5d554f46a07ce88ae58c77a",
+      "source": "original30_20261110",
+      "terminal_audit_sha256": "48462f1f4cbc0c845a279bc91f2ea177f23cb23ffc1a26d6e1aee69bf2c585c9"
+    },
+    {
+      "task": "firmware-card-interaction-tests-L3-074",
+      "subset": "web",
+      "score": "100.0",
+      "score_sha256": "6a97af08be95448bef2728a3c61caad4441032b49a8904b2c4f5fcc3fad3c52a",
+      "source": "original30_20261110",
+      "terminal_audit_sha256": "93fdb5b57499a2291d16668a7cff0e77eb7585edb4d22216ad7daf55e4b88522"
+    },
+    {
+      "task": "analyst-forecast-extract-L3-018",
+      "subset": "office",
+      "score": "93.7400",
+      "score_sha256": "b0c4fa234b1d6d91b85f81b5f142ec689ea64d5a0df56613a85e6c6d95ca8e8f",
+      "source": "original30_20261110",
+      "terminal_audit_sha256": "d44d4d9f8215d69473bbe0f2dceec4ba32364c4cbaa4ca8388aaefa29a561cae"
+    },
+    {
+      "task": "execution-closeout-reconcile-L4-003-successor",
+      "subset": "office",
+      "score": "80.6600",
+      "score_sha256": "15552e857d6f992686f026e96083115fdb4793d5086b2ed57f030adbd4d34b2c",
+      "source": "explicitly_authorized_technical_retest_20261111",
+      "terminal_audit_sha256": "6202c0998e4bf45340ba42d7fbb8d89df7346cbdceddedf6aaf5d34038b178c5"
+    }
+  ],
+  "no_new_control_pairing": true,
+  "causal_improvement_claim": false
+}
