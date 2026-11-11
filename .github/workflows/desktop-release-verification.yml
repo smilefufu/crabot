@@ -1,38 +1,106 @@
-name: Desktop release verification
+name: Stage validated desktop.26 release assets
 on:
   workflow_dispatch:
 permissions:
-  contents: read
+  contents: write
+  actions: read
 jobs:
-  host:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-2022]
-    runs-on: ${{ matrix.os }}
+  stage:
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
-      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
-    defaults:
-      run:
-        shell: bash
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
         with:
-          node-version: '22.22.3'
-      - name: Build this checkout's actual SDK, Shared, Native and internal host
+          ref: 74dec3c55d7b17196ea851ca994c2e12e805f151
+      - name: Require the fixed tag and successful native acceptance runs
+        shell: bash
         run: |
-          pnpm --dir crabot-client install --frozen-lockfile --ignore-scripts
-          pnpm --dir crabot-client run build
-          pnpm --dir crabot-shared install --frozen-lockfile --ignore-scripts
-          pnpm --dir crabot-shared run build
-          pnpm install --frozen-lockfile --ignore-scripts
-          node scripts/build-native.mjs
-          pnpm --dir crabot-desktop install --frozen-lockfile --ignore-scripts
-          pnpm --dir crabot-desktop run build
-      - name: Install original publisher fixture dependency
-        run: pnpm --dir crabot-admin install --frozen-lockfile --ignore-scripts
-      - name: Verify canonical signing, archive bytes and bounded anonymous downloads
-        run: node --test --test-concurrency=1 scripts/desktop/release-signing.test.mjs crabot-desktop/tests/release-signatures.test.mjs crabot-desktop/tests/release-download.test.mjs
+          test "$(git rev-parse HEAD)" = 74dec3c55d7b17196ea851ca994c2e12e805f151
+          for run in 42986083675 42986088193 42986079303 42986092889; do
+            test "$(gh run view "$run" --repo smilefufu/crabot --json conclusion --jq .conclusion)" = success
+          done
+          test "$(gh release view v2026.11.11.1 --repo smilefufu/crabot --json isDraft --jq .isDraft)" = true
+      - uses: actions/download-artifact@v4
+        with:
+          name: crabot-darwin-arm64-offline-test-74dec3c55d7b17196ea851ca994c2e12e805f151
+          run-id: 42986083675
+          github-token: ${{ github.token }}
+          path: release-input/darwin-arm64
+      - uses: actions/download-artifact@v4
+        with:
+          name: crabot-darwin-x64-offline-test-74dec3c55d7b17196ea851ca994c2e12e805f151
+          run-id: 42986088193
+          github-token: ${{ github.token }}
+          path: release-input/darwin-x64
+      - uses: actions/download-artifact@v4
+        with:
+          name: crabot-win32-x64-offline-test-74dec3c55d7b17196ea851ca994c2e12e805f151
+          run-id: 42986079303
+          github-token: ${{ github.token }}
+          path: release-input/win32-x64
+      - uses: actions/download-artifact@v4
+        with:
+          name: crabot-linux-x64-deb-test-74dec3c55d7b17196ea851ca994c2e12e805f151
+          run-id: 42986092889
+          github-token: ${{ github.token }}
+          path: release-input/linux-x64
+      - name: Verify exact source, version, manifests and final bytes before draft upload
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, hashlib, shutil
+          from pathlib import Path
+          source='74dec3c55d7b17196ea851ca994c2e12e805f151'; version='0.1.0-desktop.26'
+          out=Path('release-out'); out.mkdir()
+          rows=[]
+          targets=[('darwin-arm64','darwin','arm64','*.dmg',42986083675),('darwin-x64','darwin','x64','*.dmg',42986088193),('win32-x64','win32','x64','*.exe',42986079303),('linux-x64','linux','x64','*.deb',42986092889)]
+          def only(root,pattern):
+            values=list(root.rglob(pattern)); assert len(values)==1,(root,pattern,values); return values[0]
+          def digest(file):
+            with file.open('rb') as stream:return hashlib.file_digest(stream,'sha256').hexdigest()
+          for target,platform,arch,pattern,run in targets:
+            root=Path('release-input')/target; package=only(root,pattern)
+            assert package.name.startswith('Crabot-'+version+'-') and 'candidate' in package.name
+            assert package.is_file() and not package.is_symlink()
+            sha=digest(package); size=package.stat().st_size
+            if platform=='linux':
+              provenance=json.loads(only(root,'source.json').read_text()); assert provenance=={'commit':source,'version':version}
+              accepted=json.loads(only(root,'acceptance.json').read_text())
+              assert accepted['package_source']==source and accepted['version']==version
+              assert any(item.get('name')=='stop_overwrite_remove_reinstall_preserves_data_and_admin_configuration' and item.get('passed') for item in accepted['checks'])
+            else:
+              provenance=json.loads(only(root,'runtime-footprint.json').read_text())
+              assert (provenance['commit'],provenance['platform'],provenance['arch'])==(source,platform,arch)
+              log=only(root,'final-dmg-boot.log' if platform=='darwin' else 'windows-payload-boot.log').read_text()
+              accepted=[json.loads(line.split('CRABOT_PACKAGED_BOOT ',1)[1]) for line in log.splitlines() if line.startswith('CRABOT_PACKAGED_BOOT ')]
+              assert len(accepted)==1 and accepted[0]['platform']==platform and accepted[0]['arch']==arch
+              for key in ['packaged_asar_native_auth','installed_core_shared_with_cli','gui_crash_preserves_core','reattach_same_generation','cli_stop_stays_stopped','outside_checkout','registered_bundled_cli']:assert accepted[0][key] is True,key
+              sums=only(root,'SHA256SUMS').read_text().splitlines()
+              assert sha+'  '+package.name in sums
+            manifest=json.loads(only(root,'artifacts.json' if platform=='win32' else 'installers.json').read_text())
+            assert manifest['candidate_only'] is True and manifest['release_signed'] is False
+            if platform=='win32':
+              assert package.name in manifest['files']
+            else:
+              assert (manifest['version'],manifest['platform'],manifest['arch'])==(version,platform,arch)
+              entries=[item for item in manifest['files'] if item['file']==package.name]
+              assert len(entries)==1 and entries[0]['sha256']==sha and entries[0]['bytes']==size
+            shutil.copyfile(package,out/package.name)
+            (out/(package.name+'.sha256')).write_text(sha+'  '+package.name+'\n')
+            rows.append({'target':target,'file':package.name,'bytes':size,'sha256':sha,'source_commit':source,'native_acceptance_run':run})
+          receipt={'tag':'v2026.11.11.1','desktop_version':version,'source_commit':source,'candidate_only':True,'release_signed':False,'environment':'Native GitHub CI. Real-user OS trust prompts, GNOME/Wayland and real model business use are not represented.','https_scope_diagnostic_run':42759268758,'known_limitations':['On the tested macOS15 host, static make_request to example.com fails with its default system CA; browser fetch/stealthy_fetch succeed. All three tools succeed for GitHub, Python docs and Baidu. Product trust policy unchanged.'],'files':rows}
+          (out/'desktop.26-verification.json').write_text(json.dumps(receipt,ensure_ascii=False,indent=2)+'\n')
+          print(json.dumps(receipt,ensure_ascii=False,indent=2))
+          PY
+      - name: Add exact validated desktop packages to the existing draft
+        shell: bash
+        run: |
+          test "$(gh release view v2026.11.11.1 --repo smilefufu/crabot --json isDraft --jq .isDraft)" = true
+          gh release upload v2026.11.11.1 release-out/* --repo smilefufu/crabot
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop.26-release-verification
+          path: release-out/desktop.26-verification.json
+          if-no-files-found: error

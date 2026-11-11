@@ -35,7 +35,7 @@ const baseline = baselinePath ? await readArtifact(path.resolve(baselinePath)) :
 if (baselinePath) assert.notEqual(baseline.artifact.version, artifact.version, 'upgrade acceptance requires two distinct GUI/Core versions')
 const report = { harness_source: process.env.GITHUB_SHA, version: artifact.version,
   legacy_fixture: legacyVersion ? { published_program: legacyVersion, stopped_data: 'synthetic history, password, dependencies and workspace' } : null,
-  initial_version: baseline.artifact.version, upgrade_fixture: baselinePath ? 'same source, two version stamps; not a released cross-version data migration' : null,
+  initial_version: baseline.artifact.version, upgrade_fixture: baselinePath ? 'published desktop.25 final DEB to desktop.26 final DEB with original data' : null,
   system: (await fs.readFile('/etc/os-release', 'utf8')).trim(), environment: 'Native GitHub VM, Xvfb; GNOME/Wayland human acceptance not represented', checks: [] }
 const children = [], pause = ms => new Promise(resolve => setTimeout(resolve, ms))
 const command = async (file, args, options = {}) => (await exec(file, args, { timeout: 180000, maxBuffer: 2000000, ...options })).stdout

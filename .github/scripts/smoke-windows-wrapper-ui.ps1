@@ -118,7 +118,7 @@ try {
   Start-Sleep -Milliseconds 250
  }
  if (!$verified) {
-  $baselineStage = if($UpgradeInstaller){'desktop14-before-candidate'}else{'fresh-candidate'}
+  $baselineStage = if($UpgradeInstaller){'desktop25-before-candidate'}else{'fresh-candidate'}
   $state = @{stage=$baselineStage; installer_exited=$process.HasExited; finish_clicked=$finished; target=$target}
   if($status){$state.running=$status.running; $state.modules=@($status.modules | Select-Object module_id,status,pid)}
   Write-Output ('CRABOT_INITIAL_ENTRY_FAILURE ' + ($state | ConvertTo-Json -Depth 4 -Compress))
@@ -135,8 +135,8 @@ try {
  if ($installed.install_root -ne $target) { throw 'GUI bound another installation root' }
  if ($UpgradeInstaller) {
   if (!$ExpectedVersion) { throw 'Expected candidate version required for upgrade acceptance' }
-  $beforeSelection = Get-Content (Join-Path $target 'current-release.json') -Raw | ConvertFrom-Json
-  if ($beforeSelection.version -ne '0.1.0-desktop.14') { throw 'Expected the actual delivered desktop.14 baseline' }
+  $beforeSelection = Get-Content (Join-Path $target 'program/gui/resources/desktop-release.json') -Raw | ConvertFrom-Json
+  if ($beforeSelection.version -ne '0.1.0-desktop.25') { throw 'Expected the actual delivered desktop.25 baseline' }
   $data = Join-Path $target 'data'
   $beforeRuntime = Get-Content (Join-Path $data 'instance-runtime.json') -Raw | ConvertFrom-Json
   $sentinel = Join-Path $data 'upgrade-preserved.txt'
@@ -155,7 +155,7 @@ try {
    }
    foreach ($oldModule in $oldModules) { & "$env:SystemRoot/System32/taskkill.exe" /PID $oldModule.root_pid /T /F 2>&1 | Write-Output }
    if (@(Get-ChildItem (Join-Path $data 'module-runtime-registry/records') -Filter '*.json').Count -ne $moduleFiles.Count) { throw 'Force-kill fixture unexpectedly lost original recovery files' }
-   $oldGui = [IO.Path]::GetFullPath((Join-Path $target ('app/releases/' + $beforeSelection.gui_id + '/Crabot.exe')))
+   $oldGui = [IO.Path]::GetFullPath((Join-Path $target 'program/gui/Crabot.exe'))
    # Fixture cleanup of the known baseline GUI after its Core has stopped. The
    # candidate must itself observe absence; no stop/migration receipt is forged.
    foreach ($row in @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $oldGui })) {
@@ -164,8 +164,8 @@ try {
   } else {
    # Match normal Quit: use the baseline's own stop coordinator before exiting its GUI.
    & $command stop 2>&1 | Write-Output
-   if ($LASTEXITCODE -ne 0) { throw 'Original desktop.14 did not stop normally' }
-   $oldGui = [IO.Path]::GetFullPath((Join-Path $target ('app/releases/' + $beforeSelection.gui_id + '/Crabot.exe')))
+   if ($LASTEXITCODE -ne 0) { throw 'Original desktop.25 did not stop normally' }
+   $oldGui = [IO.Path]::GetFullPath((Join-Path $target 'program/gui/Crabot.exe'))
    foreach ($row in @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $oldGui })) {
     & "$env:SystemRoot/System32/taskkill.exe" /PID $row.ProcessId /T /F 2>&1 | Write-Output
    }

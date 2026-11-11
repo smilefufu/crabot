@@ -1,193 +1,116 @@
-name: Desktop installer initialization probe
+name: Release desktop.25 to desktop.26 upgrade acceptance
 on:
   workflow_dispatch:
-    inputs:
-      ubuntu_deb:
-        description: 'Install and verify an already-built exact DEB on Ubuntu24/26; no rebuild'
-        type: boolean
-        default: false
-      directory_only:
-        description: 'Run only native installation-directory regressions without a package download'
-        type: boolean
-        default: false
-      source_run:
-        type: string
-        default: '41170496475'
-      artifact_name:
-        type: string
-        default: 'crabot-win32-x64-offline-test-a34d9e253fa9ea565e29c0a34f8c2b8ed960b7a7'
-      upgrade_from14:
-        description: Verify an actual desktop.14 installation upgrades through the new EXE and GUI
-        type: boolean
-        default: false
-      upgrade_launch:
-        description: Actual candidate entry after stopping desktop.14
-        type: choice
-        options: [direct, finish, menu]
-        default: direct
-      ui_only:
-        description: 'Verify the completed EXE interface without repeating source builds or legacy acceptance'
-        type: boolean
-        default: false
 permissions:
   contents: read
   actions: read
 jobs:
-  ubuntu-deb:
-    if: inputs.ubuntu_deb == true
+  upgrade:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, ubuntu-26.04]
+        include:
+          - target: win32-x64
+            os: windows-latest
+            run: 42986079303
+            artifact: offline-test
+            pattern: '*offline-candidate.exe'
+            baseline: Crabot-0.1.0-desktop.25-win-x64-offline-candidate.exe
+          - target: darwin-arm64
+            os: macos-15
+            run: 42986083675
+            artifact: offline-test
+            pattern: '*candidate.dmg'
+            baseline: Crabot-0.1.0-desktop.25-mac-arm64-candidate.dmg
+          - target: darwin-x64
+            os: macos-15-intel
+            run: 42986088193
+            artifact: offline-test
+            pattern: '*candidate.dmg'
+            baseline: Crabot-0.1.0-desktop.25-mac-x64-candidate.dmg
+          - target: linux-x64
+            os: ubuntu-24.04
+            run: 42986092889
+            artifact: deb-test
+            pattern: '*candidate.deb'
+            baseline: Crabot-0.1.0-desktop.25-linux-amd64-candidate.deb
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22.22.3'
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - uses: astral-sh/setup-uv@v6
-        with:
-          version: '0.13.0'
-      - uses: actions/download-artifact@v4
-        with:
-          github-token: ${{ github.token }}
-          run-id: ${{ inputs.source_run }}
-          name: ${{ inputs.artifact_name }}
-          path: .desktop-build
-      - name: Native system display and ordinary package dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends apparmor-utils libgtk-3-0t64 libnss3 libxss1 libasound2t64 libgbm1 xvfb xauth xdotool dbus-x11 zstd
-      - name: Exact DEB installation and kernel sandbox before independent source preparation
-        run: |
-          ulimit -c 0
-          dbus-run-session -- xvfb-run -a node .github/scripts/verify-ubuntu-deb.mjs .desktop-build/deb/distribution
-      - name: Published CLI14 and CLI15 data through the ordinary DEB GUI
-        run: |
-          for version in v2026.10.14.1 v2026.10.15.1; do
-            dbus-run-session -- xvfb-run -a node .github/scripts/verify-ubuntu-deb.mjs .desktop-build/deb/distribution --legacy="$version"
-          done
-      - name: Actual fixed-path version21 to version22 upgrade
-        run: |
-          dbus-run-session -- xvfb-run -a node .github/scripts/verify-ubuntu-deb.mjs .desktop-build/deb-upgrade/distribution --baseline=.desktop-build/deb/distribution
-      - name: Independent source GUI and Core coexistence with the accepted DEB
-        run: |
-          UV_PYTHON=3.12 node scripts/dev.mjs build
-          node --test scripts/lib/__tests__/desktop-entry.test.mjs
-          pnpm --dir crabot-desktop install --frozen-lockfile
-          pnpm --dir crabot-desktop run build
-          ulimit -c 0
-          dbus-run-session -- xvfb-run -a node .github/scripts/verify-ubuntu-deb-coexistence.mjs .desktop-build/deb-upgrade/distribution
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: ubuntu-deb-acceptance-${{ matrix.os }}-${{ github.run_id }}
-          path: |
-            .desktop-build/deb-upgrade/acceptance.json
-            .desktop-build/deb/acceptance.json
-            .desktop-build/deb/acceptance-*.log
-            .desktop-build/deb/legacy-*/acceptance.json
-            .desktop-build/deb/legacy-*/acceptance-*.log
-            .desktop-build/deb-upgrade/acceptance-*.log
-            .desktop-build/development-coexistence.log
-            .desktop-build/development-*.log
-          if-no-files-found: warn
-          retention-days: 7
-  recheck:
-    if: inputs.ubuntu_deb != true
-    runs-on: windows-latest
     timeout-minutes: 40
     defaults:
       run:
         shell: bash
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TARGET: ${{ matrix.target }}
+      BASELINE_NAME: ${{ matrix.baseline }}
+      FINAL_PATTERN: ${{ matrix.pattern }}
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '22.22.3'
-      - name: Native installation directory regression
-        if: inputs.directory_only == true
-        run: |
-          node scripts/build-native.mjs
-          node .github/scripts/probe-windows-install-directory.mjs 2>&1 | tee .desktop-build/directory-regression.log
-          node --test scripts/lib/__tests__/private-file-paths.test.mjs scripts/lib/__tests__/process-identity.test.mjs
-          pnpm --dir crabot-client install --frozen-lockfile
-          pnpm --dir crabot-client run build
-          pnpm --dir crabot-desktop install --frozen-lockfile
-          node .github/scripts/probe-windows-single-layer-installer.mjs 2>&1 | tee .desktop-build/directory-extraction-regression.log
-          pnpm --dir crabot-desktop run build
-          node --test --test-concurrency=1 crabot-desktop/tests/windows-removal-entry.test.mjs crabot-desktop/tests/startup-page.test.mjs crabot-desktop/tests/startup-page-real.test.mjs crabot-desktop/tests/paired-binding.test.mjs
-          pnpm install --frozen-lockfile
-          pnpm --dir scripts/lib install --frozen-lockfile
-          node --test --test-name-pattern='publish-source-remove-public' crabot-desktop/tests/removal-frame.test.mjs
-      - name: Prepare the finite test dependencies
-        if: inputs.directory_only != true && inputs.ui_only != true
-        run: |
-          node scripts/build-native.mjs
-          pnpm --dir crabot-client install --frozen-lockfile
-          pnpm --dir crabot-client run build
-          pnpm install --frozen-lockfile
-          pnpm --dir scripts/lib install --frozen-lockfile
-          pnpm --dir crabot-desktop install --frozen-lockfile
-          pnpm --dir crabot-desktop run build
+      - name: Require accepted final package build
+        run: test "$(gh run view '${{ matrix.run }}' --repo smilefufu/crabot --json conclusion --jq .conclusion)" = success
       - uses: actions/download-artifact@v4
-        if: inputs.directory_only != true
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          run-id: ${{ inputs.source_run }}
-          name: ${{ inputs.artifact_name }}
-          path: .desktop-build/completed-exe
-      - uses: actions/download-artifact@v4
-        if: inputs.upgrade_from14 == true
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          run-id: '41277405704'
-          name: crabot-win32-x64-offline-test-aed22d452babae4048e16f2da02df51a2cd5c42b
-          path: .desktop-build/desktop14-baseline
-      - name: Place the original completed EXE without rebuilding it
-        if: inputs.directory_only != true
+          name: crabot-${{ matrix.target }}-${{ matrix.artifact }}-74dec3c55d7b17196ea851ca994c2e12e805f151
+          run-id: ${{ matrix.run }}
+          github-token: ${{ github.token }}
+          path: .desktop-build/release-final
+      - name: Download and verify exact published desktop.25 baseline
         run: |
-          mkdir -p .desktop-build/manual/installer/distribution
-          find .desktop-build/completed-exe -type f \( -name '*offline-candidate.exe' -o -name SHA256SUMS \) -exec cp {} .desktop-build/manual/installer/distribution/ \;
-      - name: Exact EXE extraction with the original and sufficient output budgets
-        if: inputs.directory_only != true && inputs.ui_only != true
-        run: node .github/scripts/recheck-windows-single-layer.mjs 2>&1 | tee .desktop-build/exact-exe-recheck.log
-      - name: Real v14 data confirmation in the unchanged packaged GUI
-        if: inputs.directory_only != true && inputs.ui_only != true
-        run: node .github/scripts/verify-legacy-user-takeover.mjs .desktop-build/manual/paired .desktop-build/manual/installer v2026.10.14.1 2>&1 | tee .desktop-build/exact-exe-legacy-gui.log
-      - name: Real EXE Finish opens the GUI with 1.5 GiB free TEMP
-        env:
-          CRABOT_UPGRADE_FROM14: ${{ inputs.upgrade_from14 }}
-          CRABOT_UPGRADE_LAUNCH: ${{ inputs.upgrade_launch }}
-        if: ${{ !cancelled() && inputs.directory_only != true && inputs.ui_only == true }}
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess,json,hashlib,os,re
+          root=Path('.desktop-build/released-baseline/distribution');root.mkdir(parents=True)
+          name=os.environ['BASELINE_NAME'];tag='v2026.11.10.1'
+          release=json.loads(subprocess.check_output(['gh','release','view',tag,'--repo','smilefufu/crabot','--json','assets'],text=True))
+          asset=next(item for item in release['assets'] if item['name']==name)
+          subprocess.run(['gh','release','download',tag,'--repo','smilefufu/crabot','--pattern',name,'--pattern',name+'.sha256','--dir',str(root)],check=True)
+          file=root/name
+          with file.open('rb') as stream:sha=hashlib.file_digest(stream,'sha256').hexdigest()
+          assert asset['digest']=='sha256:'+sha and file.stat().st_size==asset['size']
+          assert (root/(name+'.sha256')).read_text(encoding='utf-8-sig').split()[0].lower()==sha
+          if os.environ['TARGET']=='linux-x64':(root/'installers.json').write_text(json.dumps({'version':'0.1.0-desktop.25','files':[{'file':name,'sha256':sha}]}))
+          final=list(Path('.desktop-build/release-final').rglob(os.environ['FINAL_PATTERN']));assert len(final)==1
+          with open(os.environ['GITHUB_ENV'],'a') as out:out.write('BASELINE_PACKAGE='+str(file.resolve())+'\nFINAL_PACKAGE='+str(final[0].resolve())+'\n')
+          print('VERIFIED_PUBLISHED_BASELINE',name,sha)
+          PY
+      - name: Windows actual Finish and Start menu upgrade
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $files = @(Get-ChildItem .desktop-build/manual/installer/distribution -Filter '*offline-candidate.exe')
-          if ($files.Count -ne 1) { throw 'Expected exactly one unchanged completed EXE' }
-          $expected = (Get-Content .desktop-build/manual/installer/distribution/SHA256SUMS -Raw).Trim().Split(' ')[0]
-          if ((Get-FileHash $files[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) { throw 'Completed EXE SHA mismatch' }
-          if ($env:CRABOT_UPGRADE_FROM14 -eq 'true') {
-            $old = @(Get-ChildItem .desktop-build/desktop14-baseline -Recurse -Filter '*offline-candidate.exe')
-            if ($old.Count -ne 1 -or (Get-FileHash $old[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant() -ne '3c725b47a01d5c2c4211241c8c86b91c5829d60f4f5ed554ef21d1c8cf7a3d3a') { throw 'Pinned desktop.14 baseline mismatch' }
-            $version = $files[0].Name -replace '^Crabot-(.+)-win-x64-offline-candidate\.exe$', '$1'
-            & .github/scripts/smoke-windows-wrapper-capacity.ps1 -Installer $old[0].FullName -UpgradeInstaller $files[0].FullName -ExpectedVersion $version -UpgradeLaunch $env:CRABOT_UPGRADE_LAUNCH -Expected complete | Tee-Object .desktop-build/exact-exe-ui.log
-          } else {
-            & .github/scripts/smoke-windows-wrapper-capacity.ps1 -Installer $files[0].FullName -Expected complete | Tee-Object .desktop-build/exact-exe-ui.log
-          }
-      - name: Retain exact package recheck evidence
+          & .github/scripts/smoke-windows-wrapper-capacity.ps1 -Installer $env:BASELINE_PACKAGE -UpgradeInstaller $env:FINAL_PACKAGE -ExpectedVersion '0.1.0-desktop.26' -UpgradeLaunch finish -Expected complete | Tee-Object .desktop-build/release-windows-upgrade.log
+      - name: Mac exact DMG fixed-path replacement and reopen
+        if: runner.os == 'macOS'
+        run: node .github/scripts/verify-release-mac-upgrade.mjs "$BASELINE_PACKAGE" "$FINAL_PACKAGE" 2>&1 | tee .desktop-build/release-mac-upgrade.log
+      - uses: pnpm/action-setup@v4
+        if: runner.os == 'Linux'
+      - name: Prepare original Ubuntu acceptance dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends apparmor-utils libgtk-3-0t64 libnss3 libxss1 libasound2t64 libgbm1 xvfb xauth xdotool dbus-x11
+          node scripts/build-native.mjs
+          pnpm --dir crabot-client install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-client run build
+          pnpm --dir crabot-shared install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-shared run build
+          pnpm --dir crabot-core install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-core run build
+      - name: Ubuntu real published DEB to new final DEB
+        if: runner.os == 'Linux'
+        run: |
+          distribution=$(dirname "$FINAL_PACKAGE")
+          dbus-run-session -- xvfb-run -a node .github/scripts/verify-ubuntu-deb.mjs "$distribution" --baseline=.desktop-build/released-baseline/distribution 2>&1 | tee .desktop-build/release-ubuntu-upgrade.log
+      - uses: actions/upload-artifact@v4
         if: always()
-        uses: actions/upload-artifact@v4
         with:
-          name: exact-windows-exe-recheck-${{ github.sha }}
+          name: release-upgrade-${{ matrix.target }}
           path: |
-            .desktop-build/*.log
-            .desktop-build/*.json
-          include-hidden-files: true
+            .desktop-build/release-*-upgrade.log
+            .desktop-build/release-final/**/acceptance*.json
+            .desktop-build/release-final/**/acceptance*.log
+            ${{ runner.temp }}/exact-desktop-upgrade/acceptance.json
+            ${{ runner.temp }}/exact-desktop-upgrade/*.log
           if-no-files-found: warn
-          retention-days: 7
