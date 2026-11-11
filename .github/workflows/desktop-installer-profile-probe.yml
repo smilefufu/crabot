@@ -49,8 +49,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22.22.3'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Require accepted final package build
-        run: test "$(gh run view '${{ matrix.run }}' --repo smilefufu/crabot --json conclusion --jq .conclusion)" = success
+        timeout-minutes: 20
+        run: gh run watch '${{ matrix.run }}' --repo smilefufu/crabot --exit-status --interval 30
       - uses: actions/download-artifact@v4
         with:
           name: crabot-${{ matrix.target }}-${{ matrix.artifact }}-74dec3c55d7b17196ea851ca994c2e12e805f151
