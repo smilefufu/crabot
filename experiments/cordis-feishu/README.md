@@ -40,6 +40,10 @@ node --test --test-concurrency=1 experiments/cordis-feishu/normal-instance.test.
 
 原55885数据就地保留，沿正常 `start -d` 后台入口切换；启动命令退出后控制器归属于系统父进程，Admin/Agent就绪、飞书连接、聊天同步，受管树仍只监听55885。Provider、全局模型和全部现有Channel配置切换前后哈希一致，生产3000进程身份未变。浏览器验证已安装/待接入实验入口折叠、模块页添加后定位平台、320px添加页和模块页无横向溢出；临时54010前端预览已关闭，原飞书和Telegram账号保留运行。未发真实测试消息或重新授权。部署证据 `/private/tmp/crabot-collaboration-v10-deployed-20261111.json`，截图 `/private/tmp/crabot-collaboration-final-20261111.png`。最终真人体验验收后才创建整体正式PR。
 
+体积复核（2026-11-11）：已对当前v10额外生成macOS ARM核心CLI候选归档并通过解包往返核验：`.desktop-build/cordis-collaboration-size-20261111/crabot-v2026.11.11-cordis.10-darwin-arm64-candidate.tar.gz`，439,694,983 B（439.7 MB / 419.3 MiB），SHA-256 `5b40bba1a94258d9f538e0e1a282a9ab11c48de197965cd658d92918cee5edf8`。含两个清单文件的展开普通文件总量1,128,416,349 B（1.13 GB）；前述1,123,586,075 B是清单内负载，不含清单本身。插件及下载缓存另计，不包含Electron外壳；不作为Windows或完整桌面安装包体积，也不把不同归档方式与历史候选的压缩差额归因为代码减量。
+
+安装速度复核：验收实例最近Slack安装API耗时2,159ms，安装记录确认registry.npmmirror.com及cdn.npmmirror.com；npm日志39条tgz访问中24条命中本地缓存。Admin继承本机127.0.0.1:7890代理环境，国内registry不在NO_PROXY中，打包npm的代理选择逻辑会使用该配置。国内源、本机代理和缓存并不互斥；日志不能判定代理软件最终直连还是远端转发，不据此宣称无代理同等速度。只读核查，未关闭代理、清缓存或重装业务插件。
+
 ## 本轮完整归档（2026-11-10）
 
 生产提交 `75345346`，候选 `2026.11.10-cordis.8`。macOS ARM 归档 `.desktop-build/crabot-cordis-validation-darwin-arm64-20261110-v8.tar.gz`：441,399,176 B，SHA-256 `f840dc0264d2bbc869d0ab6c556dfff05af4adc55ab2f2f8240af2e3507c1611`；25,291个清单文件、展开1,123,310,154 B。主包无六个Channel目录和平台专属SDK。
