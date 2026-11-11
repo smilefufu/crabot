@@ -44,7 +44,12 @@ async function boot(version) {
     assert.ok(events.some(e=>e.component==='desktop'&&e.phase==='ready'),output)
     assert.ok(events.some(e=>e.component==='desktop-bootstrap'&&e.phase==='app-ready'&&e.app_version===version),output)
     assert.equal((await cli('--version')).trim(),version)
-    const status = JSON.parse(await cli('status','--json'))
+    let status; const readyDeadline=Date.now()+120000
+    do {
+      status=JSON.parse(await cli('status','--json'))
+      if(status.running&&status.modules.filter(m=>['admin-web','crabot-agent','memory-default'].includes(m.module_id)&&m.status==='running').length===3)break
+      await new Promise(resolve=>setTimeout(resolve,500))
+    }while(Date.now()<readyDeadline)
     assert.equal(status.running,true); assert.equal(status.data_dir,data)
     assert.equal(status.modules.filter(m=>['admin-web','crabot-agent','memory-default'].includes(m.module_id)&&m.status==='running').length,3)
     report.checks.push({ version, app_ready: true, cli_same_version: true, modules_running: true })

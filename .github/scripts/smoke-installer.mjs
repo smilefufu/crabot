@@ -229,7 +229,7 @@ try {
     }
     await run(process.execPath, [join(repo, 'cli.mjs'), '--help'])
   }
-  console.log(JSON.stringify({ platform: `${process.platform}-${process.arch}`, version, realInstaller: true, initialEntry: windows ? "irm|iex" : "bash", coreHealth: health.data.status, runningReinstallRejected: true, reinstallPreservesData: true, cliUpgradePreservesData: true, uiUpgradeStatus: uiStatus.phase, realLegacyPackageInstalled: legacyVersion, legacyRecoveryPreservesData: true, badChecksumRejected: true, requests: requests.length }))
+  console.log(JSON.stringify({ platform: `${process.platform}-${process.arch}`, version, realInstaller: true, initialEntry: windows ? "irm|iex" : "bash", coreHealth: health.status, runningReinstallRejected: true, reinstallPreservesData: true, cliUpgradePreservesData: true, uiUpgradeStatus: uiStatus.phase, realLegacyPackageInstalled: legacyVersion, legacyRecoveryPreservesData: true, badChecksumRejected: true, requests: requests.length }))
 } catch (error) {
   console.error(`Installer acceptance failed: ${error.message}`)
   for (const name of ['supervisor.boot.log', 'mm.stderr.log', 'mm.stdout.log']) {

@@ -369,6 +369,19 @@ jobs:
           node .github/scripts/smoke-scrapling.mjs "$Unpacked"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Retain exact final archives independently of acceptance result
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-cli-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            crabot-*.tar.gz
+            crabot-*.tar.gz.sha256
+            crabot-*.zip
+            crabot-*.zip.sha256
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: error
+
       - name: Load IPC-aware acceptance harness only after final archive creation
         shell: bash
         run: |
