@@ -5,11 +5,10 @@ import path from 'node:path'
 import { spawn, execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { once } from 'node:events'
-import control from '../../scripts/lib/runtime-control.cjs'
 import { createHash, randomBytes } from 'node:crypto'
 import { pipeline } from 'node:stream/promises'
 import { Readable } from 'node:stream'
-import { probeMmModules } from '../../scripts/lib/mm-probe.mjs'
+import { probeMmModules, probeHealthStatus } from '../../scripts/lib/mm-probe.mjs'
 assert.equal(process.env.GITHUB_ACTIONS, 'true'); assert.equal(process.platform, 'linux'); assert.ok(process.getuid() > 0)
 const exec = promisify(execFile), distribution = path.resolve(process.argv[2])
 const base = path.dirname(distribution), root = '/opt/Crabot', core = root + '/resources/core', entry = root + '/crabot-desktop'
@@ -78,10 +77,9 @@ async function healthyModules() {
       for (const id of ['admin-web', 'crabot-agent', 'memory-default']) {
         const module = modules?.find(item => item.module_id === id)
         assert.equal(module?.status, 'running', id + ' has not registered')
-        const value = await control.callRuntimeControl(data,
-          { target: module.port, source: 'release-acceptance', method: 'health', params: {} }, { timeoutMs: 5000 })
-        assert.ok(['healthy', 'degraded'].includes(value.status), id + ' is not ready')
-        result.push({ module: id, health: value.status })
+        const status = await probeHealthStatus(module.port, undefined, { dataDir: data })
+        assert.ok(['healthy', 'degraded'].includes(status), id + ' is not ready')
+        result.push({ module: id, health: status })
       }
       return result
     } catch (error) { failure = error; await pause(500) }
