@@ -64,17 +64,74 @@ describe('Channel installation admission', () => {
     expect((await manager.listPlugins()).items.every(item => !item.installed)).toBe(true)
   })
 
-  it('never starts an old auto-start account when package preparation failed', async () => {
+  it.each(['feishu', 'telegram', 'wechat', 'dingtalk', 'slack', 'voice'])('keeps an existing %s account and credentials without starting when its plugin installation fails', async platform => {
     const { root, rpc } = await fixture()
-    await fs.writeFile(path.join(root, 'channel-instances.json'), JSON.stringify([{ id: 'restore-me', name: 'restore-me', implementation_id: 'channel-feishu', platform: 'feishu', auto_start: true, start_priority: 30, module_registered: false, created_at: '', updated_at: '' }]))
+    await fs.writeFile(path.join(root, 'channel-instances.json'), JSON.stringify([{ id: 'restore-me', name: 'restore-me', implementation_id: `channel-${platform}`, platform, auto_start: true, start_priority: 30, module_registered: false, created_at: '', updated_at: '' }]))
+    const config = { FIXTURE_CREDENTIAL: 'synthetic-existing-secret' }
+    await fs.writeFile(path.join(root, 'channel-configs/restore-me.json'), JSON.stringify(config))
     const restored = new ChannelManager(root, rpc as any)
     await restored.initialize()
     vi.spyOn(restored, 'installPlugin').mockRejectedValue(new Error('synthetic-private-install-failure'))
     await restored.reRegisterInstances()
+    expect(rpc.registerModuleDefinition).not.toHaveBeenCalled()
     expect(rpc.startModule).not.toHaveBeenCalled()
     expect(restored.getInstance('restore-me')).toMatchObject({ auto_start: true })
+    expect(await restored.loadLocalConfig('restore-me')).toEqual(config)
     expect(restored.getStartupError('restore-me')).toContain('账号配置已保留')
     expect(restored.getStartupError('restore-me')).not.toContain('synthetic-private')
+  })
+
+  it.each(['feishu', 'telegram', 'wechat', 'dingtalk', 'slack'])('restores an existing %s auto-start account by installing its missing plugin before registration and start', async platform => {
+    const { root, rpc } = await fixture()
+    const saved = { id: '已有账号', name: '已有账号', implementation_id: `channel-${platform}`, platform, auto_start: true, start_priority: 30, module_registered: true, created_at: '', updated_at: '' }
+    const config = { FIXTURE_CREDENTIAL: 'synthetic-existing-secret' }
+    await fs.writeFile(path.join(root, 'channel-instances.json'), JSON.stringify([saved]))
+    await fs.writeFile(path.join(root, 'channel-configs', `${saved.id}.json`), JSON.stringify(config))
+    const restored = new ChannelManager(root, rpc as any)
+    await restored.initialize()
+    expect(restored.listImplementations().items).toEqual([])
+    const order: string[] = []
+    vi.spyOn(restored, 'installPlugin').mockImplementation(async id => {
+      order.push('install')
+      await installTestChannel(root, platform)
+      return restored.requireInstalled(id)
+    })
+    rpc.registerModuleDefinition.mockImplementation(async () => { order.push('register') })
+    rpc.startModule.mockImplementation(async () => { order.push('start') })
+
+    await restored.reRegisterInstances()
+
+    expect(order).toEqual(['install', 'register', 'start'])
+    expect(restored.getInstance(saved.id)).toEqual(saved)
+    expect(await restored.loadLocalConfig(saved.id)).toEqual(config)
+    expect(rpc.registerModuleDefinition).toHaveBeenCalledWith(expect.objectContaining({
+      module_id: saved.id, auto_start: true,
+      env: expect.objectContaining({ ...config, DATA_DIR: path.join(root, 'channels', saved.id) }),
+    }), 'admin')
+    expect(restored.getStartupError(saved.id)).toBeUndefined()
+  })
+
+  it('does not download a stopped existing account until explicitly preparing its original definition for start', async () => {
+    const { root, rpc } = await fixture()
+    const saved = { id: '已有停用账号', name: '已有停用账号', implementation_id: 'channel-telegram', platform: 'telegram', auto_start: false, start_priority: 30, module_registered: true, created_at: '', updated_at: '' }
+    await fs.writeFile(path.join(root, 'channel-instances.json'), JSON.stringify([saved]))
+    const restored = new ChannelManager(root, rpc as any)
+    await restored.initialize()
+    const install = vi.spyOn(restored, 'installPlugin').mockImplementation(async id => {
+      await installTestChannel(root, 'telegram')
+      return restored.requireInstalled(id)
+    })
+    await restored.reRegisterInstances()
+    expect(install).not.toHaveBeenCalled()
+    expect(rpc.registerModuleDefinition).not.toHaveBeenCalled()
+    expect(rpc.startModule).not.toHaveBeenCalled()
+
+    await restored.ensureInstanceDefinition(saved.id)
+
+    expect(install).toHaveBeenCalledWith(saved.implementation_id)
+    expect(rpc.registerModuleDefinition).toHaveBeenCalledOnce()
+    expect(rpc.startModule).not.toHaveBeenCalled()
+    expect(restored.getInstance(saved.id)).toEqual(saved)
   })
 
   it('accepts the protocol duplicate-definition result when preparing an existing instance for restart or Admin recovery', async () => {

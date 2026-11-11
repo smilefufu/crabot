@@ -44,6 +44,16 @@ node --test --test-concurrency=1 experiments/cordis-feishu/normal-instance.test.
 
 安装速度复核：验收实例最近Slack安装API耗时2,159ms，安装记录确认registry.npmmirror.com及cdn.npmmirror.com；npm日志39条tgz访问中24条命中本地缓存。Admin继承本机127.0.0.1:7890代理环境，国内registry不在NO_PROXY中，打包npm的代理选择逻辑会使用该配置。国内源、本机代理和缓存并不互斥；日志不能判定代理软件最终直连还是远端转发，不据此宣称无代理同等速度。只读核查，未关闭代理、清缓存或重装业务插件。
 
+## 旧账号缺插件恢复（2026-11-11）
+
+用户完成协作入口体验验收并授权正式 PR 后，合入 `origin/main` 的 `2c8937f5`，合并提交 `f0e8375e`；仅进度文档冲突，保留双方记录。重新完整构建封装 v11（`2026.11.11-cordis.11`），25,327 文件、1,123,463,463 B。真实实例、CLI、国内公开 npm 安装及合成收发、六平台受管往返 4/4 通过：`/private/tmp/cordis-pr-v11-product-20261111.tap`。原 55885 验收实例继续运行 v10，不修改原数据或生产 3000。
+
+针对“旧版已配置账号、新版尚无插件”：下载公开 `v2026.11.10.1` macOS ARM CLI，核对 SHA-256 `5f745b8c473644608c1d1574a0021ca2ff6effed694288a912cd3a694669adf6`。用其真实 Core/Admin/Agent/Memory 在临时数据中创建飞书、Telegram 自动启动账号、停用微信账号及飞书会话，正常旧 CLI 停止后切换新核心读取同一数据。新核心插件目录开始不存在，飞书 0.1.1、Telegram 0.1.3 自动从国内源安装并运行；停用微信保留，不安装、不启动。账号 ID、凭据与 Provider 文件摘要、飞书会话 ID 保持；模型引用保持，main 已有的保留策略迁移按预期补入 30 天。新运行记录 v2，受管树只监听一个 Admin Web 端口，新 CLI 正常停止；模型请求 0。
+
+此演练经过既有显式 Python 转换工具，原 Python 环境指纹不变；最初直接用新封装程序启动旧环境被既有迁移门禁拒绝，未绕过。验证范围是旧正式版数据、缺插件恢复和新旧 CLI 启停，不代替各平台安装器完整版本切换验收。完整诊断与证明保留在 `/private/tmp/crabot-cordis-upgrade-20261111/`：`proof.json`、`python-migration-proof.json`、`rehearsal-final.log`。外部平台客户端为合成实现；没有使用真实账号或真实模型。
+
+安装恢复定向 5 文件 29 项通过，补充覆盖五个普通平台先安装、再登记、再启动且保持旧配置，六个平台安装失败保留凭据、不登记、不启动，以及停用账号仅显式启动时准备插件。合并后 Web 全量 85 文件 509 项通过，Core/Admin/Agent/Web 类型构建通过。扩大 Admin 回归的 4 个失败在纯净 main 对照树同样复现；Agent 扩大回归也保留既有失败与时序不稳定项，不记全仓全绿，不通过删除功能或改无关断言收尾。
+
 ## 本轮完整归档（2026-11-10）
 
 生产提交 `75345346`，候选 `2026.11.10-cordis.8`。macOS ARM 归档 `.desktop-build/crabot-cordis-validation-darwin-arm64-20261110-v8.tar.gz`：441,399,176 B，SHA-256 `f840dc0264d2bbc869d0ab6c556dfff05af4adc55ab2f2f8240af2e3507c1611`；25,291个清单文件、展开1,123,310,154 B。主包无六个Channel目录和平台专属SDK。
