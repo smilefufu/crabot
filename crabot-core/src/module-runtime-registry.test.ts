@@ -20,6 +20,7 @@ function makeRegistry(
   options: {
     platform?: NodeJS.Platform
     inspectWindowsPortOwners?: (port: number) => Promise<WindowsPortOwner[]>
+    probeWindowsBootTime?: () => Promise<string>
     probeRuntimeIdentity?: (port: number) => Promise<RuntimeIdentity | null>
     confirmOrphanTermination?: (candidate: OrphanTerminationCandidate) => Promise<boolean>
   } = {},
@@ -34,6 +35,7 @@ function makeRegistry(
     terminateProcessTree: terminateTree,
     platform: options.platform,
     inspectWindowsPortOwners: options.inspectWindowsPortOwners,
+    probeWindowsBootTime: options.probeWindowsBootTime,
     probeRuntimeIdentity: options.probeRuntimeIdentity,
     confirmOrphanTermination: options.confirmOrphanTermination,
     createId: vi.fn()
@@ -89,6 +91,99 @@ describe('ModuleRuntimeRegistry', () => {
     expect(probeRuntimeIdentity).not.toHaveBeenCalled()
     expect(terminateTree).not.toHaveBeenCalled()
     expect(await registry.listRecords()).toHaveLength(1)
+  })
+
+  it.each([
+    ['ipc', null], ['pipe', null],
+    ['ipc', 'win32:2026-11-12T05:00:00.0000000Z'],
+    ['pipe', 'win32:2026-11-12T05:00:00.0000000Z'],
+  ] as const)('settles a pre-reboot Windows %s runtime with current identity %s without targeting any process', async (transport, currentIdentity) => {
+    const identities = new Map<number, string | null>([[71000, 'win32:2026-11-12T03:17:34.2398230Z']])
+    const probeWindowsBootTime = vi.fn(async () => '2026-11-12T04:39:42.9165700Z')
+    const inspectWindowsPortOwners = vi.fn(async () => [{ pid: 72000, process_name: 'unrelated', process_start_identity: 'other-start' }])
+    const probeRuntimeIdentity = vi.fn(async () => null)
+    const { registry, terminateTree } = makeRegistry(identities, new Set([71000]), {
+      platform: 'win32', probeWindowsBootTime, inspectWindowsPortOwners, probeRuntimeIdentity,
+    })
+    await registry.recordSpawn({ runtimeId: 'before-reboot', moduleId: 'memory-default', rootPid: 71000, modulePort: 19003, rpcTransport: transport })
+    identities.set(71000, currentIdentity)
+
+    await registry.recoverOrphans({ currentRuntimeIds: new Set(), gracefulTimeoutMs: 30000 })
+
+    expect(await registry.listRecords()).toEqual([])
+    expect(probeWindowsBootTime).toHaveBeenCalledOnce()
+    expect(inspectWindowsPortOwners).not.toHaveBeenCalled()
+    expect(probeRuntimeIdentity).not.toHaveBeenCalled()
+    expect(terminateTree).not.toHaveBeenCalled()
+  })
+
+  it('observes Windows boot time once when settling multiple pre-reboot transports', async () => {
+    const identities = new Map<number, string | null>([
+      [71000, 'win32:2026-11-12T03:17:34.2398230Z'], [71001, 'win32:2026-11-12T03:17:42.7610180Z'],
+    ])
+    const probeWindowsBootTime = vi.fn(async () => '2026-11-12T04:39:42.9165700Z')
+    const { registry, terminateTree } = makeRegistry(identities, new Set(), { platform: 'win32', probeWindowsBootTime })
+    await registry.recordSpawn({ runtimeId: 'before-ipc', moduleId: 'admin-web', rootPid: 71000, modulePort: 19001, rpcTransport: 'ipc' })
+    await registry.recordSpawn({ runtimeId: 'before-pipe', moduleId: 'memory-default', rootPid: 71001, modulePort: 19003, rpcTransport: 'pipe' })
+    identities.clear()
+
+    await registry.recoverOrphans({ currentRuntimeIds: new Set(), gracefulTimeoutMs: 30000 })
+
+    expect(await registry.listRecords()).toEqual([])
+    expect(probeWindowsBootTime).toHaveBeenCalledOnce()
+    expect(terminateTree).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['2026-11-12T03:00:00.0000000Z', false],
+    ['2026-11-12T03:17:34.2398230Z', false],
+    ['2026-11-12T03:17:34.2399999Z', false],
+    ['invalid', false],
+    ['2026-02-30T04:39:42.9165700Z', false],
+    ['', true],
+  ] as const)('retains detached records when boot observation %s fails to prove a reboot (failure=%s)', async (boot, failed) => {
+    const identities = new Map<number, string | null>([[71000, 'win32:2026-11-12T03:17:34.2398230Z']])
+    const probeWindowsBootTime = vi.fn(async () => { if (failed) throw new Error('OS observation failed'); return boot })
+    const { dataDir, registry, terminateTree } = makeRegistry(identities, new Set(), { platform: 'win32', probeWindowsBootTime })
+    await registry.recordSpawn({ runtimeId: 'unproven', moduleId: 'memory-default', rootPid: 71000, modulePort: 19003, rpcTransport: 'pipe' })
+    const file = path.join(dataDir, 'module-runtime-registry/records/unproven.json'), before = await fs.readFile(file, 'utf8')
+    identities.clear()
+
+    await expect(registry.recoverOrphans({ currentRuntimeIds: new Set(), gracefulTimeoutMs: 30000 })).rejects.toThrow('Cannot prove detached managed runtime exit')
+
+    expect(await fs.readFile(file, 'utf8')).toBe(before)
+    expect(terminateTree).not.toHaveBeenCalled()
+  })
+
+  it.each(['original-start', 'win32:invalid', 'win32:2026-02-30T03:17:34.2398230Z'])('retains an invalid Windows start identity %s without using boot time', async start => {
+    const identities = new Map<number, string | null>([[71000, start]])
+    const probeWindowsBootTime = vi.fn(async () => '2026-11-12T04:39:42.9165700Z')
+    const { registry, terminateTree } = makeRegistry(identities, new Set(), { platform: 'win32', probeWindowsBootTime })
+    await registry.recordSpawn({ runtimeId: 'invalid-start', moduleId: 'memory-default', rootPid: 71000, modulePort: 19003, rpcTransport: 'ipc' })
+    identities.clear()
+
+    await expect(registry.recoverOrphans({ currentRuntimeIds: new Set(), gracefulTimeoutMs: 30000 })).rejects.toThrow('Cannot prove detached managed runtime exit')
+
+    expect(await registry.listRecords()).toHaveLength(1)
+    expect(probeWindowsBootTime).not.toHaveBeenCalled()
+    expect(terminateTree).not.toHaveBeenCalled()
+  })
+
+  it('retains a pre-reboot record when guarded recovery authority changes during the OS observation', async () => {
+    let authorized = true
+    const identities = new Map<number, string | null>([[71000, 'win32:2026-11-12T03:17:34.2398230Z']])
+    const probeWindowsBootTime = vi.fn(async () => { authorized = false; return '2026-11-12T04:39:42.9165700Z' })
+    const { dataDir, registry, terminateTree } = makeRegistry(identities, new Set(), { platform: 'win32', probeWindowsBootTime })
+    await registry.recordSpawn({ runtimeId: 'guarded', moduleId: 'memory-default', rootPid: 71000, modulePort: 19003, rpcTransport: 'pipe' })
+    const file = path.join(dataDir, 'module-runtime-registry/records/guarded.json'), before = await fs.readFile(file, 'utf8')
+    identities.clear()
+
+    await expect(registry.recoverOrphans({ currentRuntimeIds: new Set(), runtimeIds: new Set(['guarded']), gracefulTimeoutMs: 30000,
+      verify: () => { if (!authorized) throw new Error('Recovery authority changed') },
+    })).rejects.toThrow('Recovery authority changed')
+
+    expect(await fs.readFile(file, 'utf8')).toBe(before)
+    expect(terminateTree).not.toHaveBeenCalled()
   })
 
   it('probes the standard runtime identity RPC envelope', async () => {

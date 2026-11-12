@@ -74,6 +74,7 @@ export interface ModuleRuntimeRegistryOptions {
   isProcessTreeAlive?: (pid: number, modulePort: number, rootExited: boolean) => boolean | Promise<boolean>
   terminateProcessTree?: (pid: number, options: TerminateProcessTreeOptions) => Promise<void>
   inspectWindowsPortOwners?: (port: number) => Promise<WindowsPortOwner[]>
+  probeWindowsBootTime?: () => Promise<string>
   probeRuntimeIdentity?: (port: number) => Promise<RuntimeIdentity | null>
   confirmOrphanTermination?: (candidate: OrphanTerminationCandidate) => Promise<boolean>
   platform?: NodeJS.Platform
@@ -81,11 +82,12 @@ export interface ModuleRuntimeRegistryOptions {
   now?: () => string
 }
 
-function execFileText(file: string, args: string[]): Promise<string> {
+function execFileText(file: string, args: string[], timeout?: number): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(file, args, {
       windowsHide: true,
       maxBuffer: 1024 * 1024,
+      timeout,
       env: { ...process.env, LC_ALL: 'C' },
     }, (error, stdout) => {
       if (error) reject(error)
@@ -96,6 +98,19 @@ function execFileText(file: string, args: string[]): Promise<string> {
 
 export async function probeProcessStartIdentity(pid: number): Promise<string | null> {
   return probeModuleStartIdentity(pid)
+}
+
+function windowsTimestamp(value: string): number {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,7})?Z$/.test(value)) return NaN
+  const time = Date.parse(value)
+  return Number.isFinite(time) && new Date(time).toISOString().slice(0, 19) === value.slice(0, 19) ? time : NaN
+}
+
+async function probeWindowsBootTime(): Promise<string> {
+  return (await execFileText(path.join((process.env.SystemRoot || process.env.WINDIR)!, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), [
+    '-NoProfile', '-NonInteractive', '-Command',
+    "$ErrorActionPreference='Stop'; (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().ToString('o')",
+  ], 10000)).trim()
 }
 
 export async function inspectWindowsPortOwners(port: number): Promise<WindowsPortOwner[]> {
@@ -202,6 +217,7 @@ export class ModuleRuntimeRegistry {
   private readonly isTreeAlive: (pid: number, modulePort: number, rootExited: boolean) => boolean | Promise<boolean>
   private readonly terminateTree: (pid: number, options: TerminateProcessTreeOptions) => Promise<void>
   private readonly inspectPortOwners: (port: number) => Promise<WindowsPortOwner[]>
+  private readonly probeBootTime: () => Promise<string>
   private readonly probeModuleIdentity: (port: number) => Promise<RuntimeIdentity | null>
   private readonly confirmTermination?: (candidate: OrphanTerminationCandidate) => Promise<boolean>
   private readonly platform: NodeJS.Platform
@@ -222,6 +238,7 @@ export class ModuleRuntimeRegistry {
     })
     this.terminateTree = options.terminateProcessTree ?? terminateOwnedProcessTree
     this.inspectPortOwners = options.inspectWindowsPortOwners ?? inspectWindowsPortOwners
+    this.probeBootTime = options.probeWindowsBootTime ?? probeWindowsBootTime
     this.probeModuleIdentity = options.probeRuntimeIdentity ?? probeRuntimeIdentity
     this.confirmTermination = options.confirmOrphanTermination
     this.createId = options.createId ?? (() => crypto.randomUUID())
@@ -299,6 +316,7 @@ export class ModuleRuntimeRegistry {
     if (verify !== undefined && (typeof verify !== 'function' || runtimeIds === undefined)) throw new Error('Guarded orphan recovery requires an explicit runtime scope')
     const currentRuntimeIds = verify ? new Set(input.currentRuntimeIds) : input.currentRuntimeIds
     const records = await guardedOrphanStep(verify, () => this.listRecords())
+    let windowsBootTime: number | undefined
     for (const record of records) {
       if (record.instance_id !== this.getInstanceId()) continue
       if (moduleId !== undefined && record.module_id !== moduleId) continue
@@ -308,7 +326,20 @@ export class ModuleRuntimeRegistry {
       const currentIdentity = await guardedOrphanStep(verify, () => this.probeStartIdentity(record.root_pid))
       if (this.platform === 'win32'
         && currentIdentity !== record.process_start_identity) {
-        if (record.rpc_transport) throw new Error(`Cannot prove detached managed runtime exit for ${record.module_id}/${record.runtime_id}; retained runtime record: ${this.recordPath(record.runtime_id)}`)
+        if (record.rpc_transport) {
+          const startedAt = record.process_start_identity.startsWith('win32:') ? windowsTimestamp(record.process_start_identity.slice(6)) : NaN
+          if (Number.isFinite(startedAt)) {
+            windowsBootTime ??= await guardedOrphanStep(verify, async () => {
+              try { return windowsTimestamp(await this.probeBootTime()) } catch { return NaN }
+            })
+            // A reboot ended the entire old tree, even if its PID now belongs to another process.
+            if (startedAt < windowsBootTime) {
+              await guardedOrphanStep(verify, () => this.removeRuntime(record.runtime_id))
+              continue
+            }
+          }
+          throw new Error(`Cannot prove detached managed runtime exit for ${record.module_id}/${record.runtime_id}; retained runtime record: ${this.recordPath(record.runtime_id)}`)
+        }
         await this.recoverDetachedWindowsRuntime(record, gracefulTimeoutMs, verify)
         continue
       }
