@@ -1,5 +1,12 @@
 # Crabot 项目进度
 
+### Windows 跨开机遗留 IPC/pipe 登记（2026-11-13，现场本地修复，未发版）
+
+- `.26` 在 Windows 正常关机重启后，Admin/Agent/Memory 的旧根 PID 已消失，但 IPC/pipe 登记仍直接拒绝恢复，导致 `CRABOT_PREFLIGHT_FAILED`。按用户逐项确认的[最小规则](crabot-docs/superpowers/specs/2026-11-12-windows-reboot-orphan-preflight-design.md)，只在原 PID 已消失或身份改变、且系统开机时间严格晚于记录的启动时间时正常收口；不杀进程，不用 TCP 证明 IPC 归属，不改同次开机、HTTP/POSIX 或记录格式。
+- 五项复现先失败；Registry/Orphan Prompt/Process Tree 定向 52 项及受影响模块严格类型检查通过。Windows x64 Node 22.22.3（ARM 虚拟机）原生十项对照通过，覆盖 released 失败、修复后跨开机恢复及同次开机/查询失败保护；不冒充整仓构建或 x64 真机验收。
+- 经授权备份后，仅向原 `.26` 安装应用一份编译 JS；原三个真实记录保持原字节，随后由 GUI 正常恢复，模型接入页可见。正常停止确认 stopped/登记清空，GUI 再启动后原数据根的三个核心模块重新登记，模型接入页恢复。未手工删记录、换安装根、填模型密钥或调用模型。
+- 该 VM 为有备份凭据的本地单文件修复，版本仍 `.26`，保留公开包原清单且未关闭校验，不宣称原发行字节完整；重装公开 `.26` 会覆盖补丁。未重新发布安装包，未做补丁后的整机重启复验。
+
 ### v2026.11.11.1 与桌面 .26 公开预览（2026-11-11，已发布，未部署本机）
 
 - 从 main 的 `74dec3c5` 固定源码发布 [v2026.11.11.1](https://github.com/smilefufu/crabot/releases/tag/v2026.11.11.1)：包含单端口 IPC／按需协作插件与新接入页、派工复核及工作规则、增量记录／反思后回收／旧程序清理；桌面版本为 `0.1.0-desktop.26`。
