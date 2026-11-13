@@ -53,7 +53,7 @@ export interface ToolFaceDeps {
   readonly workerRequestControl?: import('./worker-request-context.js').WorkerRequestControl
   readonly requestGuard?: import('../../workers/harness/request-guard.js').WorkerRequestGuard
   readonly requestAuthorization?: 'shared' | 'request'
-  readonly executeRequest?: (input: import('../conversation-request.js').ExecuteConversationRequestParams) => Promise<import('../conversation-request.js').ExecuteConversationRequestResult>
+  readonly executeRequest?: (input: import('../conversation-request.js').ExecuteConversationRequestInput) => Promise<import('../conversation-request.js').ExecuteConversationRequestResult>
   readonly voice?: boolean
   readonly dailyReflection?: DailyReflection
   readonly describeExecutionTools?: DescribeExecutionTools

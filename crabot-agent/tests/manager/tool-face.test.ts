@@ -168,14 +168,16 @@ describe('主体授权与角色能力分开执行', () => {
     expect(loaded.output).toContain('execute_request')
     const tool = buildManagerToolFace(deps).find(tool => tool.name === 'execute_request')!
     expect(tool).toBeDefined()
-    const result = await tool.call({ source_id: 'current', delivery: 'requester_private' })
+    const result = await tool.call({ delivery: 'requester_private' })
     expect(result.output).toContain('[本人私发请求状态：正文不在共享上下文显示。不得要求返回正文或改发原群。]')
     expect(result.output).not.toContain('PRIVATE_BODY')
     expect(executeRequest).toHaveBeenCalledTimes(1)
-    expect((await tool.call({ source_id: 'current', delivery: 'origin', permission: 'master' })).isError).toBe(true)
+    expect((await tool.call({ delivery: 'origin', permission: 'master' })).isError).toBe(true)
     expect(executeRequest).toHaveBeenCalledTimes(1)
     executeRequest.mockRejectedValueOnce(new Error('SECRET_FAILURE_BODY'))
-    expect((await tool.call({ source_id: 'current', delivery: 'requester_private' })).output).not.toContain('SECRET_FAILURE_BODY')
+    expect((await tool.call({ delivery: 'requester_private' })).output).not.toContain('SECRET_FAILURE_BODY')
+    executeRequest.mockRejectedValueOnce(new Error('REQUEST_SOURCE_AMBIGUOUS: 本轮有多条人类输入'))
+    expect((await tool.call({ delivery: 'origin' })).output).toContain('REQUEST_SOURCE_AMBIGUOUS')
     for (const requestAuthorization of [undefined, 'request'] as const) {
       expect(buildManagerToolFace(makeDeps({ requestAuthorization, executeRequest })).some(tool => tool.name === 'execute_request')).toBe(false)
     }

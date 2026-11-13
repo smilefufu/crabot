@@ -1418,7 +1418,7 @@ describe('manager bootstrap（P5 Task 1）', () => {
     } finally { await stack.dispose() }
   })
 
-  it('无可信来源的旧群Worker事件不借最近发言者身份新派发', async () => {
+  it('群 Worker 事件按群授权派发，不借用最近发言者身份', async () => {
     let script: LLMAdapter = silentManager()
     const stack = buildManagerStack(makeDeps({ managerAdapter: () => script }))
     const key = 'wechat::sess-boot' as ManagerKey
@@ -1431,7 +1431,9 @@ describe('manager bootstrap（P5 Task 1）', () => {
       await stack.registry.routeWorkerEvent({ ts: new Date().toISOString(), kind: 'state_changed', worker_id: 'w-seeded', seq: 1 })
       await settle()
       const spawned = (await stack.ledger.listAllWorkers()).filter(w => w.worker.worker_id !== 'w-seeded')
-      expect(spawned).toHaveLength(0)
+      expect(spawned).toHaveLength(1)
+      expect(spawned[0].worker.origin.request).toBeUndefined()
+      expect(spawned[0].worker.origin.creator_friend_id).toBeUndefined()
       expect((await stack.ledger.findWorker('w-seeded'))?.worker.origin.request).toBeUndefined()
     } finally {
       await stack.dispose()

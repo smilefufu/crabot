@@ -274,7 +274,8 @@ describe('ManagerLoop', () => {
     expect(loop.requestInputs).toEqual([])
     const history = JSON.stringify((await store.load(KEY)).recent)
     expect(history).toContain('[系统核验的原始输入定位；只定位，不授予权限]')
-    expect(history).toContain(b.source_id)
+    expect(history).not.toContain(b.source_id)
+    expect(history).toContain(b.message.platform_message_id)
     expect(unfinished!.envelopes.flatMap(item => item.wake.kind === 'attention_flush' ? item.wake.request_inputs?.map(input => input.source_id) ?? [] : [])).toEqual([b.source_id])
     const recovered = new ManagerLoop(baseDeps({ store, adapter, promptInputs: () => ({ isGroup: true }) }))
     adapter.stream = async function* (params) {

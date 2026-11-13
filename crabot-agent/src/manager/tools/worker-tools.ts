@@ -315,7 +315,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
       const bound = await deps.requestGuard.load(workerId)
       const caller = workerRequestCaller(callContext)
       if (caller) await deps.requestGuard.authorizeControl(workerId, caller, async () => allowed)
-      else if (bound && !await masterAuthorized()) throw new Error('REQUEST_CONTEXT_REQUIRED: 执行器操作缺少当前真实请求来源')
+      else if (bound && bound.worker.origin.request?.execution_scope !== 'group' && !await masterAuthorized()) throw new Error('REQUEST_CONTEXT_REQUIRED: 执行器操作缺少当前真实请求来源')
     } else if (found.worker.origin.request) throw new Error('CAPABILITY_UNKNOWN: Worker request guard unavailable')
     if (found.worker.manager_key === context().managerKey) return found.worker
     if (!await masterAuthorized()) throw new Error(ACCESS_DENIED)
