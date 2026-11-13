@@ -382,7 +382,7 @@ describe('production isolated request tool closure', () => {
         expect(params.systemPrompt).toContain('你的基础工具只有群公共授权')
         expect(JSON.stringify(params.messages)).not.toContain('PRIVATE_ENGINE_BODY')
         if (sharedTurn++ === 0) { planned = { name: 'load_tool_family', input: { family: 'crabot' } }; return }
-        if (sharedTurn === 2) { planned = { name: 'execute_request', input: { source_id: inputs[0].source_id, delivery: 'requester_private' } }; return }
+        if (sharedTurn === 2) { planned = { name: 'execute_request', input: { delivery: 'requester_private' } }; return }
       }
     }
     await stack.registry.routeHumanMessages('voice', 'group', [original])
@@ -582,6 +582,29 @@ describe('production isolated request tool closure', () => {
     expect(results.search.isError).toBe(false)
     const search = rpc.mock.calls.find(call => call[1] === 'search_long_term')
     expect(search?.[2]).toMatchObject({ accessible_scopes: ['group'], access_context: { actor_kind: 'conversation', scene: { type: 'group_session' } } })
+  })
+
+  it('lets the shared Manager read a bound group Worker during idle review without a source_id', async () => {
+    const inputs = await stack.trustedHumanInputs.capture(key, [message()])
+    const record = await stack.conversationRequests.forInputs(key, inputs).create({ source_id: inputs[0].source_id, delivery: 'origin' })
+    await stack.conversationRequests.attachWorker(key, record.request_id, 'w-group')
+    const binding = { schema_version: 1 as const, request_id: record.request_id, source_sha256: record.source_sha256, execution_scope: 'group' as const }
+    await stack.ledger.upsertWorker(key, 'w-group', () => ({ worker_id: 'w-group', manager_key: key,
+      task: { id: 'w-group', title: 'group work', status: 'running', created_at: new Date().toISOString() },
+      origin: { trigger_type: 'message', creator_friend_id: 'f-owner', request: binding }, report_to: { channel_id: 'voice', session_id: 'group' }, incarnations: [], updated_at: new Date().toISOString() }))
+    await new WorkerContextStore(path.join(root, 'agent', 'workers')).write('w-group', { schema_version: 2, manager_key: key, creator_friend_id: 'f-owner', request: binding, target_session: message().session })
+    expect((await stack.requestGuard.load('w-group'))?.request.request_id).toBe(record.request_id)
+    let read = false
+    inspect = async params => {
+      if (read || !params.systemPrompt.includes('你的基础工具只有群公共授权')) return
+      read = true
+      results.state = await tool(params, 'get_worker_state').call({ worker_id: 'w-group' }, context)
+    }
+    await stack.registry.getOrCreate(key).wakeUp({ wake: { kind: 'workboard_idle_review' }, received_at: new Date().toISOString(), timezone: 'Asia/Shanghai' })
+    expect(results.state).toBeDefined()
+    expect(results.state.isError).toBe(false)
+    expect(results.state.output).not.toContain('REQUEST_SOURCE_REQUIRED')
+    expect(results.state.output).not.toContain('admitted input window')
   })
 
 })

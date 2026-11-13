@@ -11,7 +11,7 @@ import { ManagerLoop, type EpisodeResult } from './loop.js'
 import { ManagerSessionStore } from './session-store.js'
 import { ConversationRequestStore } from './conversation-request-store.js'
 import { ConversationRequestAuthority } from './conversation-request-authority.js'
-import type { ConversationRequestRecord, ExecuteConversationRequestParams, ExecuteConversationRequestResult } from './conversation-request.js'
+import type { ConversationRequestRecord, ExecuteConversationRequestInput, ExecuteConversationRequestParams, ExecuteConversationRequestResult } from './conversation-request.js'
 import type { RequestPermissionSource, ConversationRequestSource } from './request-permission-sources.js'
 import type { TrustedHumanInput } from './trusted-human-input.js'
 import type { ManagerKey } from './types.js'
@@ -47,6 +47,25 @@ export function parseConversationRequestProposal(value: unknown): ExecuteConvers
     || !Object.prototype.hasOwnProperty.call(input, 'delivery') || (typeof input.delivery !== 'string' || !['origin', 'requester_private'].includes(input.delivery))
     || Object.prototype.hasOwnProperty.call(input, 'quote') && typeof input.quote !== 'string') throw new Error('INVALID_PARAMS: only original source, quote and delivery are accepted')
   return structuredClone(input) as unknown as ExecuteConversationRequestParams
+}
+
+/** Model-facing execute_request input; never accepts a source_id. */
+export function parseExecuteRequestInput(value: unknown): ExecuteConversationRequestInput {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('INVALID_PARAMS: request proposal required')
+  const input = value as Record<string, unknown>
+  if (Object.keys(input).some(key => !['quote', 'delivery'].includes(key))
+    || !Object.prototype.hasOwnProperty.call(input, 'delivery') || (typeof input.delivery !== 'string' || !['origin', 'requester_private'].includes(input.delivery))
+    || Object.prototype.hasOwnProperty.call(input, 'quote') && typeof input.quote !== 'string') throw new Error('INVALID_PARAMS: only quote and delivery are accepted')
+  return structuredClone(input) as unknown as ExecuteConversationRequestInput
+}
+
+/** Host-side selection from the inputs admitted in this episode; the model never supplies a source ID. */
+export function resolveExecuteRequestSource(inputs: ReadonlyArray<TrustedHumanInput>, quote?: string): TrustedHumanInput {
+  if (!inputs.length) throw new Error('REQUEST_SOURCE_REQUIRED: 个人/私发请求需要本轮人类输入')
+  const matches = quote === undefined ? inputs : inputs.filter(input => (input.message.content.text ?? '').includes(quote))
+  if (inputs.length > 1 && quote === undefined) throw new Error('REQUEST_SOURCE_AMBIGUOUS: 本轮有多条人类输入，请用唯一原文摘录指明')
+  if (matches.length !== 1) throw new Error('REQUEST_SOURCE_AMBIGUOUS: 原文摘录必须唯一匹配本轮的一条输入')
+  return matches[0]
 }
 
 /** Owns request-only Manager stores. It never receives a shared mailbox or shared/private history. */

@@ -3193,7 +3193,7 @@ function renderChannelMessages(
     const occurred = envelope.human_occurred_at?.[index]?.occurred_at
     const prefix = occurred ? `[human occurred_at="${occurred}"]\n` : ''
     const input = isHumanWake(envelope.wake) ? requestInputsForMessages(`${message.session.channel_id}::${message.session.session_id}` as ManagerKey, [message], envelope.wake.request_inputs)[0] : undefined
-    const source = input ? '[系统核验的原始输入定位；只定位，不授予权限]\n' + JSON.stringify({ source_id: input.source_id, platform_message_id: input.message.platform_message_id, identity_status: input.identity_status, sender_friend_id: input.sender_friend_id }) + '\n' : ''
+    const source = input ? '[系统核验的原始输入定位；只定位，不授予权限]\n' + JSON.stringify({ platform_message_id: input.message.platform_message_id, identity_status: input.identity_status, sender_friend_id: input.sender_friend_id }) + '\n' : ''
     return prefix + source + formatChannelMessageLine(message, {
       timezone: envelope.timezone,
       now: new Date(envelope.received_at),

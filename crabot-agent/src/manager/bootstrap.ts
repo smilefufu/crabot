@@ -1,7 +1,7 @@
 import { assertWorkspaceExecutionAllowed, workspaceMaintenancePending } from 'crabot-shared'
 import { isDeepStrictEqual } from 'node:util'
 import { allowed } from '../permissions/tool-authorization.js'
-import { ConversationRequestRunner } from './conversation-request-runner.js'
+import { ConversationRequestRunner, resolveExecuteRequestSource } from './conversation-request-runner.js'
 import { createConversationRequestLoop } from './request-loop.js'
 import { VoiceManagementHost } from './voice-management-host.js'
 import type { ToolFaceDeps } from './tools/tool-face.js'
@@ -1080,23 +1080,18 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         voice: traceHooks?.isVoice?.() === true,
         requestAuthorization: targetSessionType === 'group' && !isSystemThread && !scheduleIdentity ? 'shared' : undefined,
         requestGuard,
-        executeRequest: targetSessionType === 'group' && !isSystemThread && !scheduleIdentity ? input => requestRunner.execute(key, traceHooks?.requestInputs() ?? [], input, traceHooks?.voiceReplyContextForSource(input.source_id), traceHooks?.onSuccessfulSendMessage) : undefined,
-        workerRequestControl: targetSessionType === 'group' && !isSystemThread && !scheduleIdentity ? { scope: 'shared', authority: async (selection, operation) => {
+        executeRequest: targetSessionType === 'group' && !isSystemThread && !scheduleIdentity ? input => {
           const inputs = traceHooks?.requestInputs() ?? []
-          if (selection.source_id) {
-            const record = await conversationRequests.forInputs(key, inputs).create({ source_id: selection.source_id, ...(selection.quote !== undefined ? { quote: selection.quote } : {}), delivery: 'origin' })
-            return new ConversationRequestAuthority(conversationRequests, key, record.request_id, 'group', resolveCurrentRequestSource)
-          }
-          if (!inputs.length && !selection.quote && wakeEvent && wakeEvent.kind !== 'human_messages' && wakeEvent.kind !== 'attention_flush' && operation.worker_id) {
-            const found = await ledger.findWorker(operation.worker_id)
-            const bound = found ? await requestGuard.load(operation.worker_id) : null
-            if (found?.managerKey === key && !bound && !found.worker.origin.request) return undefined
-          }
-          if (!inputs.length && !selection.quote && wakeEvent?.kind === 'worker_event') {
-            const bound = await requestGuard.load(wakeEvent.event.worker_id)
-            if (bound && bound.worker.manager_key === key && bound.worker.origin.request?.execution_scope === 'group') return new ConversationRequestAuthority(conversationRequests, key, bound.request.request_id, 'group', resolveCurrentRequestSource)
-          }
-          throw new Error('REQUEST_SOURCE_REQUIRED: 请引用当前系统核验的原始输入')
+          const source = resolveExecuteRequestSource(inputs, input.quote)
+          return requestRunner.execute(key, inputs, { source_id: source.source_id, ...(input.quote !== undefined ? { quote: input.quote } : {}), delivery: input.delivery }, traceHooks?.voiceReplyContextForSource(source.source_id), traceHooks?.onSuccessfulSendMessage)
+        } : undefined,
+        workerRequestControl: targetSessionType === 'group' && !isSystemThread && !scheduleIdentity ? { scope: 'shared', authority: async operation => {
+          if (!operation.worker_id) return undefined
+          const found = await ledger.findWorker(operation.worker_id)
+          if (!found || found.managerKey !== key) return undefined
+          const bound = await requestGuard.load(operation.worker_id)
+          if (!bound || bound.worker.origin.request?.execution_scope !== 'group') return undefined
+          return new ConversationRequestAuthority(conversationRequests, key, bound.request.request_id, 'group', resolveCurrentRequestSource)
         } } : undefined,
         messagingDeps: { ...deps.messagingDeps, voiceReplyContext: traceHooks?.voiceReplyContext },
         // send_message 省略 channel_id 时使用的 manager 归属目标与结构化 Session 观察索引

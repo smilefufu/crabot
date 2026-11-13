@@ -33,6 +33,11 @@ export interface ExecuteConversationRequestParams {
   quote?: string
   delivery: 'origin' | 'requester_private'
 }
+/** Model-facing input; source_id is resolved by the host from the current human inputs. */
+export interface ExecuteConversationRequestInput {
+  quote?: string
+  delivery: 'origin' | 'requester_private'
+}
 export interface ExecuteConversationRequestResult {
   request_id: string
   status: 'running' | 'waiting' | 'closed' | 'recovery_required'

@@ -275,9 +275,12 @@ describe('isolated request admission with real ManagerLoop', () => {
       policy: { keepRecent: 10, hardCapTokens: 100000 }, voiceOutput: port, voiceResponseEndOwner: 'parent', onSuccessfulVoiceReply(target) { parent.recordSuccessfulSendMessage(target); pending = false },
       adapter: () => ({ updateConfig() {}, async *stream() { yield* chunksFromContent([{ type: 'text', text: '<voice_reply>听到了。</voice_reply>' }], 'end_turn') } }), model: () => 'fixture', toolFace: () => [], promptInputs: () => ({ isGroup: true, requestAuthorization: 'request' }), harness: {} as never, now: () => new Date(), markPendingReply() {}, hasPendingReply: () => true,
     }))
-    const execute = buildExecuteRequestTool(args => executor.execute(key, parent.requestInputs, args, parent.voiceReplyContextForSource(args.source_id)))
+    const execute = buildExecuteRequestTool(args => {
+      const source = parent.requestInputs[0]
+      return executor.execute(key, parent.requestInputs, { source_id: source.source_id, ...(args.quote !== undefined ? { quote: args.quote } : {}), delivery: args.delivery }, parent.voiceReplyContextForSource(source.source_id))
+    })
     const adapter: LLMAdapter = { updateConfig() {}, async *stream(params) {
-      yield* chunksFromContent(hasOperation(params) ? [] : [{ type: 'tool_use', name: 'execute_request', id: 'nested', input: { source_id: inputs[0].source_id, delivery: 'origin' } }], hasOperation(params) ? 'end_turn' : 'tool_use')
+      yield* chunksFromContent(hasOperation(params) ? [] : [{ type: 'tool_use', name: 'execute_request', id: 'nested', input: { delivery: 'origin' } }], hasOperation(params) ? 'end_turn' : 'tool_use')
     } }
     parent = new ManagerLoop({ key, managerKey: () => key, isSystemThread: false, store: new ManagerSessionStore(path.join(directory, 'parent')), policy: { keepRecent: 10, hardCapTokens: 100000 }, voiceOutput: port, adapter: () => adapter, model: () => 'fixture', toolFace: () => [execute], promptInputs: () => ({ isGroup: true }), harness: {} as never, now: () => new Date(), markPendingReply() { pending = true }, hasPendingReply: () => pending })
     const result = await parent.wakeUp({ wake: { kind: 'human_messages', messages: [inputs[0].message], request_inputs: inputs }, received_at: inputs[0].received_at, timezone: 'Asia/Shanghai', voice_reply_context: voice })

@@ -76,7 +76,7 @@ export function createExecutionCapabilitiesTool(deps: ToolFaceDeps): ToolDefinit
             const bound = await deps.requestGuard.load(args.worker_id)
             const caller = workerRequestCaller(callContext)
             if (caller) await deps.requestGuard.authorizeControl(args.worker_id, caller, async () => allowed)
-            else if (bound) throw new Error('REQUEST_CONTEXT_REQUIRED')
+            else if (bound && bound.worker.origin.request?.execution_scope !== 'group') throw new Error('REQUEST_CONTEXT_REQUIRED')
             if (bound) {
               request = { binding: bound.worker.origin.request!, source: requestSourceFor(bound.source), permission_sources: bound.request.permission_sources }
               currentSources = await deps.requestGuard.currentSources(args.worker_id)
