@@ -4,7 +4,7 @@
 
 - 按用户确认的 [2026-10-15 spec §8](crabot-docs/superpowers/specs/2026-10-15-group-request-authorization-and-interruption-design.md) 修订：群任务 spawn/send/read/query/control 不再要求模型传 source_id，也不受唤醒类型或当前输入窗口限制；已绑定群执行器按台账自动解析，新群执行器 unbound，按当前群授权与主控归属执行。个人授权/私发保留，`execute_request` 改由宿主从本轮人类输入自动定位来源（单条直接绑定，多条需唯一 quote）；模型不再看到 source_id，个人/私发隔离与任务状态守卫不变。协议升至 v3.20.0。
 - 新增 worker-request-context、execute-request-input 及「空闲自省读取绑定群执行器」生产回归；受影响 manager 定向 475 项中 472 通过，其余为 main 已复现的 Memory 夹具失败及隔离单跑通过的时序项。整目录 manager 仍有 main 同样出现的 compaction/restart/媒体夹具失败，未标全绿。
-- 未部署、未打包。
+- PR: https://github.com/smilefufu/crabot/pull/250；未部署、未打包。
 
 ### Windows 跨开机遗留 IPC/pipe 登记（2026-11-13，现场本地修复，未发版）
 
