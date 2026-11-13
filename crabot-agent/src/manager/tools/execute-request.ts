@@ -25,7 +25,13 @@ export function buildExecuteRequestTool(execute: (input: ExecuteConversationRequ
         // Return a fixed status projection, never a nested model/tool body from another context.
         const receipt: ExecuteConversationRequestResult = { request_id: result.request_id, status: result.status, delivery: result.delivery, worker_ids: [...result.worker_ids] }
         return { output: prefix + '\n' + JSON.stringify(receipt), isError: result.status === 'recovery_required' }
-      } catch { return { output: prefix + '\n' + JSON.stringify({ error: 'REQUEST_EXECUTION_FAILED' }), isError: true } }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : ''
+        if (/^(REQUEST_SOURCE_|Invalid or ambiguous request selection|REQUEST_SCOPE_CONFLICT)/.test(message)) {
+          return { output: prefix + '\n' + JSON.stringify({ error: message }), isError: true }
+        }
+        return { output: prefix + '\n' + JSON.stringify({ error: 'REQUEST_EXECUTION_FAILED' }), isError: true }
+      }
     },
   }), roleAuthorization('manager'))
 }

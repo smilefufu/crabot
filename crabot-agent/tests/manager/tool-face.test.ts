@@ -176,6 +176,8 @@ describe('主体授权与角色能力分开执行', () => {
     expect(executeRequest).toHaveBeenCalledTimes(1)
     executeRequest.mockRejectedValueOnce(new Error('SECRET_FAILURE_BODY'))
     expect((await tool.call({ delivery: 'requester_private' })).output).not.toContain('SECRET_FAILURE_BODY')
+    executeRequest.mockRejectedValueOnce(new Error('REQUEST_SOURCE_AMBIGUOUS: 本轮有多条人类输入'))
+    expect((await tool.call({ delivery: 'origin' })).output).toContain('REQUEST_SOURCE_AMBIGUOUS')
     for (const requestAuthorization of [undefined, 'request'] as const) {
       expect(buildManagerToolFace(makeDeps({ requestAuthorization, executeRequest })).some(tool => tool.name === 'execute_request')).toBe(false)
     }

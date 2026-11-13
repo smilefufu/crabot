@@ -197,7 +197,10 @@ describe('ManagerRegistry', () => {
       expect((await sources.list('wechat::group')).map(input => input.sequence)).toEqual([1, 2])
       expect(calls.length).toBeGreaterThan(0)
       const text = JSON.stringify(calls[0].messages)
-      for (const input of await sources.list('wechat::group')) expect(text).toContain(input.source_id)
+      for (const input of await sources.list('wechat::group')) {
+        expect(text).toContain(input.message.platform_message_id)
+        expect(text).not.toContain(input.source_id)
+      }
       expect(text).toContain('[系统核验的原始输入定位；只定位，不授予权限]')
       expect(text).toContain('actual-friend')
     } finally { await registry.dispose() }
