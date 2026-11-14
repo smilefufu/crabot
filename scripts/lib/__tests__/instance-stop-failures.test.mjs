@@ -5,19 +5,20 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-async function fixture(t, { rpcFails = false, stale = false, denied = false, lateChild = false, execChanged = false } = {}) {
+async function fixture(t, { rpcFails = false, stale = false, denied = false, lateChild = false, execChanged = false, noChildList = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'crabot-stop-failure-'))
   t.after(() => rm(root, { recursive: true, force: true }))
   const controller = { pid: 101, parent: 1, owner: 'fixture', started: '1', executable: '/node' }
   const mm = { ...controller, pid: 102, parent: 101, started: '2' }
   const active = new Map(stale ? [] : [[101, controller], [102, mm]])
   const record = { generation: 'fixture', controller, mm, install_root: root, mm_port: 19000 }
-  let cleared = false
+  let cleared = false, fullScans = 0
   const signals = [], events = []
   const identity = {
     sameProcess: (expected, actual) => !!actual && expected.started === actual.started && expected.pid === actual.pid && expected.executable === actual.executable && expected.owner === actual.owner,
     inspectProcess: pid => pid === process.pid ? { ...controller, pid } : active.get(pid) ?? null,
-    listProcessIds: () => [...active.keys()],
+    listProcessIds: () => { fullScans++; return [...active.keys()] },
+    ...(noChildList ? {} : { listChildProcessIds: pid => [...active.values()].filter(item => item.parent === pid).map(item => item.pid) }),
     terminateKnownProcess: target => {
       signals.push(target.pid)
       if (denied) throw Object.assign(new Error('Access is denied (Win32 5)'), { code: 'CRABOT_PROCESS_SIGNAL' })
@@ -50,7 +51,7 @@ async function fixture(t, { rpcFails = false, stale = false, denied = false, lat
   await mkdir(join(root, 'module-runtime-registry/records'), { recursive: true })
   await writeFile(join(root, 'module-runtime-registry/instance-id'), 'fixture')
   await writeFile(join(root, 'module-runtime-registry/records/stale.json'), JSON.stringify({ instance_id: 'fixture', root_pid: 103, process_start_identity: 'old' }))
-  return { observe: () => hasRunningModuleProcesses(root), stop: () => stopInstance(root), signals, events, cleared: () => cleared, active, root }
+  return { observe: () => hasRunningModuleProcesses(root), stop: () => stopInstance(root), signals, events, cleared: () => cleared, active, root, fullScans: () => fullScans }
 }
 
 test('Windows RPC failure still reaches exact-generation termination and completes stop', async t => {
@@ -60,6 +61,14 @@ test('Windows RPC failure still reaches exact-generation termination and complet
   assert.deepEqual(f.signals, [102, 101])
   assert.equal(f.active.size, 0)
   assert.equal(f.cleared(), true)
+  assert.equal(f.fullScans(), 0)
+})
+
+test('an unavailable child list falls back to the full process observation', async t => {
+  const f = await fixture(t, { rpcFails: true, noChildList: true })
+  await f.stop()
+  assert.deepEqual(f.signals, [102, 101])
+  assert.ok(f.fullScans() > 0)
 })
 
 test('already-exited processes stop successfully despite retained module records', async t => {

@@ -10,6 +10,21 @@ test('shared module-start probe preserves the existing Core producer identity fo
   assert.equal(await probeProcessStartIdentity(2_147_483_647), null)
 })
 
+test('Windows FILETIME conversion reproduces the CIM microsecond identity text', async () => {
+  const { windowsStartIdentityFromFiletime } = await import('../module-process-start.cjs')
+  assert.equal(windowsStartIdentityFromFiletime(134391297733548722n), 'win32:2026-11-14T11:36:13.3548720Z')
+  assert.equal(windowsStartIdentityFromFiletime(134391243239790487n), 'win32:2026-11-14T10:05:23.9790480Z')
+})
+
+test('Windows start identity probe works without PowerShell in PATH', { skip: process.platform !== 'win32' }, async t => {
+  const { probeProcessStartIdentity } = await import('../module-process-start.cjs')
+  const previous = process.env.PATH
+  t.after(() => { if (previous === undefined) delete process.env.PATH; else process.env.PATH = previous })
+  process.env.PATH = ''
+  const identity = await probeProcessStartIdentity(process.pid)
+  assert.match(identity, /^win32:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}0Z$/)
+})
+
 
 test('Windows Core listener and process-tree observations work without PowerShell in PATH', { skip: process.platform !== 'win32', timeout: 30_000 }, async t => {
   const net = await import('node:net'), { once } = await import('node:events'), path = await import('node:path')

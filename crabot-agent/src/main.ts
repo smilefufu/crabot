@@ -83,6 +83,9 @@ async function main(): Promise<void> {
 
   // 创建 UnifiedAgent 实例
   const agent = new UnifiedAgent(config)
+  // The managed entry owns in-flight model/worker work; after the bounded stop
+  // it must exit rather than wait for network handles to drain.
+  agent.exitProcessOnStop = true
 
   // 处理退出信号
   process.on('SIGINT', () => {

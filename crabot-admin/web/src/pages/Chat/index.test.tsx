@@ -8,7 +8,7 @@ import React from 'react'
 import { MemoryRouter } from 'react-router-dom'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import { Chat } from './index'
+import { Chat, chatConnectionLabel } from './index'
 import type { ChatMessage, ChatServerMessage, ConnectionStatus } from '../../types/chat'
 import { ClientError } from 'crabot-client'
 import { setServerScope } from '../../services/server-state'
@@ -436,5 +436,17 @@ describe('聊天发送快捷键', () => {
     expect(sendMessage).not.toHaveBeenCalled()
     fireEvent.keyDown(input, { key: 'Enter', metaKey: modified })
     expect(sendMessage).toHaveBeenCalledOnce()
+  })
+})
+
+describe('桌面启动连接提示', () => {
+  it('首次连接失败且在宽限期内显示服务启动中，不显示红色错误', () => {
+    expect(chatConnectionLabel('error', 'syncing', true, false, false)).toEqual({ color: '#f59e0b', text: '服务启动中…' })
+  })
+
+  it('宽限期结束、已连接过或非桌面模式恢复真实错误', () => {
+    expect(chatConnectionLabel('error', 'syncing', true, false, true).text).toBe('连接错误')
+    expect(chatConnectionLabel('error', 'syncing', true, true, false).text).toBe('连接错误')
+    expect(chatConnectionLabel('error', 'syncing', false, false, false).text).toBe('连接错误')
   })
 })

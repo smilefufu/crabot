@@ -77,25 +77,27 @@ async function stopKnownProcessScope(initial, { timeoutMs, onObserved, graceful,
     await delay(Math.min(25, Math.max(1, gracefulEnd - Date.now())))
   }
   const forceEnd = Math.min(observationEnd, Date.now() + 5000)
-  let signalFailure
+  const signalFailures = new Map(), retrying = new Set()
   for (;;) {
     const active = await observe()
     if (!active.length) return snapshot()
     if (Date.now() >= forceEnd) {
-      if (signalFailure) throw signalFailure.error
+      const failure = active.map(item => signalFailures.get(key(item))).find(Boolean)
+      if (failure) throw failure
       fail()
     }
-    if (signalFailure && active.some(item => key(item) === signalFailure.key)) {
-      await delay(25)
-      continue
-    }
-    signalFailure = undefined
-    const candidate = active.find(item => !signalled.has(key(item)) && !active.some(parent => parent.pid === item.parent))
-      ?? active.find(item => !signalled.has(key(item)))
-    if (candidate) {
-      signalled.add(key(candidate))
+    // The force window is the last resort: submit every newly observed target
+    // in one pass instead of one leaf per poll, which used to exhaust the
+    // window on larger trees. Failed submissions are retried while their
+    // generation remains active; a generation still active and unsignalled
+    // when the window ends reports the native failure.
+    for (const candidate of active) {
+      const candidateKey = key(candidate)
+      if (signalled.has(candidateKey) && !retrying.has(candidateKey)) continue
+      signalled.add(candidateKey)
+      retrying.delete(candidateKey)
       try { api.terminateKnownProcess(candidate) }
-      catch (error) { signalFailure = { key: key(candidate), error } }
+      catch (error) { signalFailures.set(candidateKey, error); retrying.add(candidateKey) }
     }
     await delay(25)
   }

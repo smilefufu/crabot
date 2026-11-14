@@ -557,6 +557,8 @@ export abstract class ModuleBase {
   private server: NetServer | null = null
   private isShuttingDown = false
   private stopPromise: Promise<void> | null = null
+  /** Managed entries that own in-flight work opt in; a completed stop then exits instead of waiting for stray handles. */
+  exitProcessOnStop = false
 
   constructor(config: ModuleConfig) {
     this.config = config
@@ -658,6 +660,11 @@ export abstract class ModuleBase {
         this.server!.close(() => resolve())
       })
     }
+    if (this.exitProcessOnStop) this.exitAfterStop()
+  }
+
+  protected exitAfterStop(): void {
+    process.exit(0)
   }
 
   /** Platform business only; the Cordis host owns transport, identity and shutdown. */

@@ -53,6 +53,26 @@ describe('UnifiedAgent runtime config invalidation', () => {
     expect(agent.configStale).toBe(false)
   })
 
+  it('bounds shutdown when an in-flight manager run never settles', async () => {
+    const agent = boot(config()) as any
+    agent.shutdownBudgetMs = 80
+    vi.spyOn(agent.scheduleScriptRunner, 'stop').mockResolvedValue(undefined)
+    const dispose = vi.spyOn(agent.managerStack, 'dispose').mockImplementation(() => new Promise<void>(() => {}))
+    vi.spyOn(agent.mcpConnector, 'disconnectAll').mockResolvedValue(undefined)
+    vi.spyOn(agent.computerUseOwner, 'close').mockResolvedValue(undefined)
+    vi.spyOn(agent.lspManager, 'stop').mockResolvedValue(undefined)
+    const flushCheckpoints = vi.fn()
+    agent.agentHandler = { flushActiveCheckpoints: flushCheckpoints }
+    const flush = vi.spyOn(agent.traceStore, 'flushRunningTraces')
+    const started = Date.now()
+    await agent.onStop()
+    expect(Date.now() - started).toBeLessThan(1_000)
+    expect(dispose).toHaveBeenCalledTimes(1)
+    expect(flushCheckpoints).toHaveBeenCalledTimes(1)
+    expect(flush).toHaveBeenCalledTimes(1)
+    dispose.mockRestore()
+  })
+
   it('does not start MCP connections during onStart', async () => {
     const cfg = config()
     cfg.agent_config!.mcp_servers = [{ name: 'slow', transport: 'stdio', command: 'echo' }]

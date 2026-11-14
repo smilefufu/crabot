@@ -37,6 +37,7 @@ const loadCore = (file: string) => import(pathToFileURL(path.join(coreRoot, file
 let window: BrowserWindow | undefined, tray: Tray | undefined, controller: DesktopController | undefined
 let dataRoot = path.join(homedir(), '.crabot/data'), initialError: unknown, quitting = false
 let pendingQuit: Promise<boolean> | undefined
+let backgroundStop: Promise<void> | undefined
 let artifacts: ArtifactWindows | undefined
 let updates: UpdateDialog | undefined
 let updateRequested = process.argv.includes('--check-updates')
@@ -86,6 +87,10 @@ async function bootUninstall() {
 async function quit(): Promise<boolean> {
   if (preparingData) return false
   if (pendingUninstall) return false
+  if (backgroundStop) {
+    void dialog.showMessageBox({ type: 'info', title: 'CRABOT', message: '有实例正在退出，请稍后再启动。', buttons: ['知道了'] })
+    return false
+  }
   if (pendingQuit) return pendingQuit
   pendingQuit = (async () => {
     const state = controller?.host.snapshot()
@@ -93,13 +98,31 @@ async function quit(): Promise<boolean> {
       const answer = await dialog.showMessageBox({ type: 'question', title: '退出 CRABOT', message: '退出将停止共享的 CRABOT 服务。',
         detail: '正在进行的任务和其他客户端连接会受影响。关闭窗口可以继续后台运行。', buttons: ['取消', '停止服务并退出'], defaultId: 0, cancelId: 0 })
       if (answer.response !== 1) return false
-      const stopped = await controller!.stop()
-      if (stopped.phase !== 'stopped') {
-        await dialog.showMessageBox({ type: 'error', message: '停止服务失败。', detail: `${'message' in stopped && stopped.message || '请查看基础诊断。'}${'code' in stopped && stopped.code ? `\n错误码：${stopped.code}` : ''}` })
-        return false
-      }
     }
-    quitting = true; app.quit(); return true
+    // Hide the app immediately; the verified stop keeps running in this
+    // process (single-instance ownership is retained until it exits).
+    window?.hide()
+    tray?.destroy(); tray = undefined
+    app.dock?.hide()
+    const needsStop = state !== undefined && state.phase !== 'stopped' && state.phase !== 'migration_required'
+    backgroundStop = (async () => {
+      try {
+        const stopped = needsStop ? await controller!.stop() : { phase: 'stopped' as const }
+        if (stopped.phase !== 'stopped') {
+          const value = stopped as { message?: string; code?: string }
+          console.error(JSON.stringify({ component: 'desktop-quit', phase: 'stop-incomplete', code: value.code ?? 'DESKTOP_UNAVAILABLE' }))
+          bootstrapStage('quit-stop-incomplete', { code: value.code, detail: value.message?.slice(0, 512) })
+        }
+      } catch (error) {
+        // A failed stop must not strand a headless process; leftovers are the
+        // next start's preflight problem (spec D5.2).
+        console.error(JSON.stringify({ component: 'desktop-quit', phase: 'stop-failed', code: 'DESKTOP_STOP_FAILED' }))
+        bootstrapStage('quit-stop-failed', { code: 'DESKTOP_STOP_FAILED', detail: error instanceof Error ? error.message.slice(0, 512) : String(error).slice(0, 512) })
+      } finally {
+        quitting = true; app.quit()
+      }
+    })().finally(() => { backgroundStop = undefined })
+    return true
   })().finally(() => { pendingQuit = undefined })
   return pendingQuit
 }
@@ -136,6 +159,11 @@ function claimInstance() {
     if (process.platform === 'win32' && args.includes('--uninstall')) {
       uninstallRequested = true; if (requestUninstall) void requestUninstall(); return
     }
+    if (backgroundStop) {
+      void dialog.showMessageBox({ type: 'info', title: 'CRABOT', message: '有实例正在退出，请稍后再启动。', buttons: ['知道了'] })
+      return
+    }
+    if (quitting) return
     show()
     if (args.includes('--check-updates')) { updateRequested = true; if (updates) void updates.open() }
   })
@@ -556,6 +584,7 @@ app.on('before-quit', event => {
   if (quitting) return
   event.preventDefault()
   if (pendingUninstall) return
+  if (backgroundStop) return
   if (cancelRemovalHost) cancelRemovalHost()
   else void quit()
 })
