@@ -1,5 +1,12 @@
 # Crabot 项目进度
 
+### 退出/启动体验：Agent 快速收口、强制终止可靠性与启动提示（2026-11-14，PR 待 review）
+
+- 按用户逐项确认的 [spec](crabot-docs/superpowers/specs/2026-11-14-shutdown-startup-ux-design.md) 实现。实测 40–55 秒停机拆为：停机前进程核验约 22 秒（每条记录一次 PowerShell 查创建时间 + 全量 561 进程扫描）、Agent `onStop` 等在执行 Manager 回合约 29 秒、slack 约 13–14 秒；上次正常退出因回合超 30 秒进入强制阶段，5 秒窗口内每 25 ms 只杀一个叶节点未完成，抛 `CRABOT_PROCESS_SCOPE_STOP` 并保留 runtime 记录。
+- D1：Agent `onStop` 固定 3 秒预算（scheduleScriptRunner ≤1s、`managerStack.dispose` ≤2.5s，MCP/LSP 并行收尾），`Main` 入口启用 `exitProcessOnStop` 显式退出；D2：强制阶段一次提交整棵已观测树并重试失败项，窗口结束仍活跃才报错；D3：Windows 启动身份改原生 FILETIME，文本与 CIM 微秒精度逐字节一致；D4：`collectOwned` 沿原生子进程列表从已核验根枚举，不可用回退全量扫描；D5：桌面退出确认后立即隐藏窗口/托盘，`controller.stop()` 后台完成后 `app.quit()`，二次启动遇后台停机提示“有实例正在退出”；D6：桌面 Chat 首次连接失败且打开不足 15 秒显示“服务启动中…”。
+- 验证：scripts 26 项、Agent 停机预算回归、Chat 29 项通过；agent/shared/desktop/web 严格类型检查通过。未做真实 GUI 冷启动验收，未部署、未打包。
+- PR: https://github.com/smilefufu/crabot/pull/253（设计型，@claude review；不自行合并）。
+
 ### Agent 启动关键路径：trace 索引后台化与 MCP 异步连接（2026-11-14，已合并，本机 .29-local 已安装）
 
 - 按用户逐项确认的 [spec](crabot-docs/superpowers/specs/2026-11-14-agent-startup-critical-path-design.md)：`register()` 前不再解析约 1 GB 历史 trace 归档，也不再等待 MCP 握手／`listTools`。历史索引在注册后流式、分块构建；历史 reader 通过 `whenIndexed()` 等待完整结果，聊天、健康检查与当前轮执行不等待。真实数据离线测量：构造函数 20 ms，后台索引约 12.4 s（13 文件、6,212 行、2,148 episodes）。
