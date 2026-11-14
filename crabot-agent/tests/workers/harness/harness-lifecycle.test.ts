@@ -784,7 +784,7 @@ describe('WorkerHarness.spawnWorker', () => {
     const provider = new DailyReflectionEvidence({
       managersDir: join(dataDir, 'managers'), store: new ManagerSessionStore(join(dataDir, 'managers')),
       ledger, harness, turns: new WorkerTurnStore(workersDir),
-      traces: { listTraceManagerKeys: () => [], readManagerEpisodes: async function* () {}, readManagerEpisode: async () => undefined },
+      traces: { listTraceManagerKeys: () => [], readManagerEpisodes: async function* () {}, readManagerEpisode: async () => undefined, whenIndexed: async () => {} },
       captureWorkerTrace, readWorkerTrace: async () => ({ events: [] }), redact: text => text,
     })
     const reflection = { window_start: '2026-01-01T00:00:00.000Z', window_end: '2026-01-02T00:00:00.000Z',

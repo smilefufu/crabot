@@ -23,7 +23,7 @@ export interface ReflectionEvidenceDeps {
   canReadWorker?: (workerId: string) => Promise<boolean>
   harness: WorkerHarness
   turns: WorkerTurnStore
-  traces: Pick<TraceStore, 'listTraceManagerKeys' | 'readManagerEpisodes' | 'readManagerEpisode'>
+  traces: Pick<TraceStore, 'listTraceManagerKeys' | 'readManagerEpisodes' | 'readManagerEpisode' | 'whenIndexed'>
   captureWorkerTrace: (workerId: string, seq: number) => Promise<{ source: ReflectionWorkerTrace; result: Pick<CompositeTraceResult, 'events' | 'unavailable_reason'> }>
   readWorkerTrace: (workerId: string, source: ReflectionWorkerTrace) => Promise<Pick<CompositeTraceResult, 'events' | 'unavailable_reason'>>
   redact: (text: string) => string
@@ -136,6 +136,7 @@ export class DailyReflectionEvidence {
     const records: ReflectionRecord[] = []
     const gaps: string[] = []
     const reflectionEpisodes = new Set(state.episode_ids)
+    await this.deps.traces.whenIndexed()
     const keys = new Set([...await this.deps.store.listManagerKeys(), ...this.deps.traces.listTraceManagerKeys()])
     try {
       for (const entry of await fs.readdir(this.deps.managersDir, { withFileTypes: true })) {

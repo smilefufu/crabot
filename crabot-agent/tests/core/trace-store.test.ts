@@ -366,6 +366,139 @@ describe('TraceStore index', () => {
     }
   })
 
+  it('defers historical archive indexing until the background build', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trace-test-'))
+    try {
+      const trace = {
+        trace_id: 'trace-deferred',
+        related_task_id: 'task-deferred',
+        module_id: 'agent-1',
+        started_at: '2026-04-13T10:00:00.000Z',
+        ended_at: '2026-04-13T10:01:00.000Z',
+        duration_ms: 60000,
+        status: 'completed',
+        trigger: { type: 'task', summary: 'deferred archive' },
+        outcome: { summary: 'done' },
+        spans: [],
+      }
+      fs.writeFileSync(path.join(dir, 'traces-v3-2026-04-13.jsonl'), JSON.stringify(trace) + '\n')
+
+      const store = new TraceStore(10, dir, 'traces-running.jsonl', 'traces-v3-', ['traces-', 'traces-v3-'], false, true)
+      expect(store.searchTraces({ task_id: 'task-deferred' }).total).toBe(0)
+
+      const full = await store.getFullTrace('trace-deferred')
+      expect(full?.trace_id).toBe('trace-deferred')
+      expect(store.searchTraces({ task_id: 'task-deferred' }).traces).toHaveLength(1)
+      await expect(store.whenIndexed()).resolves.toBeUndefined()
+    } finally {
+      fs.rmSync(dir, { recursive: true })
+    }
+  })
+
+  it('keeps a deferred running snapshot until the archive index decides it is interrupted', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trace-test-'))
+    try {
+      const store = new TraceStore(10, dir)
+      const trace = store.startTrace({
+        module_id: 'agent-1',
+        trigger: { type: 'task', summary: 'crashed task' },
+        related_task_id: 'task-crashed',
+      })
+      ;(store as unknown as { flushInFlightTraces: () => void }).flushInFlightTraces()
+
+      const restarted = new TraceStore(10, dir, 'traces-running.jsonl', 'traces-v3-', ['traces-', 'traces-v3-'], false, true)
+      expect(restarted.searchTraces({ task_id: 'task-crashed' }).traces[0]?.status).toBe('running')
+      await restarted.whenIndexed()
+      const result = restarted.searchTraces({ task_id: 'task-crashed' })
+      expect(result.traces).toHaveLength(1)
+      expect(result.traces[0].status).toBe('failed')
+      expect(result.traces[0].outcome_summary).toContain('interrupted')
+      expect(restarted.getTrace(trace.trace_id)?.status).toBe('failed')
+    } finally {
+      fs.rmSync(dir, { recursive: true })
+    }
+  })
+
+  it('reconciles an untouched deferred builtin snapshot after the index finishes', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trace-test-'))
+    try {
+      const store = new TraceStore(10, dir)
+      const trace = store.startTrace({
+        module_id: 'agent-1',
+        trigger: { type: 'task', summary: 'crashed builtin' },
+      })
+      ;(store as unknown as { flushInFlightTraces: () => void }).flushInFlightTraces()
+
+      const restarted = new TraceStore(10, dir, 'traces-running.jsonl', 'traces-v3-', ['traces-', 'traces-v3-'], true, true)
+      await restarted.whenIndexed()
+      expect(restarted.getTrace(trace.trace_id)?.status).toBe('failed')
+      expect(restarted.getTrace(trace.trace_id)?.outcome?.summary).toContain('interrupted')
+    } finally {
+      fs.rmSync(dir, { recursive: true })
+    }
+  })
+
+  it('lets a terminal archive replace an interrupted manager snapshot after indexing', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trace-test-'))
+    try {
+      const store = new TraceStore(10, dir)
+      store.startManagerEpisode('ep-archived', 'chat::one' as never, { type: 'human_message', summary: 'episode' })
+      ;(store as unknown as { flushInFlightTraces: () => void }).flushInFlightTraces()
+      store.finishManagerEpisode('ep-archived', { status: 'completed' })
+
+      const restarted = new TraceStore(10, dir, 'traces-running.jsonl', 'traces-v3-', ['traces-', 'traces-v3-'], false, true)
+      expect(restarted.getManagerEpisode('ep-archived')?.status).toBe('running')
+      expect(fs.readFileSync(path.join(dir, 'traces-running.jsonl'), 'utf-8')).toContain('ep-archived')
+      await restarted.whenIndexed()
+      expect(restarted.getManagerEpisode('ep-archived')?.status).toBe('completed')
+      restarted.reconcileInterruptedManagerEpisodes()
+      expect(restarted.getManagerEpisode('ep-archived')?.status).toBe('completed')
+    } finally {
+      fs.rmSync(dir, { recursive: true })
+    }
+  })
+
+  it('does not reconcile a manager episode opened after the startup snapshot', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trace-test-'))
+    try {
+      const store = new TraceStore(10, dir, 'traces-running.jsonl', 'traces-v3-', ['traces-', 'traces-v3-'], false, true)
+      const startupIds = new Set(store.activeManagerEpisodeIds())
+      expect(startupIds.size).toBe(0)
+
+      // register 后、索引完成前新开的 episode。
+      store.startManagerEpisode('ep-new', 'chat::one' as never, { type: 'human_message', summary: 'new episode' })
+      await store.whenIndexed()
+      store.reconcileInterruptedManagerEpisodes(new Set(), startupIds)
+
+      expect(store.getManagerEpisode('ep-new')?.status).toBe('running')
+      store.finishManagerEpisode('ep-new', { status: 'completed' })
+      expect(store.getManagerEpisode('ep-new')?.status).toBe('completed')
+    } finally {
+      fs.rmSync(dir, { recursive: true })
+    }
+  })
+
+  it('reconciles an archive-only running episode loaded by the index', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trace-test-'))
+    try {
+      // 只在归档留下 start 行，不写 running 文件：模拟 episode 开始后、首次 flush 前崩溃。
+      const seed = new TraceStore(10, dir)
+      seed.startManagerEpisode('ep-archive-only', 'chat::one' as never, { type: 'human_message', summary: 'crashed before flush' })
+
+      const restarted = new TraceStore(10, dir, 'traces-running.jsonl', 'traces-v3-', ['traces-', 'traces-v3-'], false, true)
+      const startupIds = new Set(restarted.activeManagerEpisodeIds())
+      expect(startupIds.size).toBe(0)
+      await restarted.whenIndexed()
+
+      const candidates = new Set([...startupIds, ...restarted.archivedRunningManagerEpisodeIds()])
+      expect(candidates.has('ep-archive-only')).toBe(true)
+      restarted.reconcileInterruptedManagerEpisodes(new Set(), candidates)
+      expect(restarted.getManagerEpisode('ep-archive-only')?.status).toBe('failed')
+    } finally {
+      fs.rmSync(dir, { recursive: true })
+    }
+  })
+
   it('searches by keyword in trigger_summary and outcome_summary', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trace-test-'))
     try {

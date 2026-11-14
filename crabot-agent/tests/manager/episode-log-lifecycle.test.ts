@@ -20,7 +20,7 @@ beforeEach(async () => {
   store = new ManagerSessionStore(root); traces = new Map()
   deps = { managersDir: root, store, ledger: { listAllWorkers: async () => [] },
     traces: { listTraceManagerKeys: () => [key], readManagerEpisode: async id => traces.get(id),
-      readManagerEpisodes: async function* () { yield* traces.values() } }, redact: value => value,
+      readManagerEpisodes: async function* () { yield* traces.values() }, whenIndexed: async () => {} }, redact: value => value,
   } as ReflectionEvidenceDeps
   provider = new DailyReflectionEvidence(deps)
 })

@@ -250,6 +250,7 @@ export function createGetTaskProgressTool(deps: GetTaskProgressToolDeps): ToolDe
       }
 
       // 2. 拉本地 trace 树，加载完整 trace（getFullTrace 走 ring buffer + 文件按需读）
+      await deps.traceStore.whenIndexed()
       const tree = deps.traceStore.getTraceTree(task_id)
       const traceIds = [
         ...tree.tree.fronts.map(t => t.trace_id),

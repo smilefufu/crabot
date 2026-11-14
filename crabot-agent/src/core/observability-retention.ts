@@ -176,7 +176,10 @@ export class ObservabilityRetention {
       }
       if (this.closing) return
       this.lastResult.removed_episodes += await this.deps.sessions.cleanupEpisodeLogs(cutoff, this.deps.traces.activeManagerEpisodeIds())
-      if (!this.closing) this.deps.traces.cleanupOldTraces(days, false)
+      if (!this.closing) {
+        await this.deps.traces.whenIndexed()
+        if (!this.closing) this.deps.traces.cleanupOldTraces(days, false)
+      }
     } catch (error) { recordError(error) }
   }
 }

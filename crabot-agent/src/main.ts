@@ -98,9 +98,12 @@ async function main(): Promise<void> {
   try {
     await agent.start()
     await agent.register(ConfigLoader.getRuntimeBearer())
-    // 启动对账放在 register 之后发：它的 fs 扫描 + tmux 子进程会占满 libuv 默认 4 线程池，
-    // 而 register 的 getaddrinfo 排在同一个池上——并发跑会把注册拖慢。仍然不 await。
+    // 以下后台工作都放在 register 之后发，且不 await：它们的 fs/子进程/归档解析
+    // 会占用 libuv 线程池并推迟 register 的 getaddrinfo，从而放大 Admin cutover 前
+    // 的 503 窗口。MCP 与历史 trace 索引都不是 Agent 注册或对话的前置条件。
     agent.startManagerStackReconciliation()
+    agent.startMcpConnections()
+    agent.startTraceIndexBackground()
     console.log('Unified Agent module started successfully')
     console.log(`- Module ID: ${config.module_id}`)
     console.log(`- Port: ${config.port}`)

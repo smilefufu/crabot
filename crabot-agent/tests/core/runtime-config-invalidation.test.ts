@@ -53,6 +53,44 @@ describe('UnifiedAgent runtime config invalidation', () => {
     expect(agent.configStale).toBe(false)
   })
 
+  it('does not start MCP connections during onStart', async () => {
+    const cfg = config()
+    cfg.agent_config!.mcp_servers = [{ name: 'slow', transport: 'stdio', command: 'echo' }]
+    const agent = boot(cfg) as any
+    agent.importLegacyV2Tasks = vi.fn().mockResolvedValue(undefined)
+    agent.managerStack.principals.init = vi.fn().mockResolvedValue(undefined)
+    agent.startEventLoopWatchdog = vi.fn()
+    agent.traceStore.startFlushTimer = vi.fn()
+    agent.detectFeishuChannel = vi.fn().mockResolvedValue(undefined)
+    agent.sessionManager.startCleanup = vi.fn()
+    const prepare = vi.spyOn(McpConnector, 'prepare')
+
+    await agent.onStart()
+
+    expect(prepare).not.toHaveBeenCalled()
+    expect(agent.mcpConnector.count).toBe(0)
+  })
+
+  it('discards a startup MCP candidate when config advances before it is adopted', async () => {
+    const cfg = config()
+    cfg.agent_config!.mcp_servers = [{ name: 'slow', transport: 'stdio', command: 'echo' }]
+    const agent = boot(cfg) as any
+    vi.spyOn(agent.computerUseOwner, 'prepare').mockResolvedValue(cfg.agent_config!.mcp_servers)
+    let release!: (candidate: any) => void
+    const prepare = vi.spyOn(McpConnector, 'prepare').mockImplementation(() =>
+      new Promise<any>(resolve => { release = resolve }))
+    const candidate = { disconnectAll: vi.fn().mockResolvedValue(undefined) }
+    const replaceWith = vi.spyOn(agent.mcpConnector, 'replaceWith').mockResolvedValue(undefined)
+
+    agent.startMcpConnections()
+    await vi.waitFor(() => expect(prepare).toHaveBeenCalledTimes(1))
+    agent.mcpConfigGeneration += 1
+    release(candidate)
+
+    await vi.waitFor(() => expect(candidate.disconnectAll).toHaveBeenCalledTimes(1))
+    expect(replaceWith).not.toHaveBeenCalled()
+  })
+
   it('clears stale after a successful equal-revision authenticated pull without reapplying config', async () => {
     const agent = boot(config()) as any
     agent.adminPort = 19998

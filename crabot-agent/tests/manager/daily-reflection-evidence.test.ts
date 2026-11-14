@@ -42,6 +42,7 @@ async function fixture() {
       listTraceManagerKeys: () => [...new Set([...traces.values()].map(trace => trace.manager_key))],
       readManagerEpisode: async id => traces.get(id),
       readManagerEpisodes: async function* () { yield* traces.values() },
+      whenIndexed: async () => {},
     },
     captureWorkerTrace: vi.fn(async () => ({ source: { seq: 1, incarnation_fingerprint: 'fingerprint', upper_bound: { native: 0, harness: 0, legacy: 0 } }, result: { events: [], next_cursor: 'next' } })),
     readWorkerTrace: vi.fn(async () => ({ events: [], next_cursor: 'next' })),
