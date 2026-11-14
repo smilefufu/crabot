@@ -1,12 +1,13 @@
 # Crabot 项目进度
 
-### Agent 启动关键路径：trace 索引后台化与 MCP 异步连接（2026-11-14，未部署，PR 待 review）
+### Agent 启动关键路径：trace 索引后台化与 MCP 异步连接（2026-11-14，已合并，未部署）
 
 - 按用户逐项确认的 [spec](crabot-docs/superpowers/specs/2026-11-14-agent-startup-critical-path-design.md)：`register()` 前不再解析约 1 GB 历史 trace 归档，也不再等待 MCP 握手／`listTools`。历史索引在注册后流式、分块构建；历史 reader 通过 `whenIndexed()` 等待完整结果，聊天、健康检查与当前轮执行不等待。真实数据离线测量：构造函数 20 ms，后台索引约 12.4 s（13 文件、6,212 行、2,148 episodes）。
 - MCP 改为注册后后台连接：独立候选 connector 成功且配置代际未变才原子接管；配置更新淘汰旧候选，失败只降级 MCP，不改变 Agent healthy 判据。关闭不额外等待，迟到候选自行丢弃并关闭。
 - Manager checkpoint 增加内部可选 `finished` 终态标记，在 trace finish 前落盘；启动按标记裁决，不再依赖 trace 索引；compaction failure 不标记。索引未就绪时暂缓写 interrupted，避免后台索引把当前日期归档的 interrupted 覆盖真正终态；running 文件保留到索引完成后再收口。
 - review 真实风险修复：onStart 先快照构造阶段 running episode，索引完成后的补收口只遍历“快照 ∪ 索引从归档新载入的 running episode”，注册后新开的 episode 不误标、仅存在于归档、首次 flush 前崩溃的遗留 episode 也不会永久卡 running；补两项回归。同时纳入等价简化整理。
 - 验证：Agent TypeScript 构建通过；trace-store 58、session-store 15、restart-resume 36、episode-log-lifecycle 17、observability-retention、mcp-connector 及 runtime-config 16/17 通过。`runtime-config-invalidation` 的 degraded startup 与 daily-reflection-evidence 的临时 I/O 冻结断言在未修改的干净 main 复现，属既有失败。未在真实 GUI 冷启动复验，未部署、未打包。
+- PR: https://github.com/smilefufu/crabot/pull/252（@claude approve 后自动合并）。
 
 ### 运行记录首屏查询性能（2026-11-14，源码修复，未部署／发包）
 
