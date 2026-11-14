@@ -1,6 +1,6 @@
 # Crabot 项目进度
 
-### Agent 启动关键路径：trace 索引后台化与 MCP 异步连接（2026-11-14，已合并，未部署）
+### Agent 启动关键路径：trace 索引后台化与 MCP 异步连接（2026-11-14，已合并，本机 .29-local 已安装）
 
 - 按用户逐项确认的 [spec](crabot-docs/superpowers/specs/2026-11-14-agent-startup-critical-path-design.md)：`register()` 前不再解析约 1 GB 历史 trace 归档，也不再等待 MCP 握手／`listTools`。历史索引在注册后流式、分块构建；历史 reader 通过 `whenIndexed()` 等待完整结果，聊天、健康检查与当前轮执行不等待。真实数据离线测量：构造函数 20 ms，后台索引约 12.4 s（13 文件、6,212 行、2,148 episodes）。
 - MCP 改为注册后后台连接：独立候选 connector 成功且配置代际未变才原子接管；配置更新淘汰旧候选，失败只降级 MCP，不改变 Agent healthy 判据。关闭不额外等待，迟到候选自行丢弃并关闭。
@@ -8,6 +8,7 @@
 - review 真实风险修复：onStart 先快照构造阶段 running episode，索引完成后的补收口只遍历“快照 ∪ 索引从归档新载入的 running episode”，注册后新开的 episode 不误标、仅存在于归档、首次 flush 前崩溃的遗留 episode 也不会永久卡 running；补两项回归。同时纳入等价简化整理。
 - 验证：Agent TypeScript 构建通过；trace-store 58、session-store 15、restart-resume 36、episode-log-lifecycle 17、observability-retention、mcp-connector 及 runtime-config 16/17 通过。`runtime-config-invalidation` 的 degraded startup 与 daily-reflection-evidence 的临时 I/O 冻结断言在未修改的干净 main 复现，属既有失败。未在真实 GUI 冷启动复验，未部署、未打包。
 - PR: https://github.com/smilefufu/crabot/pull/252（@claude approve 后自动合并）。
+- 本机 `.29-local` 安装后首次启动失败：升级前旧实例停止留下 `crabot-agent` runtime 记录（PID 111620 已退出），同次开机 orphan preflight 保守拒绝。核对无 agent/node 进程、无 Crabot pipe、MM/HTTP 未监听后，备份并移除该记录；重新启动成功，四模块 healthy，GUI 已恢复。备份在 `/tmp/crabot-runtime-record-8223a8f3.json`。实测 admin 注册后约 8 秒 agent 注册完成；服务由 CLI 启动，尚未复验 GUI 自行启动路径。
 
 ### 运行记录首屏查询性能（2026-11-14，源码修复，未部署／发包）
 
