@@ -5347,9 +5347,10 @@ export class WorkerHarness {
   /** Replay durable wake obligations and establish a no-notification baseline for unobserved live sessions. */
   async reconcileNativeActivityOnStartup(): Promise<void> {
     const all = await this.deps.ledger.listAllWorkers()
-    for (const { worker } of all) {
+    const { targets } = await this.startupReconcileTargets(all)
+    for (const { worker } of targets) {
       for (const incarnation of worker.incarnations) {
-        if (isTerminalStatus(worker.task.status) || !isExecutableIncarnation(incarnation) || incarnation.state === 'exited') continue
+        if (!isExecutableIncarnation(incarnation) || incarnation.state === 'exited') continue
         try {
           await this.collectNativeActivity({
             worker_id: worker.worker_id,
@@ -5583,6 +5584,40 @@ export class WorkerHarness {
   }
 
   /**
+   * 启动恢复目标。idle/halted builtin 在没有 pending 责任时不探测、不 rehydrate：
+   * 它们没有可恢复的执行载体，逐个 state()/rehydrate 只会放大冷启动成本。
+   * 非 builtin 的 tmux/CLI 化身仍按契约探活；pending 责任由各自 store 定点识别。
+   */
+  private async startupReconcileTargets(all: ReadonlyArray<{ managerKey: ManagerKey; worker: LedgerWorker }>): Promise<{
+    targets: Array<{ managerKey: ManagerKey; worker: LedgerWorker }>
+    skipped: string[]
+  }> {
+    const pending = new Set<string>([
+      ...(await this.inputDeliveryStore.listPendingDeliveries()).map(receipt => receipt.worker_id),
+      ...(await this.queryReceiptStore.listInFlight()).map(receipt => receipt.worker_id),
+    ])
+    const targets: Array<{ managerKey: ManagerKey; worker: LedgerWorker }> = [], skipped: string[] = []
+    for (const entry of all) {
+      if (isTerminalStatus(entry.worker.task.status)) continue
+      if (this.isStartupReconcileTarget(entry.worker, pending)) { targets.push(entry); continue }
+      const controls = await this.controlOperationStore.active(entry.worker.worker_id)
+      const native = await this.nativeActivityStore.pending(entry.worker.worker_id)
+      if (controls.length || native.length) targets.push(entry)
+      else skipped.push(entry.worker.worker_id)
+    }
+    return { targets, skipped }
+  }
+
+  private isStartupReconcileTarget(worker: LedgerWorker, pending: ReadonlySet<string>): boolean {
+    if (worker.task.status === 'running') return true
+    const mainline = worker.incarnations.filter(incarnation => incarnation.forked_from === undefined).at(-1)
+    if (mainline?.state === 'running') return true
+    if (mainline && mainline.impl !== 'builtin') return true
+    if (worker.recovery_notices?.some(notice => notice.status === 'pending')) return true
+    return pending.has(worker.worker_id)
+  }
+
+  /**
    * 崩溃恢复对账(protocol-agent-v3 §12,替代 admin 的一刀切自愈)。agent 进程重启后调用
    * 一次:巡检台账里所有非终态 worker 的主线化身,凭 adapter.state() 判定它到底是"进程
    * 没了、化身也没了"(判死)还是"化身独立于 agent 进程,可能还活着"(如 tmux worker),
@@ -5619,18 +5654,21 @@ export class WorkerHarness {
    *   "台账化身已标 exited 而探测判活"的内部矛盾并发 state_changed
    *   (detail.source='reconcile',与被动回调路径区分);归 revived。
    */
+
   async reconcileOnStartup(): Promise<ReconcileReport> {
     const revived: string[] = []
     const failed: string[] = []
     const unchanged: string[] = []
 
     const all = await this.deps.ledger.listAllWorkers()
-    const targets = all.filter(({ worker }) => !isTerminalStatus(worker.task.status))
+    const { targets, skipped } = await this.startupReconcileTargets(all)
+    if (skipped.length) console.log(`[WorkerHarness] startup reconcile targets=${targets.length} skipped=${skipped.length} (idle/halted builtin without pending responsibility)`)
     // 报告的 unchanged 桶按 brief 定义包含"终态"(不只是"无需动作但仍被判定过的非终态
     // worker")——已终态的 worker 在这里直接归档,不进 Promise.allSettled 那批,不占用
     // per-worker 锁、不调用 adapter.state()(即使重复调用 reconcileOnStartup,已判死过的
     // worker 从第二次起也是在这一步就被截住,不会再走到 reconcileOneWorker)。
     unchanged.push(...all.filter(({ worker }) => isTerminalStatus(worker.task.status)).map(({ worker }) => worker.worker_id))
+    unchanged.push(...skipped)
 
     const settled: Array<PromiseSettledResult<'revived' | 'failed' | 'unchanged'>> = []
     for (let start = 0; start < targets.length; start += WORKER_SWEEP_CONCURRENCY) {
