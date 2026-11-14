@@ -30,6 +30,11 @@ export interface ManagerResumeCheckpoint {
   readonly adminChatClaims: ReadonlyArray<readonly [string, 'unclaimed' | 'claimed']>
   readonly transientMessageIds: ReadonlyArray<string>
   readonly spawnedWorkerIds: ReadonlyArray<string>
+  /**
+   * 终态标记：episode 已正常收尾，但因崩溃或清理失败仍残留 checkpoint 时，
+   * 下次启动必须丢弃而不是续跑。旧 checkpoint 缺省为 false。
+   */
+  readonly finished?: boolean
   readonly execution: {
     readonly needsSpawnRecheck: boolean
     readonly spawnRecheckInjected: boolean

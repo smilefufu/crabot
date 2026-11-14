@@ -6,6 +6,7 @@
 
 import * as fs from 'fs'
 import * as path from 'path'
+import * as readline from 'node:readline'
 import { createHash } from 'node:crypto'
 import type { AgentTrace, AgentSpan, AgentSpanType, AgentSpanDetails, TokenUsage } from '../types.js'
 import { aggregateUsage } from './trace-usage.js'
@@ -125,6 +126,16 @@ export class TraceStore {
   private readonly idleBuiltinTraces = new Set<string>()
   private readonly activeTraceWriters = new Set<string>()
 
+  // ── 历史索引后台构建 ────────────────────────────────────
+  // 生产启动时历史归档可达 1 GB，同步解析会推迟 Agent 注册。deferHistoricalIndex
+  // 模式下构造阶段只恢复当前进程状态，register() 后再分块构建历史索引；未完成时
+  // 历史 reader 通过 whenIndexed() 等待，不返回不完整结果。
+  private readonly deferHistoricalIndex: boolean
+  private historyIndexState: 'pending' | 'building' | 'ready' = 'ready'
+  private historyIndexPromise?: Promise<void>
+  /** 延迟裁决的全局 running 快照项；历史索引完成后按归档状态收口。 */
+  private readonly deferredRunningSnapshot = new Map<string, 'legacy' | 'builtin'>()
+
   constructor(
     maxSize = 100,
     persistDir?: string,
@@ -132,19 +143,228 @@ export class TraceStore {
     archiveFilePrefix = 'traces-',
     readableArchiveFilePrefixes: readonly string[] = [archiveFilePrefix],
     private readonly deferBuiltinRecovery = false,
+    deferHistoricalIndex = false,
   ) {
     this.maxSize = maxSize
     this.persistDir = persistDir
     this.runningFlushFile = runningFlushFile
     this.archiveFilePrefix = archiveFilePrefix
     this.readableArchiveFilePrefixes = readableArchiveFilePrefixes
+    this.deferHistoricalIndex = deferHistoricalIndex
     if (persistDir) {
       fs.mkdirSync(persistDir, { recursive: true })
-      this.rebuildIndex()
+      if (deferHistoricalIndex) {
+        this.historyIndexState = 'pending'
+      } else {
+        this.rebuildIndex()
+      }
       this.loadResumableCheckpoints()
-      this.loadRunningTraces()
+      this.loadRunningTraces(deferHistoricalIndex)
       this.reconcileInterruptedResumableToolCalls()
     }
+  }
+
+  /**
+   * 等待历史归档索引完成。deferHistoricalIndex=false 时立即返回。
+   * 索引失败也会 resolve：reader 看到的是已成功加载的部分索引，而不是永久挂起。
+   */
+  whenIndexed(): Promise<void> {
+    if (!this.persistDir || this.historyIndexState === 'ready') return Promise.resolve()
+    return this.startHistoricalIndexBuild()
+  }
+
+  /** 历史索引是否已可用（同步模式恒为 true）。 */
+  isHistoricalIndexReady(): boolean {
+    return this.historyIndexState === 'ready'
+  }
+
+  /**
+   * 启动历史归档索引构建。幂等；caller（UnifiedAgent）在 register() 后调用，不 await。
+   */
+  startHistoricalIndexBuild(): Promise<void> {
+    if (!this.persistDir || !this.deferHistoricalIndex || this.historyIndexState === 'ready') {
+      return Promise.resolve()
+    }
+    if (this.historyIndexPromise) return this.historyIndexPromise
+    this.historyIndexState = 'building'
+    this.historyIndexPromise = this.buildHistoricalIndex()
+      .catch((error) => {
+        console.warn(`[TraceStore] history index build failed:`,
+          error instanceof Error ? error.message : String(error))
+      })
+      .finally(() => {
+        this.historyIndexState = 'ready'
+      })
+    return this.historyIndexPromise
+  }
+
+  /**
+   * 流式解析历史归档并分块让出事件循环。索引先写本地集合，完成后一次性合并，
+   * 避免构建期间与运行时新写入互相覆盖，也避免逐条 findIndex 的 O(n²) 去重。
+   */
+  private async buildHistoricalIndex(): Promise<void> {
+    if (!this.persistDir) return
+    const startedAt = Date.now()
+    const entries: TraceIndexEntry[] = []
+    const entryPositions = new Map<string, number>()
+    const episodes = new Map<string, ManagerEpisodeTrace>()
+    let merged = false
+    let files = 0
+    let lines = 0
+    try {
+      const names = (await fs.promises.readdir(this.persistDir))
+        .filter((file) => this.readableArchiveFilePrefixes.some((prefix) => this.archiveDate(file, prefix) !== undefined))
+        .sort()
+      files = names.length
+      for (const file of names) {
+        const stream = fs.createReadStream(path.join(this.persistDir, file), { encoding: 'utf-8' })
+        const reader = readline.createInterface({ input: stream, crlfDelay: Infinity })
+        let offset = 0
+        try {
+          for await (const line of reader) {
+            const lineBytes = Buffer.byteLength(line, 'utf-8') + 1
+            if (line.trim()) {
+              const record = parseTraceRecordLine(line)
+              if (record === null) {
+                if (line.includes('"kind"')) {
+                  this.managerBadRecordCount += 1
+                  if (this.managerBadRecordCount <= 5 || this.managerBadRecordCount % 100 === 0) {
+                    console.warn(`[TraceStore] skipped malformed trace record (count=${this.managerBadRecordCount}) in ${file}`)
+                  }
+                }
+              } else if (record.kind === 'manager_episode') {
+                const existing = episodes.get(record.trace.trace_id)
+                // 终态记录优先：不能被同 id 的旧 running 行覆盖。
+                if (!existing || existing.status === 'running' || record.trace.status !== 'running') {
+                  episodes.set(record.trace.trace_id, record.trace)
+                }
+              } else {
+                try {
+                  const trace = record.trace as AgentTrace
+                  const entry = this.traceToIndexEntry(trace, file, offset)
+                  const existingIdx = entryPositions.get(trace.trace_id)
+                  if (existingIdx !== undefined) entries[existingIdx] = entry
+                  else {
+                    entryPositions.set(trace.trace_id, entries.length)
+                    entries.push(entry)
+                  }
+                } catch (lineError) {
+                  this.managerBadRecordCount += 1
+                  if (this.managerBadRecordCount <= 5 || this.managerBadRecordCount % 100 === 0) {
+                    console.warn(`[TraceStore] skipped malformed legacy trace (count=${this.managerBadRecordCount}) in ${file}:`,
+                      lineError instanceof Error ? lineError.message : String(lineError))
+                  }
+                }
+              }
+            }
+            offset += lineBytes
+            lines += 1
+            if (lines % 50 === 0) await new Promise<void>((resolve) => setImmediate(resolve))
+          }
+        } finally {
+          reader.close()
+          stream.destroy()
+        }
+      }
+      this.mergeHistoricalIndex(entries, episodes)
+      merged = true
+      console.log(
+        `[TraceStore] history index built: files=${files} lines=${lines} ` +
+        `traces=${entries.length} episodes=${episodes.size} ms=${Date.now() - startedAt}`,
+      )
+    } catch (error) {
+      // 已读到的部分仍可用；read API 不应因后续文件损坏而永远等不到索引。
+      if (!merged) this.mergeHistoricalIndex(entries, episodes)
+      console.warn(`[TraceStore] history index build aborted:`,
+        error instanceof Error ? error.message : String(error))
+    } finally {
+      try {
+        this.finalizeDeferredRunningSnapshot()
+      } catch (error) {
+        console.warn(`[TraceStore] deferred running snapshot finalize failed:`,
+          error instanceof Error ? error.message : String(error))
+      }
+    }
+  }
+
+  private mergeHistoricalIndex(entries: TraceIndexEntry[], episodes: Map<string, ManagerEpisodeTrace>): void {
+    const positions = new Map<string, number>()
+    for (let index = 0; index < this.traceIndex.length; index++) {
+      positions.set(this.traceIndex[index].trace_id, index)
+    }
+    for (const entry of entries) {
+      const existingIdx = positions.get(entry.trace_id)
+      if (existingIdx !== undefined) {
+        // 构造阶段从 running 快照建立的条目没有归档位置；补上真实 file/offset，
+        // 否则该 trace 被 ring buffer 淘汰后永远读不回。
+        if (!this.traceIndex[existingIdx].file && entry.file) this.traceIndex[existingIdx] = entry
+        continue
+      }
+      positions.set(entry.trace_id, this.traceIndex.length)
+      this.traceIndex.push(entry)
+    }
+    this.rebuildTaskIndex()
+    for (const episode of episodes.values()) {
+      const resident = this.managerEpisodes.get(episode.trace_id)
+      // running 快照通常比归档更新；但归档已有终态说明 episode 在最后一次 flush
+      // 之后收尾，必须用终态记录覆盖过期快照。正常启动在索引未就绪时不会先标
+      // interrupted；这里仍兼容索引就绪后或外部提前收口的场景。
+      const staleInterrupted = resident?.status === 'failed'
+        && resident.outcome?.summary === '[interrupted: agent restarted]'
+      if (!resident || ((resident.status === 'running' || staleInterrupted) && episode.status !== 'running')) {
+        this.loadManagerEpisode(episode)
+      }
+    }
+  }
+
+  /**
+   * 历史索引完成后裁决构造阶段保留的全局 running 快照：
+   * 归档已有记录则跳过（与同步路径一致），否则标 interrupted 并落盘。
+   */
+  private finalizeDeferredRunningSnapshot(): void {
+    if (this.deferredRunningSnapshot.size === 0) return
+    const now = new Date()
+    for (const [traceId, kind] of this.deferredRunningSnapshot) {
+      const trace = this.traces.get(traceId)
+      if (!trace || trace.status !== 'running') continue
+      if (kind === 'builtin') {
+        // 索引完成前 first burst 已接管该化身：active writer 或已 idle 的 trace
+        // 不再按“重启遗留”收口，保持 running 交给正常生命周期。
+        if (this.activeTraceWriters.has(traceId) || this.idleBuiltinTraces.has(traceId)) continue
+        const archived = this.readTraceFromIndex(traceId)
+        if (!archived || (archived.status === 'running' && trace.spans.length >= archived.spans.length)) {
+          this.deferredBuiltinTraces.add(traceId)
+        } else {
+          this.dropDeferredTrace(traceId)
+        }
+        continue
+      }
+      if (this.traceIndex.some((entry) => entry.trace_id === traceId)) {
+        this.dropDeferredTrace(traceId)
+        continue
+      }
+      this.appendInterruptedToolResults(trace, now.toISOString())
+      trace.status = 'failed'
+      if (!trace.ended_at) {
+        trace.ended_at = now.toISOString()
+        trace.duration_ms = now.getTime() - new Date(trace.started_at).getTime()
+      }
+      if (!trace.outcome) trace.outcome = { summary: '[interrupted: agent restarted]' }
+      this.persistTrace(trace)
+    }
+    this.deferredRunningSnapshot.clear()
+    // builtin 延迟恢复项在同步路径由 reconcileTraces 的 finish hook 收口；索引
+    // 完成晚于该 hook 时在这里补做，避免它们永久停在 running。
+    if (this.deferredBuiltinTraces.size > 0) this.reconcileDeferredBuiltinTraces()
+    else this.flushInFlightTraces()
+  }
+
+  private dropDeferredTrace(traceId: string): void {
+    this.traces.delete(traceId)
+    const index = this.order.indexOf(traceId)
+    if (index !== -1) this.order.splice(index, 1)
+    this.deferredBuiltinTraces.delete(traceId)
+    this.idleBuiltinTraces.delete(traceId)
   }
 
   /**
@@ -464,7 +684,7 @@ export class TraceStore {
     }
   }
 
-  private loadRunningTraces(): void {
+  private loadRunningTraces(deferFinalization = false): void {
     if (!this.persistDir) return
     const filePath = path.join(this.persistDir, this.runningFlushFile)
     if (!fs.existsSync(filePath)) return
@@ -495,6 +715,12 @@ export class TraceStore {
           try {
           const trace = record.trace as AgentTrace
           if (this.deferBuiltinRecovery && trace.trigger.type === 'task' && !trace.related_task_id) {
+            if (deferFinalization) {
+              this.traces.set(trace.trace_id, trace)
+              if (!this.order.includes(trace.trace_id)) this.order.push(trace.trace_id)
+              this.deferredRunningSnapshot.set(trace.trace_id, 'builtin')
+              continue
+            }
             const archived = this.readTraceFromIndex(trace.trace_id)
             if (!archived || (archived.status === 'running' && trace.spans.length >= archived.spans.length)) {
               this.traces.set(trace.trace_id, trace)
@@ -515,6 +741,14 @@ export class TraceStore {
             }
             continue
           }
+          if (deferFinalization) {
+            // 索引未完成时无法判断它是否已在归档收尾：先保留为 running，等索引完成后
+            // finalizeDeferredRunningSnapshot 再决定跳过或标 interrupted。
+            this.traces.set(trace.trace_id, trace)
+            if (!this.order.includes(trace.trace_id)) this.order.push(trace.trace_id)
+            this.deferredRunningSnapshot.set(trace.trace_id, 'legacy')
+            continue
+          }
           // 已经 endTrace 过的（rebuildIndex 已读到）跳过
           if (this.traceIndex.some(e => e.trace_id === trace.trace_id)) continue
           // 标记为 interrupted，写入日期文件让 UI 正确显示
@@ -533,6 +767,10 @@ export class TraceStore {
           } catch { /* skip malformed */ }
         }
       }
+      // 延迟裁决时保留 running 文件，直到历史索引完成后再按归档状态收口；
+      // running manager episode 也先留在文件里，避免索引完成前崩溃丢失现场。
+      // 期间 flush timer 会继续把内存中的 running trace 写回该文件。
+      if (deferFinalization && (this.deferredRunningSnapshot.size > 0 || this.runningManagerEpisodeIds.size > 0)) return
       // 清空 running 文件——这些 trace 已落到日期文件
       if (this.deferredBuiltinTraces.size > 0) this.flushInFlightTraces()
       else fs.writeFileSync(filePath, '', 'utf-8')
@@ -908,7 +1146,10 @@ export class TraceStore {
     const cached = this.traces.get(traceId)
     if (cached) return cached
 
-    // 2. 从 JSONL 按需读取——分块循环读直到遇到换行符（容纳任意大小 trace；
+    // 2. 历史 trace 依赖归档索引；索引后台构建期间只等待历史 reader，不阻塞执行路径。
+    await this.whenIndexed()
+
+    // 3. 从 JSONL 按需读取——分块循环读直到遇到换行符（容纳任意大小 trace；
     //    历史 bug：固定 64KB buffer 会把 spans 较多的 trace 截断 → JSON parse 失败 → 404）
     return this.readTraceFromIndex(traceId)
   }

@@ -1204,6 +1204,11 @@ export class ManagerLoop {
       // completed/max_turns → completed；failed/aborted → failed（plan §5.5）。
       const failed = result.outcome === 'failed' || result.outcome === 'aborted'
       if (failed) this.markFailedHumanInputGap()
+      // 终态标记必须先于 trace finish：若进程在 trace 收尾与 checkpoint 删除之间崩溃，
+      // 下次启动仍能识别该 checkpoint 已终态，不重放 episode。
+      if (result.contextRecoveryRequired !== true) {
+        this.deps.store.markCheckpointFinished(this.deps.key, episodeId)
+      }
       if (traceStarted) {
         this.recordHumanInputs([])
         this.recordRequestCoverage(episodeId, recovery !== undefined)
@@ -1290,6 +1295,9 @@ export class ManagerLoop {
         repliedToHuman: false,
         successfulSendMessageTargets: [],
       })
+      // 失败输入已 requeue 落定后再标终态：若在标记前崩溃，仍沿原路径恢复；
+      // 若标记成功但删除失败，下次启动不会重放本 episode。
+      this.deps.store.markCheckpointFinished(this.deps.key, episodeId)
       this.deps.store.clearCheckpoint(this.deps.key, episodeId)
       throw err
     } finally {

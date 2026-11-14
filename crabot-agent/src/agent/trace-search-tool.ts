@@ -43,6 +43,7 @@ export function createSearchTracesTool(traceStore: TraceStore): ToolDefinition {
           offset?: number
         }
 
+        await traceStore.whenIndexed()
         const limit = Math.max(0, Math.min(params.limit ?? 20, 100))
         const offset = Math.max(0, params.offset ?? 0)
 

@@ -1610,6 +1610,7 @@ describe('manager 读模型 RPC（P6-A §7/§8.4）', () => {
       listTraceManagerKeys: () => [],
       countManagerEpisodes: () => 0,
       listManagerEpisodes: () => ({ items: [], pagination: { page: 1, page_size: 20, total_items: 0, total_pages: 0 } }),
+      whenIndexed: async () => {},
     }
     return agent as unknown as {
       handleListManagersAdmin(p: unknown): Promise<unknown>
@@ -1623,6 +1624,7 @@ describe('manager 读模型 RPC（P6-A §7/§8.4）', () => {
       stackStoreKeys: ['wechat::sess-a'],
       traceStore: {
         listTraceManagerKeys: () => ['wechat::sess-b'],
+        whenIndexed: async () => {},
         countManagerEpisodes: (key: string) => (key === 'wechat::sess-b' ? 2 : 0),
         listManagerEpisodes: () => ({ items: [{ started_at: '2026-08-01T00:00:00.000Z' }], pagination: { page: 1, page_size: 20, total_items: 1, total_pages: 1 } }),
       },
@@ -1722,6 +1724,7 @@ describe('manager 读模型 RPC（P6-A §7/§8.4）', () => {
     const agent = buildAgentWithTraceStack({
       traceStore: {
         listTraceManagerKeys: () => [],
+        whenIndexed: async () => {},
         countManagerEpisodes: () => 0,
         listManagerEpisodes: (key: string, pagination: unknown) => {
           seen.push([key, pagination])
@@ -1845,7 +1848,7 @@ describe('manager 读模型 RPC（P6-A §7/§8.4）', () => {
     const agent = buildAgentWithTraceStack({
       workers: [{ managerKey: 'wechat::sess-a', worker }],
       traceStore: {
-        listTraceManagerKeys: () => [], countManagerEpisodes: () => 0,
+        listTraceManagerKeys: () => [], whenIndexed: async () => {}, countManagerEpisodes: () => 0,
         listManagerEpisodes: () => ({ items: [child], pagination: { page: 1, page_size: 20, total_items: 21, total_pages: 2 } }),
         getManagerEpisode: (id: string) => id === 'ep-parent' ? parent : undefined,
       } as never,

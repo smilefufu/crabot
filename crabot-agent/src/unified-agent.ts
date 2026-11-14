@@ -835,6 +835,10 @@ export class UnifiedAgent extends ModuleBase {
   /** True after startup reconciliation has settled, even when it failed. */
   private managerReconciliationSettled = false
   private runtimeClosing = false
+  /** register() 后的 MCP 启动连接；关闭时只用于标记，不额外等待。 */
+  private mcpStartupPromise?: Promise<void>
+  /** 配置更新代际：旧代际的启动候选完成时直接丢弃，不能覆盖新配置。 */
+  private mcpConfigGeneration = 0
   private workspaceRootVerifier?: ReturnType<typeof createWorkspaceRelocationRootVerifier>
   private workspaceInterruptedRootVerifier?: ReturnType<typeof createWorkspaceInterruptedRootVerifier>
   private workspaceRecoveryRootVerifier?: ReturnType<typeof createWorkspaceRecoveryRootVerifier>
@@ -856,6 +860,8 @@ export class UnifiedAgent extends ModuleBase {
 
   // Trace 存储
   private traceStore: TraceStore
+  /** onStart 时保留的 checkpoint episode；历史索引完成后补一次归档 running 收口。 */
+  private readonly startupResumableManagerEpisodeIds = new Set<string>()
   private scheduleScriptRunner: ScheduleScriptRunner
   private lspManager: LSPManager
   private builtinSubagentRunner: BuiltinSubagentRunner
@@ -903,6 +909,8 @@ export class UnifiedAgent extends ModuleBase {
       'traces-running-v3.jsonl',
       'traces-v3-',
       ['traces-', 'traces-v3-'],
+      true,
+      // 历史归档索引放到 register() 后后台构建；构造阶段只恢复当前进程状态。
       true,
     )
     this.scheduleScriptRunner = new ScheduleScriptRunner({
@@ -2226,6 +2234,8 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   private async applyRuntimeConfigCandidate(next: UnifiedAgentConfig): Promise<void> {
+    // 任一配置 apply 都让启动期间的后台 MCP 候选过期，由本次 apply 构建并接管新连接。
+    this.mcpConfigGeneration += 1
     const candidate = next.agent_config
     if (!candidate) throw new Error('Pulled runtime config has no agent config')
     // All fallible work happens before the live fields are touched.
@@ -4004,6 +4014,7 @@ export class UnifiedAgent extends ModuleBase {
     if (typeof raw !== 'string' || !isManagerKey(raw)) throw new RpcError('INVALID_PARAMS', 'manager_key 非法')
     const key = raw as ManagerKey
     const stack = this.requireManagerStack()
+    await this.traceStore.whenIndexed()
     const known = new Set<ManagerKey>([
       ...await stack.store.listManagerKeys(),
       ...this.traceStore.listTraceManagerKeys(),
@@ -4305,6 +4316,7 @@ export class UnifiedAgent extends ModuleBase {
   /** §8.4 list_managers_admin：disk session keys ∪ TraceStore keys ∪ 内存 running keys 的去重 union。 */
   private async handleListManagersAdmin(params: { pagination?: import('crabot-shared').PaginationParams }): Promise<import('crabot-shared').PaginatedResult<import('./manager/read-model.js').ManagerAdminSummary>> {
     const stack = this.requireManagerStack()
+    await this.traceStore.whenIndexed()
     const diskKeys = await stack.store.listManagerKeys()
     const traceKeys = this.traceStore.listTraceManagerKeys()
     const workers = await stack.ledger.listAllWorkers()
@@ -4738,6 +4750,7 @@ export class UnifiedAgent extends ModuleBase {
     if (!params || typeof params.manager_key !== 'string' || params.manager_key.length === 0) {
       throw new Error('manager_key is required')
     }
+    await this.traceStore.whenIndexed()
     const result = this.traceStore.listManagerEpisodes(params.manager_key, params.pagination)
     const workerFacts = new Map<string, EpisodeWorkerFact>()
     for (const worker of await stack.ledger.listWorkers(params.manager_key)) {
@@ -5892,14 +5905,23 @@ export class UnifiedAgent extends ModuleBase {
     await this.managerStack?.principals.init()
     const managerCheckpoints = await this.managerStack?.store.listCheckpoints() ?? []
     const resumableManagerCheckpoints = managerCheckpoints.filter((checkpoint) => {
-      const episode = this.traceStore.getManagerEpisode(checkpoint.episodeId)
-      if (!episode || episode.status === 'running'
-        || (episode.status === 'failed' && episode.outcome?.error?.startsWith('上下文压缩失败：'))) return true
+      // 终态标记由 ManagerLoop 在 trace finish 前落盘；旧 checkpoint 无标记按未完成处理。
+      // 这里不查 trace 索引，历史归档索引在 register() 后才后台构建。
+      if (checkpoint.finished !== true) return true
       this.managerStack!.store.clearCheckpoint(checkpoint.state.key, checkpoint.episodeId)
       return false
     })
+    this.startupResumableManagerEpisodeIds.clear()
+    for (const checkpoint of resumableManagerCheckpoints) {
+      this.startupResumableManagerEpisodeIds.add(checkpoint.episodeId)
+    }
     this.managerStack?.registry.registerResumeCheckpoints(resumableManagerCheckpoints)
-    this.traceStore.reconcileInterruptedManagerEpisodes(new Set(resumableManagerCheckpoints.map((checkpoint) => checkpoint.episodeId)))
+    // 索引尚未就绪时先不落 interrupted：否则当前日期归档会被写成 interrupted，
+    // 随后后台索引会把它当成“最新终态”覆盖掉真正的 completed/failed。
+    // running 文件会保留到索引完成后，由 startTraceIndexBackground 补一次收口。
+    if (this.traceStore.isHistoricalIndexReady()) {
+      this.traceStore.reconcileInterruptedManagerEpisodes(this.startupResumableManagerEpisodeIds)
+    }
     // P6-B §6：activation registry 载入持久 verification 状态；runtime config 已在
     // constructor/pull 路径应用过时 applyRuntimeConfigCandidate 会补 apply（见下）。
     await this.activationRegistry.load()
@@ -5935,18 +5957,69 @@ export class UnifiedAgent extends ModuleBase {
     // 所有执行入口由 admission fail closed；挂退避 pull 重试自愈。management-only 阶段
     // invalidation 事件尚未开放，不能只依赖事件，必须靠自己的轮询等到 Admin 可解析配置。
     if (!this.configAuthenticated) this.scheduleRuntimeConfigPullRetry()
+  }
 
-    // Connect to external MCP servers (Admin-configured)
-    if (this.agentConfig?.mcp_servers && this.agentConfig.mcp_servers.length > 0) {
-      console.log(
-        `[${this.config.moduleId}] Connecting to ${this.agentConfig.mcp_servers.length} MCP server(s)...`
-      )
-      await this.mcpConnector.connectAll(await this.computerUseOwner.prepare(this.agentConfig.mcp_servers))
-      this.verifyComputerUseSetup(ConfigLoader.consumeInitialSetup())
-      console.log(
-        `[${this.config.moduleId}] ${this.mcpConnector.count} MCP server(s) connected`
-      )
-    }
+  /**
+   * 外部 MCP 连接在 register() 后后台建立，**不 await**。
+   *
+   * MCP 都是非必需能力：handshake 与 tools/list 可能耗时数十秒，不能把它们放进
+   * onStart() 推迟 Agent 注册。这里用独立候选 connector，成功且配置代际未变才
+   * 原子接管 live connector；失败、关闭或配置已更新时丢弃候选并关闭。
+   */
+  startMcpConnections(): void {
+    if (this.mcpStartupPromise || this.runtimeClosing) return
+    const configs = this.agentConfig?.mcp_servers ?? []
+    if (configs.length === 0) return
+    const generation = this.mcpConfigGeneration
+    const current = () => !this.runtimeClosing && !this.configStale && generation === this.mcpConfigGeneration
+    console.log(`[${this.config.moduleId}] Connecting to ${configs.length} MCP server(s)...`)
+    const task = (async () => {
+      let candidate: McpConnector | undefined
+      try {
+        const prepared = await this.computerUseOwner.prepare(configs)
+        if (!current()) return
+        candidate = await McpConnector.prepare(prepared)
+        if (!current()) return
+        await this.mcpConnector.replaceWith(candidate)
+        candidate = undefined
+        this.verifyComputerUseSetup(ConfigLoader.consumeInitialSetup())
+        console.log(`[${this.config.moduleId}] ${this.mcpConnector.count} MCP server(s) connected`)
+      } catch (error) {
+        console.error(
+          `[${this.config.moduleId}] background MCP connect failed:`,
+          error instanceof Error ? error.message : String(error),
+        )
+      } finally {
+        if (candidate) {
+          await candidate.disconnectAll().catch((error) => {
+            console.error(
+              `[${this.config.moduleId}] failed to close discarded MCP candidate:`,
+              error instanceof Error ? error.message : String(error),
+            )
+          })
+        }
+        this.mcpStartupPromise = undefined
+      }
+    })()
+    this.mcpStartupPromise = task
+  }
+
+  /**
+   * 历史 trace 归档索引在 register() 后后台构建，**不 await**。
+   * 完成后补一次归档中遗留 running manager episode 的收口；失败只 warn。
+   */
+  startTraceIndexBackground(): void {
+    void this.traceStore.startHistoricalIndexBuild()
+      .then(() => {
+        if (this.runtimeClosing) return
+        this.traceStore.reconcileInterruptedManagerEpisodes(this.startupResumableManagerEpisodeIds)
+      })
+      .catch((error) => {
+        console.warn(
+          `[${this.config.moduleId}] trace history index failed（不影响启动）:`,
+          error instanceof Error ? error.message : String(error),
+        )
+      })
   }
 
   /**
@@ -6069,6 +6142,8 @@ export class UnifiedAgent extends ModuleBase {
     if (this.voiceRetryTimer) clearInterval(this.voiceRetryTimer)
     this.voiceRetryTimer = undefined
     this.runtimeClosing = true
+    // 不等待启动连接；迟到的候选在自身 finally 中看到过期代际并关闭。
+    this.mcpConfigGeneration += 1
     await this.scheduleScriptRunner.stop()
     this.stopCliSubagentHarvestScheduler()
     for (const timer of this.workboardNoticeRetryTimers.values()) clearTimeout(timer)

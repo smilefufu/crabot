@@ -22,6 +22,7 @@ describe('ManagerSessionStore', () => {
     expect(ManagerSessionStore.parseWorkspaceRelocationCheckpoint(key, raw).state.recent).toHaveLength(1)
     expect(() => ManagerSessionStore.parseWorkspaceRelocationCheckpoint('other::manager', raw)).toThrow('invalid resume checkpoint')
     expect(() => ManagerSessionStore.parseWorkspaceRelocationCheckpoint(key, JSON.stringify({ ...checkpoint, pendingToolCallIds: null }))).toThrow('invalid resume checkpoint')
+    expect(() => ManagerSessionStore.parseWorkspaceRelocationCheckpoint(key, JSON.stringify({ ...checkpoint, finished: 'yes' }))).toThrow('invalid resume checkpoint')
     expect(() => ManagerSessionStore.parseWorkspaceRelocationCheckpoint(key, JSON.stringify({ ...checkpoint, execution: {} }))).toThrow('invalid resume checkpoint')
     expect(JSON.stringify(checkpoint, null, 4) + '\n').toBe(raw)
   })
@@ -79,6 +80,30 @@ describe('ManagerSessionStore', () => {
       expect((await store.loadCheckpoint(key))?.episodeId).toBe('atomic-' + index)
     }
   }, 30_000)
+
+  it('marks a checkpoint finished without depending on trace indexes', async () => {
+    const key: ManagerKey = 'wechat::checkpoint-finished'
+    await store.ensureSession(key)
+    const checkpoint: ManagerResumeCheckpoint = { episodeId: 'finished-episode', state: { key, foldedCount: 0,
+      recent: [createUserMessage('finished body')] }, envelopes: [], wakeIndex: -1, pending: [], hasEngineMessages: true,
+      turns: [], responses: [], tools: [], pendingToolCallIds: [], adminChatClaims: [], transientMessageIds: [], spawnedWorkerIds: [],
+      execution: { needsSpawnRecheck: false, spawnRecheckInjected: false, spawnRecheckOutcomeRecorded: false,
+        postSendRecheckSequence: 0, successfulSendMessageTargets: [], continuedWorkers: [] } }
+    store.saveCheckpoint(checkpoint)
+    expect((await store.loadCheckpoint(key))?.finished).toBeUndefined()
+
+    store.markCheckpointFinished(key, checkpoint.episodeId)
+    const finished = await store.loadCheckpoint(key)
+    expect(finished?.episodeId).toBe(checkpoint.episodeId)
+    expect(finished?.finished).toBe(true)
+
+    // 已被后续 episode 替换时不得改写。
+    store.markCheckpointFinished(key, 'stale-episode')
+    expect((await store.loadCheckpoint(key))?.episodeId).toBe(checkpoint.episodeId)
+
+    store.clearCheckpoint(key, checkpoint.episodeId)
+    expect(await store.loadCheckpoint(key)).toBeUndefined()
+  })
 
   it('不存在的 key 返回空态,且不建目录', async () => {
     const key: ManagerKey = 'wechat::sess-never-seen'

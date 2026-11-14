@@ -226,6 +226,28 @@ export class ManagerSessionStore {
     }
   }
 
+  /**
+   * 在 trace finish 前原子标记当前 episode 已终态。之后即使进程崩溃或
+   * clearCheckpoint 删除失败，重启也不会把该 checkpoint 当成未完成续跑。
+   * checkpoint 已被后续 episode 替换时保持不动。
+   */
+  markCheckpointFinished(key: ManagerKey, episodeId: string): void {
+    const target = join(this.dirFor(key), CHECKPOINT_FILE)
+    const temporary = `${target}.${randomUUID()}.tmp`
+    try {
+      const checkpoint = JSON.parse(readFileSync(target, 'utf-8')) as ManagerResumeCheckpoint
+      if (checkpoint.episodeId !== episodeId || checkpoint.finished === true) return
+      writeFileSync(temporary, JSON.stringify({ ...checkpoint, finished: true }), { encoding: 'utf-8', mode: 0o600 })
+      renameSync(temporary, target)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        console.warn(`[ManagerSessionStore] checkpoint terminal mark failed for ${key}:`, error)
+      }
+    } finally {
+      try { unlinkSync(temporary) } catch { /* rename already removed the temporary file */ }
+    }
+  }
+
   async loadCheckpoint(key: ManagerKey): Promise<ManagerResumeCheckpoint | undefined> {
     let raw: string
     try {
@@ -253,6 +275,7 @@ export class ManagerSessionStore {
       || !Array.isArray(checkpoint.responses) || !Array.isArray(checkpoint.tools) || !Array.isArray(checkpoint.pendingToolCallIds)
       || !Array.isArray(checkpoint.adminChatClaims) || !Array.isArray(checkpoint.transientMessageIds)
       || !Array.isArray(checkpoint.spawnedWorkerIds) || typeof checkpoint.hasEngineMessages !== 'boolean'
+      || (checkpoint.finished !== undefined && typeof checkpoint.finished !== 'boolean')
       || !Array.isArray(checkpoint.execution?.successfulSendMessageTargets) || !Array.isArray(checkpoint.execution?.continuedWorkers)) {
       throw new Error(`[ManagerSessionStore] invalid resume checkpoint for ${key}`)
     }
