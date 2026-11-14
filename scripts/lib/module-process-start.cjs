@@ -2,7 +2,6 @@
 // recorded text and failure/null semantics stable; no caching or stop authority.
 const { execFile } = require('node:child_process')
 const fs = require('node:fs/promises')
-const path = require('node:path')
 
 function execFileText(file, args) {
   return new Promise((resolve, reject) => {
@@ -48,18 +47,23 @@ async function probePosixStartIdentity(pid) {
   }
 }
 
+const WINDOWS_EPOCH_100NS = 116444736000000000n
+
+// Win32_Process.CreationDate is a CIM datetime with microsecond precision. The
+// native inspect returns the full FILETIME; truncating the 100ns digit yields
+// byte-identical text to the PowerShell producer without starting PowerShell.
+function windowsStartIdentityFromFiletime(filetime) {
+  const ticks = BigInt(filetime)
+  const unix = ticks - WINDOWS_EPOCH_100NS
+  const seconds = unix >= 0n ? unix / 10000000n : (unix - 9999999n) / 10000000n
+  const micros = (unix - seconds * 10000000n) / 10n
+  const iso = new Date(Number(seconds) * 1000).toISOString().replace(/\.\d{3}Z$/, '')
+  return `win32:${iso}.${micros.toString().padStart(6, '0')}0Z`
+}
+
 async function probeWindowsStartIdentity(pid) {
-  const script = "$ErrorActionPreference='Stop'; "
-    + `$process = Get-CimInstance Win32_Process -Filter \"ProcessId = ${pid}\"; `
-    + `if ($null -ne $process) { $process.CreationDate.ToUniversalTime().ToString('o') }`
-  const output = await execFileText(path.join(process.env.SystemRoot || process.env.WINDIR, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), [
-    '-NoProfile',
-    '-NonInteractive',
-    '-Command',
-    script,
-  ])
-  const startedAt = output.trim()
-  return startedAt ? `win32:${startedAt}` : null
+  const process = require('./process-identity.cjs').inspectProcess(pid)
+  return process ? windowsStartIdentityFromFiletime(process.started) : null
 }
 
 async function probeProcessStartIdentity(pid) {
@@ -68,4 +72,4 @@ async function probeProcessStartIdentity(pid) {
   return probePosixStartIdentity(pid)
 }
 
-module.exports = { probeProcessStartIdentity }
+module.exports = { probeProcessStartIdentity, windowsStartIdentityFromFiletime }

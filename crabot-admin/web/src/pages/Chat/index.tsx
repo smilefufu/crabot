@@ -10,6 +10,29 @@ import { MessageContextMenu } from './MessageContextMenu'
 import { ChatActivity, type PendingChatRequest } from './ChatActivity'
 import { createRequestId, ClientError } from 'crabot-client'
 import { ChatSnapshotController, useServerScope, getServerScope } from '../../services/server-state'
+import { isDesktop } from '../../services/desktop-host'
+
+const STARTUP_GRACE_MS = 15_000
+
+export function chatConnectionLabel(
+  status: ConnectionStatus,
+  syncStatus: 'syncing' | 'synced' | 'partial' | 'error',
+  desktop: boolean,
+  everConnected: boolean,
+  startupGraceExpired: boolean,
+): { color: string; text: string } {
+  if (desktop && status === 'error' && !everConnected && !startupGraceExpired) {
+    return { color: '#f59e0b', text: '服务启动中…' }
+  }
+  const syncText = { synced: '已同步', syncing: '正在同步...', partial: '状态未完全同步', error: '状态未完全同步' }[syncStatus]
+  return {
+    connecting: { color: '#f59e0b', text: '连接中...' },
+    connected: { color: syncStatus === 'synced' ? '#10b981' : '#f59e0b', text: syncText },
+    disconnected: { color: '#94a3b8', text: '已断开' },
+    error: { color: '#ef4444', text: '连接错误' },
+    replaced: { color: '#94a3b8', text: '聊天已在另一个窗口打开' },
+  }[status]
+}
 
 const PAGE_SIZE = 30
 
@@ -46,6 +69,8 @@ export const Chat: React.FC = () => {
   const [taskStatuses, setTaskStatuses] = useState<Map<string, ChatTaskSnapshot>>(new Map())
   const [input, setInput] = useState('')
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>(chatService.status)
+  const [everConnected, setEverConnected] = useState(chatService.status === 'connected')
+  const [startupGraceExpired, setStartupGraceExpired] = useState(false)
   const [hasMore, setHasMore] = useState(true)
   const [loadingMore, setLoadingMore] = useState(false)
   const [showScrollButton, setShowScrollButton] = useState(false)
@@ -194,12 +219,19 @@ export const Chat: React.FC = () => {
     if (chatService.status === 'disconnected' || chatService.status === 'error') chatService.connect()
     const unsubscribeStatus = chatService.onStatusChange(status => {
       setConnectionStatus(status)
-      if (status === 'connected') void refreshSnapshot()
+      if (status === 'connected') { setEverConnected(true); void refreshSnapshot() }
     })
     const unsubscribeMessage = chatService.onMessage(handleServerMessage)
     const unsubscribeInvalid = chatService.onInvalidation?.(() => { void refreshSnapshot() })
     return () => { unsubscribeStatus(); unsubscribeMessage(); unsubscribeInvalid?.() }
   }, [refreshSnapshot])
+
+  // 桌面启动时 Admin cutover/Agent 注册尚未完成，首次 503 不应显示成红色错误。
+  useEffect(() => {
+    if (!isDesktop || everConnected || startupGraceExpired) return
+    const timer = setTimeout(() => setStartupGraceExpired(true), STARTUP_GRACE_MS)
+    return () => clearTimeout(timer)
+  }, [everConnected, startupGraceExpired])
 
   useEffect(() => {
     if (![...taskStatuses.values()].some(task => !['closed', 'completed', 'failed', 'cancelled'].includes(task.status))) return
@@ -578,16 +610,8 @@ export const Chat: React.FC = () => {
 
   // 连接状态指示器
   const renderConnectionStatus = () => {
-    const syncText = { synced: '已同步', syncing: '正在同步...', partial: '状态未完全同步', error: '状态未完全同步' }[syncStatus]
-    const statusConfig: Record<ConnectionStatus, { color: string; text: string }> = {
-      connecting: { color: '#f59e0b', text: '连接中...' },
-      connected: { color: syncStatus === 'synced' ? '#10b981' : '#f59e0b', text: syncText },
-      disconnected: { color: '#94a3b8', text: '已断开' },
-      error: { color: '#ef4444', text: '连接错误' },
-      replaced: { color: '#94a3b8', text: '聊天已在另一个窗口打开' },
-    }
-
-    const config = statusConfig[connectionStatus]
+    const config = chatConnectionLabel(connectionStatus, syncStatus, isDesktop, everConnected, startupGraceExpired)
+    const startingUp = isDesktop && connectionStatus === 'error' && !everConnected && !startupGraceExpired
 
     return (
       <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
@@ -600,7 +624,7 @@ export const Chat: React.FC = () => {
           }}
         />
         <span style={{ fontSize: '0.85rem', color: config.color }}>{config.text}</span>
-        {(connectionStatus === 'disconnected' || connectionStatus === 'error' || connectionStatus === 'replaced'
+        {!startingUp && (connectionStatus === 'disconnected' || connectionStatus === 'error' || connectionStatus === 'replaced'
           || (connectionStatus === 'connected' && ['partial', 'error'].includes(syncStatus))) && (
           <button
             onClick={connectionStatus === 'connected' ? () => { void refreshSnapshot() } : handleReconnect}

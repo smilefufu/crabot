@@ -6151,13 +6151,41 @@ export class UnifiedAgent extends ModuleBase {
     } catch { return false }
   }
 
+  /** 停机预算：在途 Manager 回合最多等这么久，之后由进程退出开关结束。 */
+  shutdownBudgetMs = 3_000
+
+  private async withinShutdownBudget(promise: Promise<unknown>, limitMs: number, label: string): Promise<void> {
+    // Always attach the rejection handler, even with no budget left: an
+    // unawaited rejection would trip the fatal handler during shutdown.
+    const settled = promise.catch((error) => {
+      console.error(`[${this.config.moduleId}] ${label} failed during shutdown:`, error)
+    })
+    if (limitMs <= 0) return void settled
+    let timer: NodeJS.Timeout | undefined
+    try {
+      await Promise.race([settled, new Promise<void>((resolve) => { timer = setTimeout(resolve, limitMs) })])
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+
   protected override async onStop(): Promise<void> {
     if (this.voiceRetryTimer) clearInterval(this.voiceRetryTimer)
     this.voiceRetryTimer = undefined
     this.runtimeClosing = true
     // 不等待启动连接；迟到的候选在自身 finally 中看到过期代际并关闭。
     this.mcpConfigGeneration += 1
-    await this.scheduleScriptRunner.stop()
+    const deadline = Date.now() + this.shutdownBudgetMs
+    // This runs unattended until the budget reaches it; catch immediately so an
+    // early rejection is never an unhandled rejection in the shutdown window.
+    const mcpCleanup = (async () => {
+      await this.mcpConnector.disconnectAll()
+      await this.computerUseOwner.close()
+      await this.lspManager.stop()
+    })().catch((error) => {
+      console.error(`[${this.config.moduleId}] MCP/LSP cleanup failed during shutdown:`, error)
+    })
+
     this.stopCliSubagentHarvestScheduler()
     for (const timer of this.workboardNoticeRetryTimers.values()) clearTimeout(timer)
     this.workboardNoticeRetryTimers.clear()
@@ -6173,11 +6201,12 @@ export class UnifiedAgent extends ModuleBase {
     this.managerStack?.harness.stopLivenessSweep()
     this.managerStack?.harness.stopRecoveryNoticeDelivery()
 
-    try {
-      await this.managerStack?.dispose()
-    } catch (error) {
-      console.error(`[${this.config.moduleId}] Failed to dispose worker adapters during shutdown:`, error)
-    }
+    await this.withinShutdownBudget(this.scheduleScriptRunner.stop(), Math.min(1_000, deadline - Date.now()), 'schedule script stop')
+    await this.withinShutdownBudget(
+      this.managerStack?.dispose() ?? Promise.resolve(),
+      Math.min(2_500, deadline - Date.now()),
+      'manager stack dispose',
+    )
 
     if (this.configPullTimer) {
       clearTimeout(this.configPullTimer)
@@ -6193,14 +6222,12 @@ export class UnifiedAgent extends ModuleBase {
       this.watchdogInterval = undefined
     }
 
-    // 断开 MCP 和 LSP，限制最长等待时间（避免某个 stdio 进程无响应导致 onStop 卡死）
-    await Promise.race([
-      (async () => {
-        await this.mcpConnector.disconnectAll()
-        await this.computerUseOwner.close()
-        await this.lspManager.stop()
-      })(),
-      new Promise<void>((resolve) => setTimeout(resolve, 10_000)),
-    ])
+    // 断开 MCP/LSP 与 Manager 收口并行；迟到的 stdio 进程由 MM 在根进程退出后收尾。
+    await this.withinShutdownBudget(mcpCleanup, deadline - Date.now(), 'MCP/LSP cleanup')
+    try {
+      this.traceStore.flushRunningTraces()
+    } catch (error) {
+      console.error(`[${this.config.moduleId}] Failed to flush running traces during shutdown:`, error)
+    }
   }
 }

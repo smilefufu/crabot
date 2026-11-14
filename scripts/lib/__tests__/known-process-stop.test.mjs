@@ -179,7 +179,7 @@ test('a lost native signal result is not retried when the original generations a
   assert.deepEqual([...requests.values()], [1, 1])
 })
 
-for (const mode of ['alive', 'unknown']) test('an uncertain native signal cannot stop another target while its generation remains ' + mode, async t => {
+for (const mode of ['alive', 'unknown']) test('a failed native signal is retried without blocking other verified targets ' + mode, async t => {
   const f = await fixture(t), requests = []; let failed
   const failure = Object.assign(new Error('fixture native result unavailable'), { code: 'CRABOT_PROCESS_SIGNAL' })
   const api = {
@@ -189,10 +189,40 @@ for (const mode of ['alive', 'unknown']) test('an uncertain native signal cannot
     terminateKnownProcess(item) { failed = item; requests.push(item.pid); throw failure },
   }
   await assert.rejects(stopKnownProcessScope(f.initial, { timeoutMs: 1, onObserved: f.remember }, api))
-  assert.equal(requests.length, 1)
+  assert.deepEqual([...new Set(requests)].sort(), f.initial.map(item => item.pid).sort())
+  // A readable generation keeps getting retried for the whole force window; an
+  // unreadable one ends observation before a second submission is attempted.
+  if (mode === 'alive') assert.ok(requests.length > 2)
+  else assert.equal(requests.length, 2)
   assert.equal(probeKnownProcessExit(f.initial).state, 'running')
 })
 
+
+test('the force phase terminates a large observed tree in one pass', async () => {
+  const self = { pid: process.pid, parent: 0, started: '1', owner: 'fixture-owner', executable: 'node' }
+  const tree = Array.from({ length: 200 }, (_, index) => ({
+    pid: 50000 + index, parent: index === 0 ? process.pid : 50000 + index - 1,
+    started: String(index + 2), owner: self.owner, executable: 'node',
+  }))
+  const alive = new Set(tree.map(item => item.pid)), calls = []
+  const api = {
+    inspectProcess: pid => pid === process.pid ? self : tree.find(item => item.pid === pid && alive.has(pid)) ?? null,
+    isProcessExited: pid => !alive.has(pid),
+    captureProcessTreeGeneration: pid => {
+      const ids = new Set([pid])
+      for (let changed = true; changed;) {
+        changed = false
+        for (const item of tree) if (alive.has(item.pid) && !ids.has(item.pid) && ids.has(item.parent)) { ids.add(item.pid); changed = true }
+      }
+      return tree.filter(item => ids.has(item.pid) && alive.has(item.pid))
+    },
+    terminateKnownProcess: item => { calls.push(item.pid); alive.delete(item.pid) },
+  }
+  const result = await stopKnownProcessScope([tree[0]], { timeoutMs: 1, onObserved: async () => {},
+    graceful: async () => {} }, api)
+  assert.equal(calls.length, tree.length)
+  assert.equal(result.length, tree.length)
+})
 
 test('exhausted observation reports the bounded failing phase without copying native error text', async () => {
   const self = { pid: process.pid, parent: 0, started: '1', owner: 'fixture-owner', executable: 'node' }

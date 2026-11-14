@@ -38,7 +38,7 @@ export async function hasRunningModuleProcesses(dataDir) {
   return false
 }
 
-function observedProcesses(owner) {
+function allObservedProcesses(owner) {
   const processes = []
   for (const pid of identity.listProcessIds()) {
     try {
@@ -47,6 +47,31 @@ function observedProcesses(owner) {
     } catch { /* unrelated inaccessible or already-exited process */ }
   }
   return processes
+}
+
+// Stop authority only needs the managed tree. Walking native child lists keeps
+// the same parent/owner semantics as the former all-process scan without
+// inspecting every OS process; an unreadable live parent falls back to the scan.
+function observedProcesses(owner, roots) {
+  try {
+    const observed = new Map(), queue = [...roots]
+    for (const root of queue) observed.set(root.pid, root)
+    for (let index = 0; index < queue.length; index++) {
+      const parent = queue[index]
+      let children
+      try { children = identity.listChildProcessIds(parent.pid) }
+      catch (error) { if (alive(parent)) throw error; continue }
+      if (!Array.isArray(children)) throw new Error('Child process list is unavailable')
+      for (const pid of children) {
+        if (observed.has(pid)) continue
+        let process
+        try { process = identity.inspectProcess(pid) } catch { continue }
+        if (!process || process.owner !== owner) continue
+        observed.set(pid, process); queue.push(process)
+      }
+    }
+    return [...observed.values()]
+  } catch { return allObservedProcesses(owner) }
 }
 
 function extendOwned(known, independent, processes) {
@@ -77,7 +102,8 @@ async function collectOwned(record, dataDir) {
       if (item.record.module_id === 'admin-web' && item.process.parent === record.mm?.pid) admins.push(item.process)
     }
   }
-  const processes = observedProcesses(record.controller.owner)
+  const roots = [record.controller, record.mm, ...modules].filter(Boolean)
+  const processes = observedProcesses(record.controller.owner, roots)
   // The existing UI upgrader is an independent maintenance process. It and
   // its stop CLI must survive Core shutdown; arbitrary detached children do not
   // gain this exemption. Only the registered Admin's exact native entry does.
@@ -94,7 +120,7 @@ async function collectOwned(record, dataDir) {
     }
     if (args.length === 2 && isAbsolute(args[1]) && normalize(args[1]) === updater && alive(process)) independent.add(process.pid)
   }
-  return { owned: extendOwned([record.controller, record.mm, ...modules].filter(Boolean), independent, processes), independent }
+  return { owned: extendOwned(roots, independent, processes), independent, roots }
 }
 
 function processState(process) {
@@ -145,7 +171,7 @@ export async function stopInstance(dataDir, { timeoutMs = SUPERVISOR_FORCE_TIMEO
   else if (record.mm && alive(record.mm)) process.kill(record.mm.pid, 'SIGTERM')
   const deadline = Date.now() + timeoutMs
   let lastObservation = 0
-  const refresh = () => { owned = extendOwned(owned, scope.independent, observedProcesses(record.controller.owner)); lastObservation = Date.now() }
+  const refresh = () => { owned = extendOwned(owned, scope.independent, observedProcesses(record.controller.owner, scope.roots)); lastObservation = Date.now() }
   while (Date.now() < deadline && owned.some(unsettled)) {
     // A failed RPC leaves Core running; include tools it starts during the grace period.
     if (shutdownFailed && Date.now() - lastObservation >= 1000) refresh()
