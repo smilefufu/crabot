@@ -1642,6 +1642,63 @@ describe('manager 读模型 RPC（P6-A §7/§8.4）', () => {
     await expect(agent.handleGetManagerInboundStatusAdmin({ manager_key: 'wechat::sess-a' })).rejects.toThrow('Manager stack not initialized')
   })
 
+  it('会话分页不改变排序和总数，页外会话不读取执行状态或任务板', async () => {
+    const agent = buildAgentWithTraceStack({ stackStoreKeys: ['wechat::a', 'wechat::b', 'wechat::c'] })
+    const stack = (agent as any).managerStack
+    const executionStatus = vi.spyOn(stack.harness, 'executionStatus')
+    const loadAdmin = vi.fn(async () => ({ objectives: [], archive: [] }))
+    stack.workboard = { loadAdmin }
+    stack.harness.workerView = vi.fn(async () => ({ executing: [], candidates: [], attention: [] }))
+
+    const result = await agent.handleListManagersAdmin({ pagination: { page: 2, page_size: 1 } }) as any
+
+    expect(result.pagination).toMatchObject({ page: 2, total_items: 3, total_pages: 3 })
+    expect(result.items).toMatchObject([{ manager_key: 'wechat::b', execution_status: 'idle', workboard: { status: 'ready' } }])
+    expect(executionStatus).toHaveBeenCalledTimes(1)
+    expect(loadAdmin).toHaveBeenCalledTimes(1)
+    expect(loadAdmin).toHaveBeenCalledWith('wechat::b')
+
+    executionStatus.mockClear()
+    loadAdmin.mockClear()
+    const empty = await agent.handleListManagersAdmin({ pagination: { page: 4, page_size: 1 } }) as any
+    expect(empty.items).toEqual([])
+    expect(empty.pagination.total_items).toBe(3)
+    expect(executionStatus).not.toHaveBeenCalled()
+    expect(loadAdmin).not.toHaveBeenCalled()
+  })
+
+  it('单次会话列表共用后台登记读取，下一次请求重新读取且保留执行与通知的区别', async () => {
+    const key = 'wechat::a'
+    const worker = makeLedgerWorker({ workerId: 'w-a', status: 'halted' })
+    const agent = buildAgentWithTraceStack({ stackStoreKeys: [key], workers: [{ managerKey: key, worker }] }) as any
+    const { AgentHandler } = await import('../../src/agent/agent-handler.js')
+    const records = [{ entity_id: 'shell-a', owner: { worker_id: worker.worker_id }, type: 'shell', status: 'running', ended_at: null }]
+    const list = vi.fn(async () => records)
+    agent.builtinBgRegistry = { list }
+    agent.agentHandler = Object.assign(Object.create(AgentHandler.prototype), { bgRegistry: { list } })
+    agent.managerStack.workboard = { loadAdmin: async () => ({ objectives: [], archive: [] }) }
+    agent.managerStack.harness.executionStatus = async (_workers: unknown, background: any) =>
+      (await background.listWorkerBackground(worker.worker_id)).some((entity: any) => entity.status === 'running') ? 'running' : 'idle'
+    agent.managerStack.harness.workerView = async (_workers: unknown, _board: unknown, _projects: unknown, background: any) => ({
+      executing: await background.hasRunningBg(worker.worker_id, 'all') ? [worker] : [], candidates: [], attention: [],
+    })
+
+    const first = await agent.handleListManagersAdmin({})
+    expect(first.items[0]).toMatchObject({ execution_status: 'running', running_worker_count: 1 })
+    expect(list).toHaveBeenCalledTimes(1)
+
+    Object.assign(records[0], { status: 'completed', exit_notification: { status: 'pending' } })
+    records.push({ entity_id: 'foreign-shell', owner: { worker_id: 'other-worker' }, type: 'shell', status: 'running', ended_at: null })
+    const second = await agent.handleListManagersAdmin({})
+    expect(second.items[0]).toMatchObject({ execution_status: 'idle', running_worker_count: 1 })
+    expect(list).toHaveBeenCalledTimes(2)
+
+    list.mockRejectedValueOnce(new Error('registry unreadable'))
+    const failed = await agent.handleListManagersAdmin({})
+    expect(failed.items[0]).toMatchObject({ execution_status: 'unknown', workboard: { status: 'unknown' } })
+    expect(list).toHaveBeenCalledTimes(3)
+  })
+
   it.each([
     [true, 'idle', 'running'],
     [false, 'running', 'running'],

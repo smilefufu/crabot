@@ -4309,11 +4309,9 @@ export class UnifiedAgent extends ModuleBase {
     const traceKeys = this.traceStore.listTraceManagerKeys()
     const workers = await stack.ledger.listAllWorkers()
     const activeWorkerCounts = new Map<string, number>()
-    const continuationCandidateCounts = new Map<string, number>()
     const runningWorkerCounts = new Map<string, number>()
     const queuedWorkerCounts = new Map<string, number>()
     const workerAttentionCounts = new Map<string, number>()
-    const executionStatuses = new Map<ManagerKey, import('./manager/read-model.js').ManagerExecutionStatus>()
     const workerFacts = new Map<string, EpisodeWorkerFact>()
     const workersByManager = new Map<ManagerKey, LedgerWorker[]>()
     for (const { managerKey, worker } of workers) {
@@ -4328,34 +4326,8 @@ export class UnifiedAgent extends ModuleBase {
       if (worker.task.status === 'halted') workerAttentionCounts.set(managerKey, (workerAttentionCounts.get(managerKey) ?? 0) + 1)
     }
     const running = new Map(stack.registry.listActiveManagers().map(({ key, lastActiveAtMs }) => [key, lastActiveAtMs] as const))
-    const workboardSummaries = new Map<ManagerKey, import('./manager/read-model.js').ManagerWorkboardSummary | { status: 'unknown' }>()
-    const managerKeys = new Set<ManagerKey>([...diskKeys, ...traceKeys, ...running.keys()])
-    await Promise.all([...managerKeys].map(async (key) => {
-      try {
-        executionStatuses.set(key, await stack.harness.executionStatus(workersByManager.get(key) ?? []))
-      } catch {
-        executionStatuses.set(key, 'unknown')
-      }
-      try {
-        const board = await stack.workboard.loadAdmin(key)
-        const view = await stack.harness.workerView(workersByManager.get(key) ?? [], board)
-        runningWorkerCounts.set(key, view.executing.filter(worker => worker.task.status !== 'queued').length)
-        queuedWorkerCounts.set(key, view.executing.filter(worker => worker.task.status === 'queued').length)
-        continuationCandidateCounts.set(key, view.candidates.length)
-        workerAttentionCounts.set(key, view.attention.length)
-        const counts = workboardCounts(board)
-        workboardSummaries.set(key, {
-          status: 'ready',
-          current_objective_count: counts.current_objectives,
-          current_work_item_count: counts.current_work_items,
-          blocked_work_item_count: counts.blocked_work_items,
-        })
-      } catch {
-        workboardSummaries.set(key, { status: 'unknown' })
-      }
-    }))
-    return buildManagerAdminSummaries({
-      executionStatus: key => stack.registry.isExecuting(key) ? 'running' : executionStatuses.get(key) ?? 'unknown',
+    const result = buildManagerAdminSummaries({
+      executionStatus: () => 'unknown',
       diskSessionKeys: diskKeys,
       traceKeys,
       episodeStats: (key) => {
@@ -4367,13 +4339,64 @@ export class UnifiedAgent extends ModuleBase {
         }
       },
       activeWorkerCount: (key) => activeWorkerCounts.get(key) ?? 0,
-      continuationCandidateCount: (key) => continuationCandidateCounts.get(key) ?? 0,
+      continuationCandidateCount: () => 0,
       runningWorkerCount: (key) => runningWorkerCounts.get(key) ?? 0,
       queuedWorkerCount: (key) => queuedWorkerCounts.get(key) ?? 0,
       workerAttentionCount: (key) => workerAttentionCounts.get(key) ?? 0,
       runningLastActiveAtMs: (key) => running.get(key),
-      workboardSummary: (key) => workboardSummaries.get(key) ?? { status: 'unknown' },
+      workboardSummary: () => ({ status: 'unknown' }),
     }, params?.pagination)
+    // Share only this read request; lifecycle and subsequent requests still read current facts.
+    let backgroundRecords: Promise<BgEntityRecord[]> | undefined
+    const readBackgrounds = () => {
+      if (!this.agentHandler) throw new Error('Worker background registry is not initialized')
+      return backgroundRecords ??= this.builtinBgRegistry.list()
+    }
+    const background = {
+      listWorkerBackground: async (workerId: string) => {
+        const records = await readBackgrounds()
+        return this.agentHandler!.listWorkerBackground(workerId, records)
+      },
+      hasRunningBg: async (workerId: string) => {
+        const records = await readBackgrounds()
+        return this.agentHandler!.hasRunningBgForWorker(workerId, undefined, 'all', records)
+      },
+    }
+    const items = await Promise.all(result.items.map(async item => {
+      const key = item.manager_key
+      let executionStatus: import('./manager/read-model.js').ManagerExecutionStatus = 'unknown'
+      try {
+        executionStatus = await stack.harness.executionStatus(workersByManager.get(key) ?? [], background)
+      } catch { /* An unreadable execution fact remains unknown. */ }
+      try {
+        const board = await stack.workboard.loadAdmin(key)
+        const view = await stack.harness.workerView(workersByManager.get(key) ?? [], board, undefined, background)
+        const counts = workboardCounts(board)
+        return {
+          ...item,
+          execution_status: executionStatus,
+          running_worker_count: view.executing.filter(worker => worker.task.status !== 'queued').length,
+          queued_worker_count: view.executing.filter(worker => worker.task.status === 'queued').length,
+          continuation_candidate_count: view.candidates.length,
+          worker_attention_count: view.attention.length,
+          workboard: {
+            status: 'ready' as const,
+            current_objective_count: counts.current_objectives,
+            current_work_item_count: counts.current_work_items,
+            blocked_work_item_count: counts.blocked_work_items,
+          },
+        }
+      } catch {
+        return { ...item, execution_status: executionStatus }
+      }
+    }))
+    return {
+      ...result,
+      items: items.map(item => ({
+        ...item,
+        execution_status: stack.registry.isExecuting(item.manager_key) ? 'running' : item.execution_status,
+      })),
+    }
   }
 
   /**

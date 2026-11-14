@@ -465,6 +465,26 @@ describe('WorkerHarness.executionStatus', () => {
     expect(await harness.executionStatus([idle])).toBe('unknown')
   })
 
+  it('列表的单次后台读取保持 execution 与候选视图语义，不影响之后的生命周期读取', async () => {
+    const liveRead = vi.fn(async () => [{ entity_id: 'live-shell', status: 'running' as const, ended_at: null }])
+    const { harness } = await makeHarness({}, { listWorkerBackground: liveRead })
+    const worker = await harness.spawnWorker(spawnParams())
+    const idle = { ...worker, incarnations: worker.incarnations.map(inc => ({ ...inc, state: 'idle' as const })) }
+    const background = {
+      listWorkerBackground: vi.fn(async () => [{ entity_id: 'ended-shell', status: 'completed' as const, ended_at: now() }]),
+      hasRunningBg: vi.fn(async () => true),
+    }
+    liveRead.mockClear()
+
+    expect(await harness.executionStatus([idle], background)).toBe('idle')
+    const board = { manager_key: worker.manager_key, objectives: [], archive: [] }
+    expect((await harness.workerView([idle], board, undefined, background)).executing).toHaveLength(1)
+    expect(background.hasRunningBg).toHaveBeenCalledWith(worker.worker_id, 'all')
+    expect(liveRead).not.toHaveBeenCalled()
+    expect(await harness.executionStatus([idle])).toBe('running')
+    expect(liveRead).toHaveBeenCalledTimes(1)
+  })
+
   it('已核实的切换停止事实不被旧 running 回调覆盖', async () => {
     const { harness, fake } = await makeHarness({ implId: 'claude-code' })
     const worker = await harness.spawnWorker(spawnParams({ impl: 'claude-code' }))

@@ -691,8 +691,8 @@ export class AgentHandler {
     }
   }
 
-  async hasRunningBgForWorker(workerId: string, incarnationId?: string, scope?: 'all'): Promise<boolean> {
-    const entities = await this.bgRegistry.list()
+  async hasRunningBgForWorker(workerId: string, incarnationId?: string, scope?: 'all', snapshot?: readonly BgEntityRecord[]): Promise<boolean> {
+    const entities = snapshot ?? await this.bgRegistry.list()
     return entities.some((entity) =>
       entity.owner.worker_id === workerId && (scope === 'all' || entity.owner.incarnation_id === incarnationId) && (
         entity.status === 'running' ||
@@ -707,8 +707,8 @@ export class AgentHandler {
       entity.owner.worker_id === workerId && entity.exit_notification?.status === 'pending')
   }
 
-  async listWorkerBackground(workerId: string): Promise<Pick<BgEntityRecord, 'entity_id' | 'type' | 'status' | 'ended_at'>[]> {
-    return (await this.bgRegistry.list()).filter(entity => entity.owner.worker_id === workerId)
+  async listWorkerBackground(workerId: string, snapshot?: readonly BgEntityRecord[]): Promise<Pick<BgEntityRecord, 'entity_id' | 'type' | 'status' | 'ended_at'>[]> {
+    return (snapshot ?? await this.bgRegistry.list()).filter(entity => entity.owner.worker_id === workerId)
       .map(({ entity_id, type, status, ended_at }) => ({ entity_id, type, status, ended_at }))
   }
 

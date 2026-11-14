@@ -4939,7 +4939,7 @@ export class WorkerHarness {
   }
 
   /** Observe execution only; candidate/notification protection is not evidence of activity. */
-  async executionStatus(workers: readonly LedgerWorker[]): Promise<WorkerExecutionFact> {
+  async executionStatus(workers: readonly LedgerWorker[], background: Pick<HarnessDeps, 'listWorkerBackground'> = this.deps): Promise<WorkerExecutionFact> {
     if (this.deps.isExecutionReady?.() === false) return 'unknown'
     let unknown = false
     for (const worker of workers) {
@@ -4961,9 +4961,9 @@ export class WorkerHarness {
         if (!adapter || adapter.listSubagents) needsNativeObservation = true
       }
       try {
-        const background = await this.deps.listWorkerBackground?.(worker.worker_id)
-        if (background?.some(entity => entity.status === 'running')) return 'running'
-        if (!background || background.some(entity => entity.status === 'stalled')) unknown = true
+        const entities = await background.listWorkerBackground?.(worker.worker_id)
+        if (entities?.some(entity => entity.status === 'running')) return 'running'
+        if (!entities || entities.some(entity => entity.status === 'stalled')) unknown = true
       } catch { unknown = true }
       if (worker.task.status === 'queued' || worker.incarnations.length === 0) { unknown = true; continue }
       if (!needsNativeObservation) continue
@@ -4976,12 +4976,12 @@ export class WorkerHarness {
     return unknown ? 'unknown' : 'idle'
   }
 
-  async workerView(workers: readonly LedgerWorker[], board: ManagerWorkboard, projects?: WorkerViewFacts['projects']): Promise<WorkerViewSelection> {
+  async workerView(workers: readonly LedgerWorker[], board: ManagerWorkboard, projects?: WorkerViewFacts['projects'], background: Pick<HarnessDeps, 'hasRunningBg'> = this.deps): Promise<WorkerViewSelection> {
     const execution = new Map<string, WorkerExecutionFact>()
     const blocked = new Set<string>()
     for (const worker of workers) {
       if (worker.task.status === 'closed') continue
-      execution.set(worker.worker_id, await this.workerExecutionFact(worker))
+      execution.set(worker.worker_id, await this.workerExecutionFact(worker, false, background.hasRunningBg))
       const operations = await this.controlOperationStore.list(worker.worker_id)
       const mainline = mainlineIncarnation(worker)
       if (operations.some(operation => operation.kind === 'stop' && operation.status !== 'succeeded'
@@ -5103,7 +5103,7 @@ export class WorkerHarness {
     return { halt: { ...halt, halted_at: haltedAt }, incarnations }
   }
 
-  private async workerExecutionFact(worker: LedgerWorker, probe = false): Promise<WorkerExecutionFact> {
+  private async workerExecutionFact(worker: LedgerWorker, probe = false, hasRunningBg = this.deps.hasRunningBg): Promise<WorkerExecutionFact> {
     if (worker.task.status === 'queued') return 'running'
     if (this.hasPendingBgNotification(worker.worker_id)) return 'running'
     let unknown = false
@@ -5112,7 +5112,7 @@ export class WorkerHarness {
       if (queries.some(receipt => receipt.state === 'starting' || receipt.state === 'running')) return 'running'
       if (queries.some(receipt => receipt.failure?.certainty === 'unknown')) unknown = true
       if ((await this.inputDeliveryStore.list(worker.worker_id)).some(receipt => receipt.state === 'pending')) unknown = true
-      if (await this.deps.hasRunningBg?.(worker.worker_id, 'all')) return 'running'
+      if (await hasRunningBg?.(worker.worker_id, 'all')) return 'running'
       if (worker.incarnations.some(incarnation => incarnation.state === 'running')) return 'running'
       const native = await this.nativeContinuationFact(worker, probe)
       if (native === 'running') return 'running'
