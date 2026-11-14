@@ -6,6 +6,13 @@
 - 两项性能复现先红后绿；相关 RPC／Harness 生命周期／读模型／会话 Store 374 项、Agent 类型构建通过，Core/Shared 编译完成。覆盖页外／越界不读取、下一次查询不复用旧事实、异属后台不串用、读取失败及生命周期不沿用列表快照。
 - 对冻结的真实 17 会话、4,759 Worker（30 未关闭）、4.1 MB 后台登记做五轮离线组件对照：原查询 985–1,095 ms，修复后 140–153 ms，后台登记读取 60→1 次，返回逐字段相同。会话／台账／后台／回执来自私有临时副本，Trace 与载体观察为受控夹具；验后清理副本，未改原数据、调用模型或替换现有服务。不是 Windows/macOS 真机完整首屏验收。
 
+### 启动对账目标收窄（2026-11-14，未部署，PR 待 review）
+
+- 按用户确认的 [2026-09-26 spec 修订](crabot-docs/superpowers/specs/2026-09-26-worker-ledger-read-performance-design.md) 与 [2026-09-08 §4.1 修订](crabot-docs/superpowers/specs/2026-09-08-builtin-worker-recovery-observation-control-design.md)：启动对账只覆盖 running（task/主线化身）、非 builtin 非终态（claude-code/codex tmux）、pending recovery notice，以及 pending input/query/control/native 责任。无上述责任的 idle/halted builtin 不探测、不 rehydrate、不逐条 trace 恢复，保持台账并由首次 burst 的 `ensureTraceId` 按需恢复。协议升至 v3.21.0。
+- 现场台账 279 个：171 closed、107 halted、1 running；108 非终态全部 builtin（105 idle、3 exited），pending input/query/control/native 均为 0。按新目标只对 1 个 running 对账，105 个 idle 与 3 个 exited 跳过；此前 74 秒启动耗时来自对 105 个 idle builtin 的逐个 rehydrate。
+- Agent 构建通过；harness-recovery 37 项通过。受影响 harness 5 套 449 项通过，4 项失败中 3 项在未改 main 复现、1 项 isolate 单跑通过；manager 集成 28 项通过。整目录 harness 仍有 main 同类的 Git/原生/超时环境失败，不标全绿。
+- PR: https://github.com/smilefufu/crabot/pull/251；未部署、未打包。
+
 ### 主控执行器通信去掉 source_id 前置条件（2026-11-13，未部署，待 PR）
 
 - 按用户确认的 [2026-10-15 spec §8](crabot-docs/superpowers/specs/2026-10-15-group-request-authorization-and-interruption-design.md) 修订：群任务 spawn/send/read/query/control 不再要求模型传 source_id，也不受唤醒类型或当前输入窗口限制；已绑定群执行器按台账自动解析，新群执行器 unbound，按当前群授权与主控归属执行。个人授权/私发保留，`execute_request` 改由宿主从本轮人类输入自动定位来源（单条直接绑定，多条需唯一 quote）；模型不再看到 source_id，个人/私发隔离与任务状态守卫不变。协议升至 v3.20.0。

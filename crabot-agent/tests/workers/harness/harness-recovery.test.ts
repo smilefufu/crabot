@@ -349,6 +349,35 @@ describe('WorkerHarness.reconcileOnStartup — 三态判定', () => {
     expect(events.filter((e) => e.worker_id === 'w-idle')).toHaveLength(0)
   })
 
+  it('启动对账只探测 running 与 pending 责任目标，idle/halted builtin 不探测也不 rehydrate', async () => {
+    const { harness, ledger, adaptersMap } = await makeHarness()
+    const fake = new FakeAdapter('builtin')
+    adaptersMap.set('builtin', fake)
+    const running = makeWorker('w-startup-running')
+    const idle = makeWorker('w-startup-idle', {
+      task: { id: 'task-w-startup-idle', title: '测试任务', status: 'halted', created_at: now(), halt: { halted_at: now(), halt_reason: 'turn_end' } },
+      incarnations: [{ seq: 1, impl: 'builtin', state: 'idle', workspace: '/tmp/ws', session_ref: 'ref-w-startup-idle#1', started_at: now() }],
+    })
+    const exited = makeWorker('w-startup-exited', {
+      task: { id: 'task-w-startup-exited', title: '测试任务', status: 'halted', created_at: now(), halt: { halted_at: now(), halt_reason: 'turn_end' } },
+      incarnations: [{ seq: 1, impl: 'builtin', state: 'exited', ended_reason: 'completed', workspace: '/tmp/ws', session_ref: 'ref-w-startup-exited#1', started_at: now() }],
+    })
+    for (const worker of [running, idle, exited]) await seed(ledger, DIALOG, worker)
+    fake.setState({ worker_id: running.worker_id, seq: 1 }, 'running')
+    fake.setState({ worker_id: idle.worker_id, seq: 1 }, 'idle')
+    fake.setState({ worker_id: exited.worker_id, seq: 1 }, 'exited')
+    const state = vi.spyOn(fake, 'state')
+
+    const report = await harness.reconcileOnStartup()
+
+    expect(report.revived).toEqual([running.worker_id])
+    expect(report.failed).toEqual([])
+    expect(report.unchanged.sort()).toEqual([exited.worker_id, idle.worker_id].sort())
+    expect(state.mock.calls.map(([handle]) => handle.worker_id)).toEqual([running.worker_id])
+    expect((await getWorker(ledger, idle.worker_id)).task.status).toBe('halted')
+    expect((await getWorker(ledger, exited.worker_id)).task.status).toBe('halted')
+  })
+
   it('台账化身 state=exited 但 adapter 报活(内部矛盾) → 矛盾修复为 running，发 state_changed(source=reconcile)，归 revived', async () => {
     const { harness, ledger, adaptersMap } = await makeHarness()
     const fake = new FakeAdapter('builtin')

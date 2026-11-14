@@ -1264,7 +1264,8 @@ export async function reconcileManagerStack(stack: ManagerStack): Promise<Reconc
   const report = await stack.harness.reconcileOnStartup()
   const builtin = stack.adapters.get('builtin')
   if (builtin instanceof BuiltinWorkerAdapter) {
-    await builtin.reconcileTraces((await stack.ledger.listAllWorkers()).map(({ worker }) => worker))
+    // idle builtin 的 trace 写者在首次 burst 前由 ensureTraceId 按需恢复；启动只收口 deferred trace，不遍历 idle 历史。
+    await builtin.reconcileTraces([])
   }
   await stack.harness.reconcileInputDeliveriesOnStartup()
   await stack.harness.reconcileQueryReceiptsOnStartup()
