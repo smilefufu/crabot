@@ -478,6 +478,27 @@ describe('TraceStore index', () => {
     }
   })
 
+  it('reconciles an archive-only running episode loaded by the index', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trace-test-'))
+    try {
+      // 只在归档留下 start 行，不写 running 文件：模拟 episode 开始后、首次 flush 前崩溃。
+      const seed = new TraceStore(10, dir)
+      seed.startManagerEpisode('ep-archive-only', 'chat::one' as never, { type: 'human_message', summary: 'crashed before flush' })
+
+      const restarted = new TraceStore(10, dir, 'traces-running.jsonl', 'traces-v3-', ['traces-', 'traces-v3-'], false, true)
+      const startupIds = new Set(restarted.activeManagerEpisodeIds())
+      expect(startupIds.size).toBe(0)
+      await restarted.whenIndexed()
+
+      const candidates = new Set([...startupIds, ...restarted.archivedRunningManagerEpisodeIds()])
+      expect(candidates.has('ep-archive-only')).toBe(true)
+      restarted.reconcileInterruptedManagerEpisodes(new Set(), candidates)
+      expect(restarted.getManagerEpisode('ep-archive-only')?.status).toBe('failed')
+    } finally {
+      fs.rmSync(dir, { recursive: true })
+    }
+  })
+
   it('searches by keyword in trigger_summary and outcome_summary', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trace-test-'))
     try {

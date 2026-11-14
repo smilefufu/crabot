@@ -6021,10 +6021,11 @@ export class UnifiedAgent extends ModuleBase {
     void this.traceStore.startHistoricalIndexBuild()
       .then(() => {
         if (this.runtimeClosing) return
-        this.traceStore.reconcileInterruptedManagerEpisodes(
-          this.startupResumableManagerEpisodeIds,
-          this.startupRunningManagerEpisodeIds,
-        )
+        // 启动快照之外，索引还会新载入“只在归档、首次 flush 前崩溃”的 running
+        // episode；它们也属于重启遗留。注册后新开的 episode 不会进入这两个集合。
+        const candidates = new Set(this.startupRunningManagerEpisodeIds)
+        for (const id of this.traceStore.archivedRunningManagerEpisodeIds()) candidates.add(id)
+        this.traceStore.reconcileInterruptedManagerEpisodes(this.startupResumableManagerEpisodeIds, candidates)
       })
       .catch((error) => {
         console.warn(

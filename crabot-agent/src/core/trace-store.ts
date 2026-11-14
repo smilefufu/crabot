@@ -135,6 +135,8 @@ export class TraceStore {
   private historyIndexPromise?: Promise<void>
   /** 延迟裁决的全局 running 快照项；历史索引完成后按归档状态收口。 */
   private readonly deferredRunningSnapshot = new Map<string, 'legacy' | 'builtin'>()
+  /** 索引从归档新载入的 running manager episode：只存在于归档、首次 flush 前崩溃的场景。 */
+  private readonly indexedArchivedRunningEpisodeIds = new Set<string>()
 
   constructor(
     maxSize = 100,
@@ -171,6 +173,11 @@ export class TraceStore {
   /** 历史索引是否已可用（同步模式恒为 true）。 */
   isHistoricalIndexReady(): boolean {
     return this.historicalIndexReady
+  }
+
+  /** 索引从归档新载入的 running manager episode（不在启动 running 快照内）。 */
+  archivedRunningManagerEpisodeIds(): ReadonlySet<string> {
+    return this.indexedArchivedRunningEpisodeIds
   }
 
   /**
@@ -303,7 +310,10 @@ export class TraceStore {
       const staleInterrupted = resident?.status === 'failed'
         && resident.outcome?.summary === '[interrupted: agent restarted]'
       if (!resident || ((resident.status === 'running' || staleInterrupted) && episode.status !== 'running')) {
+        const wasRunning = resident?.status === 'running'
         this.loadManagerEpisode(episode)
+        // 只存在于归档的 running episode（首次 15s flush 前崩溃）必须进入二次收口候选。
+        if (episode.status === 'running' && !wasRunning) this.indexedArchivedRunningEpisodeIds.add(episode.trace_id)
       }
     }
   }
