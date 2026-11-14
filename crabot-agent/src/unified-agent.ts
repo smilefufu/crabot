@@ -862,6 +862,8 @@ export class UnifiedAgent extends ModuleBase {
   private traceStore: TraceStore
   /** onStart 时保留的 checkpoint episode；历史索引完成后补一次归档 running 收口。 */
   private readonly startupResumableManagerEpisodeIds = new Set<string>()
+  /** 构造阶段从 running 文件载入的 episode 快照；注册后新开的 episode 不参与延迟收口。 */
+  private readonly startupRunningManagerEpisodeIds = new Set<string>()
   private scheduleScriptRunner: ScheduleScriptRunner
   private lspManager: LSPManager
   private builtinSubagentRunner: BuiltinSubagentRunner
@@ -5889,6 +5891,10 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   protected override async onStart(): Promise<void> {
+    // 在任何 onStart 副作用/重放之前固定“重启遗留”范围；register 后开放聊天时
+    // 新开的 episode 不能被历史索引完成后的补收口误标为 interrupted。
+    this.startupRunningManagerEpisodeIds.clear()
+    for (const id of this.traceStore.activeManagerEpisodeIds()) this.startupRunningManagerEpisodeIds.add(id)
     this.workspaceRetirements().load()
     this.voiceInbox.load()
     await this.reconcileVoiceHandoffs()
@@ -5920,7 +5926,10 @@ export class UnifiedAgent extends ModuleBase {
     // 随后后台索引会把它当成“最新终态”覆盖掉真正的 completed/failed。
     // running 文件会保留到索引完成后，由 startTraceIndexBackground 补一次收口。
     if (this.traceStore.isHistoricalIndexReady()) {
-      this.traceStore.reconcileInterruptedManagerEpisodes(this.startupResumableManagerEpisodeIds)
+      this.traceStore.reconcileInterruptedManagerEpisodes(
+        this.startupResumableManagerEpisodeIds,
+        this.startupRunningManagerEpisodeIds,
+      )
     }
     // P6-B §6：activation registry 载入持久 verification 状态；runtime config 已在
     // constructor/pull 路径应用过时 applyRuntimeConfigCandidate 会补 apply（见下）。
@@ -6012,7 +6021,10 @@ export class UnifiedAgent extends ModuleBase {
     void this.traceStore.startHistoricalIndexBuild()
       .then(() => {
         if (this.runtimeClosing) return
-        this.traceStore.reconcileInterruptedManagerEpisodes(this.startupResumableManagerEpisodeIds)
+        this.traceStore.reconcileInterruptedManagerEpisodes(
+          this.startupResumableManagerEpisodeIds,
+          this.startupRunningManagerEpisodeIds,
+        )
       })
       .catch((error) => {
         console.warn(

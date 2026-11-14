@@ -458,6 +458,26 @@ describe('TraceStore index', () => {
     }
   })
 
+  it('does not reconcile a manager episode opened after the startup snapshot', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trace-test-'))
+    try {
+      const store = new TraceStore(10, dir, 'traces-running.jsonl', 'traces-v3-', ['traces-', 'traces-v3-'], false, true)
+      const startupIds = new Set(store.activeManagerEpisodeIds())
+      expect(startupIds.size).toBe(0)
+
+      // register 后、索引完成前新开的 episode。
+      store.startManagerEpisode('ep-new', 'chat::one' as never, { type: 'human_message', summary: 'new episode' })
+      await store.whenIndexed()
+      store.reconcileInterruptedManagerEpisodes(new Set(), startupIds)
+
+      expect(store.getManagerEpisode('ep-new')?.status).toBe('running')
+      store.finishManagerEpisode('ep-new', { status: 'completed' })
+      expect(store.getManagerEpisode('ep-new')?.status).toBe('completed')
+    } finally {
+      fs.rmSync(dir, { recursive: true })
+    }
+  })
+
   it('searches by keyword in trigger_summary and outcome_summary', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trace-test-'))
     try {

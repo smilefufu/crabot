@@ -130,8 +130,8 @@ export class TraceStore {
   // 生产启动时历史归档可达 1 GB，同步解析会推迟 Agent 注册。deferHistoricalIndex
   // 模式下构造阶段只恢复当前进程状态，register() 后再分块构建历史索引；未完成时
   // 历史 reader 通过 whenIndexed() 等待，不返回不完整结果。
-  private readonly deferHistoricalIndex: boolean
-  private historyIndexState: 'pending' | 'building' | 'ready' = 'ready'
+  /** 历史索引可用：同步模式恒为 true，后台构建完成（含失败）后也置 true。 */
+  private historicalIndexReady: boolean
   private historyIndexPromise?: Promise<void>
   /** 延迟裁决的全局 running 快照项；历史索引完成后按归档状态收口。 */
   private readonly deferredRunningSnapshot = new Map<string, 'legacy' | 'builtin'>()
@@ -150,14 +150,10 @@ export class TraceStore {
     this.runningFlushFile = runningFlushFile
     this.archiveFilePrefix = archiveFilePrefix
     this.readableArchiveFilePrefixes = readableArchiveFilePrefixes
-    this.deferHistoricalIndex = deferHistoricalIndex
+    this.historicalIndexReady = !(persistDir && deferHistoricalIndex)
     if (persistDir) {
       fs.mkdirSync(persistDir, { recursive: true })
-      if (deferHistoricalIndex) {
-        this.historyIndexState = 'pending'
-      } else {
-        this.rebuildIndex()
-      }
+      if (!deferHistoricalIndex) this.rebuildIndex()
       this.loadResumableCheckpoints()
       this.loadRunningTraces(deferHistoricalIndex)
       this.reconcileInterruptedResumableToolCalls()
@@ -169,33 +165,39 @@ export class TraceStore {
    * 索引失败也会 resolve：reader 看到的是已成功加载的部分索引，而不是永久挂起。
    */
   whenIndexed(): Promise<void> {
-    if (!this.persistDir || this.historyIndexState === 'ready') return Promise.resolve()
     return this.startHistoricalIndexBuild()
   }
 
   /** 历史索引是否已可用（同步模式恒为 true）。 */
   isHistoricalIndexReady(): boolean {
-    return this.historyIndexState === 'ready'
+    return this.historicalIndexReady
   }
 
   /**
-   * 启动历史归档索引构建。幂等；caller（UnifiedAgent）在 register() 后调用，不 await。
+   * 启动历史归档索引构建（已就绪时立即返回）。幂等；caller（UnifiedAgent）在
+   * register() 后调用，不 await。
    */
   startHistoricalIndexBuild(): Promise<void> {
-    if (!this.persistDir || !this.deferHistoricalIndex || this.historyIndexState === 'ready') {
-      return Promise.resolve()
-    }
+    if (this.historicalIndexReady) return Promise.resolve()
     if (this.historyIndexPromise) return this.historyIndexPromise
-    this.historyIndexState = 'building'
     this.historyIndexPromise = this.buildHistoricalIndex()
       .catch((error) => {
         console.warn(`[TraceStore] history index build failed:`,
           error instanceof Error ? error.message : String(error))
       })
       .finally(() => {
-        this.historyIndexState = 'ready'
+        this.historicalIndexReady = true
       })
     return this.historyIndexPromise
+  }
+
+  /** 坏行计数 + 限频告警（同步 rebuild 与后台索引共用）。 */
+  private warnMalformedArchiveLine(file: string, label: 'trace record' | 'legacy trace', error?: unknown): void {
+    this.managerBadRecordCount += 1
+    if (this.managerBadRecordCount > 5 && this.managerBadRecordCount % 100 !== 0) return
+    const message = `[TraceStore] skipped malformed ${label} (count=${this.managerBadRecordCount}) in ${file}`
+    if (error === undefined) console.warn(message)
+    else console.warn(`${message}:`, error instanceof Error ? error.message : String(error))
   }
 
   /**
@@ -209,13 +211,11 @@ export class TraceStore {
     const entryPositions = new Map<string, number>()
     const episodes = new Map<string, ManagerEpisodeTrace>()
     let merged = false
-    let files = 0
     let lines = 0
     try {
       const names = (await fs.promises.readdir(this.persistDir))
         .filter((file) => this.readableArchiveFilePrefixes.some((prefix) => this.archiveDate(file, prefix) !== undefined))
         .sort()
-      files = names.length
       for (const file of names) {
         const stream = fs.createReadStream(path.join(this.persistDir, file), { encoding: 'utf-8' })
         const reader = readline.createInterface({ input: stream, crlfDelay: Infinity })
@@ -226,12 +226,7 @@ export class TraceStore {
             if (line.trim()) {
               const record = parseTraceRecordLine(line)
               if (record === null) {
-                if (line.includes('"kind"')) {
-                  this.managerBadRecordCount += 1
-                  if (this.managerBadRecordCount <= 5 || this.managerBadRecordCount % 100 === 0) {
-                    console.warn(`[TraceStore] skipped malformed trace record (count=${this.managerBadRecordCount}) in ${file}`)
-                  }
-                }
+                if (line.includes('"kind"')) this.warnMalformedArchiveLine(file, 'trace record')
               } else if (record.kind === 'manager_episode') {
                 const existing = episodes.get(record.trace.trace_id)
                 // 终态记录优先：不能被同 id 的旧 running 行覆盖。
@@ -249,11 +244,7 @@ export class TraceStore {
                     entries.push(entry)
                   }
                 } catch (lineError) {
-                  this.managerBadRecordCount += 1
-                  if (this.managerBadRecordCount <= 5 || this.managerBadRecordCount % 100 === 0) {
-                    console.warn(`[TraceStore] skipped malformed legacy trace (count=${this.managerBadRecordCount}) in ${file}:`,
-                      lineError instanceof Error ? lineError.message : String(lineError))
-                  }
+                  this.warnMalformedArchiveLine(file, 'legacy trace', lineError)
                 }
               }
             }
@@ -269,7 +260,7 @@ export class TraceStore {
       this.mergeHistoricalIndex(entries, episodes)
       merged = true
       console.log(
-        `[TraceStore] history index built: files=${files} lines=${lines} ` +
+        `[TraceStore] history index built: files=${names.length} lines=${lines} ` +
         `traces=${entries.length} episodes=${episodes.size} ms=${Date.now() - startedAt}`,
       )
     } catch (error) {
@@ -343,14 +334,7 @@ export class TraceStore {
         this.dropDeferredTrace(traceId)
         continue
       }
-      this.appendInterruptedToolResults(trace, now.toISOString())
-      trace.status = 'failed'
-      if (!trace.ended_at) {
-        trace.ended_at = now.toISOString()
-        trace.duration_ms = now.getTime() - new Date(trace.started_at).getTime()
-      }
-      if (!trace.outcome) trace.outcome = { summary: '[interrupted: agent restarted]' }
-      this.persistTrace(trace)
+      this.finalizeInterruptedTrace(trace, now)
     }
     this.deferredRunningSnapshot.clear()
     // builtin 延迟恢复项在同步路径由 reconcileTraces 的 finish hook 收口；索引
@@ -598,6 +582,19 @@ export class TraceStore {
     this.lastRunningSnapshotHash = hash
   }
 
+  /** 把重启遗留的 running trace 收口为 interrupted 并落盘（同步启动与延迟索引共用）。 */
+  private finalizeInterruptedTrace(trace: AgentTrace, now: Date): void {
+    this.appendInterruptedToolResults(trace, now.toISOString())
+    trace.status = 'failed'
+    if (!trace.ended_at) {
+      trace.ended_at = now.toISOString()
+      trace.duration_ms = now.getTime() - new Date(trace.started_at).getTime()
+    }
+    if (!trace.outcome) trace.outcome = { summary: '[interrupted: agent restarted]' }
+    this.traces.set(trace.trace_id, trace)
+    this.persistTrace(trace)
+  }
+
   /**
    * 启动时加载当前实例的 in-flight 文件（默认为 traces-running.jsonl）。
    * 把这些 trace 标记为 failed（interrupted），写入日期文件，然后清空 running 文件。
@@ -714,13 +711,17 @@ export class TraceStore {
         if (record && record.kind === 'legacy_agent_trace') {
           try {
           const trace = record.trace as AgentTrace
-          if (this.deferBuiltinRecovery && trace.trigger.type === 'task' && !trace.related_task_id) {
-            if (deferFinalization) {
-              this.traces.set(trace.trace_id, trace)
-              if (!this.order.includes(trace.trace_id)) this.order.push(trace.trace_id)
-              this.deferredRunningSnapshot.set(trace.trace_id, 'builtin')
-              continue
-            }
+          const builtinRecovery = this.deferBuiltinRecovery && trace.trigger.type === 'task' && !trace.related_task_id
+          // 索引未完成时无法判断它是否已在归档收尾：先保留为 running，等索引完成后
+          // finalizeDeferredRunningSnapshot 再决定跳过或标 interrupted。正在等 resume
+          // 裁决的 worker 仍按下面的 resumable 分支保持原状。
+          if (deferFinalization && (builtinRecovery || !resumableTraceIds.has(trace.trace_id))) {
+            this.traces.set(trace.trace_id, trace)
+            if (!this.order.includes(trace.trace_id)) this.order.push(trace.trace_id)
+            this.deferredRunningSnapshot.set(trace.trace_id, builtinRecovery ? 'builtin' : 'legacy')
+            continue
+          }
+          if (builtinRecovery) {
             const archived = this.readTraceFromIndex(trace.trace_id)
             if (!archived || (archived.status === 'running' && trace.spans.length >= archived.spans.length)) {
               this.traces.set(trace.trace_id, trace)
@@ -741,29 +742,10 @@ export class TraceStore {
             }
             continue
           }
-          if (deferFinalization) {
-            // 索引未完成时无法判断它是否已在归档收尾：先保留为 running，等索引完成后
-            // finalizeDeferredRunningSnapshot 再决定跳过或标 interrupted。
-            this.traces.set(trace.trace_id, trace)
-            if (!this.order.includes(trace.trace_id)) this.order.push(trace.trace_id)
-            this.deferredRunningSnapshot.set(trace.trace_id, 'legacy')
-            continue
-          }
           // 已经 endTrace 过的（rebuildIndex 已读到）跳过
           if (this.traceIndex.some(e => e.trace_id === trace.trace_id)) continue
           // 标记为 interrupted，写入日期文件让 UI 正确显示
-          const now = new Date()
-          this.appendInterruptedToolResults(trace, now.toISOString())
-          trace.status = 'failed'
-          if (!trace.ended_at) {
-            trace.ended_at = now.toISOString()
-            trace.duration_ms = now.getTime() - new Date(trace.started_at).getTime()
-          }
-          if (!trace.outcome) {
-            trace.outcome = { summary: '[interrupted: agent restarted]' }
-          }
-          this.traces.set(trace.trace_id, trace)
-          this.persistTrace(trace)
+          this.finalizeInterruptedTrace(trace, new Date())
           } catch { /* skip malformed */ }
         }
       }
@@ -798,13 +780,8 @@ export class TraceStore {
           if (!line.trim()) { offset += lineBytes; continue }
           const record = parseTraceRecordLine(line)
           if (record === null) {
-            if (line.includes('"kind"')) {
-              // 带 kind 但解析失败：新格式 record 坏行隔离并报告，不拖垮 legacy index。
-              this.managerBadRecordCount += 1
-              if (this.managerBadRecordCount <= 5 || this.managerBadRecordCount % 100 === 0) {
-                console.warn(`[TraceStore] skipped malformed trace record (count=${this.managerBadRecordCount}) in ${file}`)
-              }
-            }
+            // 带 kind 但解析失败：新格式 record 坏行隔离并报告，不拖垮 legacy index。
+            if (line.includes('"kind"')) this.warnMalformedArchiveLine(file, 'trace record')
             offset += lineBytes
             continue
           }
@@ -829,11 +806,7 @@ export class TraceStore {
               this.addToTaskIndex(trace.related_task_id, trace.trace_id)
             }
           } catch (lineError) {
-            this.managerBadRecordCount += 1
-            if (this.managerBadRecordCount <= 5 || this.managerBadRecordCount % 100 === 0) {
-              console.warn(`[TraceStore] skipped malformed legacy trace (count=${this.managerBadRecordCount}) in ${file}:`,
-                lineError instanceof Error ? lineError.message : String(lineError))
-            }
+            this.warnMalformedArchiveLine(file, 'legacy trace', lineError)
           }
           offset += lineBytes
         }
@@ -1804,10 +1777,14 @@ export class TraceStore {
 
   /**
    * 启动收口：可续跑 episode 保持 running；无检查点的遗留 episode 标 failed/interrupted。
-   * 必须在开放 Manager read model 前调用（UnifiedAgent.onStart）。
+   * candidateIds 限定本次收口范围；后台索引完成时只传构造阶段载入的快照，避免
+   * 把注册后新开的 episode 误判为重启遗留。
    */
-  reconcileInterruptedManagerEpisodes(resumableIds: ReadonlySet<string> = new Set()): void {
-    for (const id of [...this.runningManagerEpisodeIds]) {
+  reconcileInterruptedManagerEpisodes(
+    resumableIds: ReadonlySet<string> = new Set(),
+    candidateIds: ReadonlySet<string> = this.runningManagerEpisodeIds,
+  ): void {
+    for (const id of [...candidateIds]) {
       const episode = this.managerEpisodes.get(id)
       if (!episode || episode.status !== 'running') {
         this.runningManagerEpisodeIds.delete(id)
