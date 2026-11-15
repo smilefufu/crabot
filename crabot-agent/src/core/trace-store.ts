@@ -922,7 +922,27 @@ export class TraceStore {
   async acquireBuiltinTraceWriter(traceId: string, minimumOffset = 0): Promise<void> {
     const trace = await this.getFullTrace(traceId)
     if (!trace) throw new Error(`builtin trace writer unavailable: ${traceId}`)
-    if (trace.spans.length < minimumOffset) throw new Error(`builtin trace source incomplete: ${traceId}, spans=${trace.spans.length}, cursor=${minimumOffset}`)
+    if (trace.spans.length < minimumOffset) {
+      // Crash recovery may lose the last running-snapshot window while the delivery cursor
+      // already covered it. Keep the published offsets stable: fill the gap with explicit
+      // markers instead of blocking the worker forever. New events still start at the cursor.
+      const lost = minimumOffset - trace.spans.length
+      if (lost > 100_000) throw new Error(`builtin trace gap is implausible: ${traceId}, spans=${trace.spans.length}, cursor=${minimumOffset}`)
+      const now = new Date().toISOString()
+      for (let index = 0; index < lost; index++) {
+        trace.spans.push({
+          span_id: crypto.randomUUID(),
+          trace_id: trace.trace_id,
+          type: 'decision',
+          started_at: now,
+          ended_at: now,
+          duration_ms: 0,
+          status: 'completed',
+          details: { decision_type: 'trace_gap', summary: '[trace lost on restart]' },
+        })
+      }
+      console.warn(`[TraceStore] builtin trace gap filled: ${traceId}, lost=${lost}, cursor=${minimumOffset}`)
+    }
     if (this.activeTraceWriters.has(traceId) && this.traces.has(traceId)) return
     // Only the adapter's validated live/idle incarnation may reopen its own trace.
     trace.status = 'running'
