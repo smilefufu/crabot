@@ -10,6 +10,7 @@ import { finishResourceScope, resourceFailure } from '../tool-resource-scope.js'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { sha256CanonicalJson, type WorkerProcessIdentity } from 'crabot-shared'
+import { renameWithRetry } from '../../core/atomic-file.js'
 import { captureHeadlessNativeProcesses } from '../../workers/headless-native-processes.js'
 import { ExecutionAdmissions } from '../../core/execution-admissions.js'
 import { getBgEntitiesRegistryPath } from '../../core/data-paths'
@@ -518,13 +519,7 @@ export class BgEntityRegistry {
 
     const tmp = `${this.registryPath}.tmp.${process.pid}.${Date.now()}`
     await fs.writeFile(tmp, JSON.stringify(file, null, 2), 'utf8')
-    for (let attempt = 0; ; attempt++) {
-      try { await fs.rename(tmp, this.registryPath); return }
-      catch (error) {
-        if (process.platform !== 'win32' || (error as NodeJS.ErrnoException).code !== 'EPERM' || attempt >= 5) throw error
-        await new Promise(resolve => setTimeout(resolve, 50 * (attempt + 1)))
-      }
-    }
+    await renameWithRetry(tmp, this.registryPath)
   }
 
   /**
