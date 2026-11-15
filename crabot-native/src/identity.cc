@@ -649,6 +649,7 @@ static napi_value ReleaseLock(napi_env env, napi_callback_info info) {
 #include "workspace-sync.h"
 #include "workspace-copy-metadata.h"
 #include "workspace-copy-job.h"
+#include "process-job.h"
 #include "process-tree-observation.h"
 #include "program-references.h"
 
@@ -705,6 +706,7 @@ static napi_value Initialize(napi_env env, napi_value exports) {
   RegisterLocalPipe(env, exports);
   RegisterPrivateFile(env, exports);
   RegisterUserPath(env, exports);
+  RegisterProcessJob(env, exports);
 #endif
   return exports;
 }

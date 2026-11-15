@@ -250,6 +250,7 @@ interface ManagedChildState {
   child: ChildProcess
   rootPid?: number
   rootExited: boolean
+  processJob?: object
   reachedRunning: boolean
   intentionalReason?: ModuleStopReason
   finalReason?: ModuleStopReason
@@ -4938,6 +4939,20 @@ export class ModuleManager {
       logStream.end(`[${generateTimestamp()}] === spawn failed ${moduleId} ===\n`)
       throw error
     }
+    // Windows Job Object membership is the authoritative tree scope; ownership by
+    // PID tree stays as the fallback when assignment is unavailable.
+    let processJob: object | undefined
+    if (process.platform === 'win32' && proc.pid) {
+      const native = require('../../scripts/lib/process-identity.cjs')
+      try {
+        processJob = native.createProcessJob()
+        native.assignProcessToJob(processJob, proc.pid)
+      } catch (error) {
+        if (processJob) native.closeProcessJob(processJob)
+        processJob = undefined
+        console.warn(`[ModuleManager] Process job unavailable for ${moduleId}:`, error)
+      }
+    }
     let admitRuntime!: () => void
     const admitted = new Promise<void>(resolve => { admitRuntime = resolve })
     const runtimePeer = ipc || pipe ? new RuntimeRpcPeer(pipe ? new MemoryPipeChannel(proc) : proc) : undefined
@@ -4994,11 +5009,18 @@ export class ModuleManager {
       runtimeGate?.close()
       let cleanupError: unknown
       try {
-        await terminateProcessTree(proc.pid, {
-          gracefulTimeoutMs: 0,
-          forceImmediately: true,
-          modulePort: this.useIpc ? undefined : runtime.port,
-        })
+        if (process.platform === 'win32' && processJob) {
+          const native = require('../../scripts/lib/process-identity.cjs')
+          native.terminateProcessJob(processJob)
+          native.closeProcessJob(processJob)
+          processJob = undefined
+        } else {
+          await terminateProcessTree(proc.pid, {
+            gracefulTimeoutMs: 0,
+            forceImmediately: true,
+            modulePort: this.useIpc ? undefined : runtime.port,
+          })
+        }
       } catch (terminationError) {
         cleanupError = terminationError
       }
@@ -5040,6 +5062,7 @@ export class ModuleManager {
       child: proc,
       rootPid: proc.pid,
       rootExited: false,
+      processJob,
       // register may settle while recordSpawn is awaiting I/O.
       reachedRunning: (runtime as ModuleRuntime).status === 'running',
       finalizeStarted: false,
@@ -5222,6 +5245,11 @@ export class ModuleManager {
       // spawn errors with no PID cannot have created an owned process tree.
       return
     }
+    if (process.platform === 'win32' && state.processJob) {
+      await this.terminateChildJob(state, forceImmediately
+        ? Date.now() : Date.now() + this.config.shutdown_timeout * 1000)
+      return
+    }
     if (this.useIpc && process.platform === 'win32') {
       await this.stopManagedWindowsScope(state, forceImmediately)
       return
@@ -5234,6 +5262,26 @@ export class ModuleManager {
       requireOwnedProcess: state.finalReason === 'crashed',
       isRootPidExited: () => state.rootExited,
     })
+  }
+
+  private async terminateChildJob(state: ManagedChildState, gracefulDeadline: number): Promise<void> {
+    const native = require('../../scripts/lib/process-identity.cjs')
+    const job = state.processJob
+    if (!job) return
+    const sleep = (): Promise<void> => new Promise(resolve => setTimeout(resolve, 25))
+    const empty = (): boolean => {
+      try { return native.inspectProcessJob(job) === 0 } catch { return false }
+    }
+    // A gone root with a non-empty job is exactly the case the PID/port query cannot prove.
+    while (!empty() && Date.now() < gracefulDeadline) await sleep()
+    if (!empty()) {
+      native.terminateProcessJob(job)
+      const forceDeadline = Date.now() + 5000
+      while (!empty() && Date.now() < forceDeadline) await sleep()
+      if (!empty()) throw new Error(`Cannot confirm process job exit: ${state.moduleId}`)
+    }
+    native.closeProcessJob(job)
+    state.processJob = undefined
   }
 
   private async stopManagedWindowsScope(state: ManagedChildState, forceImmediately: boolean, graceful?: () => Promise<void>): Promise<void> {
@@ -5274,13 +5322,25 @@ export class ModuleManager {
     runtime: ModuleRuntime,
   ): Promise<void> {
     const timeoutMs = this.config.shutdown_timeout * 1000
+    const deadline = Date.now() + timeoutMs
+    if (process.platform === 'win32' && state.processJob) {
+      try {
+        await this.sendToModule<Record<string, never>>(runtime.port, 'shutdown', {}, timeoutMs)
+      } catch (error) {
+        console.warn(
+          `[ModuleManager] Graceful shutdown RPC failed for ${runtime.module_id}: `
+          + `${error instanceof Error ? error.message : String(error)}`,
+        )
+      }
+      await this.terminateChildJob(state, deadline)
+      return
+    }
     if (this.useIpc && process.platform === 'win32') {
       await this.stopManagedWindowsScope(state, false, async () => {
         await this.sendToModule(runtime.port, 'shutdown', {}, timeoutMs)
       })
       return
     }
-    const deadline = Date.now() + timeoutMs
     try {
       await this.sendToModule<Record<string, never>>(
         runtime.port,

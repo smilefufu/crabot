@@ -2,6 +2,7 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import type { ExecutionObservation } from 'crabot-shared'
+import { renameWithRetry } from '../core/atomic-file.js'
 import type { ToolDefinition } from '../engine/types.js'
 import { readExecutionResources } from '../engine/tool-resources.js'
 import { assertAuthorizedTools } from './tool-authorization.js'
@@ -43,7 +44,7 @@ export async function persistObservation(file: string, observation: ExecutionObs
   const temporary = `${file}.${randomUUID()}.tmp`
   try {
     await fs.writeFile(temporary, JSON.stringify(observation), { mode: 0o600 })
-    await fs.rename(temporary, file)
+    await renameWithRetry(temporary, file)
   } finally { await fs.rm(temporary, { force: true }) }
 }
 
