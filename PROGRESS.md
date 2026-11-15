@@ -1,5 +1,14 @@
 # Crabot 项目进度
 
+### harness 自愈：Windows Job Object 进程所有权与原子写重试（2026-11-15，已合并）
+
+- 只读排查 Slack 商城任务实例：slack 模块根进程退出后仍有后代，旧 PID+端口反查无法证明范围，同一模块 11 次重启均报 `Cannot confirm Windows process ownership for tree 70092/49892`；`persistObservation` 的 rename 遇杀软/索引器短暂占用返回 EPERM 且无重试，直接杀 worker burst。
+- PR [#254](https://github.com/smilefufu/crabot/pull/254)（squash `3ccf948c`）：native 新增 Job Object API（`KILL_ON_JOB_CLOSE`），MM spawn 后 Assign，停止/finalize 以 job 清空为内核证明，失败仅 warn 并回退原 PID 树；`renameWithRetry` 统一 EPERM/EBUSY/EACCES 8 次退避，供 observation 与 bg registry 共用。设计记录：[spec](crabot-docs/superpowers/specs/2026-11-15-module-process-job-ownership-design.md)。
+- 验证：原生 job 2 项、MM Windows 真实孙进程回归、process-tree-windows 11 项、agent 原子写 4 项、core/agent typecheck 通过。@claude review Approve 后自动合并。
+- review 非阻塞遗留（已记录 spec）：① Windows bg-shell 不再跨 Agent 重启 re-adopt（平台差异，非回归，恢复需 breakaway）；② `recordSpawn` 失败清理未等 job 清空；③ 崩溃 finalize 可能多等一个 `shutdown_timeout`；④ spawn→Assign 极短窗口（已有回退兜底）。
+- 尚未修复的 harness 缺陷：历史 trace 索引延迟期间 running 快照 spans 落后，`builtin trace source incomplete` 挡住投递；Read 工具对截断 PNG 无解码校验且 `compressImage` 失败静默透传，provider 400 污染历史。均需单独确认后处理。
+- #4 资源仲裁方向待 spec：worktree 做代码隔离，模拟器/真机等环境相关资源由 manager 发放带 TTL 的租约；用户已认可方向，设计点尚未逐项确认。
+
 ### 退出/启动体验：Agent 快速收口、强制终止可靠性与启动提示（2026-11-14，已合并，本机 .30-local 已安装）
 
 - 按用户逐项确认的 [spec](crabot-docs/superpowers/specs/2026-11-14-shutdown-startup-ux-design.md) 实现。实测 40–55 秒停机拆为：停机前进程核验约 22 秒（每条记录一次 PowerShell 查创建时间 + 全量 561 进程扫描）、Agent `onStop` 等在执行 Manager 回合约 29 秒、slack 约 13–14 秒；上次正常退出因回合超 30 秒进入强制阶段，5 秒窗口内每 25 ms 只杀一个叶节点未完成，抛 `CRABOT_PROCESS_SCOPE_STOP` 并保留 runtime 记录。
