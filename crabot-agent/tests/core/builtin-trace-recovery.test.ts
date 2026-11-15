@@ -19,7 +19,6 @@ describe('builtin writable trace snapshots', () => {
     store.startSpan(trace.trace_id, { type: 'llm_call', details: { assistant_text: 'new span' } })
     await store.acquireBuiltinTraceWriter(trace.trace_id, 1)
     await store.acquireBuiltinTraceWriter(trace.trace_id, 1)
-    await expect(store.acquireBuiltinTraceWriter(trace.trace_id, 2)).rejects.toThrow('source incomplete')
     expect(readFileSync(archive, 'utf8')).toBe(initial)
     store.releaseBuiltinTraceWriter(trace.trace_id)
     const snapshots = readFileSync(archive, 'utf8').trim().split('\n').map(line => JSON.parse(line))
@@ -97,12 +96,26 @@ describe('builtin writable trace snapshots', () => {
     expect(await store.getFullTrace(trace.trace_id)).toMatchObject({ status: 'failed', outcome: { summary: '[killed]' } })
   })
 
-  it('refuses the incident 270/787 gap without reusing published offsets', async () => {
+  it('fills an incident-sized gap with markers and appends after the published cursor', async () => {
     const store = make(dir)
     const trace = store.startTrace({ module_id: 'crabot-agent', trigger: { type: 'task', summary: 'damaged' } })
     for (let i = 0; i < 270; i++) store.startSpan(trace.trace_id, { type: 'llm_call', details: {} })
     const prefix = structuredClone(trace.spans)
-    await expect(store.acquireBuiltinTraceWriter(trace.trace_id, 787)).rejects.toThrow('source incomplete')
-    expect(trace.spans).toEqual(prefix)
+    await store.acquireBuiltinTraceWriter(trace.trace_id, 787)
+    expect(trace.spans.slice(0, 270)).toEqual(prefix)
+    const gap = trace.spans.slice(270)
+    expect(gap).toHaveLength(517)
+    expect(gap.every(span => span.type === 'decision'
+      && (span.details as { decision_type?: string }).decision_type === 'trace_gap')).toBe(true)
+    const appended = store.startSpan(trace.trace_id, { type: 'tool_result', details: { output_summary: 'after-restart' } })
+    expect(trace.spans.indexOf(appended)).toBe(787)
+  })
+
+  it('still rejects an implausible cursor gap', async () => {
+    const store = make(dir)
+    const trace = store.startTrace({ module_id: 'crabot-agent', trigger: { type: 'task', summary: 'corrupt' } })
+    store.startSpan(trace.trace_id, { type: 'llm_call', details: {} })
+    await expect(store.acquireBuiltinTraceWriter(trace.trace_id, 100_002)).rejects.toThrow('implausible')
+    expect(trace.spans).toHaveLength(1)
   })
 })
