@@ -699,3 +699,38 @@ runpy.run_path(fixture,run_name='__main__')`
     await forceCleanup(mm, runtime)
   })
 })
+
+describe.skipIf(process.platform !== 'win32')('Module Manager Windows job ownership', () => {
+  it('confirms a stop when the root died but its descendant is still in the job', async () => {
+    const { mm, runtime } = makeManager()
+    const pidFile = path.join(mm.dataDir, 'tree.json')
+    runtime.entry = `"${process.execPath}" "${path.resolve('src/test-fixtures/win-tree-root.mjs')}" "${pidFile}"`
+    mm.runtimeRegistry = {
+      initialize: vi.fn(async () => undefined),
+      getInstanceId: vi.fn(() => 'instance-test'),
+      createRuntimeId: vi.fn(() => 'runtime-job'),
+      recoverOrphans: vi.fn(async () => undefined),
+      recordSpawn: vi.fn(async () => ({})),
+      removeRuntime: vi.fn(async () => undefined),
+    }
+
+    await mm.startModuleProcess(runtime.module_id, undefined, {})
+    const child = mm.processes.get(runtime.module_id) as ChildProcess
+    const state = mm.childStates.get(child)
+    expect(state.processJob).toBeDefined()
+    const info = await waitFor(async () => {
+      try { return JSON.parse(await fs.readFile(pidFile, 'utf8')) as { root: number; child: number } }
+      catch { return undefined }
+    })
+
+    // The old PID/port query could not prove this scope: the root is gone and the
+    // survivor holds no listener.
+    process.kill(info.root, 'SIGKILL')
+    await state.finalized
+
+    expect(state.finalizeError).toBeUndefined()
+    expect(state.processJob).toBeUndefined()
+    await waitFor(() => pidAlive(info.child) ? undefined : true)
+    expect(mm.processes.has(runtime.module_id)).toBe(false)
+  }, 20000)
+})
