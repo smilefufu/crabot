@@ -17,7 +17,7 @@ describe('observability retention setting', () => {
     expect(input).toHaveValue(12)
     fireEvent.change(input, { target: { value: '9' } })
     fireEvent.click(screen.getByRole('button', { name: '保存' }))
-    await vi.waitFor(() => expect(providerService.updateGlobalConfig).toHaveBeenCalledWith({ observability_retention_days: 9, default_llm_provider_id: 'p' }))
+    await vi.waitFor(() => expect(providerService.updateGlobalConfig).toHaveBeenCalledWith({ observability_retention_days: 9 }))
     await vi.waitFor(() => expect(toast.success).toHaveBeenCalledWith('观测历史保留天数已保存'))
   })
   it('keeps save disabled below one day', async () => {

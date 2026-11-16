@@ -3,12 +3,10 @@ import { Card } from '../../components/Common/Card'
 import { Button } from '../../components/Common/Button'
 import { useToast } from '../../contexts/ToastContext'
 import { providerService } from '../../services/provider'
-import type { GlobalModelConfig } from '../../types'
 
 const DEFAULT_DAYS = 7
 
 export const ObservabilityRetentionCard: React.FC = () => {
-  const [config, setConfig] = useState<GlobalModelConfig>({})
   const [days, setDays] = useState(String(DEFAULT_DAYS))
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -17,7 +15,6 @@ export const ObservabilityRetentionCard: React.FC = () => {
   useEffect(() => {
     providerService.getGlobalConfig()
       .then((cfg) => {
-        setConfig(cfg)
         setDays(String(cfg.observability_retention_days ?? DEFAULT_DAYS))
       })
       .catch(() => {
@@ -32,12 +29,9 @@ export const ObservabilityRetentionCard: React.FC = () => {
   const handleSave = () => {
     if (!valid) return
     setSaving(true)
-    providerService.updateGlobalConfig({
-      ...config,
-      observability_retention_days: parsed,
-    })
+    // 服务端是合并语义；只发本字段，避免覆盖同页其它卡片刚保存的全局配置。
+    providerService.updateGlobalConfig({ observability_retention_days: parsed })
       .then((updated) => {
-        setConfig(updated)
         setDays(String(updated.observability_retention_days ?? DEFAULT_DAYS))
         toast.success('观测历史保留天数已保存')
       })

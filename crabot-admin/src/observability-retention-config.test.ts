@@ -7,7 +7,7 @@ import { CoreAgentConfigMutationCoordinator } from './core-agent-config-revision
 let directory: string
 beforeEach(async () => { directory = await fs.mkdtemp(join(tmpdir(), 'retention-config-')) })
 afterEach(async () => { await fs.rm(directory, { recursive: true, force: true }) })
-it('defaults fresh installations to 30 days', async () => {
+it('defaults fresh installations to 7 days', async () => {
   const manager = new ModelProviderManager(directory); await manager.initialize()
   expect(manager.getGlobalConfig().observability_retention_days).toBe(7)
 })
