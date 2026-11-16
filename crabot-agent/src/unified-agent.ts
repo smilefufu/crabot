@@ -6121,7 +6121,7 @@ export class UnifiedAgent extends ModuleBase {
       agentDir: getAgentDataDir(), ledger: stack.ledger, sessions: stack.store, traces: this.traceStore,
       retentionDays: () => {
         if (!this.configAuthenticated || this.runtimeClosing) throw new Error('Retention awaits authenticated configuration')
-        return this.agentConfig?.observability_retention_days ?? 30
+        return this.agentConfig?.observability_retention_days ?? 7
       },
       cleanupReflectedEpisodes: () => stack.cleanupReflectedEpisodes(),
       removeNativeCopies: id => this.nativeTraceCopyStore().removeWorker(id),

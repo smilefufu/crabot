@@ -308,7 +308,7 @@ export function parseOpenAIModels(raw: unknown[]): ModelInfo[] {
 // Preserve the old Agent-only startup override until an explicit Admin setting is saved.
 function legacyRetentionDays(): number {
   const days = Number.parseInt(process.env.TRACE_RETENTION_DAYS ?? '', 10)
-  return Number.isFinite(days) && days >= 1 ? days : 30
+  return Number.isFinite(days) && days >= 1 ? days : 7
 }
 
 export class ModelProviderManager {
@@ -1127,7 +1127,7 @@ export class ModelProviderManager {
       delete updated.trace_retention_days
       delete (updated as Record<string, unknown>).task_retention_count
       delete (updated as Record<string, unknown>).trace_retention_count
-      if (Object.prototype.hasOwnProperty.call(config, 'observability_retention_days')) updated.observability_retention_days = retention ?? 30
+      if (Object.prototype.hasOwnProperty.call(config, 'observability_retention_days')) updated.observability_retention_days = retention ?? 7
       const retentionChanged = Object.prototype.hasOwnProperty.call(config, 'observability_retention_days') &&
         updated.observability_retention_days !== this.globalConfig.observability_retention_days
       const publicBaseUrlChanged = Object.prototype.hasOwnProperty.call(config, 'public_base_url') &&
@@ -1231,7 +1231,7 @@ export class ModelProviderManager {
         image_slot_user_set: raw.image_slot_user_set,
         proxy: raw.proxy,
         public_base_url: raw.public_base_url,
-        observability_retention_days: typeof retention === 'number' && Number.isFinite(retention) && retention >= 1 ? retention : 30,
+        observability_retention_days: typeof retention === 'number' && Number.isFinite(retention) && retention >= 1 ? retention : 7,
       }
       if (raw.observability_retention_days !== this.globalConfig.observability_retention_days || ['trace_retention_days', 'task_retention_count', 'trace_retention_count'].some(key => Object.prototype.hasOwnProperty.call(raw, key))) await this.saveGlobalConfig()
       console.log('[ModelProviderManager] Loaded global config')

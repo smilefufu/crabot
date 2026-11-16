@@ -9,7 +9,7 @@ beforeEach(async () => { directory = await fs.mkdtemp(join(tmpdir(), 'retention-
 afterEach(async () => { await fs.rm(directory, { recursive: true, force: true }) })
 it('defaults fresh installations to 30 days', async () => {
   const manager = new ModelProviderManager(directory); await manager.initialize()
-  expect(manager.getGlobalConfig().observability_retention_days).toBe(30)
+  expect(manager.getGlobalConfig().observability_retention_days).toBe(7)
 })
 it.each([7, 45, 1.5])('migrates %s days without changing other configuration and retires count settings', async days => {
   const file = join(directory, 'global_model_config.json')
@@ -57,10 +57,10 @@ it('publishes a behavior revision on retention changes and treats resetting the 
     await coordinator.mutateComputed(domains, preview, apply, noOp)
   })
   await coordinator.initialize()
-  await manager.updateGlobalConfig({ observability_retention_days: 7 })
+  await manager.updateGlobalConfig({ observability_retention_days: 9 })
   expect((await coordinator.current()).revision).toBe(2)
   await manager.updateGlobalConfig({ observability_retention_days: null })
-  expect(manager.getGlobalConfig().observability_retention_days).toBe(30)
+  expect(manager.getGlobalConfig().observability_retention_days).toBe(7)
   expect((await coordinator.current()).revision).toBe(3)
   await manager.updateGlobalConfig({ observability_retention_days: null })
   expect((await coordinator.current()).revision).toBe(3)
