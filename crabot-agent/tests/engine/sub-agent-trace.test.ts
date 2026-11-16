@@ -103,8 +103,6 @@ describe('recordSubAgentTurn', () => {
         type: 'tool_started', responseId: 'engine-response', callId: 'engine-call', turnNumber: 1, toolUseId: 'provider-call',
         name: 'Read', input: { path: 'a' }, startedAtMs: Date.now(),
       })
-      ;(first as unknown as { flushInFlightTraces(): void }).flushInFlightTraces()
-      first.stopFlushTimer()
 
       const rebuilt = new TraceStore(10, dir)
       const spans = rebuilt.getTrace(trace.trace_id)?.spans ?? []
@@ -114,7 +112,6 @@ describe('recordSubAgentTurn', () => {
         status: 'failed',
         details: { response_id: 'engine-response', call_id: 'engine-call', is_error: true, output_summary: '[interrupted: agent restarted]' },
       })
-      rebuilt.stopFlushTimer()
     } finally {
       fs.rmSync(dir, { recursive: true, force: true })
     }

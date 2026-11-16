@@ -96,7 +96,6 @@ describe('ManagerLoop episode trace wiring', () => {
   })
 
   afterEach(async () => {
-    traceStore.stopFlushTimer()
     await fs.rm(dataDir, { recursive: true, force: true })
   })
 
@@ -464,7 +463,6 @@ describe('ManagerLoop episode trace wiring', () => {
     const episode = restarted.getManagerEpisode('ep-orphan')!
     expect(episode.status).toBe('failed')
     expect(episode.outcome?.summary).toContain('interrupted')
-    restarted.stopFlushTimer()
   })
 
   it('无 traceWriter 时 episode 照常运行（降级静默）', async () => {

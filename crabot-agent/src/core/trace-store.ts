@@ -7,9 +7,9 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import * as readline from 'node:readline'
-import { createHash } from 'node:crypto'
 import type { AgentTrace, AgentSpan, AgentSpanType, AgentSpanDetails, TokenUsage } from '../types.js'
 import { aggregateUsage } from './trace-usage.js'
+import { TraceLog } from './trace-log.js'
 import {
   isValidManagerEpisodeTrace,
   parseTraceRecordLine,
@@ -101,21 +101,11 @@ export class TraceStore {
   private managerIndex: Map<string, string[]> = new Map()
   private managerBadRecordCount = 0
 
-  // ── In-flight 定时持久化 ────────────────────────────────
-  // status='running' 的 trace 只在 endTrace 时才追加到按日期切片的 archive 文件。
-  // 但 agent 被 SIGKILL（health 失败 / OOM / 外部强杀）时根本没机会 endTrace，
-  // 整条主 task trace 连带所有 span 永久丢失 —— admin UI 上只能看到已结束的
-  // sub-agent / dispatch trace，看不到死前主 loop 在做啥。
-  //
-  // 解决：定时把所有 in-flight trace 全量覆盖写到独立文件 traces-running.jsonl。
-  // 覆盖式（writeFileSync + rename atomic 替换），文件大小有界。
-  // 进程重启后 rebuildIndex 把上次 running 的 trace 重新加载到 this.traces，
-  // searchTraces 的现有合并逻辑（line 107-112）能直接展示出来。
-  private flushTimer?: ReturnType<typeof setInterval>
-  private lastRunningSnapshotHash?: string
+  /** 旧版 running 文件只读兼容：启动时导入一次，不再由本实例写入。 */
   private readonly runningFlushFile: string
   private readonly archiveFilePrefix: string
   private readonly readableArchiveFilePrefixes: readonly string[]
+  private readonly log?: TraceLog
 
   // ── Worker checkpoint resume 集合 ──────────────────────
   // flushWorkerCheckpoint 把 worker trace（含 resume_checkpoint）原子写到
@@ -149,12 +139,14 @@ export class TraceStore {
   ) {
     this.maxSize = maxSize
     this.persistDir = persistDir
+    this.log = persistDir ? new TraceLog(persistDir) : undefined
     this.runningFlushFile = runningFlushFile
     this.archiveFilePrefix = archiveFilePrefix
     this.readableArchiveFilePrefixes = readableArchiveFilePrefixes
     this.historicalIndexReady = !(persistDir && deferHistoricalIndex)
     if (persistDir) {
       fs.mkdirSync(persistDir, { recursive: true })
+      this.recoverTraceLog()
       if (!deferHistoricalIndex) this.rebuildIndex()
       this.loadResumableCheckpoints()
       this.loadRunningTraces(deferHistoricalIndex)
@@ -199,7 +191,7 @@ export class TraceStore {
   }
 
   /** 坏行计数 + 限频告警（同步 rebuild 与后台索引共用）。 */
-  private warnMalformedArchiveLine(file: string, label: 'trace record' | 'legacy trace', error?: unknown): void {
+  private warnMalformedArchiveLine(file: string, label: 'trace record' | 'legacy trace' | 'trace log', error?: unknown): void {
     this.managerBadRecordCount += 1
     if (this.managerBadRecordCount > 5 && this.managerBadRecordCount % 100 !== 0) return
     const message = `[TraceStore] skipped malformed ${label} (count=${this.managerBadRecordCount}) in ${file}`
@@ -264,6 +256,7 @@ export class TraceStore {
           stream.destroy()
         }
       }
+      entries.push(...this.foldHistoricalTraceLogs(episodes))
       this.mergeHistoricalIndex(entries, episodes)
       merged = true
       console.log(
@@ -295,7 +288,9 @@ export class TraceStore {
       if (existingIdx !== undefined) {
         // 构造阶段从 running 快照建立的条目没有归档位置；补上真实 file/offset，
         // 否则该 trace 被 ring buffer 淘汰后永远读不回。
-        if (!this.traceIndex[existingIdx].file && entry.file) this.traceIndex[existingIdx] = entry
+        if (!this.traceIndex[existingIdx].file || entry.file.startsWith(`traces-v4${path.sep}`)) {
+          this.traceIndex[existingIdx] = entry
+        }
         continue
       }
       positions.set(entry.trace_id, this.traceIndex.length)
@@ -323,7 +318,6 @@ export class TraceStore {
    * 归档已有记录则跳过（与同步路径一致），否则标 interrupted 并落盘。
    */
   private finalizeDeferredRunningSnapshot(): void {
-    if (this.deferredRunningSnapshot.size === 0) return
     const now = new Date()
     for (const [traceId, kind] of this.deferredRunningSnapshot) {
       const trace = this.traces.get(traceId)
@@ -350,7 +344,6 @@ export class TraceStore {
     // builtin 延迟恢复项在同步路径由 reconcileTraces 的 finish hook 收口；索引
     // 完成晚于该 hook 时在这里补做，避免它们永久停在 running。
     if (this.deferredBuiltinTraces.size > 0) this.reconcileDeferredBuiltinTraces()
-    else this.flushInFlightTraces()
   }
 
   private dropDeferredTrace(traceId: string): void {
@@ -359,35 +352,6 @@ export class TraceStore {
     if (index !== -1) this.order.splice(index, 1)
     this.deferredBuiltinTraces.delete(traceId)
     this.idleBuiltinTraces.delete(traceId)
-  }
-
-  /**
-   * 启动 in-flight trace 的定时全量 flush。caller（UnifiedAgent.onStart）调一次。
-   * intervalMs 太短会增加 IO，太长会让"死前的最后状态"丢得多；默认 15s 是经验值。
-   */
-  startFlushTimer(intervalMs = 15_000): void {
-    if (this.flushTimer || !this.persistDir) return
-    this.flushTimer = setInterval(() => {
-      try {
-        this.flushInFlightTraces()
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        console.warn(`[TraceStore] flushInFlightTraces failed: ${msg}`)
-      }
-    }, intervalMs)
-    this.flushTimer.unref?.()
-  }
-
-  /** Persist current running traces at an external side-effect admission boundary. */
-  flushRunningTraces(): void {
-    this.flushInFlightTraces()
-  }
-
-  stopFlushTimer(): void {
-    if (this.flushTimer) {
-      clearInterval(this.flushTimer)
-      this.flushTimer = undefined
-    }
   }
 
   private static runningCheckpointFile(taskId: string): string {
@@ -403,10 +367,8 @@ export class TraceStore {
     const trace = this.traces.get(traceId)
     if (!trace) return
     trace.resume_checkpoint = checkpoint
-    const finalPath = path.join(this.persistDir, TraceStore.runningCheckpointFile(taskId))
-    const tmpPath = finalPath + '.tmp'
-    fs.writeFileSync(tmpPath, JSON.stringify(trace) + '\n', 'utf-8')
-    fs.renameSync(tmpPath, finalPath)
+    if (!this.ensureLog(trace)) throw new Error(`trace log unavailable for checkpoint: ${traceId}`)
+    this.log!.append(trace.trace_id, trace.started_at, { type: 'checkpoint', checkpoint })
   }
 
   getResumableCheckpoint(taskId: string): { traceId: string; checkpoint: import('../types.js').ResumeCheckpoint } | undefined {
@@ -556,40 +518,15 @@ export class TraceStore {
         if (!content) continue
         const trace = JSON.parse(content) as import('../types.js').AgentTrace
         if (!trace.resume_checkpoint) continue
-        this.resumableCheckpoints.set(taskId, { traceId: trace.trace_id, checkpoint: trace.resume_checkpoint })
-        this.traces.set(trace.trace_id, trace)
+        const existing = this.traces.get(trace.trace_id)
+        const resident = !existing || trace.spans.length > existing.spans.length ? trace : existing
+        this.resumableCheckpoints.set(taskId, { traceId: trace.trace_id, checkpoint: resident.resume_checkpoint ?? trace.resume_checkpoint })
+        this.ensureLog(resident)
+        this.traces.set(trace.trace_id, resident)
         if (!this.order.includes(trace.trace_id)) this.order.push(trace.trace_id)
-        this.refreshTraceIndexFromMemory(trace)
+        this.refreshTraceIndexFromMemory(resident)
       } catch { /* skip malformed */ }
     }
-  }
-
-  /**
-   * 全量重写当前实例的 in-flight 文件（默认兼容旧 traces-running.jsonl）。
-   * 用 tmp + rename 实现 atomic 替换：进程在写中间被杀，旧文件保持完好。
-   */
-  private flushInFlightTraces(): void {
-    if (!this.persistDir) return
-    const lines: string[] = []
-    for (const trace of this.traces.values()) {
-      if (trace.status === 'running') {
-        lines.push(JSON.stringify(trace))
-      }
-    }
-    for (const id of this.runningManagerEpisodeIds) {
-      const episode = this.managerEpisodes.get(id)
-      if (episode && episode.status === 'running') {
-        lines.push(JSON.stringify(wrapManagerEpisodeRecord(episode)))
-      }
-    }
-    const content = lines.length > 0 ? lines.join('\n') + '\n' : ''
-    const finalPath = path.join(this.persistDir, this.runningFlushFile)
-    const hash = createHash('sha256').update(content).digest('hex')
-    if (hash === this.lastRunningSnapshotHash && fs.existsSync(finalPath)) return
-    const tmpPath = finalPath + '.tmp'
-    fs.writeFileSync(tmpPath, content, 'utf-8')
-    fs.renameSync(tmpPath, finalPath)
-    this.lastRunningSnapshotHash = hash
   }
 
   /** 把重启遗留的 running trace 收口为 interrupted 并落盘（同步启动与延迟索引共用）。 */
@@ -714,6 +651,7 @@ export class TraceStore {
           // 归档版仍是 running 且 running 文件版 span 更多时，以后者为准。
           const existing = this.managerEpisodes.get(record.trace.trace_id)
           if (!existing || (existing.status === 'running' && record.trace.spans.length >= existing.spans.length)) {
+            this.ensureManagerLog(record.trace)
             this.loadManagerEpisode(record.trace)
           }
           continue
@@ -721,6 +659,7 @@ export class TraceStore {
         if (record && record.kind === 'legacy_agent_trace') {
           try {
           const trace = record.trace as AgentTrace
+          this.ensureLog(trace)
           const builtinRecovery = this.deferBuiltinRecovery && trace.trigger.type === 'task' && !trace.related_task_id
           // 索引未完成时无法判断它是否已在归档收尾：先保留为 running，等索引完成后
           // finalizeDeferredRunningSnapshot 再决定跳过或标 interrupted。正在等 resume
@@ -759,16 +698,78 @@ export class TraceStore {
           } catch { /* skip malformed */ }
         }
       }
-      // 延迟裁决时保留 running 文件，直到历史索引完成后再按归档状态收口；
-      // running manager episode 也先留在文件里，避免索引完成前崩溃丢失现场。
-      // 期间 flush timer 会继续把内存中的 running trace 写回该文件。
-      if (deferFinalization && (this.deferredRunningSnapshot.size > 0 || this.runningManagerEpisodeIds.size > 0)) return
-      // 清空 running 文件——这些 trace 已落到日期文件
-      if (this.deferredBuiltinTraces.size > 0) this.flushInFlightTraces()
-      else fs.writeFileSync(filePath, '', 'utf-8')
+      // 已逐条导入 v4 日志，旧 running 文件不再需要保留现场。
+      fs.writeFileSync(filePath, '', 'utf-8')
     } catch (err) {
       console.warn(`[TraceStore] loadRunningTraces failed: ${err instanceof Error ? err.message : err}`)
     }
+  }
+
+  /** Startup pass over v4 files: fold unfinished traces so resume/interrupted handling sees them. */
+  private recoverTraceLog(): void {
+    for (const file of this.log?.files() ?? []) {
+      try {
+        if (this.log!.ended(file).ended) continue
+        const folded = this.log!.foldFile(file)
+        if (!folded) continue
+        if (folded.kind === 'manager_episode') {
+          const episode = folded.trace as ManagerEpisodeTrace
+          if (!this.managerEpisodes.has(episode.trace_id)) {
+            this.loadManagerEpisode(episode)
+            this.indexedArchivedRunningEpisodeIds.add(episode.trace_id)
+          }
+          continue
+        }
+        const trace = folded.trace as AgentTrace
+        if (this.traces.has(trace.trace_id)) continue
+        if (trace.trigger.type === 'task' && !trace.related_task_id) {
+          this.traces.set(trace.trace_id, trace)
+          this.order.push(trace.trace_id)
+          this.deferredBuiltinTraces.add(trace.trace_id)
+        } else if (trace.resume_checkpoint && trace.related_task_id) {
+          this.resumableCheckpoints.set(trace.related_task_id, { traceId: trace.trace_id, checkpoint: trace.resume_checkpoint })
+          this.traces.set(trace.trace_id, trace)
+          this.order.push(trace.trace_id)
+        } else {
+          this.finalizeInterruptedTrace(trace, new Date())
+        }
+      } catch (error) {
+        console.warn(`[TraceStore] trace log recovery failed for ${path.basename(file)}:`,
+          error instanceof Error ? error.message : String(error))
+      }
+    }
+  }
+
+  private indexFoldedTrace(filePath: string, replace: boolean): void {
+    const folded = this.log!.foldFile(filePath)
+    if (!folded) return
+    if (folded.kind === 'manager_episode') {
+      const episode = folded.trace as ManagerEpisodeTrace
+      if (!this.managerEpisodes.has(episode.trace_id)) this.loadManagerEpisode(episode)
+      return
+    }
+    const trace = folded.trace as AgentTrace
+    const entry = this.traceToIndexEntry(trace, path.relative(this.persistDir!, filePath), 0)
+    const existingIdx = this.traceIndex.findIndex((item) => item.trace_id === trace.trace_id)
+    if (existingIdx === -1) this.traceIndex.push(entry)
+    else if (replace) this.traceIndex[existingIdx] = entry
+    if (trace.related_task_id) this.addToTaskIndex(trace.related_task_id, trace.trace_id)
+  }
+
+  private foldHistoricalTraceLogs(episodes: Map<string, ManagerEpisodeTrace>): TraceIndexEntry[] {
+    const entries: TraceIndexEntry[] = []
+    for (const filePath of this.log?.files() ?? []) {
+      const folded = this.log!.foldFile(filePath)
+      if (!folded) continue
+      if (folded.kind === 'manager_episode') {
+        const episode = folded.trace as ManagerEpisodeTrace
+        if (!episodes.has(episode.trace_id)) episodes.set(episode.trace_id, episode)
+        continue
+      }
+      const trace = folded.trace as AgentTrace
+      entries.push(this.traceToIndexEntry(trace, path.relative(this.persistDir!, filePath), 0))
+    }
+    return entries
   }
 
   private rebuildIndex(): void {
@@ -819,6 +820,13 @@ export class TraceStore {
             this.warnMalformedArchiveLine(file, 'legacy trace', lineError)
           }
           offset += lineBytes
+        }
+      }
+      for (const filePath of this.log?.files() ?? []) {
+        try {
+          this.indexFoldedTrace(filePath, true)
+        } catch (lineError) {
+          this.warnMalformedArchiveLine(path.relative(this.persistDir, filePath), 'trace log', lineError)
         }
       }
     } catch (outerError) {
@@ -905,7 +913,25 @@ export class TraceStore {
 
     this.traces.set(trace.trace_id, trace)
     this.order.push(trace.trace_id)
+    if (this.log) {
+      try { this.log.start(trace.trace_id, trace.started_at, 'agent', trace) }
+      catch (error) { console.warn(`[TraceStore] trace log start failed for ${trace.trace_id}:`, error) }
+      this.refreshTraceIndexFromMemory(trace)
+    }
     return trace
+  }
+
+  private ensureLog(trace: AgentTrace): boolean {
+    if (!this.log) return false
+    const file = this.log.file(trace.trace_id, trace.started_at)
+    if (this.log.has(file) || fs.existsSync(file)) return true
+    try { this.log.start(trace.trace_id, trace.started_at, 'agent', trace); return true }
+    catch (error) { console.warn(`[TraceStore] trace log migration failed for ${trace.trace_id}:`, error); return false }
+  }
+
+  private appendLog(trace: AgentTrace, record: Parameters<TraceLog['append']>[2]): void {
+    try { if (this.ensureLog(trace)) this.log!.append(trace.trace_id, trace.started_at, record) }
+    catch (error) { console.warn(`[TraceStore] trace log append failed for ${trace.trace_id}:`, error) }
   }
 
   private evictHistory(): void {
@@ -919,37 +945,17 @@ export class TraceStore {
     }
   }
 
-  async acquireBuiltinTraceWriter(traceId: string, minimumOffset = 0): Promise<void> {
+  async acquireBuiltinTraceWriter(traceId: string): Promise<void> {
     const trace = await this.getFullTrace(traceId)
     if (!trace) throw new Error(`builtin trace writer unavailable: ${traceId}`)
-    if (trace.spans.length < minimumOffset) {
-      // Crash recovery may lose the last running-snapshot window while the delivery cursor
-      // already covered it. Keep the published offsets stable: fill the gap with explicit
-      // markers instead of blocking the worker forever. New events still start at the cursor.
-      const lost = minimumOffset - trace.spans.length
-      if (lost > 100_000) throw new Error(`builtin trace gap is implausible: ${traceId}, spans=${trace.spans.length}, cursor=${minimumOffset}`)
-      const now = new Date().toISOString()
-      for (let index = 0; index < lost; index++) {
-        trace.spans.push({
-          span_id: crypto.randomUUID(),
-          trace_id: trace.trace_id,
-          type: 'decision',
-          started_at: now,
-          ended_at: now,
-          duration_ms: 0,
-          status: 'completed',
-          details: { decision_type: 'trace_gap', summary: '[trace lost on restart]' },
-        })
-      }
-      console.warn(`[TraceStore] builtin trace gap filled: ${traceId}, lost=${lost}, cursor=${minimumOffset}`)
-    }
     if (this.activeTraceWriters.has(traceId) && this.traces.has(traceId)) return
     // Only the adapter's validated live/idle incarnation may reopen its own trace.
+    const reopen = trace.status !== 'running'
     trace.status = 'running'
     delete trace.ended_at
     delete trace.duration_ms
     delete trace.outcome
-    this.persistTrace(trace, true)
+    if (reopen) this.persistTrace(trace, true)
     this.traces.set(traceId, trace)
     if (!this.order.includes(traceId)) this.order.push(traceId)
     this.activeTraceWriters.add(traceId)
@@ -960,7 +966,6 @@ export class TraceStore {
   releaseBuiltinTraceWriter(traceId: string): void {
     const trace = this.traces.get(traceId)
     if (!trace) throw new Error(`builtin trace writer lost: ${traceId}`)
-    this.persistTrace(trace, true)
     this.activeTraceWriters.delete(traceId)
     this.idleBuiltinTraces.add(traceId)
     this.evictHistory()
@@ -974,7 +979,6 @@ export class TraceStore {
       this.endTrace(id, 'failed', { summary: '[interrupted: agent restarted]' })
     }
     this.deferredBuiltinTraces.clear()
-    this.flushInFlightTraces()
   }
 
   startSpan(
@@ -1002,6 +1006,7 @@ export class TraceStore {
     const trace = this.traces.get(traceId)
     if (trace) {
       trace.spans.push(span)
+      this.appendLog(trace, { type: 'span_upsert', span })
     }
 
     return span
@@ -1029,6 +1034,8 @@ export class TraceStore {
     if (detailsUpdate) {
       span.details = { ...span.details, ...detailsUpdate } as AgentSpanDetails
     }
+    this.appendLog(trace, { type: 'span_patch', span_id: spanId,
+      patch: { status, ended_at: span.ended_at, duration_ms: span.duration_ms, details: span.details } })
   }
 
   endTrace(
@@ -1051,7 +1058,10 @@ export class TraceStore {
       trace.total_usage = totalUsage
     }
 
-    this.persistTrace(trace)
+    this.appendLog(trace, { type: 'trace_end', status, ended_at: trace.ended_at!, duration_ms: trace.duration_ms,
+      ...(trace.outcome ? { outcome: trace.outcome } : {}), ...(trace.total_usage ? { total_usage: trace.total_usage } : {}) })
+    this.log?.close(traceId, trace.started_at)
+    this.refreshTraceIndexFromMemory(trace)
     this.activeTraceWriters.delete(traceId)
     this.idleBuiltinTraces.delete(traceId)
   }
@@ -1070,7 +1080,8 @@ export class TraceStore {
     const trace = this.traces.get(traceId)
     if (!trace) return
     trace.outcome = { summary: '', ...(trace.outcome ?? {}), ...partial }
-    this.persistTrace(trace)
+    this.appendLog(trace, { type: 'outcome_patch', outcome: trace.outcome })
+    this.refreshTraceIndexFromMemory(trace)
   }
 
   updateTrace(traceId: string, updates: { related_task_id?: string }): void {
@@ -1081,6 +1092,8 @@ export class TraceStore {
       if (updates.related_task_id) {
         this.addToTaskIndex(updates.related_task_id, traceId)
       }
+      this.appendLog(trace, { type: 'snapshot', kind: 'agent', trace })
+      this.refreshTraceIndexFromMemory(trace)
     }
   }
 
@@ -1113,6 +1126,10 @@ export class TraceStore {
 
     try {
       const filePath = path.join(this.persistDir, indexEntry.file)
+      if (indexEntry.file.startsWith(`traces-v4${path.sep}`)) {
+        const folded = this.log!.foldFile(filePath)
+        return folded?.kind === 'agent' ? (folded.trace as AgentTrace) : undefined
+      }
       const fd = fs.openSync(filePath, 'r')
       try {
         const CHUNK = 64 * 1024
@@ -1144,17 +1161,31 @@ export class TraceStore {
     }
   }
 
+  /** Seq-based window for append-only readers; spans arrive with their defining seq. */
+  readSpansAfterSeq(traceId: string, fromSeq: number): { spans: Array<{ span: AgentSpan; seq: number }>; lastSeq: number } | undefined {
+    const startedAt = this.traces.get(traceId)?.started_at
+      ?? this.traceIndex.find((entry) => entry.trace_id === traceId)?.started_at
+    if (!startedAt || !this.log) return undefined
+    return this.log.window(traceId, startedAt, fromSeq) as { spans: Array<{ span: AgentSpan; seq: number }>; lastSeq: number } | undefined
+  }
+
   async getFullTrace(traceId: string): Promise<AgentTrace | undefined> {
-    // 1. 先查 ring buffer
     const cached = this.traces.get(traceId)
     if (cached) return cached
 
-    // 2. 历史 trace 依赖归档索引；索引后台构建期间只等待历史 reader，不阻塞执行路径。
-    await this.whenIndexed()
+    // Append-only traces are found directly; only legacy archives need the history index.
+    const logged = this.readTraceFromLog(traceId)
+    if (logged) return logged
 
-    // 3. 从 JSONL 按需读取——分块循环读直到遇到换行符（容纳任意大小 trace；
-    //    历史 bug：固定 64KB buffer 会把 spans 较多的 trace 截断 → JSON parse 失败 → 404）
+    await this.whenIndexed()
     return this.readTraceFromIndex(traceId)
+  }
+
+  private readTraceFromLog(traceId: string): AgentTrace | undefined {
+    const file = this.log?.find(traceId)
+    if (!file) return undefined
+    const folded = this.log!.foldFile(file)
+    return folded?.kind === 'agent' ? (folded.trace as AgentTrace) : undefined
   }
 
   getSpansAtDepth(
@@ -1285,6 +1316,7 @@ export class TraceStore {
         const stat = fs.statSync(path.join(this.persistDir, file))
         totalBytes += stat.size
       }
+      for (const file of this.log?.files() ?? []) totalBytes += fs.statSync(file).size
     } catch (err) {
       console.warn('[TraceStore] getDiskUsage failed:', err instanceof Error ? err.message : err)
     }
@@ -1328,7 +1360,110 @@ export class TraceStore {
     const cutoff = new Date()
     cutoff.setDate(cutoff.getDate() - retentionDays)
     const cutoffStr = cutoff.toISOString().slice(0, 10)
-    return this.cleanupTracesBeforeDate(cutoffStr, dryRun)
+    const legacy = this.cleanupTracesBeforeDate(cutoffStr, dryRun)
+    const log = this.cleanupTraceLogs(cutoff.getTime(), dryRun)
+    const caps = this.enforceTraceLogCaps(dryRun)
+    if (!dryRun) this.compactActiveTraceLogs()
+    return {
+      affected_count: legacy.affected_count + log.affected_count + caps.affected_count,
+      affected_bytes: legacy.affected_bytes + log.affected_bytes + caps.affected_bytes,
+      deleted_trace_ids: [...legacy.deleted_trace_ids, ...log.deleted_trace_ids, ...caps.deleted_trace_ids],
+    }
+  }
+
+  private static readonly MAX_ENDED_TRACES = 20_000
+  private static readonly MAX_TRACE_LOG_BYTES = 2 * 1024 * 1024 * 1024
+  private static readonly COMPACT_THRESHOLD_BYTES = 32 * 1024 * 1024
+  private static readonly COMPACT_TAIL_BYTES = 8 * 1024 * 1024
+
+  /** 按 trace 精确删除超过保留期的已结束 v4 日志。 */
+  private cleanupTraceLogs(cutoffMs: number, dryRun: boolean): {
+    affected_count: number
+    affected_bytes: number
+    deleted_trace_ids: string[]
+  } {
+    if (!this.log) return { affected_count: 0, affected_bytes: 0, deleted_trace_ids: [] }
+    const candidates = this.log.deletable(cutoffMs)
+    return this.removeTraceLogs(candidates, dryRun)
+  }
+
+  /** 已结束 trace 的存量兜底：条数与总字节上限，从最老开始删。 */
+  private enforceTraceLogCaps(dryRun: boolean): {
+    affected_count: number
+    affected_bytes: number
+    deleted_trace_ids: string[]
+  } {
+    if (!this.log) return { affected_count: 0, affected_bytes: 0, deleted_trace_ids: [] }
+    const ended = this.log.deletable(Number.POSITIVE_INFINITY)
+    let totalBytes = 0
+    for (const file of this.log.files()) {
+      try { totalBytes += fs.statSync(file).size } catch { /* deleted concurrently */ }
+    }
+    const excessCount = ended.length - TraceStore.MAX_ENDED_TRACES
+    let excessBytes = totalBytes - TraceStore.MAX_TRACE_LOG_BYTES
+    const selected: typeof ended = []
+    for (const item of ended) {
+      if (selected.length >= excessCount && excessBytes <= 0) break
+      selected.push(item)
+      excessBytes -= item.size
+    }
+    return this.removeTraceLogs(selected, dryRun)
+  }
+
+  private removeTraceLogs(candidates: Array<{ file: string; ended_ms: number; size: number }>, dryRun: boolean): {
+    affected_count: number
+    affected_bytes: number
+    deleted_trace_ids: string[]
+  } {
+    let affectedBytes = 0
+    const deletedIds: string[] = []
+    for (const item of candidates) {
+      const relative = path.relative(this.persistDir!, item.file)
+      const traceId = path.basename(item.file, '.jsonl')
+      affectedBytes += item.size
+      if (dryRun) continue
+      try { this.log!.remove(item.file) } catch (error) {
+        console.warn(`[TraceStore] trace log delete failed for ${relative}:`, error instanceof Error ? error.message : String(error))
+        continue
+      }
+      deletedIds.push(traceId)
+      this.forgetTraceFile(relative, traceId)
+    }
+    if (deletedIds.length > 0) this.rebuildTaskIndex()
+    return { affected_count: candidates.length, affected_bytes: affectedBytes, deleted_trace_ids: deletedIds }
+  }
+
+  private forgetTraceFile(relative: string, traceId: string): void {
+    this.traceIndex = this.traceIndex.filter((entry) => entry.file !== relative)
+    const resident = this.traces.get(traceId)
+    if (resident?.status !== 'running') {
+      this.traces.delete(traceId)
+      const orderIndex = this.order.indexOf(traceId)
+      if (orderIndex !== -1) this.order.splice(orderIndex, 1)
+    }
+    this.managerEpisodes.delete(traceId)
+    this.runningManagerEpisodeIds.delete(traceId)
+    this.managerEpisodeDates.delete(traceId)
+    for (const [key, ids] of this.managerIndex) {
+      const filtered = ids.filter((id) => id !== traceId)
+      if (filtered.length) this.managerIndex.set(key, filtered)
+      else this.managerIndex.delete(key)
+    }
+  }
+
+  /** 活跃日志超阈值时截断旧记录；checkpoint 与 seq 不变，resume 不受影响。 */
+  private compactActiveTraceLogs(): void {
+    if (!this.log) return
+    for (const file of this.log.files()) {
+      try {
+        const state = this.log.ended(file)
+        if (state.ended || state.size < TraceStore.COMPACT_THRESHOLD_BYTES) continue
+        const date = path.basename(path.dirname(file))
+        this.log.compact(path.basename(file, '.jsonl'), date, TraceStore.COMPACT_TAIL_BYTES)
+      } catch (error) {
+        console.warn(`[TraceStore] active trace compaction failed for ${path.basename(file)}:`, error instanceof Error ? error.message : String(error))
+      }
+    }
   }
 
   /**
@@ -1469,7 +1604,9 @@ export class TraceStore {
   private refreshTraceIndexFromMemory(trace: AgentTrace): void {
     const existingIdx = this.traceIndex.findIndex(e => e.trace_id === trace.trace_id)
     const existing = existingIdx >= 0 ? this.traceIndex[existingIdx] : undefined
-    const nextEntry = this.traceToIndexEntry(trace, existing?.file ?? '', existing?.file_offset ?? 0)
+    const logFile = this.log && fs.existsSync(this.log.file(trace.trace_id, trace.started_at))
+      ? path.relative(this.persistDir!, this.log.file(trace.trace_id, trace.started_at)) : existing?.file
+    const nextEntry = this.traceToIndexEntry(trace, logFile ?? '', existing?.file_offset ?? 0)
     if (existingIdx >= 0) this.traceIndex[existingIdx] = nextEntry
     else this.traceIndex.push(nextEntry)
     if (trace.related_task_id) this.addToTaskIndex(trace.related_task_id, trace.trace_id)
@@ -1511,27 +1648,8 @@ export class TraceStore {
   private persistTrace(trace: AgentTrace, required = false): void {
     if (!this.persistDir) return
     try {
-      const date = trace.started_at.slice(0, 10)
-      const file = `${this.archiveFilePrefix}${date}.jsonl`
-      const filePath = path.join(this.persistDir, file)
-      const line = JSON.stringify(trace) + '\n'
-
-      let fileOffset = 0
-      try { fileOffset = fs.statSync(filePath).size } catch { /* new file */ }
-
-      fs.appendFileSync(filePath, line, 'utf-8')
-
-      // 更新已有 index entry（如 appendTraceOutcome 二次写入），不重复 push
-      const newEntry = this.traceToIndexEntry(trace, file, fileOffset)
-      const existingIdx = this.traceIndex.findIndex(e => e.trace_id === trace.trace_id)
-      if (existingIdx !== -1) {
-        this.traceIndex[existingIdx] = newEntry
-      } else {
-        this.traceIndex.push(newEntry)
-      }
-      if (trace.related_task_id) {
-        this.addToTaskIndex(trace.related_task_id, trace.trace_id)
-      }
+      if (this.ensureLog(trace)) this.log!.append(trace.trace_id, trace.started_at, { type: 'snapshot', kind: 'agent', trace })
+      this.refreshTraceIndexFromMemory(trace)
     } catch (err) {
       // persist failure must not affect main flow
       const msg = err instanceof Error ? err.message : String(err)
@@ -1587,21 +1705,24 @@ export class TraceStore {
     }
   }
 
-  private persistManagerEpisode(episode: ManagerEpisodeTrace, strict: boolean, deferred = false): void {
+  private ensureManagerLog(episode: ManagerEpisodeTrace): boolean {
+    if (!this.log) return false
+    const file = this.log.file(episode.trace_id, episode.started_at)
+    if (this.log.has(file) || fs.existsSync(file)) return true
+    try { this.log.start(episode.trace_id, episode.started_at, 'manager_episode', episode); return true }
+    catch (error) { console.warn(`[TraceStore] manager trace log migration failed for ${episode.trace_id}:`, error); return false }
+  }
+
+  private appendManagerLog(episode: ManagerEpisodeTrace, record: Parameters<TraceLog['append']>[2], strict = false): void {
     if (!this.persistDir) return
-    // deferred=true（span/worker 增量）：纯内存更新，不写盘——15s flush 定时器已覆盖
-    // in-flight 快照，归档只在 start/finish 各落一行。每个 span 都同步写盘会把 manager
-    // loop 的热路径压在阻塞 I/O 上，且等于把 O(n²) 搬到另一个文件。
-    if (deferred) return
     try {
-      const date = episode.started_at.slice(0, 10)
-      const file = `${this.archiveFilePrefix}${date}.jsonl`
-      const filePath = path.join(this.persistDir, file)
-      fs.appendFileSync(filePath, JSON.stringify(wrapManagerEpisodeRecord(episode)) + '\n', 'utf-8')
-    } catch (err) {
+      if (!this.ensureManagerLog(episode)) throw new Error('trace log unavailable')
+      this.log!.append(episode.trace_id, episode.started_at, record)
+    }
+    catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       if (strict) throw new Error(`[TraceStore] manager episode persistence failed for ${episode.trace_id}: ${msg}`)
-      console.warn(`[TraceStore] persistManagerEpisode failed for ${episode.trace_id}: ${msg}`)
+      console.warn(`[TraceStore] manager episode log append failed for ${episode.trace_id}: ${msg}`)
     }
   }
 
@@ -1616,7 +1737,7 @@ export class TraceStore {
     if (resume && existing?.manager_key === managerKey && existing.status === 'failed'
       && existing.outcome?.error?.startsWith('上下文压缩失败：')) {
       const resumed: ManagerEpisodeTrace = { ...existing, status: 'running', ended_at: undefined, duration_ms: undefined, outcome: undefined }
-      this.persistManagerEpisode(resumed, true)
+      this.appendManagerLog(resumed, { type: 'trace_start', kind: 'manager_episode', trace: resumed }, true)
       this.managerEpisodes.set(traceId, resumed)
       this.runningManagerEpisodeIds.add(traceId)
       return
@@ -1632,7 +1753,7 @@ export class TraceStore {
       spawned_worker_ids: [],
     }
     // 先落盘成功才进内存索引（严格路径），保证「disk 可枚举」这一协议不变量。
-    this.persistManagerEpisode(episode, true)
+    this.appendManagerLog(episode, { type: 'trace_start', kind: 'manager_episode', trace: episode }, true)
     this.managerEpisodes.set(traceId, episode)
     this.managerEpisodeDates.set(traceId, episode.started_at.slice(0, 10))
     this.runningManagerEpisodeIds.add(traceId)
@@ -1649,8 +1770,7 @@ export class TraceStore {
       items: [...byId.values()].sort((a, b) => a.platform_timestamp.localeCompare(b.platform_timestamp)
         || a.platform_message_id.localeCompare(b.platform_message_id)),
     }
-    // 与 span 一样随 running flush 和最终归档保存，不为每条插话复制整个 trace。
-    this.persistManagerEpisode(episode, false, true)
+    this.appendManagerLog(episode, { type: 'snapshot', kind: 'manager_episode', trace: episode })
   }
 
   appendManagerSpan(traceId: string, span: ManagerEpisodeSpan): void {
@@ -1659,9 +1779,7 @@ export class TraceStore {
     const existing = episode.spans.findIndex((item) => item.span_id === span.span_id)
     if (existing < 0) episode.spans.push(span)
     else episode.spans[existing] = { ...span, started_at: episode.spans[existing].started_at }
-    // span 级变更不整份重写归档（否则单 episode 落盘量随 span 数 O(n²)）：
-    // running flush 每 15s 全量覆盖 running 文件兜底崩溃现场；start/finish 各落一行。
-    this.persistManagerEpisode(episode, false, true)
+    this.appendManagerLog(episode, { type: 'span_upsert', span: episode.spans.find((item) => item.span_id === span.span_id)! })
   }
 
   finishManagerSpan(traceId: string, spanId: string, patch: { status: 'completed' | 'failed'; ended_at?: string; details?: unknown }): void {
@@ -1674,7 +1792,8 @@ export class TraceStore {
     span.ended_at = endedAt
     span.duration_ms = new Date(endedAt).getTime() - new Date(span.started_at).getTime()
     if (patch.details !== undefined) span.details = patch.details
-    this.persistManagerEpisode(episode, false, true)
+    this.appendManagerLog(episode, { type: 'span_patch', span_id: spanId,
+      patch: { status: patch.status, ended_at: endedAt, duration_ms: span.duration_ms, details: span.details } })
   }
 
   addSpawnedWorkerToManagerEpisode(traceId: string, workerId: string): void {
@@ -1682,7 +1801,7 @@ export class TraceStore {
     if (!episode) return
     if (!episode.spawned_worker_ids.includes(workerId)) {
       episode.spawned_worker_ids.push(workerId)
-      this.persistManagerEpisode(episode, false, true)
+      this.appendManagerLog(episode, { type: 'snapshot', kind: 'manager_episode', trace: episode })
     }
   }
 
@@ -1709,9 +1828,14 @@ export class TraceStore {
         span.status = patch.status
         span.ended_at = endedAt
         span.duration_ms = new Date(endedAt).getTime() - new Date(span.started_at).getTime()
+        this.appendManagerLog(episode, { type: 'span_patch', span_id: span.span_id,
+          patch: { status: span.status, ended_at: span.ended_at, duration_ms: span.duration_ms } })
       }
     }
-    this.persistManagerEpisode(episode, false)
+    this.appendManagerLog(episode, { type: 'trace_end', status: patch.status, ended_at: endedAt,
+      duration_ms: episode.duration_ms, ...(episode.outcome ? { outcome: episode.outcome } : {}),
+      ...(episode.total_usage ? { total_usage: episode.total_usage } : {}) })
+    this.log?.close(traceId, episode.started_at)
     this.runningManagerEpisodeIds.delete(traceId)
     this.trackFinishedManagerEpisode(traceId)
   }
@@ -1740,11 +1864,21 @@ export class TraceStore {
     return episodes
   }
 
+  private readManagerLog(traceId: string, date: string): ManagerEpisodeTrace | undefined {
+    if (!this.log) return undefined
+    const file = this.log.file(traceId, date)
+    if (!fs.existsSync(file)) return undefined
+    const folded = this.log.foldFile(file)
+    return folded?.kind === 'manager_episode' ? (folded.trace as ManagerEpisodeTrace) : undefined
+  }
+
   async readManagerEpisode(traceId: string): Promise<ManagerEpisodeTrace | undefined> {
     const resident = this.managerEpisodes.get(traceId)
     if (resident) return resident
     const date = this.managerEpisodeDates.get(traceId)
-    return date ? (await this.readManagerArchive(date)).get(traceId) : undefined
+    if (!date) return undefined
+    const logged = this.readManagerLog(traceId, date)
+    return logged ?? (await this.readManagerArchive(date)).get(traceId)
   }
 
   async *readManagerEpisodes(): AsyncGenerator<ManagerEpisodeTrace> {
@@ -1755,9 +1889,10 @@ export class TraceStore {
       dates.set(date, ids)
     }
     for (const [date, ids] of dates) {
-      const archived = ids.some(id => !this.managerEpisodes.has(id)) ? await this.readManagerArchive(date) : new Map<string, ManagerEpisodeTrace>()
+      const needsArchive = ids.some(id => !this.managerEpisodes.has(id) && !this.readManagerLog(id, date))
+      const archived = needsArchive ? await this.readManagerArchive(date) : new Map<string, ManagerEpisodeTrace>()
       for (const id of ids) {
-        const episode = this.managerEpisodes.get(id) ?? archived.get(id)
+        const episode = this.managerEpisodes.get(id) ?? this.readManagerLog(id, date) ?? archived.get(id)
         if (!episode) throw new Error(`manager_trace_unavailable:${id}`)
         yield episode
       }
@@ -1840,10 +1975,16 @@ export class TraceStore {
               is_error: true,
             }
           }
+          this.appendManagerLog(episode, { type: 'span_patch', span_id: span.span_id,
+            patch: { status: span.status, ended_at: span.ended_at, duration_ms: span.duration_ms, details: span.details } })
+        } else if (resumable) {
+          this.appendManagerLog(episode, { type: 'span_patch', span_id: span.span_id,
+            patch: { status: span.status, ended_at: span.ended_at, duration_ms: span.duration_ms, details: span.details } })
         }
       }
-      this.persistManagerEpisode(episode, false)
       if (!resumable) {
+        this.appendManagerLog(episode, { type: 'trace_end', status: 'failed', ended_at: endedAt,
+          duration_ms: episode.duration_ms, outcome: episode.outcome })
         this.runningManagerEpisodeIds.delete(id)
         this.trackFinishedManagerEpisode(id)
       }

@@ -10,20 +10,17 @@ describe('builtin writable trace snapshots', () => {
   afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
   const make = (dir: string) => new TraceStore(1, dir, 'running.jsonl', 'trace-', ['trace-'], true)
 
-  it('does not append another full snapshot when an active writer is acquired again', async () => {
+  it('does not append a full snapshot when an active writer is acquired again', async () => {
     const store = make(dir)
     const trace = store.startTrace({ module_id: 'crabot-agent', trigger: { type: 'task', summary: 'worker' } })
-    const archive = join(dir, `trace-${trace.started_at.slice(0, 10)}.jsonl`)
+    const archive = join(dir, 'traces-v4', trace.started_at.slice(0, 10), trace.trace_id + '.jsonl')
     await store.acquireBuiltinTraceWriter(trace.trace_id)
-    const initial = readFileSync(archive, 'utf8')
     store.startSpan(trace.trace_id, { type: 'llm_call', details: { assistant_text: 'new span' } })
-    await store.acquireBuiltinTraceWriter(trace.trace_id, 1)
-    await store.acquireBuiltinTraceWriter(trace.trace_id, 1)
-    expect(readFileSync(archive, 'utf8')).toBe(initial)
+    await store.acquireBuiltinTraceWriter(trace.trace_id)
+    await store.acquireBuiltinTraceWriter(trace.trace_id)
     store.releaseBuiltinTraceWriter(trace.trace_id)
-    const snapshots = readFileSync(archive, 'utf8').trim().split('\n').map(line => JSON.parse(line))
-    expect(snapshots).toHaveLength(2)
-    expect(snapshots[1].spans).toEqual(trace.spans)
+    const records = readFileSync(archive, 'utf8').trim().split('\n').map(line => JSON.parse(line))
+    expect(records.filter(record => record.type === 'snapshot')).toHaveLength(0)
     expect((await make(dir).getFullTrace(trace.trace_id))?.spans).toEqual(trace.spans)
   })
 
@@ -55,7 +52,6 @@ describe('builtin writable trace snapshots', () => {
     const trace = first.startTrace({ module_id: 'crabot-agent', trigger: { type: 'task', summary: 'worker' } })
     await first.acquireBuiltinTraceWriter(trace.trace_id)
     first.startSpan(trace.trace_id, { type: 'tool_call', details: { call_id: 'pending-call' } })
-    ;(first as unknown as { flushInFlightTraces(): void }).flushInFlightTraces()
     const second = make(dir)
     expect((await second.getFullTrace(trace.trace_id))?.status).toBe('running')
     second.reconcileDeferredBuiltinTraces()
@@ -77,7 +73,6 @@ describe('builtin writable trace snapshots', () => {
       },
     } })
     const prefix = structuredClone(trace.spans)
-    ;(first as unknown as { flushInFlightTraces(): void }).flushInFlightTraces()
     const second = make(dir)
     second.reconcileDeferredBuiltinTraces()
     second.reconcileDeferredBuiltinTraces()
@@ -96,26 +91,16 @@ describe('builtin writable trace snapshots', () => {
     expect(await store.getFullTrace(trace.trace_id)).toMatchObject({ status: 'failed', outcome: { summary: '[killed]' } })
   })
 
-  it('fills an incident-sized gap with markers and appends after the published cursor', async () => {
+  it('keeps every persisted span without cursor padding after restart', async () => {
     const store = make(dir)
     const trace = store.startTrace({ module_id: 'crabot-agent', trigger: { type: 'task', summary: 'damaged' } })
     for (let i = 0; i < 270; i++) store.startSpan(trace.trace_id, { type: 'llm_call', details: {} })
     const prefix = structuredClone(trace.spans)
-    await store.acquireBuiltinTraceWriter(trace.trace_id, 787)
-    expect(trace.spans.slice(0, 270)).toEqual(prefix)
-    const gap = trace.spans.slice(270)
-    expect(gap).toHaveLength(517)
-    expect(gap.every(span => span.type === 'decision'
-      && (span.details as { decision_type?: string }).decision_type === 'trace_gap')).toBe(true)
-    const appended = store.startSpan(trace.trace_id, { type: 'tool_result', details: { output_summary: 'after-restart' } })
-    expect(trace.spans.indexOf(appended)).toBe(787)
-  })
-
-  it('still rejects an implausible cursor gap', async () => {
-    const store = make(dir)
-    const trace = store.startTrace({ module_id: 'crabot-agent', trigger: { type: 'task', summary: 'corrupt' } })
-    store.startSpan(trace.trace_id, { type: 'llm_call', details: {} })
-    await expect(store.acquireBuiltinTraceWriter(trace.trace_id, 100_002)).rejects.toThrow('implausible')
-    expect(trace.spans).toHaveLength(1)
+    await store.acquireBuiltinTraceWriter(trace.trace_id)
+    expect(trace.spans).toEqual(prefix)
+    store.startSpan(trace.trace_id, { type: 'tool_result', details: { output_summary: 'after-restart' } })
+    expect(store.readSpansAfterSeq(trace.trace_id, 0)?.spans).toHaveLength(271)
+    expect(store.readSpansAfterSeq(trace.trace_id, 2)?.spans).toHaveLength(270)
+    expect(store.readSpansAfterSeq(trace.trace_id, 2)?.spans.every(item => item.seq >= 2)).toBe(true)
   })
 })

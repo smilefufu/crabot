@@ -63,13 +63,11 @@ describe('UnifiedAgent runtime config invalidation', () => {
     vi.spyOn(agent.lspManager, 'stop').mockResolvedValue(undefined)
     const flushCheckpoints = vi.fn()
     agent.agentHandler = { flushActiveCheckpoints: flushCheckpoints }
-    const flush = vi.spyOn(agent.traceStore, 'flushRunningTraces')
     const started = Date.now()
     await agent.onStop()
     expect(Date.now() - started).toBeLessThan(1_000)
     expect(dispose).toHaveBeenCalledTimes(1)
     expect(flushCheckpoints).toHaveBeenCalledTimes(1)
-    expect(flush).toHaveBeenCalledTimes(1)
     dispose.mockRestore()
   })
 
@@ -80,7 +78,6 @@ describe('UnifiedAgent runtime config invalidation', () => {
     agent.importLegacyV2Tasks = vi.fn().mockResolvedValue(undefined)
     agent.managerStack.principals.init = vi.fn().mockResolvedValue(undefined)
     agent.startEventLoopWatchdog = vi.fn()
-    agent.traceStore.startFlushTimer = vi.fn()
     agent.detectFeishuChannel = vi.fn().mockResolvedValue(undefined)
     agent.sessionManager.startCleanup = vi.fn()
     const prepare = vi.spyOn(McpConnector, 'prepare')
@@ -323,7 +320,6 @@ describe('UnifiedAgent runtime config invalidation', () => {
     agent.importLegacyV2Tasks = vi.fn().mockResolvedValue(undefined)
     agent.managerStack.principals.init = vi.fn().mockResolvedValue(undefined)
     agent.startEventLoopWatchdog = vi.fn()
-    agent.traceStore.startFlushTimer = vi.fn()
     agent.detectFeishuChannel = vi.fn().mockResolvedValue(undefined)
     agent.sessionManager.startCleanup = vi.fn()
     // onStart 给降级 Agent 挂退避 pull；无需任何 invalidation 事件即可自愈。
