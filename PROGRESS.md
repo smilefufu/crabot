@@ -7,7 +7,8 @@
 - 用户补充 manager 长跑与 executor 极端增长风险并要求通用清理。设计已补：活跃与否以 `trace_end` 判定、按 trace 精确按年龄删除、已结束 trace 条数/总量兜底、活跃文件在 checkpoint 处 compaction；现有“当天有活跃 trace 就整天不能删”的日期文件缺陷随之消除。已确认阈值：20,000 条/2 GB 默认上限、32 MB 触发/保留 8 MB 尾部、暂不 gzip。
 - 实现完成：每 trace `traces-v4/<date>/<traceId>.jsonl`、seq 窗口、逐记录 append、checkpoint 记录、按 trace 清理与条数/体积兜底、活跃 header+checkpoint compaction、旧 v3/running/checkpoint 文件启动只读导入；删除 15 秒 running 快照与 timer。harness 仅在上一进程留有 cursor 时从源末尾续读，新化身从 0 开始。
 - 定向验证：trace-log 6、trace-store 54、builtin-trace-recovery 7、manager-trace 14、builtin-adapter 91、sub-agent-trace 4、registry 95、daily-reflection-evidence 36、trace 相关 harness 均通过；`worker-mcp-capability` 2、`harness-lifecycle` 性能 1、`daily-reflection` 冻结字节 1、`worker-tools` 1 及各 workspace-git/软链用例在未修改 main 同样失败。Agent tsc 通过。设计型 PR [#257](https://github.com/smilefufu/crabot/pull/257)，不自行 merge。
-- PR review 定性：3 条真实风险确认并修复（seq 不前进导致重复/O(n²)；半行尾续写后整 trace 不可读；CLI 接续 cursor 被误当重启 seed 跳过首回合）。改为 append 推进 nextSeq、start 置 1、重开写者前截断半行、任意坏行跳过告警、半截 header 重建、接续写盘时同步内存位置；seed unavailable 不落 cursor。新增 5 项回归，相关 405 项通过。
+- PR review 定性：3 条真实风险确认并修复（seq 不前进导致重复/O(n²)；半行尾续写后整 trace 不可读；CLI 接续 cursor 被误当重启 seed 跳过首回合）。改为 append 推进 nextSeq、start 置 1、重开写者前截断半行、任意坏行跳过告警、半截 header 重建、接续写盘时同步内存位置；seed unavailable 不落 cursor。新增 5 项回归，相关 405 项通过。@claude 已 Approve。
+- review follow-up（理论窗口，暂不修）：inherit 写盘后、首次 collect 前若进程恰好重启，接续首回合 activity 会被 seed 跳过；窗口仅锁内数毫秒。另一个已接受限制：有 checkpoint 的 compaction 后较早 span 不再出现在 fold，属 display 妥协，投递窗口按 seq 不受影响。
 - 设计记录：[spec](crabot-docs/superpowers/specs/2026-11-15-trace-store-append-only-design.md)（docs `0f4d17f`/`a427f18`）。
 - 用户 2026-11-16 决定保留期默认 30→7 天并保留后台修改入口。PR [#256](https://github.com/smilefufu/crabot/pull/256)（squash `aebc99f9`）：Agent/Admin 缺省与迁移兜底改为 7，全局设置新增 1–365 天输入；review 真实风险（整份 config 快照会覆盖同页其它设置）已修为只 PATCH 单字段。Admin 7 项、Web 2 项、typecheck 通过。非阻塞：旧安装无显式值时下次清理会删 7–30 天历史（符合需求，发版说明可写）；`PublicBaseUrlCard` 有同类快照回写问题，记 follow-up；服务端无 365 上限。
 
