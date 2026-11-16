@@ -4571,6 +4571,9 @@ export class WorkerHarness {
         offset: sourceOffset,
       },
     })
+    // The cursor now exists on disk but predates this process's first observation; pin the
+    // in-memory position so the first resumed turn is read instead of being seeded away.
+    this.nativeTraceOffsets.set(`${target.worker_id}#${target.incarnation_id}`, sourceOffset)
   }
 
   /** 首次升级接续时没有旧 cursor；在 resume 之前把已退出源 session 的末尾立为无通知基线。 */
