@@ -164,6 +164,10 @@
 - 候选由本地 Windows ARM VM 的 x64 工具从 `8c57f0b5` 构建并在 SYSTEM 下验收；安装耗时约 120/200/85 秒，不能替代 Win11 x64 真机普通用户或 GUI 首启验收。未触发 GitHub 打包、未发版。安装包与验收记录在 `Downloads/Crabot-Windows-local24-20261105`。
 - 审查非阻塞 follow-up：手工只读程序文件兼容、任务 cwd 刻意位于被清空 program 子目录时的空目录清理容错；正常工作区/标准解包夹具未触发，本次不扩展。
 
+### 本地 .31 候选打包（2026-11-16）
+
+- 从 `5d8faa89`（含 MCP 开关删除与 trace append-only）构建 `0.1.0-desktop.31-local` 未签名单层候选；stage-core / package-application / package-offline-installer 全部退出 0，包在 `.desktop-build/manual-31/installer/distribution/Crabot-0.1.0-desktop.31-local-win-x64-offline-candidate.exe`（564,565,875 字节，SHA-256 `9b19440f2b1e0e2f7b62229a2b8a30e5e2902d8f2ffaa9112901650a9c90eccc`）。尚未安装/启动验收。
+
 ### 主控工具加载 hotfix：退役 full/shadow，待 PR 验证
 
 - 用户要求删除导致评测偏离正式使用配置的旧全量模式：运行时只保留渐进加载，旧模式及按会话切换环境变量不再生效。核心工具、按族追加和权限不变（独立 MCP 总开关后已于 2026-11-16 删除）；宿主请求授权改为直接查单个工具定义，不再借用 full 投影。
