@@ -39,7 +39,6 @@ describe('Manager MCP production authorization wiring', () => {
     directory = await fs.mkdtemp(join(tmpdir(), 'manager-mcp-auth-'))
     vi.stubEnv('DATA_DIR', directory)
     vi.stubEnv('CRABOT_AGENT_DATA_DIR', '')
-    vi.stubEnv('CRABOT_MANAGER_MCP_ENABLED', '1')
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     const templates = new PermissionTemplateManager()
     templates.initSystemTemplates()
@@ -272,20 +271,18 @@ describe('Manager MCP production authorization wiring', () => {
     expect(execute).not.toHaveBeenCalled()
   })
 
-  it('the MCP kill switch blocks already loaded calls and excludes MCP from new episodes', async () => {
+  it('the old total-switch env no longer gates exposure or loaded calls', async () => {
     grantPrivate()
+    vi.stubEnv('CRABOT_MANAGER_MCP_ENABLED', '0')
     const identity = { targetSession: target, creatorFriendId: 'creator' }
     const episode = await scheduled(identity)
-    await episode.search(mcpName)
+    expect((await episode.search(mcpName)).loaded).toContain(mcpName)
     const loaded = episode.tools().find(tool => tool.name === mcpName)!
-    vi.stubEnv('CRABOT_MANAGER_MCP_ENABLED', '0')
-    expect(await loaded.call({}, {} as never)).toMatchObject({ isError: true })
-    await episode.expectHidden(mcpName)
-    await (await scheduled(identity)).expectHidden(mcpName)
-    expect(execute).not.toHaveBeenCalled()
+    expect(await loaded.call({}, {} as never)).toMatchObject({ isError: false })
+    expect(execute).toHaveBeenCalledOnce()
   })
 
-  it('rollback during an in-flight MCP call does not repeat its side effect', async () => {
+  it('revocation during an in-flight MCP call does not repeat its side effect', async () => {
     grantPrivate()
     const identity = { targetSession: target, creatorFriendId: 'creator' }
     const episode = await scheduled(identity)
@@ -298,15 +295,14 @@ describe('Manager MCP production authorization wiring', () => {
     const tool = episode.tools().find(tool => tool.name === mcpName)!
     const result = tool.call({}, {} as never)
     await entered
-    vi.stubEnv('CRABOT_MANAGER_MCP_ENABLED', '0')
-    await episode.expectHidden(mcpName)
+    grantPrivate(false)
     finish()
     expect(await result).toMatchObject({ output: 'once', isError: false })
     expect(await tool.call({}, {} as never)).toMatchObject({ isError: true })
     await (await scheduled(identity)).expectHidden(mcpName)
     expect(execute).toHaveBeenCalledOnce()
   })
-  it('real UnifiedAgent request MCP uses its guarded friend source while retaining the true group and global rollback', async () => {
+  it('real UnifiedAgent request MCP uses its guarded friend source while retaining the true group and friend revocation', async () => {
     grantPrivate()
     const friendPermissions = await agent.resolvePrincipalPermissions('creator', target.session_id, 'private', target.channel_id)
     const group = groupTarget(false)!
@@ -340,7 +336,7 @@ describe('Manager MCP production authorization wiring', () => {
     expect(await tool.call({}, {})).toMatchObject({ isError: false })
     expect(execute).toHaveBeenCalledOnce()
     expect(stack.principals.currentMasterAuthorization(key)).toBeUndefined()
-    vi.stubEnv('CRABOT_MANAGER_MCP_ENABLED', '0')
+    sources.friend.resolved.tool_access.mcp_skill = false
     expect(await tool.call({}, {})).toMatchObject({ isError: true })
     expect(execute).toHaveBeenCalledOnce()
   })

@@ -1359,7 +1359,7 @@ export class UnifiedAgent extends ModuleBase {
       getRuntimeConfigSummary: () => this.agentConfig,
       managerMcpToolsFor: (access) => {
         const { permissions } = access
-        if (process.env.CRABOT_MANAGER_MCP_ENABLED !== '1' || !permissions) return []
+        if (!permissions) return []
         return this.computerUseOwner.bindTools(this.mcpConnector.getAllTools().filter((tool) => {
           const category = tool.category
           return (category === 'desktop' || category === 'mcp_skill') && permissions.tool_access[category] === true
@@ -1372,7 +1372,7 @@ export class UnifiedAgent extends ModuleBase {
         })
       },
       managerMcpToolAuthorization: async ({ targetSession, creatorFriendId, category, requestPermissions }) => {
-        if (process.env.CRABOT_MANAGER_MCP_ENABLED !== '1' || !targetSession
+        if (!targetSession
           || (targetSession.type === 'private' && !creatorFriendId)
           || (category !== 'desktop' && category !== 'mcp_skill')) return false
         const permissions = requestPermissions ? await requestPermissions() : await this.resolvePrincipalPermissions(
