@@ -5,7 +5,8 @@
 - 止血 PR [#255](https://github.com/smilefufu/crabot/pull/255)（squash `a64f3ced`）：`acquireBuiltinTraceWriter` 遇到 spans < 已发布 cursor 时按差额补 `decision/trace_gap` 标记，保持 offset、新事件仍从 cursor 后追加；超过 100000 缺口才拒绝。`builtin-trace-recovery` 8 项、agent typecheck 通过；@claude review Approve 后自动合并。review 非阻塞：提前 return 分支标记仅内存、100000 魔数、no-extra-snapshot 用例不再覆盖 cursor 超出行为。
 - 用户确认彻底重构方向：现有 trace 四份拷贝/全量快照/cursor 与数组下标绑定属于历史性复杂；改为 append-only，display 可妥协，崩溃恢复与投递正确性优先。已确认：保留公共接口重写存储（A）、manager episode 与 executor 统一记录流（B）、checkpoint 是日志记录且 resume 只读最后完整条（C1）、不持久化 harness 读游标且重启从末尾开始（C2a）、接受崩溃丢失最后未完成 turn 尾部（C3）、每 trace 一文件（D1）、逐记录 append 不 fsync（D2）、单写者/mutex（D3）、旧文件只读兼容并一次性导入未完成 trace（D4）。
 - 用户补充 manager 长跑与 executor 极端增长风险并要求通用清理。设计已补：活跃与否以 `trace_end` 判定、按 trace 精确按年龄删除、已结束 trace 条数/总量兜底、活跃文件在 checkpoint 处 compaction；现有“当天有活跃 trace 就整天不能删”的日期文件缺陷随之消除。待确认阈值：20,000 条/2 GB 默认上限、32 MB 触发/保留 8 MB 尾部、暂不 gzip。
-- 设计记录：[spec](crabot-docs/superpowers/specs/2026-11-15-trace-store-append-only-design.md)（docs `30f12e7`）。
+- 设计记录：[spec](crabot-docs/superpowers/specs/2026-11-15-trace-store-append-only-design.md)（docs `0f4d17f`/`a427f18`）。
+- 用户 2026-11-16 决定保留期默认 30→7 天并保留后台修改入口。PR [#256](https://github.com/smilefufu/crabot/pull/256)（squash `aebc99f9`）：Agent/Admin 缺省与迁移兜底改为 7，全局设置新增 1–365 天输入；review 真实风险（整份 config 快照会覆盖同页其它设置）已修为只 PATCH 单字段。Admin 7 项、Web 2 项、typecheck 通过。非阻塞：旧安装无显式值时下次清理会删 7–30 天历史（符合需求，发版说明可写）；`PublicBaseUrlCard` 有同类快照回写问题，记 follow-up；服务端无 365 上限。
 
 ### harness 自愈：Windows Job Object 进程所有权与原子写重试（2026-11-15，已合并）
 
