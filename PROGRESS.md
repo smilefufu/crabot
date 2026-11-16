@@ -1,5 +1,12 @@
 # Crabot 项目进度
 
+### trace 缺口止血与 TraceStore append-only 重构设计（2026-11-15/16）
+
+- 止血 PR [#255](https://github.com/smilefufu/crabot/pull/255)（squash `a64f3ced`）：`acquireBuiltinTraceWriter` 遇到 spans < 已发布 cursor 时按差额补 `decision/trace_gap` 标记，保持 offset、新事件仍从 cursor 后追加；超过 100000 缺口才拒绝。`builtin-trace-recovery` 8 项、agent typecheck 通过；@claude review Approve 后自动合并。review 非阻塞：提前 return 分支标记仅内存、100000 魔数、no-extra-snapshot 用例不再覆盖 cursor 超出行为。
+- 用户确认彻底重构方向：现有 trace 四份拷贝/全量快照/cursor 与数组下标绑定属于历史性复杂；改为 append-only，display 可妥协，崩溃恢复与投递正确性优先。已确认：保留公共接口重写存储（A）、manager episode 与 executor 统一记录流（B）、checkpoint 是日志记录且 resume 只读最后完整条（C1）、不持久化 harness 读游标且重启从末尾开始（C2a）、接受崩溃丢失最后未完成 turn 尾部（C3）、每 trace 一文件（D1）、逐记录 append 不 fsync（D2）、单写者/mutex（D3）、旧文件只读兼容并一次性导入未完成 trace（D4）。
+- 用户补充 manager 长跑与 executor 极端增长风险并要求通用清理。设计已补：活跃与否以 `trace_end` 判定、按 trace 精确按年龄删除、已结束 trace 条数/总量兜底、活跃文件在 checkpoint 处 compaction；现有“当天有活跃 trace 就整天不能删”的日期文件缺陷随之消除。待确认阈值：20,000 条/2 GB 默认上限、32 MB 触发/保留 8 MB 尾部、暂不 gzip。
+- 设计记录：[spec](crabot-docs/superpowers/specs/2026-11-15-trace-store-append-only-design.md)（docs `30f12e7`）。
+
 ### harness 自愈：Windows Job Object 进程所有权与原子写重试（2026-11-15，已合并）
 
 - 只读排查 Slack 商城任务实例：slack 模块根进程退出后仍有后代，旧 PID+端口反查无法证明范围，同一模块 11 次重启均报 `Cannot confirm Windows process ownership for tree 70092/49892`；`persistObservation` 的 rename 遇杀软/索引器短暂占用返回 EPERM 且无重试，直接杀 worker burst。
