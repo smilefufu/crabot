@@ -71,7 +71,7 @@ export interface GlobalModelConfig {
    * 可选；未配置时后端退化为 http://localhost:<web_port>。
    */
   public_base_url?: string
-  /** 统一观测历史保留天数，默认30，不清理工作区。 */
+  /** 统一观测历史保留天数，默认7，不清理工作区。 */
   observability_retention_days?: number | null
 
 }

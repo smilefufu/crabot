@@ -6,6 +6,7 @@ import { Loading } from '../../components/Common/Loading'
 import { useToast } from '../../contexts/ToastContext'
 import { api } from '../../services/api'
 import { browserService } from '../../services/browser'
+import { ObservabilityRetentionCard } from './ObservabilityRetentionCard'
 import { ProxyConfigCard } from './ProxyConfigCard'
 import { PublicBaseUrlCard } from './PublicBaseUrlCard'
 import { VersionUpgradeCard } from './VersionUpgradeCard'
@@ -214,6 +215,10 @@ export const GlobalSettings: React.FC = () => {
 
       <div className="settings-card">
         <PublicBaseUrlCard />
+      </div>
+
+      <div className="settings-card">
+        <ObservabilityRetentionCard />
       </div>
 
       <div className="settings-card">

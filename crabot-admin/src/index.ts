@@ -8456,7 +8456,7 @@ export class AdminModule extends ModuleBase {
       ...config,
       model_config: resolvedModelConfig,
       tmp_page_base_url: tmpPageBaseUrl,
-      observability_retention_days: this.modelProviderManager.getGlobalConfig().observability_retention_days ?? 30,
+      observability_retention_days: this.modelProviderManager.getGlobalConfig().observability_retention_days ?? 7,
       mcp_servers: mcpServerConfigs,
       skills: this.skillManager.list()
         .filter((s) => {
@@ -10037,7 +10037,7 @@ export class AdminModule extends ModuleBase {
         default_image_model_id: global.default_image_model_id ?? null,
         image_slot_user_set: global.image_slot_user_set ?? null,
         public_base_url: global.public_base_url ?? null,
-        observability_retention_days: global.observability_retention_days ?? 30,
+        observability_retention_days: global.observability_retention_days ?? 7,
       },
       providers,
       mcp_servers: this.mcpServerManager.runtimeSemanticEntries(),
