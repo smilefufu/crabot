@@ -88,11 +88,14 @@ function parseRecords(content: string): TraceLogRecord[] {
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index]
     if (!line.trim()) continue
-    // A partial tail is the only line allowed to be malformed.
     try {
       const parsed = JSON.parse(line) as TraceLogRecord
-      if (parsed.v === 1 && typeof parsed.type === 'string') records.push(parsed)
-    } catch { if (index < lines.length - 2) throw new Error('Corrupt trace log line') }
+      if (parsed.v !== 1 || typeof parsed.type !== 'string') throw new Error('invalid record')
+      records.push(parsed)
+    } catch {
+      // A tail left by a crash is expected; any other bad line is reported but never blocks the trace.
+      if (index < lines.length - 2) console.warn(`[TraceLog] skipping corrupt line ${index + 1}`)
+    }
   }
   return records
 }
@@ -108,13 +111,57 @@ export class TraceLog {
   /** Whether this process already created the file (still verified by the caller on first use). */
   has(file: string): boolean { return this.known.has(file) }
 
+  /** A readable first record is a header; a crash can leave the file without a complete one. */
+  hasHeader(file: string): boolean {
+    let handle: number
+    try { handle = fs.openSync(file, 'r') } catch { return false }
+    try {
+      const buffer = Buffer.alloc(4096)
+      const read = fs.readSync(handle, buffer, 0, buffer.length, 0)
+      const first = buffer.toString('utf-8', 0, read).split('\n').find((line) => line.trim())
+      if (!first) return false
+      const record = JSON.parse(first) as TraceLogRecord
+      return record.type === 'trace_start' || record.type === 'snapshot'
+    } catch { return false } finally { fs.closeSync(handle) }
+  }
+
+  /** Drops a partial tail left by a crash so the next append cannot strand a bad line mid-file. */
+  private repairTail(file: string): void {
+    let size: number
+    try { size = fs.statSync(file).size } catch { return }
+    if (!size) return
+    const handle = fs.openSync(file, 'r')
+    try {
+      const last = Buffer.alloc(1)
+      fs.readSync(handle, last, 0, 1, size - 1)
+      if (last[0] === 0x0a) return
+      const chunk = 4096
+      for (let end = size; end > 0;) {
+        const start = Math.max(0, end - chunk)
+        const buffer = Buffer.alloc(end - start)
+        fs.readSync(handle, buffer, 0, buffer.length, start)
+        const newline = buffer.lastIndexOf(0x0a)
+        if (newline >= 0) {
+          fs.truncateSync(file, start + newline + 1)
+          console.warn(`[TraceLog] truncated partial tail in ${path.basename(file)}`)
+          return
+        }
+        end = start
+      }
+      fs.truncateSync(file, 0)
+    } finally { fs.closeSync(handle) }
+  }
+
   private write(file: string, line: string): void {
     let handle = this.handles.get(file)
     if (handle === undefined) {
+      this.repairTail(file)
       handle = fs.openSync(file, 'a')
       this.handles.set(file, handle)
     }
-    fs.writeSync(handle, line)
+    const bytes = Buffer.from(line)
+    let written = 0
+    while (written < bytes.length) written += fs.writeSync(handle, bytes, written)
   }
 
   /** Releases the append handle; later appends reopen the file. */
@@ -155,12 +202,14 @@ export class TraceLog {
     }
     this.known.add(file)
     this.write(file, JSON.stringify({ v: 1, trace_id: traceId, seq: 0, ts: new Date().toISOString(), type: 'trace_start', kind, trace }) + '\n')
+    this.nextSeq.set(traceId, 1)
   }
 
   append(traceId: string, startedAt: string, record: RecordInput): number {
     const file = this.file(traceId, startedAt)
     const seq = this.nextSeq.get(traceId) ?? this.lastSeq(traceId, startedAt) + 1
     this.write(file, JSON.stringify({ ...record, v: 1, trace_id: traceId, seq, ts: record.ts ?? new Date().toISOString() }) + '\n')
+    this.nextSeq.set(traceId, seq + 1)
     return seq
   }
 

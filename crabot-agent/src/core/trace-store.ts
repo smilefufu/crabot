@@ -924,7 +924,11 @@ export class TraceStore {
   private ensureLog(trace: AgentTrace): boolean {
     if (!this.log) return false
     const file = this.log.file(trace.trace_id, trace.started_at)
-    if (this.log.has(file) || fs.existsSync(file)) return true
+    if (this.log.has(file)) return true
+    if (fs.existsSync(file)) {
+      if (this.log.hasHeader(file)) return true
+      fs.rmSync(file, { force: true })
+    }
     try { this.log.start(trace.trace_id, trace.started_at, 'agent', trace); return true }
     catch (error) { console.warn(`[TraceStore] trace log migration failed for ${trace.trace_id}:`, error); return false }
   }
@@ -1708,7 +1712,11 @@ export class TraceStore {
   private ensureManagerLog(episode: ManagerEpisodeTrace): boolean {
     if (!this.log) return false
     const file = this.log.file(episode.trace_id, episode.started_at)
-    if (this.log.has(file) || fs.existsSync(file)) return true
+    if (this.log.has(file)) return true
+    if (fs.existsSync(file)) {
+      if (this.log.hasHeader(file)) return true
+      fs.rmSync(file, { force: true })
+    }
     try { this.log.start(episode.trace_id, episode.started_at, 'manager_episode', episode); return true }
     catch (error) { console.warn(`[TraceStore] manager trace log migration failed for ${episode.trace_id}:`, error); return false }
   }

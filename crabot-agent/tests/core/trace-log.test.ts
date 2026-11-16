@@ -49,6 +49,38 @@ describe('append-only trace log', () => {
     expect(log.lastSeq('t-1', started_at)).toBe(5)
   })
 
+  it('detects a missing or partial header', () => {
+    log.start('t-1', started_at, 'agent', trace())
+    expect(log.hasHeader(log.file('t-1', started_at))).toBe(true)
+    fs.truncateSync(log.file('t-1', started_at), 5)
+    expect(log.hasHeader(log.file('t-1', started_at))).toBe(false)
+  })
+
+  it('keeps seq strictly increasing across window reads', () => {
+    log.start('t-1', started_at, 'agent', trace())
+    expect(log.append('t-1', started_at, { type: 'span_upsert', span: span('a') })).toBe(1)
+    log.window('t-1', started_at, 0)
+    expect(log.append('t-1', started_at, { type: 'span_upsert', span: span('b') })).toBe(2)
+    expect(log.append('t-1', started_at, { type: 'span_upsert', span: span('c') })).toBe(3)
+  })
+
+  it('truncates a partial tail before a restarted writer appends', () => {
+    log.start('t-1', started_at, 'agent', trace())
+    log.append('t-1', started_at, { type: 'span_upsert', span: span('a') })
+    fs.appendFileSync(log.file('t-1', started_at), '{"v":1,"tra', 'utf-8')
+    const restarted = new TraceLog(root)
+    restarted.append('t-1', started_at, { type: 'span_upsert', span: span('b') })
+    expect(restarted.fold('t-1', started_at)?.trace.spans.map((item) => item.span_id)).toEqual(['a', 'b'])
+  })
+
+  it('skips a corrupt middle line but keeps later records', () => {
+    log.start('t-1', started_at, 'agent', trace())
+    log.append('t-1', started_at, { type: 'span_upsert', span: span('a') })
+    fs.appendFileSync(log.file('t-1', started_at), 'not json\n', 'utf-8')
+    log.append('t-1', started_at, { type: 'span_upsert', span: span('b') })
+    expect(log.fold('t-1', started_at)?.trace.spans.map((item) => item.span_id)).toEqual(['a', 'b'])
+  })
+
   it('expires only finished traces and never an active one', () => {
     const old = Date.now() - 8 * 86_400_000
     const oldIso = new Date(old).toISOString()

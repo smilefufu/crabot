@@ -4679,6 +4679,8 @@ export class WorkerHarness {
       // resume at the end instead of replaying history. New incarnations start at zero.
       if (await this.nativeActivityStore.hasCursor(h.worker_id, h.incarnation_id)) {
         const seeded = await adapter.readTrace(h)
+        // An unavailable source has no trustworthy end; retry seeding on the next observation.
+        if (seeded.unavailableReason !== undefined) return
         offset = seeded.nextCursor.offset
         this.nativeTraceOffsets.set(positionKey, offset)
         await this.nativeActivityStore.commitObservation({
