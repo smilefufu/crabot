@@ -268,7 +268,6 @@ export class ScheduleScriptRunner {
         try {
           if (child.pid === undefined) throw new Error('Schedule script child has no pid')
           const identity = await (this.deps.readProcessIdentity ?? readProcessStartIdentity)(child.pid)
-          this.deps.traceStore.flushRunningTraces()
           markerPath = await this.writeMarker({
             schema_version: 1,
             schedule_id: run.scheduleId,

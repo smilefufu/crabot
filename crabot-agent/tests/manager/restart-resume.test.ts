@@ -42,7 +42,6 @@ describe('Manager restart continuation', () => {
   })
   afterEach(async () => {
     vi.unstubAllEnvs()
-    trace.stopFlushTimer()
     await fs.rm(dir, { recursive: true, force: true })
   })
 
@@ -484,7 +483,6 @@ describe('Manager restart continuation', () => {
     await old.routeHumanMessages('feishu', 'restart-test', [message('queued', 'Queued correction')])
     const checkpoint = await checkpointWhere((value) => value.pending.length === 1)
     expect(trace.getManagerEpisode(checkpoint.episodeId)?.human_inputs?.items.map(item => item.platform_message_id)).toEqual(['original'])
-    trace.flushRunningTraces()
     trace = new TraceStore(100, join(dir, 'traces'), 'running.jsonl', 'traces-v3-')
     const inputs: string[] = []
     const restored = registry({

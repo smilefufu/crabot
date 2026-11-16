@@ -625,6 +625,47 @@ describe('WorkerHarness — 透明接续：revive (capabilities().revive === tru
     ])
   })
 
+  it('CLI 接续后首个回合的 activity 不被重启 seed 跳过', async () => {
+    const nativeTrace: NormalizedTraceEvent[] = [
+      { ts: '2026-08-21T00:00:00.000Z', kind: 'message', role: 'assistant', summary: '旧化身输出' },
+    ]
+    const { harness, adaptersMap } = await makeHarness()
+    const fake = new FakeAdapter({
+      implId: 'claude-code',
+      caps: { revive: true },
+      nativeTrace,
+      onStateChange: harness.handleStateChange,
+      resumeBehavior: (prev) => ({
+        worker_id: prev.worker_id,
+        seq: prev.seq + 1,
+        impl: 'claude-code',
+        session_ref: prev.session_ref,
+      }),
+    })
+    adaptersMap.set('claude-code', fake)
+    const worker = await harness.spawnWorker(spawnParams({ impl: 'claude-code' }))
+    const source = worker.incarnations[0]
+    fake.emitStateChange({
+      worker_id: worker.worker_id, incarnation_id: source.incarnation_id, seq: source.seq,
+      impl: 'claude-code', session_ref: source.session_ref,
+    }, 'exited')
+    await waitUntil(async () => (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0].task.status === 'halted')
+
+    await harness.sendToWorker(worker.worker_id, '继续执行')
+    const target = (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0].incarnations[1]
+    const targetHandle: IncarnationHandle = {
+      worker_id: worker.worker_id, incarnation_id: target.incarnation_id, seq: target.seq,
+      impl: 'claude-code', session_ref: target.session_ref,
+    }
+    nativeTrace.push({ ts: '2026-08-21T00:02:00.000Z', kind: 'message', role: 'assistant', summary: '接续后首个回合输出' })
+    events.length = 0
+    harness.handleNativeActivity(targetHandle)
+    await waitUntil(async () =>
+      (await harness.getPersistedNativeActivityTrace(worker.worker_id, target.incarnation_id!, { offset: 1 })).events.length > 0)
+    const persisted = await harness.getPersistedNativeActivityTrace(worker.worker_id, target.incarnation_id!, { offset: 1 })
+    expect(persisted.events).toEqual([expect.objectContaining({ summary: '接续后首个回合输出' })])
+  })
+
   it('resume首投accepted后同步completed：新化身与task按endReason落completed', async () => {
     const { harness, adaptersMap } = await makeHarness()
     const fake = new FakeAdapter({

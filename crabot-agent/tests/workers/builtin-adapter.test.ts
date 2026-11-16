@@ -657,7 +657,8 @@ describe('BuiltinWorkerAdapter', () => {
         appendTurn: () => {},
         finishIncarnationTrace: () => {},
       },
-      traceReader: { readTrace: async () => trace },
+      traceReader: { readTrace: async () => trace,
+        readSpansAfterSeq: (_id: string, seq: number) => ({ spans: trace.spans.map((span, index) => ({ span, seq: index })).filter(item => item.seq >= seq), lastSeq: trace.spans.length - 1 }) },
     })
     const h = await adapter.spawn(spec({ adapter: makeAdapter([{ stopReason: 'end_turn' }]) }))
     await waitState(adapter, h, 'idle')
@@ -673,8 +674,32 @@ describe('BuiltinWorkerAdapter', () => {
     ])
     expect(first.events[0].detail).not.toHaveProperty('assistant_text')
     expect(first.nextCursor).toEqual({ offset: 3 })
-
     await expect(adapter.readTrace(h, first.nextCursor)).resolves.toEqual({ events: [], nextCursor: { offset: 3 } })
+  })
+
+  it('reads spans by log seq when the trace source exposes seq windows', async () => {
+    const span = { span_id: 'late', trace_id: 'trace-1', type: 'tool_call', started_at: '2026-08-20T01:00:03.000Z',
+      details: { name: 'shell', call_id: 'call-1' } }
+    const adapter = new BuiltinWorkerAdapter({
+      dataDir: tmp,
+      traceHooks: {
+        startIncarnationTrace: () => 'trace-1',
+        appendTurn: () => {},
+        finishIncarnationTrace: () => {},
+      },
+      traceReader: {
+        readTrace: async () => ({ trace_id: 'trace-1', spans: [span], status: 'running' } as unknown as AgentTrace),
+        readSpansAfterSeq: (_traceId: string, seq: number) => seq > 7 ? { spans: [], lastSeq: 9 } : { spans: [{ span: span as never, seq: 8 }], lastSeq: 9 },
+      },
+    })
+    const h = await adapter.spawn(spec({ adapter: makeAdapter([{ stopReason: 'end_turn' }]) }))
+    await waitState(adapter, h, 'idle')
+
+    const first = await adapter.readTrace(h, { offset: 1 })
+    expect(first.events).toMatchObject([{ kind: 'tool_call', source_offset: 8 }])
+    expect(first.nextCursor).toEqual({ offset: 10 })
+    expect((await adapter.readTrace(h, first.nextCursor)).events).toEqual([])
+    expect((await adapter.readTrace(h, first.nextCursor)).nextCursor).toEqual({ offset: 10 })
   })
 
   it('append-only 工具结果可从上次 cursor 单独读到，并与调用共享 call_id', async () => {
@@ -697,7 +722,8 @@ describe('BuiltinWorkerAdapter', () => {
         appendTurn: () => {},
         finishIncarnationTrace: () => {},
       },
-      traceReader: { readTrace: async () => trace },
+      traceReader: { readTrace: async () => trace,
+        readSpansAfterSeq: (_id: string, seq: number) => ({ spans: trace.spans.map((span, index) => ({ span, seq: index })).filter(item => item.seq >= seq), lastSeq: trace.spans.length - 1 }) },
     })
     const h = await adapter.spawn(spec({ adapter: makeAdapter([{ stopReason: 'end_turn' }]) }))
     await waitState(adapter, h, 'idle')
@@ -747,7 +773,8 @@ describe('BuiltinWorkerAdapter', () => {
         appendTurn: () => {},
         finishIncarnationTrace: () => {},
       },
-      traceReader: { readTrace: async () => trace },
+      traceReader: { readTrace: async () => trace,
+        readSpansAfterSeq: (_id: string, seq: number) => ({ spans: trace.spans.map((span, index) => ({ span, seq: index })).filter(item => item.seq >= seq), lastSeq: trace.spans.length - 1 }) },
     })
     const h = await adapter.spawn(spec({ adapter: makeAdapter([{ stopReason: 'end_turn' }]) }))
     await waitState(adapter, h, 'idle')
@@ -775,7 +802,8 @@ describe('BuiltinWorkerAdapter', () => {
         appendTurn: () => {},
         finishIncarnationTrace: () => {},
       },
-      traceReader: { readTrace: async () => trace },
+      traceReader: { readTrace: async () => trace,
+        readSpansAfterSeq: (_id: string, seq: number) => ({ spans: trace.spans.map((span, index) => ({ span, seq: index })).filter(item => item.seq >= seq), lastSeq: trace.spans.length - 1 }) },
     })
     const h = await adapter.spawn(spec({ adapter: makeAdapter([{ stopReason: 'end_turn' }]) }))
     await waitState(adapter, h, 'idle')
@@ -810,7 +838,8 @@ describe('BuiltinWorkerAdapter', () => {
         appendTurn: () => {},
         finishIncarnationTrace: () => {},
       },
-      traceReader: { readTrace: async () => trace },
+      traceReader: { readTrace: async () => trace,
+        readSpansAfterSeq: (_id: string, seq: number) => ({ spans: trace.spans.map((span, index) => ({ span, seq: index })).filter(item => item.seq >= seq), lastSeq: trace.spans.length - 1 }) },
     })
     const h = await adapter.spawn(spec({ adapter: makeAdapter([{ stopReason: 'end_turn' }]) }))
     await waitState(adapter, h, 'idle')
@@ -842,7 +871,8 @@ describe('BuiltinWorkerAdapter', () => {
         appendTurn: () => {},
         finishIncarnationTrace: () => {},
       },
-      traceReader: { readTrace: async () => trace },
+      traceReader: { readTrace: async () => trace,
+        readSpansAfterSeq: (_id: string, seq: number) => ({ spans: trace.spans.map((span, index) => ({ span, seq: index })).filter(item => item.seq >= seq), lastSeq: trace.spans.length - 1 }) },
     })
     const h = await adapter.spawn(spec({ adapter: makeAdapter([{ stopReason: 'end_turn' }]) }))
     await waitState(adapter, h, 'idle')
@@ -869,6 +899,7 @@ describe('BuiltinWorkerAdapter', () => {
       dataDir: tmp,
       traceReader: {
         readTrace: async () => undefined,
+        readSpansAfterSeq: () => undefined,
         listSubagents: async (workerId) => workerId === 'worker-parent' ? [child] : [],
         getSubagent: async (workerId, subagentId) => workerId === 'worker-parent' && subagentId === child.subagent_id ? child : undefined,
         readSubagentTrace,

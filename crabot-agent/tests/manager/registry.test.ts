@@ -342,7 +342,7 @@ describe('ManagerRegistry', () => {
     const send = vi.fn().mockRejectedValueOnce(new Error('delivery unavailable'))
       .mockResolvedValue({ platform_message_id: 'delivered', sent_at: '2026-01-01T00:00:00.000Z' })
     const traces = new TraceStore(100, join(dataDir, 'traces'))
-    try {
+    {
       const registry = new ManagerRegistry(baseRegistryDeps({ adapter, dailyReflectionFor: () => host,
         traceWriter: traces.managerTraceWriter(text => text),
         toolFace: (_key, _system, _identity, _human, _permissions, _hooks, _wake, faceState) => buildManagerToolFace({
@@ -377,7 +377,7 @@ describe('ManagerRegistry', () => {
       expect(result.dailyReflection?.outcome).toBe(retrySummary ? 'completed' : 'partial')
       if (!retrySummary) expect(result.dailyReflection?.validation_errors).toContain('summary_delivery_unproven')
       expect(confirm).toHaveBeenCalledTimes(retrySummary ? 1 : 0)
-    } finally { traces.stopFlushTimer() }
+    }
   })
 
   it('daily end_turn preserves the window; only its analysis Worker resumes the daily profile', async () => {

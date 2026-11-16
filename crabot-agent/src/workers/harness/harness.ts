@@ -1005,6 +1005,8 @@ export class WorkerHarness {
   private recoveryNoticeDrainInFlight = false
   private recoveryNoticeTimer?: ReturnType<typeof setTimeout>
   private recoveryNoticeDeliveryStopped = false
+  /** Read positions live only in this process; restarts seed each incarnation at the source end. */
+  private readonly nativeTraceOffsets = new Map<string, number>()
 
   nativeTraceOffset(workerId: string, incarnationId: IncarnationId): Promise<number> {
     return this.nativeActivityStore.cursor(workerId, incarnationId)
@@ -4569,6 +4571,9 @@ export class WorkerHarness {
         offset: sourceOffset,
       },
     })
+    // The cursor now exists on disk but predates this process's first observation; pin the
+    // in-memory position so the first resumed turn is read instead of being seeded away.
+    this.nativeTraceOffsets.set(`${target.worker_id}#${target.incarnation_id}`, sourceOffset)
   }
 
   /** 首次升级接续时没有旧 cursor；在 resume 之前把已退出源 session 的末尾立为无通知基线。 */
@@ -4670,7 +4675,26 @@ export class WorkerHarness {
     const adapter = this.deps.adapters.get(h.impl)
     if (!adapter?.readTrace) return
     const observed = !baselineUnobserved || await this.nativeActivityStore.hasCursor(h.worker_id, h.incarnation_id)
-    const offset = await this.nativeActivityStore.cursor(h.worker_id, h.incarnation_id)
+    const positionKey = `${h.worker_id}#${h.incarnation_id}`
+    let offset = this.nativeTraceOffsets.get(positionKey)
+    if (offset === undefined) {
+      // A cursor left by a previous process means the source predates this process:
+      // resume at the end instead of replaying history. New incarnations start at zero.
+      if (await this.nativeActivityStore.hasCursor(h.worker_id, h.incarnation_id)) {
+        const seeded = await adapter.readTrace(h)
+        // An unavailable source has no trustworthy end; retry seeding on the next observation.
+        if (seeded.unavailableReason !== undefined) return
+        offset = seeded.nextCursor.offset
+        this.nativeTraceOffsets.set(positionKey, offset)
+        await this.nativeActivityStore.commitObservation({
+          worker_id: h.worker_id,
+          cursor: { incarnation_id: h.incarnation_id, impl: h.impl, seq: h.seq, offset },
+        })
+        return
+      }
+      offset = 0
+      this.nativeTraceOffsets.set(positionKey, 0)
+    }
     const trace = await adapter.readTrace(h, { offset })
     if (trace.unavailableReason !== undefined) {
       // 数据源声明不可用（builtin：meta 缺失 / trace_id 缺失 / trace store 读不到；CLI：原生
@@ -4683,6 +4707,7 @@ export class WorkerHarness {
     if (trace.nextCursor.offset < offset) {
       throw new Error(`native trace cursor moved backwards for ${h.worker_id}#${h.seq}`)
     }
+    this.nativeTraceOffsets.set(positionKey, trace.nextCursor.offset)
     if (baselineUnobserved && !observed) {
       await this.nativeActivityStore.commitObservation({
         worker_id: h.worker_id,

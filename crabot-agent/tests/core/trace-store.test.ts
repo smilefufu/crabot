@@ -48,93 +48,12 @@ describe('TraceStore', () => {
     })
   })
 
-  describe('in-flight trace flush + reload (survives SIGKILL)', () => {
+  describe('in-flight trace persistence (survives SIGKILL)', () => {
     function makeTempDir(): string {
       return fs.mkdtempSync(path.join(os.tmpdir(), 'trace-store-flush-'))
     }
 
-    it('does not rewrite an unchanged snapshot on successive 15-second ticks', () => {
-      const dir = makeTempDir()
-      const store = new TraceStore(10, dir)
-      vi.useFakeTimers()
-      try {
-        store.startTrace({ module_id: 'agent-1', trigger: { type: 'task', summary: 'waiting' } })
-        store.flushRunningTraces()
-        const file = path.join(dir, 'traces-running.jsonl')
-        const savedTime = new Date('2000-01-01T00:00:00.000Z')
-        fs.utimesSync(file, savedTime, savedTime)
-        store.startFlushTimer()
-        vi.advanceTimersByTime(120_000)
-        expect(fs.statSync(file).mtimeMs).toBe(savedTime.getTime())
-      } finally {
-        store.stopFlushTimer()
-        vi.useRealTimers()
-        fs.rmSync(dir, { recursive: true, force: true })
-      }
-    })
-
-    it('persists changed content and restores a missing snapshot without extending the flush interval', () => {
-      const dir = makeTempDir()
-      try {
-        const store = new TraceStore(10, dir)
-        const trace = store.startTrace({ module_id: 'agent-1', trigger: { type: 'task', summary: 'working' } })
-        store.flushRunningTraces()
-        store.startSpan(trace.trace_id, { type: 'llm_call', details: { iteration: 1 } })
-        store.flushRunningTraces()
-        const file = path.join(dir, 'traces-running.jsonl')
-        const updated = fs.readFileSync(file, 'utf8')
-        expect(JSON.parse(updated).spans).toHaveLength(1)
-        fs.unlinkSync(file)
-        store.flushRunningTraces()
-        expect(fs.readFileSync(file, 'utf8')).toBe(updated)
-        const recovered = new TraceStore(10, dir).getTrace(trace.trace_id)
-        expect(recovered?.spans.some(span => span.type === 'llm_call')).toBe(true)
-      } finally {
-        fs.rmSync(dir, { recursive: true, force: true })
-      }
-    })
-
-    it('retries the same snapshot after writing the temporary file fails', () => {
-      const dir = makeTempDir()
-      const store = new TraceStore(10, dir)
-      const trace = store.startTrace({ module_id: 'agent-1', trigger: { type: 'task', summary: 'working' } })
-      store.flushRunningTraces()
-      const file = path.join(dir, 'traces-running.jsonl')
-      const before = fs.readFileSync(file, 'utf8')
-      store.startSpan(trace.trace_id, { type: 'llm_call', details: { iteration: 1 } })
-      fs.mkdirSync(`${file}.tmp`)
-      try {
-        expect(() => store.flushRunningTraces()).toThrow()
-        expect(fs.readFileSync(file, 'utf8')).toBe(before)
-        fs.rmdirSync(`${file}.tmp`)
-        store.flushRunningTraces()
-        expect(JSON.parse(fs.readFileSync(file, 'utf8')).spans).toHaveLength(1)
-      } finally {
-        fs.rmSync(dir, { recursive: true, force: true })
-      }
-    })
-
-    it('retries a snapshot that could not replace the previous file', () => {
-      const dir = makeTempDir()
-      try {
-        const store = new TraceStore(10, dir)
-        const trace = store.startTrace({ module_id: 'agent-1', trigger: { type: 'task', summary: 'working' } })
-        store.flushRunningTraces()
-        const file = path.join(dir, 'traces-running.jsonl')
-        fs.renameSync(file, `${file}.previous`)
-        fs.mkdirSync(file)
-        store.startSpan(trace.trace_id, { type: 'llm_call', details: { iteration: 1 } })
-        expect(() => store.flushRunningTraces()).toThrow()
-        fs.rmdirSync(file)
-        fs.renameSync(`${file}.previous`, file)
-        store.flushRunningTraces()
-        expect(JSON.parse(fs.readFileSync(file, 'utf8')).spans).toHaveLength(1)
-      } finally {
-        fs.rmSync(dir, { recursive: true, force: true })
-      }
-    })
-
-    it('uses a configured v3 running file without loading or changing the legacy running file', () => {
+    it('keeps every span in the trace log and never touches a legacy running file', () => {
       const dir = makeTempDir()
       try {
         const legacyPath = path.join(dir, 'traces-running.jsonl')
@@ -142,9 +61,11 @@ describe('TraceStore', () => {
         const before = fs.readFileSync(legacyPath, 'utf8')
         const store = new TraceStore(10, dir, 'traces-running-v3.jsonl')
         const trace = store.startTrace({ module_id: 'agent-1', trigger: { type: 'task', summary: 'new' } })
-        ;(store as unknown as { flushInFlightTraces: () => void }).flushInFlightTraces()
+        store.startSpan(trace.trace_id, { type: 'llm_call', details: { iteration: 1 } })
+        const logFile = path.join(dir, 'traces-v4', trace.started_at.slice(0, 10), trace.trace_id + '.jsonl')
+        expect(fs.readFileSync(logFile, 'utf8')).toContain('span_upsert')
+        expect(fs.existsSync(path.join(dir, 'traces-running-v3.jsonl'))).toBe(false)
         expect(fs.readFileSync(legacyPath, 'utf8')).toBe(before)
-        expect(fs.readFileSync(path.join(dir, 'traces-running-v3.jsonl'), 'utf8')).toContain(trace.trace_id)
       } finally {
         fs.rmSync(dir, { recursive: true, force: true })
       }
@@ -181,8 +102,7 @@ describe('TraceStore', () => {
 
         const trace = store.startTrace({ module_id: 'v3-agent', trigger: { type: 'task', summary: 'new' } })
         store.endTrace(trace.trace_id, 'completed')
-        const today = trace.started_at.slice(0, 10)
-        expect(fs.existsSync(path.join(dir, `traces-v3-${today}.jsonl`))).toBe(true)
+        expect(fs.existsSync(path.join(dir, 'traces-v4', trace.started_at.slice(0, 10), trace.trace_id + '.jsonl'))).toBe(true)
         expect(fs.readFileSync(legacyPath)).toEqual(legacyBefore)
 
         store.cleanupOldTraces(1, false)
@@ -205,7 +125,6 @@ describe('TraceStore', () => {
         // 模拟一个跑了几轮 turn 的 trace（in-flight，未 endTrace）
         store1.startSpan(trace.trace_id, { type: 'llm_call', details: { iteration: 1 } })
         // 触发 flush（私有方法用 any 绕过）
-        ;(store1 as unknown as { flushInFlightTraces: () => void }).flushInFlightTraces()
 
         // 不调 endTrace —— 模拟 SIGKILL
         // 新进程启动，新 store 从同一 dir 加载
@@ -234,12 +153,10 @@ describe('TraceStore', () => {
           module_id: 'agent-1',
           trigger: { type: 'task', summary: 'done task' },
         })
-        ;(store as unknown as { flushInFlightTraces: () => void }).flushInFlightTraces()
 
         // 完成 trace → 走 append 到 traces-{date}.jsonl
         store.endTrace(trace.trace_id, 'completed', { summary: 'ok' })
         // 再触发 flush：running 文件应该清掉这条
-        ;(store as unknown as { flushInFlightTraces: () => void }).flushInFlightTraces()
 
         const runningPath = path.join(dir, 'traces-running.jsonl')
         const content = fs.existsSync(runningPath) ? fs.readFileSync(runningPath, 'utf-8') : ''
@@ -254,26 +171,6 @@ describe('TraceStore', () => {
       }
     })
 
-    it('startFlushTimer triggers periodic flush', async () => {
-      const dir = makeTempDir()
-      try {
-        const store = new TraceStore(10, dir)
-        const trace = store.startTrace({
-          module_id: 'agent-1',
-          trigger: { type: 'task', summary: 'timer test' },
-        })
-        store.startFlushTimer(50)
-        await new Promise(resolve => setTimeout(resolve, 120))
-        store.stopFlushTimer()
-
-        const runningPath = path.join(dir, 'traces-running.jsonl')
-        expect(fs.existsSync(runningPath)).toBe(true)
-        const content = fs.readFileSync(runningPath, 'utf-8')
-        expect(content).toContain(trace.trace_id)
-      } finally {
-        fs.rmSync(dir, { recursive: true, force: true })
-      }
-    })
   })
 })
 
@@ -404,12 +301,10 @@ describe('TraceStore index', () => {
         trigger: { type: 'task', summary: 'crashed task' },
         related_task_id: 'task-crashed',
       })
-      ;(store as unknown as { flushInFlightTraces: () => void }).flushInFlightTraces()
 
       const restarted = new TraceStore(10, dir, 'traces-running.jsonl', 'traces-v3-', ['traces-', 'traces-v3-'], false, true)
-      expect(restarted.searchTraces({ task_id: 'task-crashed' }).traces[0]?.status).toBe('running')
-      await restarted.whenIndexed()
       const result = restarted.searchTraces({ task_id: 'task-crashed' })
+      await restarted.whenIndexed()
       expect(result.traces).toHaveLength(1)
       expect(result.traces[0].status).toBe('failed')
       expect(result.traces[0].outcome_summary).toContain('interrupted')
@@ -427,7 +322,6 @@ describe('TraceStore index', () => {
         module_id: 'agent-1',
         trigger: { type: 'task', summary: 'crashed builtin' },
       })
-      ;(store as unknown as { flushInFlightTraces: () => void }).flushInFlightTraces()
 
       const restarted = new TraceStore(10, dir, 'traces-running.jsonl', 'traces-v3-', ['traces-', 'traces-v3-'], true, true)
       await restarted.whenIndexed()
@@ -443,12 +337,10 @@ describe('TraceStore index', () => {
     try {
       const store = new TraceStore(10, dir)
       store.startManagerEpisode('ep-archived', 'chat::one' as never, { type: 'human_message', summary: 'episode' })
-      ;(store as unknown as { flushInFlightTraces: () => void }).flushInFlightTraces()
       store.finishManagerEpisode('ep-archived', { status: 'completed' })
 
       const restarted = new TraceStore(10, dir, 'traces-running.jsonl', 'traces-v3-', ['traces-', 'traces-v3-'], false, true)
-      expect(restarted.getManagerEpisode('ep-archived')?.status).toBe('running')
-      expect(fs.readFileSync(path.join(dir, 'traces-running.jsonl'), 'utf-8')).toContain('ep-archived')
+      expect(restarted.getManagerEpisode('ep-archived')).toBeUndefined()
       await restarted.whenIndexed()
       expect(restarted.getManagerEpisode('ep-archived')?.status).toBe('completed')
       restarted.reconcileInterruptedManagerEpisodes()
@@ -487,7 +379,6 @@ describe('TraceStore index', () => {
 
       const restarted = new TraceStore(10, dir, 'traces-running.jsonl', 'traces-v3-', ['traces-', 'traces-v3-'], false, true)
       const startupIds = new Set(restarted.activeManagerEpisodeIds())
-      expect(startupIds.size).toBe(0)
       await restarted.whenIndexed()
 
       const candidates = new Set([...startupIds, ...restarted.archivedRunningManagerEpisodeIds()])
@@ -926,6 +817,32 @@ describe('TraceStore.cleanupOldTraces', () => {
 
 })
 
+describe('TraceStore cleanup of append-only traces', () => {
+  it('deletes only finished traces past retention and never an active trace', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trace-clean-v4-'))
+    try {
+      const store = new TraceStore(10, dir)
+      const active = store.startTrace({ module_id: 'a', trigger: { type: 'task', summary: 'active' } })
+      const activeFile = path.join(dir, 'traces-v4', active.started_at.slice(0, 10), active.trace_id + '.jsonl')
+      const oldDir = path.join(dir, 'traces-v4', '2020-01-01')
+      fs.mkdirSync(oldDir, { recursive: true })
+      const oldFile = path.join(oldDir, 'old-trace.jsonl')
+      const start = { v: 1, trace_id: 'old-trace', seq: 0, ts: '2020-01-01T00:00:00.000Z', type: 'trace_start', kind: 'agent',
+        trace: { trace_id: 'old-trace', module_id: 'a', started_at: '2020-01-01T00:00:00.000Z', status: 'running', trigger: { type: 'task', summary: 'old' }, spans: [] } }
+      const end = { v: 1, trace_id: 'old-trace', seq: 1, ts: '2020-01-01T00:01:00.000Z', type: 'trace_end',
+        status: 'completed', ended_at: '2020-01-01T00:01:00.000Z' }
+      fs.writeFileSync(oldFile, JSON.stringify(start) + '\n' + JSON.stringify(end) + '\n')
+
+      const result = store.cleanupOldTraces(1, false)
+      expect(result.deleted_trace_ids).toContain('old-trace')
+      expect(fs.existsSync(oldFile)).toBe(false)
+      expect(fs.existsSync(activeFile)).toBe(true)
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
 describe('TraceStore.cleanupOldTracesByCount', () => {
   // 给 traces-* 文件准备指定 trace_id 列表的 helper
   const writeTracesFile = (dir: string, dateStr: string, traceIds: string[]) => {
@@ -1035,13 +952,12 @@ describe('flushWorkerCheckpoint', () => {
       messages: [{ id: 'm1', role: 'user', content: 'hi', timestamp: 1 }],
       worker_state: { todo_items: [] },
     })
-    const file = path.join(dir, 'traces-running-task-1.jsonl')
-    expect(fs.existsSync(file)).toBe(true)
-    const parsed = JSON.parse(fs.readFileSync(file, 'utf-8').trim())
+    const file = path.join(dir, 'traces-v4', trace.started_at.slice(0, 10), trace.trace_id + '.jsonl')
+    const parsed = fs.readFileSync(file, 'utf-8').trim().split('\n').map(line => JSON.parse(line))
+      .filter(record => record.type === 'checkpoint').at(-1)
     expect(parsed.trace_id).toBe(trace.trace_id)
-    expect(parsed.resume_checkpoint.messages).toHaveLength(1)
-    expect(parsed.resume_checkpoint.system_prompt).toBe('SP')
-    expect(fs.existsSync(file + '.tmp')).toBe(false)
+    expect(parsed.checkpoint.messages).toHaveLength(1)
+    expect(parsed.checkpoint.system_prompt).toBe('SP')
   })
 })
 
@@ -1094,11 +1010,8 @@ describe('loadResumableCheckpoints', () => {
         status: 'failed',
         details: { call_id: 'engine-call', is_error: true, output_summary: '[interrupted: agent restarted]' },
       })
-
-      store.stopFlushTimer()
       const rebuilt = new TraceStore(100, dir)
       expect(rebuilt.getTrace('tr-tool')?.spans.filter((span) => span.type === 'tool_result')).toHaveLength(1)
-      rebuilt.stopFlushTimer()
     } finally {
       fs.rmSync(dir, { recursive: true, force: true })
     }
@@ -1120,7 +1033,6 @@ describe('loadResumableCheckpoints', () => {
         details: { call_id: 'engine-call', tool_use_id: 'provider-call', tool_name: 'Read', input_summary: '{}' },
       })
       store.endSpan(trace.trace_id, call.span_id, 'completed', undefined, 1_000)
-      ;(store as unknown as { flushInFlightTraces(): void }).flushInFlightTraces()
 
       const rebuilt = new TraceStore(100, dir)
       const loaded = rebuilt.getTrace(trace.trace_id)
@@ -1298,8 +1210,9 @@ describe('TraceStore reactivateResumableTrace（resume 续写复用旧 trace）'
       store1.endTrace(trace.trace_id, 'completed', { summary: 'done' })
 
       const store2 = new TraceStore(10, dir)
-      const resumed = store2.getTrace(trace.trace_id)
-      expect(resumed?.status).toBe('running')
+      expect(store2.getTrace(trace.trace_id)).toBeUndefined()
+      expect(store2.findLatestResumeCheckpointByTaskId('task-terminal')?.traceId).toBe(trace.trace_id)
+      expect(store2.reactivateTraceById(trace.trace_id)?.status).toBe('running')
       expect(store2.searchTraces({ task_id: 'task-terminal' }).traces[0]!.status).toBe('running')
       expect(store2.searchTraces({ task_id: 'task-terminal', status: 'completed' }).traces).toHaveLength(0)
     } finally {

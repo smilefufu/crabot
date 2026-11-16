@@ -43,7 +43,6 @@ describe('TraceStore manager episode traces', () => {
   })
 
   afterEach(() => {
-    store.stopFlushTimer()
     fs.rmSync(dir, { recursive: true, force: true })
   })
 
@@ -52,11 +51,13 @@ describe('TraceStore manager episode traces', () => {
     try {
       vi.setSystemTime(new Date('2020-01-01T12:00:00Z'))
       store.startManagerEpisode('old-running', KEY_A, TRIGGER)
+      const file = path.join(dir, 'traces-v4', '2020-01-01', 'old-running.jsonl')
       vi.setSystemTime(new Date('2026-11-11T12:00:00Z'))
       store.cleanupOldTraces(30, false)
-      const file = path.join(dir, 'traces-v3-2020-01-01.jsonl')
       expect(fs.existsSync(file)).toBe(true)
+      vi.setSystemTime(new Date('2020-01-01T12:05:00Z'))
       store.finishManagerEpisode('old-running', { status: 'completed', outcome: { summary: 'done' } })
+      vi.setSystemTime(new Date('2026-11-11T12:00:00Z'))
       store.cleanupOldTraces(30, false)
       expect(fs.existsSync(file)).toBe(false)
     } finally { vi.useRealTimers() }
@@ -69,8 +70,7 @@ describe('TraceStore manager episode traces', () => {
     expect(running.manager_key).toBe(KEY_A)
 
     // start 即落盘（episode admission 不变量）
-    const today = new Date().toISOString().slice(0, 10)
-    const archive = fs.readFileSync(path.join(dir, `traces-v3-${today}.jsonl`), 'utf-8')
+    const archive = fs.readFileSync(path.join(dir, 'traces-v4', running.started_at.slice(0, 10), 'ep-1.jsonl'), 'utf-8')
     expect(archive).toContain('"kind":"manager_episode"')
     expect(archive).toContain('"trace_id":"ep-1"')
 
@@ -130,18 +130,15 @@ describe('TraceStore manager episode traces', () => {
     expect(episode.outcome?.error).toBe('controlled')
   })
 
-  it('running episodes enter the in-flight flush and survive rebuild from disk', () => {
+  it('running episodes survive rebuild from disk without a flush', () => {
     store.startManagerEpisode('ep-4', KEY_A, TRIGGER)
-    // 强制一次 flush（模拟进程被杀前的最后状态）
-    ;(store as unknown as { flushInFlightTraces(): void }).flushInFlightTraces()
-    expect(fs.readFileSync(path.join(dir, 'traces-running.jsonl'), 'utf-8')).toContain('ep-4')
+    const file = path.join(dir, 'traces-v4', store.getManagerEpisode('ep-4')!.started_at.slice(0, 10), 'ep-4.jsonl')
+    expect(fs.readFileSync(file, 'utf-8')).toContain('"type":"trace_start"')
 
-    // 新实例从磁盘 rebuild：archive 行优先（带 kind），running 文件兜底
     const rebuilt = new TraceStore(100, dir, 'traces-running.jsonl', 'traces-v3-')
     expect(rebuilt.getManagerEpisode('ep-4')).toBeDefined()
     expect(rebuilt.countManagerEpisodes(KEY_A)).toBe(1)
     expect(rebuilt.listTraceManagerKeys()).toContain(KEY_A)
-    rebuilt.stopFlushTimer()
   })
 
   it('reconcileInterruptedManagerEpisodes closes leftover running as failed/interrupted preserving spans', () => {
@@ -153,8 +150,6 @@ describe('TraceStore manager episode traces', () => {
       span_id: 'tool-live', type: 'tool_call', started_at: new Date().toISOString(), status: 'running',
       details: { call_id: 'call-live', name: 'slow_tool', input_summary: '{}' },
     })
-    // span 增量走 deferred flush（覆盖式 running 文件）；生产由 15s 定时器兜底。
-    ;(store as unknown as { flushInFlightTraces(): void }).flushInFlightTraces()
     const rebuilt = new TraceStore(100, dir, 'traces-running.jsonl', 'traces-v3-')
     rebuilt.reconcileInterruptedManagerEpisodes()
     const episode = rebuilt.getManagerEpisode('ep-5')!
@@ -170,7 +165,6 @@ describe('TraceStore manager episode traces', () => {
         is_error: true,
       },
     })
-    rebuilt.stopFlushTimer()
   })
 
   it('legacy no-kind lines still parse and never leak manager records into legacy index', async () => {
@@ -188,7 +182,6 @@ describe('TraceStore manager episode traces', () => {
     await expect(rebuilt.getFullTrace('legacy-1')).resolves.toBeDefined()
     // manager record 不进 legacy task/trace 面
     await expect(rebuilt.getFullTrace('ep-6')).resolves.toBeUndefined()
-    rebuilt.stopFlushTimer()
   })
 
   it('manager index is isolated per manager_key with stable sort and pagination', () => {
@@ -216,12 +209,12 @@ describe('TraceStore manager episode traces', () => {
   })
 
   it('start persistence failure throws (episode admission fail-closed)', () => {
-    fs.chmodSync(dir, 0o500)
+    fs.writeFileSync(path.join(dir, 'traces-v4'), 'not a directory')
     try {
       expect(() => store.startManagerEpisode('ep-ro', KEY_A, TRIGGER)).toThrow('persistence failed')
       expect(store.getManagerEpisode('ep-ro')).toBeUndefined()
     } finally {
-      fs.chmodSync(dir, 0o700)
+      fs.rmSync(path.join(dir, 'traces-v4'))
     }
   })
 
@@ -235,8 +228,7 @@ describe('TraceStore manager episode traces', () => {
     // 的内容是调用方给的脱敏结果——所以用已脱敏输入断言。
     const redacted = { ...secretTrigger, summary: 'Bearer [REDACTED]' }
     store.startManagerEpisode('ep-secret', KEY_A, redacted)
-    const today = new Date().toISOString().slice(0, 10)
-    const archive = fs.readFileSync(path.join(dir, `traces-v3-${today}.jsonl`), 'utf-8')
+    const archive = fs.readFileSync(path.join(dir, 'traces-v4', store.getManagerEpisode('ep-secret')!.started_at.slice(0, 10), 'ep-secret.jsonl'), 'utf-8')
     expect(archive).not.toContain('sk-supersecretvalue123456789')
     expect(archive).toContain('[REDACTED]')
   })
@@ -256,7 +248,6 @@ describe('TraceStore manager episode traces', () => {
     const rebuilt = new TraceStore(100, dir, 'traces-running.jsonl', 'traces-v3-')
     await expect(rebuilt.getFullTrace('legacy-2')).resolves.toBeDefined()
     expect(rebuilt.getManagerBadRecordCount()).toBeGreaterThan(0)
-    rebuilt.stopFlushTimer()
   })
 
   it('cleanup by date removes manager records from files but never running episodes', () => {
@@ -280,6 +271,5 @@ describe('TraceStore manager episode traces', () => {
     expect(result.affected_count).toBe(1)
     expect(rebuilt.getManagerEpisode('ep-old')).toBeUndefined()
     expect(rebuilt.getManagerEpisode('ep-running')).toBeDefined()
-    rebuilt.stopFlushTimer()
   })
 })

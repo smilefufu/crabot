@@ -322,7 +322,8 @@ export interface BuiltinTraceHooks {
 
 export interface BuiltinTraceReader {
   readTrace(traceId: string): Promise<import('../../types.js').AgentTrace | undefined>
-  minimumOffset?(workerId: string, incarnationId?: string): Promise<number>
+  /** Spans upserted at or after fromSeq, with the log seq they appeared at. */
+  readSpansAfterSeq(traceId: string, fromSeq: number): { spans: Array<{ span: import('../../types.js').AgentSpan; seq: number }>; lastSeq: number } | undefined
   listSubagents?(workerId: string): Promise<WorkerSubagentSummary[]>
   getSubagent?(workerId: string, subagentId: string): Promise<WorkerSubagentSummary | undefined>
   readSubagentTrace?(workerId: string, subagentId: string, cursor?: TraceCursor): Promise<{
@@ -947,20 +948,16 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       return { sourceAvailable: false, spans: [], events: [], nextCursor: cursor ?? { offset: 0 } }
     }
     const start = cursor?.offset ?? 0
-    const publishedOffset = await this.deps.traceReader.minimumOffset?.(h.worker_id, h.incarnation_id) ?? 0
-    if (Math.max(start, publishedOffset) > trace.spans.length) {
-      console.warn(`[BuiltinWorkerAdapter] trace source incomplete: ${traceId}, cursor=${start}, spans=${trace.spans.length}`)
+    const window = this.deps.traceReader.readSpansAfterSeq(traceId, start)
+    if (!window) {
+      console.warn(`[BuiltinWorkerAdapter] trace source incomplete: ${traceId}, seq=${start}`)
       return { sourceAvailable: false, unavailableReason: 'builtin trace source incomplete', spans: [], events: [], nextCursor: cursor ?? { offset: 0 } }
     }
-    const spans = trace.spans.slice(start)
     const events: import('../types.js').NormalizedTraceEvent[] = []
-    let consumed = start
-    for (let i = start; i < trace.spans.length; i++) {
-      const normalizedEvents = normalizeBuiltinSpan(trace.spans[i])
-      events.push(...normalizedEvents.map((event) => ({ ...event, source_offset: i })))
-      consumed = i + 1
+    for (const item of window.spans) {
+      for (const event of normalizeBuiltinSpan(item.span)) events.push({ ...event, source_offset: item.seq })
     }
-    return { sourceAvailable: true, spans, events, nextCursor: { offset: consumed } }
+    return { sourceAvailable: true, spans: window.spans.map((item) => item.span), events, nextCursor: { offset: window.lastSeq + 1 } }
   }
 
   async kill(h: IncarnationHandle): Promise<void> {

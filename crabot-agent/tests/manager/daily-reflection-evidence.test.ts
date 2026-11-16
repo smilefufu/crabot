@@ -160,7 +160,7 @@ describe('daily reflection persisted evidence', () => {
   it('reads evicted archived episodes, including episodes whose history is missing', async () => {
     const f = await fixture()
     const traces = new TraceStore(20, join(f.root, 'traces'))
-    try {
+    {
       for (let i = 0; i < 1002; i++) {
         traces.startManagerEpisode(`archived-${i}`, 'chat::one' as ManagerKey, { type: 'human_message', summary: 'archive fixture' })
         traces.finishManagerEpisode(`archived-${i}`, { status: 'completed' })
@@ -179,7 +179,7 @@ describe('daily reflection persisted evidence', () => {
       expect((await provider.read(record, archiveState)).content).toContain('archived input')
       expect(manifest.records.find(item => item.source_id === 'archived-1')?.gaps).toEqual(['manager_history_unavailable'])
       expect(traces.getManagerEpisode('archived-0')).toBeUndefined()
-    } finally { traces.stopFlushTimer() }
+    }
   })
 
   it('retries detail I/O at frozen history bytes without including later messages', async () => {

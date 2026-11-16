@@ -5197,9 +5197,7 @@ export class UnifiedAgent extends ModuleBase {
     const redact = (text: string) => redactSecrets(text, [...this.knownSecrets])
     return {
       acquireTraceWriter: async (traceId, workerId, incarnationId) => {
-        const offset = incarnationId && this.managerStack
-          ? await this.managerStack.harness.nativeTraceOffset(workerId, incarnationId) : 0
-        await this.traceStore.acquireBuiltinTraceWriter(traceId, offset)
+        await this.traceStore.acquireBuiltinTraceWriter(traceId)
       },
       releaseTraceWriter: (traceId) => this.traceStore.releaseBuiltinTraceWriter(traceId),
       finishTraceRecovery: () => this.traceStore.reconcileDeferredBuiltinTraces(),
@@ -5281,9 +5279,8 @@ export class UnifiedAgent extends ModuleBase {
 
   private builtinTraceReader(): import('./workers/builtin/adapter.js').BuiltinTraceReader {
     return {
-      minimumOffset: (workerId, incarnationId) => incarnationId && this.managerStack
-        ? this.managerStack.harness.nativeTraceOffset(workerId, incarnationId) : Promise.resolve(0),
       readTrace: async (traceId) => this.traceStore.getFullTrace(traceId),
+      readSpansAfterSeq: (traceId, fromSeq) => this.traceStore.readSpansAfterSeq(traceId, fromSeq),
       listSubagents: (workerId) => this.builtinSubagentRunner.list(workerId),
       getSubagent: (workerId, subagentId) => this.builtinSubagentRunner.get(workerId, subagentId),
       readSubagentTrace: (workerId, subagentId, cursor) => this.builtinSubagentRunner.readTrace(workerId, subagentId, cursor),
@@ -5955,9 +5952,6 @@ export class UnifiedAgent extends ModuleBase {
     // 先 await onStart 再 listen，堵死会让 RPC 端口长时间不可用）。
     void this.replayPendingAdminChatWakes()
     this.startEventLoopWatchdog()
-    // trace 的 in-flight 持久化：每 15s 覆盖写 traces-running-v3.jsonl，让 agent
-    // 被 SIGKILL 时主 task trace 仍能保留到最后一次 flush 的状态。
-    this.traceStore.startFlushTimer(15_000)
     // 探測是否有飛書 channel，決定是否注入 read_feishu_document 工具
     this.detectFeishuChannel().catch(() => {/* 探测失败不影响启动 */})
     this.sessionManager.startCleanup()
@@ -6196,7 +6190,6 @@ export class UnifiedAgent extends ModuleBase {
 
     this.sessionManager.stopCleanup()
     this.attentionScheduler.stopAll()
-    this.traceStore.stopFlushTimer()
     this.observabilityRetention?.stop()
     this.managerStack?.harness.stopLivenessSweep()
     this.managerStack?.harness.stopRecoveryNoticeDelivery()
@@ -6224,10 +6217,5 @@ export class UnifiedAgent extends ModuleBase {
 
     // 断开 MCP/LSP 与 Manager 收口并行；迟到的 stdio 进程由 MM 在根进程退出后收尾。
     await this.withinShutdownBudget(mcpCleanup, deadline - Date.now(), 'MCP/LSP cleanup')
-    try {
-      this.traceStore.flushRunningTraces()
-    } catch (error) {
-      console.error(`[${this.config.moduleId}] Failed to flush running traces during shutdown:`, error)
-    }
   }
 }
