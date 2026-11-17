@@ -1,5 +1,11 @@
 # Crabot 项目进度
 
+### 图片临时路径、LLM 误报与 Windows 管理浏览器（2026-11-17，源码修复，未部署）
+
+- 按用户收窄后的 [Spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-11-17-cross-platform-path-and-failure-boundaries-design.md)，仅修三项：非视觉工具图片改用系统临时目录及唯一 MIME 文件名，写入失败回工具结果；LLM 专用兜底要求明确请求来源，普通文件/工具/runtime 错误与取消不误报；Windows 管理 Chrome/CDP 补标准目录发现与 profile 路径，失败准确说明，不新增全局杀用户 Chrome。B（shell entity 身份）、C（原生 CLI）和其他审计项不改。
+- 同步最新 main 后，338 项定向用例与 Agent/Admin 类型检查通过。扩大检查的 22 项失败均在原基线 `755c82e1` 复现（入站夹具 17、重试预算夹具 1、压缩夹具 3、Slack HTTPS 超时 1），不标全仓全绿、不并入本次修复。
+- Windows 浏览器使用平台模拟验证，尚未真机运行；没有真实模型调用、业务数据重放、部署或安装包发布。临时文件沿用 OS 管理，不新增 24 小时 TTL 或清理任务。
+
 ### 微信群聊响应开关保存与表单修复（2026-11-17，源码修复，未部署）
 
 - 运行中保存 `group.only_respond_to_mentions` 后写回现有 `channel-configs/<id>.json`，开启和关闭均在模块重启后保持；串行处理并发保存，保留已有凭据与其他配置，写盘失败明确报错且允许重试。
