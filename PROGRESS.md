@@ -1,5 +1,13 @@
 # Crabot 项目进度
 
+### 后台 Shell 产物读取防护：Bash 工具描述语义 + Read 图片解码门禁（2026-11-17，已合并）
+
+- 根因闭环（2026-11-14 e10_currency 事故）：WiFi adb screencap 3.1MB 慢写约 21s，Bash 10s 宽限到期转后台返回「命令已转后台（entity_id: xxx）」，模型误读为已完成 2s 后 Read 截图，读到写入中截断字节；compressImage 静默透传坏图进对话历史，后续请求持续 400。证据：图片 mtime 23:43:08.7 晚于 trace Read span 23:42:59.3；完整文件直发 Provider 200、截断版 400 逐字复现。转后台/唤醒机制本身经全链核对确认完整（onShellExit → worker 队列 → dispatcher → harness inbox → idle 续 burst，含重试与重启补投），问题在模型误读。
+- 用户逐项确认：改工具描述（不改返回文案）、Read 图片解码校验、不加 system prompt 总则、历史毒图自愈记 follow-up。PR [#258](https://github.com/smilefufu/crabot/pull/258)（squash `28daa4ae`）：① Bash 描述改「视为本次运行需要较长时间才能完成…可通过 Output 进行阻塞式读取」（用户给定文案）；② `verifyImageDecodable`（sharp 强制完整解码）在 Read 图片入口拦截，失败返回「文件不完整或已损坏，可能仍在被写入中」；真实事故文件验证 262KB~2MB 截断全部被拒、完整版通过；sharp 不可用跳过校验。read-tool 27/27、agent tsc 通过；@claude review Approve（零行内意见）后自动合并。
+- 现场重放实验（deepseek-flash，事故原命令形状 + 行为一致的 adb shim 慢写 PNG）：正常环境 4 轮（old/new 交错）转后台全部复现，下一步 span 均为先 Output 阻塞等待、退出后读完整图，0 早读 0 个 400，新文案无负向变化；故意破坏 Output 可达性的对照轮模型 3/4 早读，解码门禁 3/3 拦截、0 个 400——兜底层独立于提示词生效。局限：重放是短上下文新会话，事故的长任务上下文不可完全复现，A/B 首 span 无差异。
+- Follow-up：① 历史毒图自愈（400 含 unsupported image 时替换占位重试一次）；② `pendingBgNotifications` friend 队列 drain 端随旧提示链清理（9896cc13）被删，enqueue 无生产消费者（现架构所有 shell 均带 worker_id，分支不可达，可清理）。
+- 设计记录：[spec](crabot-docs/superpowers/specs/2026-11-17-bg-shell-product-read-guard-design.md)（docs `98302d5`）。
+
 ### trace 缺口止血与 TraceStore append-only 重构设计（2026-11-15/16）
 
 - 止血 PR [#255](https://github.com/smilefufu/crabot/pull/255)（squash `a64f3ced`）：`acquireBuiltinTraceWriter` 遇到 spans < 已发布 cursor 时按差额补 `decision/trace_gap` 标记，保持 offset、新事件仍从 cursor 后追加；超过 100000 缺口才拒绝。`builtin-trace-recovery` 8 项、agent typecheck 通过；@claude review Approve 后自动合并。review 非阻塞：提前 return 分支标记仅内存、100000 魔数、no-extra-snapshot 用例不再覆盖 cursor 超出行为。
@@ -18,7 +26,7 @@
 - PR [#254](https://github.com/smilefufu/crabot/pull/254)（squash `3ccf948c`）：native 新增 Job Object API（`KILL_ON_JOB_CLOSE`），MM spawn 后 Assign，停止/finalize 以 job 清空为内核证明，失败仅 warn 并回退原 PID 树；`renameWithRetry` 统一 EPERM/EBUSY/EACCES 8 次退避，供 observation 与 bg registry 共用。设计记录：[spec](crabot-docs/superpowers/specs/2026-11-15-module-process-job-ownership-design.md)。
 - 验证：原生 job 2 项、MM Windows 真实孙进程回归、process-tree-windows 11 项、agent 原子写 4 项、core/agent typecheck 通过。@claude review Approve 后自动合并。
 - review 非阻塞遗留（已记录 spec）：① Windows bg-shell 不再跨 Agent 重启 re-adopt（平台差异，非回归，恢复需 breakaway）；② `recordSpawn` 失败清理未等 job 清空；③ 崩溃 finalize 可能多等一个 `shutdown_timeout`；④ spawn→Assign 极短窗口（已有回退兜底）。
-- 尚未修复的 harness 缺陷：历史 trace 索引延迟期间 running 快照 spans 落后，`builtin trace source incomplete` 挡住投递；Read 工具对截断 PNG 无解码校验且 `compressImage` 失败静默透传，provider 400 污染历史。均需单独确认后处理。
+- 尚未修复的 harness 缺陷：历史 trace 索引延迟期间 running 快照 spans 落后，`builtin trace source incomplete` 挡住投递（需单独确认后处理）；Read 截断 PNG 解码校验已由 PR [#258](https://github.com/smilefufu/crabot/pull/258) 修复（见 2026-11-17 段）。
 - #4 资源仲裁方向待 spec：worktree 做代码隔离，模拟器/真机等环境相关资源由 manager 发放带 TTL 的租约；用户已认可方向，设计点尚未逐项确认。
 
 ### 退出/启动体验：Agent 快速收口、强制终止可靠性与启动提示（2026-11-14，已合并，本机 .30-local 已安装）
