@@ -466,6 +466,10 @@ export class WechatChannel extends ModuleBase {
   }): { config: Record<string, unknown>; requires_restart: boolean } {
     const incoming = params.config ?? {}
     if ((incoming.credentials as { mode?: string } | undefined)?.mode === 'webhook') throw new RpcError('INVALID_PARAMS', '微信 Webhook 已移除，请改用 Socket.IO')
+    const switchValue = incoming.group?.only_respond_to_mentions
+    if (switchValue !== undefined && typeof switchValue !== 'boolean' && switchValue !== 'true' && switchValue !== 'false') {
+      throw new RpcError('INVALID_PARAMS', 'only_respond_to_mentions 必须为布尔值')
+    }
     let requiresRestart = false
 
     const creds = incoming.credentials ?? {}
@@ -480,10 +484,8 @@ export class WechatChannel extends ModuleBase {
       this.wechatConfig.api_key = creds.api_key
       requiresRestart = true
     }
-    const group = incoming.group ?? {}
-    // Admin SchemaField 的 enum 分支回传字符串（"true"/"false"），用户未动时原样
+    // Admin SchemaField 回传字符串（"true"/"false"），用户未动时原样
     // 回传 get_config 的 boolean——两种都接受，避免运行中热改静默 no-op。
-    const switchValue = group.only_respond_to_mentions
     if (typeof switchValue === 'boolean') {
       this.wechatConfig.only_respond_to_mentions = switchValue
     } else if (switchValue === 'true' || switchValue === 'false') {

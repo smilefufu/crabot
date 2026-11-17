@@ -37,6 +37,7 @@ export class ChannelManager {
   private instances: Map<string, ChannelInstance> = new Map()
   private instanceWrites: Promise<unknown> = Promise.resolve()
   private slackConfigUpdates: Promise<unknown> = Promise.resolve()
+  private wechatConfigUpdates: Promise<unknown> = Promise.resolve()
 
   private readonly dataDir: string
   private readonly implementationsFilePath: string
@@ -424,6 +425,11 @@ export class ChannelManager {
   }
 
   async updateConfig(params: UpdateChannelConfigParams): Promise<{ config: ChannelConfig; requires_restart: boolean }> {
+    if (this.instances.get(params.instance_id)?.implementation_id === 'channel-wechat') {
+      const update = this.wechatConfigUpdates.then(() => this.applyConfig(params))
+      this.wechatConfigUpdates = update.catch(() => {})
+      return update
+    }
     if (this.instances.get(params.instance_id)?.implementation_id !== 'channel-slack') return this.applyConfig(params)
     // Serialize Slack RPC + bootstrap mirror so concurrent saves cannot restore an older env on restart.
     const update = this.slackConfigUpdates.then(() => this.applyConfig(params))
@@ -448,6 +454,13 @@ export class ChannelManager {
       { config: params.config },
       'admin'
     )
+    if (instance.implementation_id === 'channel-wechat' && params.config.group?.only_respond_to_mentions !== undefined) {
+      const value = result.config.group?.only_respond_to_mentions
+      if (typeof value !== 'boolean') throw new Error('WeChat returned an invalid group configuration')
+      const local = (await this.loadLocalConfig(params.instance_id)) ?? {}
+      local.WECHAT_ONLY_RESPOND_TO_MENTIONS = String(value)
+      await this.saveLocalConfig(params.instance_id, local)
+    }
     if (instance.implementation_id === 'channel-slack') {
       // Slack persists before applying; keep Admin's stopped-instance form and restart env in sync.
       const local = (await this.loadLocalConfig(params.instance_id)) ?? {}

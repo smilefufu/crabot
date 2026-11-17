@@ -236,12 +236,11 @@ describe('WechatChannel group mention gate', () => {
       expect((channel as any).wechatConfig.api_key).toBe('wct_test')
     })
 
-    it('update_config：非法类型忽略，不破坏状态', () => {
+    it('update_config：非法布尔值拒绝，其他字段和开关保持不变', () => {
       const channel = makeChannel({ onlyRespondToMentions: true })
-      const result = (channel as any).handleUpdateConfig({
-        config: { group: { only_respond_to_mentions: 'yes' }, credentials: { api_key: 123 } },
-      })
-      expect(result.requires_restart).toBe(false)
+      expect(() => (channel as any).handleUpdateConfig({
+        config: { group: { only_respond_to_mentions: 'yes' }, credentials: { api_key: 'must-not-apply' } },
+      })).toThrow('必须为布尔值')
       expect((channel as any).wechatConfig.only_respond_to_mentions).toBe(true)
       expect((channel as any).wechatConfig.api_key).toBe('wct_test')
     })

@@ -56,6 +56,9 @@ function SchemaField({ propKey, prop, value, required, onChange }: {
 }) {
   const inputType = prop.format === 'password' ? 'password' : 'text'
   const isReadOnly = prop.readOnly === true
+  const isBoolean = prop.type === 'boolean'
+    || (prop.enum?.length === 2 && prop.enum.every(v => v === 'true' || v === 'false'))
+  const checked = (value || String(prop.default ?? 'false')) === 'true'
 
   return (
     <div className="form-group schema-field">
@@ -67,7 +70,7 @@ function SchemaField({ propKey, prop, value, required, onChange }: {
       {prop.description && (
         <p className="schema-field__desc">{prop.description}</p>
       )}
-      {prop.enum ? (
+      {prop.enum && !isBoolean ? (
         <select
           className="select"
           value={value}
@@ -82,19 +85,20 @@ function SchemaField({ propKey, prop, value, required, onChange }: {
             )
           })}
         </select>
-      ) : prop.type === 'boolean' ? (
+      ) : isBoolean ? (
         <div className="schema-field__bool">
           <label className="toggle-switch">
             <input
               type="checkbox"
-              checked={value === 'true'}
+              aria-label={prop.title ?? propKey}
+              checked={checked}
               onChange={(e) => onChange(propKey, String(e.target.checked))}
               disabled={isReadOnly}
             />
             <span className="toggle-track" />
           </label>
-          <span className={`schema-field__bool-label${value === 'true' ? ' schema-field__bool-label--on' : ''}`}>
-            {value === 'true' ? '已启用' : '已禁用'}
+          <span className={`schema-field__bool-label${checked ? ' schema-field__bool-label--on' : ''}`}>
+            {checked ? '已启用' : '已禁用'}
           </span>
         </div>
       ) : (
@@ -784,7 +788,17 @@ export const ChannelConfig: React.FC = () => {
                                       <label style={{ fontSize: '0.8125rem', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '0.375rem', display: 'block' }}>
                                         {key}.{subKey}
                                       </label>
-                                      <input
+                                      {typeof subVal === 'boolean' ? (
+                                        <label className="toggle-switch">
+                                          <input
+                                            type="checkbox"
+                                            aria-label={`${key}.${subKey}`}
+                                            checked={subVal}
+                                            onChange={(e) => setEditingConfig(setNestedValue(editingConfig!, `${key}.${subKey}`, e.target.checked))}
+                                          />
+                                          <span className="toggle-track" />
+                                        </label>
+                                      ) : <input
                                         className="input"
                                         type={subKey.includes('secret') || subKey.includes('token') || subKey.includes('password') ? 'password' : 'text'}
                                         value={String(subVal ?? '')}
@@ -792,7 +806,7 @@ export const ChannelConfig: React.FC = () => {
                                           if (!editingConfig) return
                                           setEditingConfig(setNestedValue(editingConfig, `${key}.${subKey}`, e.target.value))
                                         }}
-                                      />
+                                      />}
                                     </div>
                                   ))
                                 }
