@@ -2417,7 +2417,9 @@ export class ManagerLoop {
         this.resumeCheckpoint = { ...this.resumeCheckpoint, transientMessageIds: [...transientIds],
           protectedTailMessageId: this.resumeCheckpoint.protectedTailMessageId ?? firstInput?.id }
       }
-      this.flushCheckpoint({ ...state, recent })
+      // 工具结果图像只存在于 LLM 请求投影：回合中 checkpoint 落盘同样剥离
+      // （read_image 之后每次 LLM 调用都会走到，PR #259 review 真实风险修复）。
+      this.flushCheckpoint({ ...state, recent: stripToolResultImages(recent) })
     }
 
     // LLM 重试期间配置热切换的订阅（spec 2026-08-30-llm-retry-config-hotreload）：
@@ -2529,7 +2531,8 @@ export class ManagerLoop {
                 imageRefs: this.resumeCheckpoint?.state.imageRefs ?? state.imageRefs,
                 rollingSummary: batch.state.previousSummary, recent,
                 foldedCount: state.foldedCount + batch.consumedMessages }
-              await this.deps.store.save({ ...next, recent: recent.filter((message) =>
+              // 压缩落盘（state.json）同样剥离工具结果图像（PR #259 review 真实风险修复）。
+              await this.deps.store.save({ ...next, recent: stripToolResultImages(recent).filter((message) =>
                 !this.resumeCheckpoint?.transientMessageIds.includes(message.id)) })
               for (const item of [...this.currentEpisodeEnvelopes, ...(this.currentEpisodeInjected ?? [])]) {
                 if (isHumanWake(item.wake) || transientSystemPromptForWake(item.wake)) continue

@@ -50,7 +50,7 @@ export interface ProjectDocToolDeps {
   readonly supportsVision?: () => boolean | undefined
 }
 
-interface MarkdownFile {
+interface ListedFile {
   readonly path: string
   readonly realPath: string
   readonly kind: 'file' | 'symlink'
@@ -269,7 +269,7 @@ async function resolveExisting(root: string, relativePath: string): Promise<{
   return { logicalPath, realPath, kind: linkStat.isSymbolicLink() ? 'symlink' : 'file', stat }
 }
 
-async function markdownFile(root: string, relativePath: string): Promise<MarkdownFile> {
+async function readableTextFile(root: string, relativePath: string): Promise<ListedFile> {
   assertReadableTextPath(relativePath)
   const resolved = await resolveExisting(root, relativePath)
   if (!resolved.stat.isFile()) throw new Error('path 目标不是普通文件')
@@ -282,7 +282,7 @@ async function markdownFile(root: string, relativePath: string): Promise<Markdow
 }
 
 /** list 用：扩展名由 LISTED_EXTENSIONS 过滤，这里不再按文本白名单校验（图片软链接也要能列出）。 */
-async function listedFile(root: string, relativePath: string): Promise<MarkdownFile> {
+async function listedFile(root: string, relativePath: string): Promise<ListedFile> {
   const resolved = await resolveExisting(root, relativePath)
   if (!resolved.stat.isFile()) throw new Error('path 目标不是普通文件')
   return {
@@ -293,7 +293,7 @@ async function listedFile(root: string, relativePath: string): Promise<MarkdownF
   }
 }
 
-async function listReadableFiles(root: string, scope: string): Promise<MarkdownFile[]> {
+async function listReadableFiles(root: string, scope: string): Promise<ListedFile[]> {
   if (scope !== '') {
     const resolved = await resolveExisting(root, scope)
     if (resolved.stat.isFile()) return [await listedFile(root, scope)]
@@ -301,7 +301,7 @@ async function listReadableFiles(root: string, scope: string): Promise<MarkdownF
     if (resolved.kind === 'symlink') throw new Error('list/search 范围不能是目录软链接')
   }
 
-  const found: MarkdownFile[] = []
+  const found: ListedFile[] = []
   const walk = async (relativeDirectory: string): Promise<void> => {
     const absoluteDirectory = path.join(root, relativeDirectory)
     const entries = await fs.readdir(absoluteDirectory, { withFileTypes: true })
@@ -330,8 +330,8 @@ function textLines(text: string): string[] {
   return lines
 }
 
-async function readMarkdown(root: string, relativePath: string, startLine: number, maxLines: number) {
-  const file = await markdownFile(root, relativePath)
+async function readTextFile(root: string, relativePath: string, startLine: number, maxLines: number) {
+  const file = await readableTextFile(root, relativePath)
   if (file.size > MAX_READ_FILE_BYTES) throw new Error('文件超过 1 MiB，拒绝读取')
   const body = await fs.readFile(file.realPath, 'utf-8')
   const lines = textLines(body)
@@ -371,7 +371,7 @@ async function readProjectImage(root: string, relativePath: string): Promise<{
   }
 }
 
-async function searchMarkdown(root: string, scope: string, query: string, limit: number) {
+async function searchTextFiles(root: string, scope: string, query: string, limit: number) {
   const files = (await listReadableFiles(root, scope)).filter((file) => {
     const ext = fileExtension(file.path)
     return ext === '.md' || TEXT_EXTENSIONS.has(ext)
@@ -473,14 +473,14 @@ export function buildProjectDocTools(deps: ProjectDocToolDeps): ToolDefinition[]
           const relative = normalizeRelativePath(input.path, 'path')
           const startLine = boundedInteger(input.start_line, 1, Number.MAX_SAFE_INTEGER, 'start_line')
           const maxLines = boundedInteger(input.max_lines, DEFAULT_READ_LINES, MAX_READ_LINES, 'max_lines')
-          return ok(await readMarkdown(root, relative, startLine, maxLines))
+          return ok(await readTextFile(root, relative, startLine, maxLines))
         }
         if (input.operation === 'search') {
           if (!hasOnlyKeys(input, ['project_root', 'operation', 'path', 'query', 'limit'])) throw new Error('search 包含无关参数')
           const scope = input.path === undefined ? '' : normalizeRelativePath(input.path, 'path', true)
           if (typeof input.query !== 'string' || input.query.trim() === '') throw new Error('search.query 必须是非空字符串')
           const limit = boundedInteger(input.limit, DEFAULT_SEARCH_MATCHES, MAX_SEARCH_MATCHES, 'limit')
-          return ok(await searchMarkdown(root, scope, input.query, limit))
+          return ok(await searchTextFiles(root, scope, input.query, limit))
         }
         throw new Error('operation 必须是 list、read、search' + (visionAvailable ? ' 或 read_image' : ''))
       } catch (error) {
