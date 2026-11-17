@@ -274,12 +274,27 @@ describe('createReadTool', () => {
 
   it('returns image data for jpg files', async () => {
     const filePath = path.join(tmpDir, 'photo.jpg')
-    await fs.writeFile(filePath, Buffer.alloc(100, 0xFF))
+    const sharp = (await import('sharp')).default
+    const jpegData = await sharp({ create: { width: 1, height: 1, channels: 3, background: 'red' } }).jpeg().toBuffer()
+    await fs.writeFile(filePath, jpegData)
 
     const result = await tool.call({ file_path: filePath }, {})
     expect(result.isError).toBe(false)
     expect(result.images).toBeDefined()
     expect(result.images![0].media_type).toBe('image/jpeg')
+  })
+
+  it('rejects a truncated image with a tool error instead of returning image data', async () => {
+    const filePath = path.join(tmpDir, 'shot.png')
+    const sharp = (await import('sharp')).default
+    const full = await sharp({ create: { width: 256, height: 256, channels: 3, background: { r: 12, g: 34, b: 56 } } }).png().toBuffer()
+    await fs.writeFile(filePath, full.subarray(0, Math.floor(full.length / 2)))
+
+    const result = await tool.call({ file_path: filePath }, {})
+    expect(result.isError).toBe(true)
+    expect(result.output).toContain('不完整或已损坏')
+    expect(result.output).toContain('被写入中')
+    expect(result.images).toBeUndefined()
   })
 
   it('returns display-only result for non-image binary files', async () => {

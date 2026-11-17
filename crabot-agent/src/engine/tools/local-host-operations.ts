@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto'
 import { StringDecoder } from 'node:string_decoder'
 import { relative } from 'node:path'
 import { rgPath } from '@vscode/ripgrep'
-import { compressImage } from '../image-utils'
+import { compressImage, verifyImageDecodable } from '../image-utils'
 import { inferMediaType } from '../../agent/media-resolver'
 import { truncateUtf8, byteLength } from '../byte-cap'
 import { FILE_UNCHANGED_STUB } from './file-read-state'
@@ -274,6 +274,9 @@ async function readOperation(input: Record<string, unknown>): Promise<LocalOpera
     if (isImageFile(filePath)) {
       if (stat.size > MAX_IMAGE_SIZE) return { result: { output: `[Image too large: ${filePath}, ${stat.size} bytes]`, isError: false } }
       const image = await fs.readFile(filePath)
+      if (!await verifyImageDecodable(image)) {
+        return { result: { output: `图片解码失败（${filePath}，${stat.size} 字节）：文件不完整或已损坏，可能仍在被写入中。等写入它的命令退出后再读取。`, isError: true } }
+      }
       const compressed = await compressImage({ media_type: inferMediaType(undefined, filePath), data: image.toString('base64') })
       return {
         result: { output: `[Image: ${filePath}, ${stat.size} bytes]`, isError: false, images: [compressed] },
