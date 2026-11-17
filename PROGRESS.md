@@ -7,6 +7,16 @@
 - 回归覆盖运行时保存→真实配置文件→启动环境→新建模块、true/false 与字符串输入、并发、写盘失败重试、凭据保留，以及运行中／停止／兼容表单；不改群聊门控语义。
 - 验证：Admin 定向 19 项、协作入口前端 55 项、微信门控 17 项通过；Admin／前端／微信模块类型检查、Web 生产构建通过。额外重启委托套件因隔离 worktree 缺少 Core 构建产物未加载，不作为通过项；未部署或发布插件包。
 
+### 主控读产物图片与白名单文本：inspect_project_docs 扩展（2026-11-17，已合并）
+
+- 背景：主控能看聊天入站图（image-vision 注入链）但看不到 worker 产出图（截图/生成图），只能靠文字转述。用户否决开放 raw Read/Bash/Write（主控是注入入口且自带外发通道，"读→发"一跳；执行基础设施全是 worker 语义），确认在既有 `inspect_project_docs` 授权边界内扩展：授权根 = worker 工作区注册表 + 主体 file_io，工作区外（~/.ssh、model_providers.json、channel-configs）结构上不可达。
+- 用户逐项确认设计点：read_image 独立操作 / read+search 文本白名单（txt/json/yaml/yml/toml/log/csv）/ list 覆盖文本与图片（png/jpg/jpeg/webp）/ 按 supportsVision 显式 true 门控（schema 枚举与描述同步降级，门控在授权之后）/ 投影注入落盘剥离。协议先行更新 protocol-agent-v3.md（docs `7887bc6`）。PR [#259](https://github.com/smilefufu/crabot/pull/259)（squash `4ca1e42b`）：read_image 复用 #258 `verifyImageDecodable` + `compressImage`/`MAX_IMAGE_SIZE` 管线；`stripToolResultImages` 剥离工具结果图像。
+- review 真实风险（阻塞）确认成立并修复（`ee1c4ea8`）：剥离最初只覆盖 episode 收尾，回合中 `checkpoint()`（每次 LLM 调用前必触发 → running.json）与压缩落盘 `onBatchApplied`（state.json）仍写 base64。两条路径套用同一 strip；回归场景六（manager-integration）捕获每次 saveCheckpoint/store.save 载荷断言无 images 结构、含「[图像已省略]」占位，先在未修复代码上确认失败再转绿。命名漂移随本次修正（MarkdownFile→ListedFile、readMarkdown→readTextFile 等，纯内部）。@claude 复核 Approve 后自动合并。
+- 场景搭建澄清两个既有接线事实（已写进 harness 注释）：buildProjectDocTools 主体授权经 `workerContext().principalPermissions` 取（非 wake 直接带）；manager engine 未声明 supportsVision 时 query-loop 本就把工具结果图像落 /tmp 丢弃——测剥离必须显式声明视觉能力。
+- 验证：manager-integration 7/7、project-doc-tools+image-vision 42/42、tool-face 89/89、episode-projection 通过、agent tsc 通过；registry 2 项失败为 main 基线既有。
+- Follow-up：① search 无单文件大小上限（流式全扫，大日志慢；review 非阻塞，是否对齐 read 的 1 MiB 拒绝属产品决策）；② **Read 工具敏感路径守卫缺失**：`containsSensitivePath` 只在 Bash 上，worker/manager 侧 Read 均可读 channel-configs 与 model_providers.json（API key 明文）——既有洞，应抽通用守卫 Read/Bash 共用；③ 历史毒图自愈与 `pendingBgNotifications` 死代码清理见下段。
+- 设计记录：[spec](crabot-docs/superpowers/specs/2026-11-17-manager-inspect-image-read-design.md)（docs `7887bc6`）。
+
 ### 后台 Shell 产物读取防护：Bash 工具描述语义 + Read 图片解码门禁（2026-11-17，已合并）
 
 - 根因闭环（2026-11-14 e10_currency 事故）：WiFi adb screencap 3.1MB 慢写约 21s，Bash 10s 宽限到期转后台返回「命令已转后台（entity_id: xxx）」，模型误读为已完成 2s 后 Read 截图，读到写入中截断字节；compressImage 静默透传坏图进对话历史，后续请求持续 400。证据：图片 mtime 23:43:08.7 晚于 trace Read span 23:42:59.3；完整文件直发 Provider 200、截断版 400 逐字复现。转后台/唤醒机制本身经全链核对确认完整（onShellExit → worker 队列 → dispatcher → harness inbox → idle 续 burst，含重试与重启补投），问题在模型误读。
