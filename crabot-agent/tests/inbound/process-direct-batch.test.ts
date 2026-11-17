@@ -767,12 +767,12 @@ describe('processDirectBatch —— 私聊 lane handler（cutover 后下游是 m
   // fail-loud 兜底（plan §三）
   //
   // 风险面：manager episode 失败 → agent 活着、health 还是绿的，但它完全不回话。
-  // 三形态行为不同，判据必须双管（catch + outcome）：
+  // LLM 兜底必须有请求边界来源；普通异常、取消和静默完成均不发送：
   //
   // | 形态 | 触发 | 抛错? | 兜底? |
   // |---|---|---|---|
-  // | F1 正常失败（LLM 挂 / key 过期 / 限流） | `outcome ∈ {failed, aborted}` | 不抛 | 发 |
-  // | F2 中途抛错（adapter thunk / store IO） | 抛 | 抛 | 发 |
+  // | F1 已确证 LLM 失败 | `outcome='failed'` + llmFailure | 不抛 | 发 |
+  // | F2 本地中途抛错（adapter thunk / store IO） | 抛 | 抛 | 不发 |
   // | F3 静默完成（manager 决定不说话） | `outcome='completed'` + 没出声 | 不抛 | **不发** |
   // ==========================================================================
 
@@ -781,7 +781,7 @@ describe('processDirectBatch —— 私聊 lane handler（cutover 后下游是 m
     function stubOutcome(outcome: 'failed' | 'aborted' | 'completed'): void {
       internals.managerStack.registry.routeHumanMessages = async () => {
         calls.push('manager_llm')
-        return { episodeId: 'ep-1', outcome, turns: 1, consumedEvents: outcome === 'completed', repliedToHuman: false }
+        return { episodeId: 'ep-1', llmFailure: outcome === 'failed' ? true as const : undefined, outcome, turns: 1, consumedEvents: outcome === 'completed', repliedToHuman: false }
       }
     }
 
@@ -821,7 +821,7 @@ describe('processDirectBatch —— 私聊 lane handler（cutover 后下游是 m
       })
       internals.managerStack.registry.routeHumanMessages = async () => ({
         episodeId: 'ep-stopped', outcome: 'failed', turns: 1,
-        consumedEvents: false, repliedToHuman: false, error: 'LLM 恢复已终止',
+        consumedEvents: false, repliedToHuman: false, llmFailure: true, error: 'LLM 恢复已终止',
       })
       await internals.processDirectBatch(batchOf([makeMessage({ id: 'recovery-stopped', type: 'private' })]))
       const sends = rpcCalls.filter((call) => call.method === 'send_message')
@@ -844,17 +844,18 @@ describe('processDirectBatch —— 私聊 lane handler（cutover 后下游是 m
       expect(failLoudText()).toContain('管理员')
     })
 
-    it('F1：outcome=aborted 同样兜底', async () => {
+    it('主动取消不发送 LLM 兜底', async () => {
       boot()
       stubOutcome('aborted')
 
       await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
 
-      expect(failLoudText()).toContain('aborted')
+      expect(failLoudText()).toBeUndefined()
+      expect(internals.failLoudSentAt.size).toBe(0)
     })
 
     /** F2：loop 本身起不来（`adapter()` thunk 抛、store IO 抛）——异常冒到 lane handler。 */
-    it('F2：episode 抛错时兜底回复带上原始错误信息', async () => {
+    it('本地 store 异常不发送 LLM 兜底', async () => {
       boot()
       internals.managerStack.registry.routeHumanMessages = async () => {
         throw new Error('store IO boom')
@@ -862,15 +863,17 @@ describe('processDirectBatch —— 私聊 lane handler（cutover 后下游是 m
 
       await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
 
-      expect(failLoudText()).toContain('store IO boom')
+      expect(failLoudText()).toBeUndefined()
+      expect(internals.failLoudSentAt.size).toBe(0)
     })
 
     it('失败通知先脱敏已知凭证，再截断错误正文', async () => {
       boot()
       const secret = 'credential-without-provider-prefix-0123456789'
       internals.knownSecrets.add(secret)
-      internals.managerStack.registry.routeHumanMessages = async () => {
-        throw new Error(`AUTH_DENIED ${'x'.repeat(170)} ${secret}`)
+      hoisted.managerAdapter = {
+        updateConfig() {},
+        async *stream() { throw new Error(`AUTH_DENIED ${'x'.repeat(170)} ${secret}`) },
       }
       await internals.processDirectBatch(batchOf([makeMessage({ id: 'secret-failure', type: 'private' })]))
       expect(failLoudText()).toContain('AUTH_DENIED')
@@ -897,10 +900,19 @@ describe('processDirectBatch —— 私聊 lane handler（cutover 后下游是 m
       expect(text).toContain('槽位')
     })
 
-    /**
-     * F3 不兜：群聊里 stay_silent 合法，私聊里也分不清"故意沉默"和"prompt 坏了"。
-     * 误报（机器人无缘无故说"我出错了"）比漏报更伤。
-     */
+    it('failed 没有明确 LLM 来源时不误报、不占用通知冷却', async () => {
+      boot()
+      internals.managerStack.registry.routeHumanMessages = async () => ({
+        episodeId: 'local', outcome: 'failed', error: 'ENOENT: local file', turns: 0, consumedEvents: false, repliedToHuman: false,
+      })
+      await internals.processDirectBatch(batchOf([makeMessage({ id: 'local', type: 'private' })]))
+      expect(failLoudText()).toBeUndefined()
+      expect(internals.failLoudSentAt.size).toBe(0)
+      stubOutcome('failed')
+      await internals.processDirectBatch(batchOf([makeMessage({ id: 'provider', type: 'private' })]))
+      expect(failLoudText()).toContain('管理员')
+    })
+
     it('F3：episode 正常完成但 manager 决定沉默时，一个字都不发', async () => {
       boot([]) // 空脚本 = manager 一句话都不说
 
@@ -970,9 +982,9 @@ describe('processDirectBatch —— 私聊 lane handler（cutover 后下游是 m
      */
     it('兜底走裸 send_message RPC，不经 manager 工具面', async () => {
       boot()
-      internals.managerStack.registry.routeHumanMessages = async () => {
-        throw new Error('manager stack is dead')
-      }
+      internals.managerStack.registry.routeHumanMessages = async () => ({
+        episodeId: 'failed-llm', outcome: 'failed', llmFailure: true, turns: 0, consumedEvents: false, repliedToHuman: false,
+      })
 
       await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
 
@@ -986,9 +998,9 @@ describe('processDirectBatch —— 私聊 lane handler（cutover 后下游是 m
 
     it('channel 也挂了时兜底失败只记日志，不把异常抛回 lane', async () => {
       boot()
-      internals.managerStack.registry.routeHumanMessages = async () => {
-        throw new Error('manager stack is dead')
-      }
+      internals.managerStack.registry.routeHumanMessages = async () => ({
+        episodeId: 'failed-llm', outcome: 'failed', llmFailure: true, turns: 0, consumedEvents: false, repliedToHuman: false,
+      })
       const realCall = internals.rpcClient.call
       internals.rpcClient.call = async (port, method, params, from) => {
         if (method === 'send_message') throw new Error('channel down')

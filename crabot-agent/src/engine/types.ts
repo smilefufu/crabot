@@ -667,6 +667,8 @@ export interface EngineResult {
   readonly totalTurns: number
   readonly usage: LLMTokenUsage
   readonly error?: string
+  /** Confirmed at the adapter request boundary; missing provenance is not an LLM failure. */
+  readonly llmFailure?: true
   /** Capacity processing stopped; retain the current execution for continuation. */
   readonly contextRecoveryRequired?: true
   readonly finalMessages: ReadonlyArray<EngineMessage>

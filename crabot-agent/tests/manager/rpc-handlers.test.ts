@@ -89,8 +89,9 @@ function completedEpisode(outcome: 'completed' | 'failed' | 'aborted' = 'complet
   turns: number
   consumedEvents: boolean
   repliedToHuman: boolean
+  llmFailure?: true
 } {
-  return { episodeId: 'ep-1', outcome, turns: 1, consumedEvents: true, repliedToHuman: false }
+  return { episodeId: 'ep-1', outcome, llmFailure: outcome === 'failed' ? true : undefined, turns: 1, consumedEvents: true, repliedToHuman: false }
 }
 
 function makeLedgerWorker(p: {
@@ -424,7 +425,7 @@ describe('trigger_schedule 的 fail-loud 兜底', () => {
     expect(text).not.toContain('再发一次')
   })
 
-  it('F2(episode 抛错)→ 兜底文案带上原始错误信息', async () => {
+  it('本地 adapter 构造异常不发送 LLM 兜底', async () => {
     const { agent, rpcCalls } = buildOutboundAgent(async () => {
       throw new Error('adapter thunk 炸了')
     })
@@ -438,8 +439,18 @@ describe('trigger_schedule 的 fail-loud 兜底', () => {
     await settle()
 
     const text = sentText(rpcCalls)
-    expect(text).toContain('定时任务「晚间反思」')
-    expect(text).toContain('adapter thunk 炸了')
+    expect(text).toBeUndefined()
+    expect(agent.failLoudSentAt.size).toBe(0)
+  })
+
+  it.each(['failed', 'aborted'])('%s 没有确证的 LLM 来源时不发送后台兜底', async (outcome) => {
+    const { agent, rpcCalls } = buildOutboundAgent(async () => ({
+      ...completedEpisode('completed'), outcome, error: 'ENOENT: local state',
+    }))
+    await agent.handleTriggerSchedule(scheduleTrigger({ schedule_id: 'local-failed', title: '本地错误', description: 'd' }))
+    await settle()
+    expect(rpcCalls).toEqual([])
+    expect(agent.failLoudSentAt.size).toBe(0)
   })
 
   it('outcome=completed → 不发兜底(误报比漏报更伤)', async () => {

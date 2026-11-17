@@ -104,6 +104,18 @@ export class BrowserManager {
       return null
     }
 
+    if (process.platform === 'win32') {
+      const roots = [process.env.LOCALAPPDATA, process.env.ProgramFiles, process.env['ProgramFiles(x86)']]
+      for (const root of roots) {
+        if (!root) continue
+        for (const product of ['Google/Chrome', 'Chromium']) {
+          const candidate = path.win32.join(root, product, 'Application', 'chrome.exe')
+          if (existsSync(candidate)) return candidate
+        }
+      }
+      return null
+    }
+
     if (process.platform === 'linux') {
       const names = [
         'google-chrome',
@@ -196,13 +208,13 @@ export class BrowserManager {
 
     const config = await this.loadConfig()
 
-    if (config.profile_mode === 'user') {
+    if (config.profile_mode === 'user' && process.platform !== 'win32') {
       await this.killExistingChrome()
     }
 
     const profileDir =
       config.profile_mode === 'user'
-        ? this.getUserProfileDir()
+        ? this.getUserProfileDir(chromePath)
         : this.isolatedProfileDir
 
     await fs.mkdir(profileDir, { recursive: true })
@@ -219,29 +231,48 @@ export class BrowserManager {
       stdio: 'ignore',
     })
 
+    let processError: Error | undefined
+    let exited = false
+    child.on('error', error => { processError = error })
+    child.once('exit', () => { exited = true })
+    await new Promise<void>((resolve, reject) => {
+      child.once('error', reject)
+      child.once('spawn', () => { child.removeListener('error', reject); resolve() })
+    })
+    if (child.pid === undefined) throw new Error('Chrome started without a process ID')
     child.unref()
     this.process = child
 
-    // Write PID file
+    const profileHint = process.platform === 'win32' && config.profile_mode === 'user'
+      ? ' The user profile may be in use or remote debugging may be restricted. Close Chrome or choose isolated profile mode.'
+      : ''
+    // Write PID file only after spawn succeeds. On readiness failure, retain the
+    // managed child/PID for the existing stop path rather than dropping ownership.
     const pidDir = path.dirname(this.pidPath)
     await fs.mkdir(pidDir, { recursive: true })
     await fs.writeFile(this.pidPath, String(child.pid), 'utf-8')
 
-    // Wait for CDP to become ready
     const deadline = Date.now() + CDP_READY_TIMEOUT_MS
     while (Date.now() < deadline) {
+      if (processError) throw processError
+      if (exited) throw new Error(`Chrome exited before CDP became ready.${profileHint}`)
       if (await this.isCdpReady()) return
       await sleep(CDP_POLL_INTERVAL_MS)
     }
-
     throw new Error(
-      `Chrome started but CDP port ${this.cdpPort} did not become ready within ${CDP_READY_TIMEOUT_MS / 1000}s`
+      `Chrome started but CDP port ${this.cdpPort} did not become ready within ${CDP_READY_TIMEOUT_MS / 1000}s.${profileHint}`
     )
   }
 
-  private getUserProfileDir(): string {
+  private getUserProfileDir(chromePath: string): string {
     if (process.platform === 'darwin') {
       return path.join(os.homedir(), 'Library', 'Application Support', 'Google', 'Chrome')
+    }
+    if (process.platform === 'win32') {
+      const localAppData = process.env.LOCALAPPDATA
+      if (!localAppData) throw new Error('LOCALAPPDATA is missing; cannot locate the user browser profile. Choose isolated profile mode.')
+      const product = /[\\/]Chromium[\\/]/i.test(chromePath) ? 'Chromium' : 'Google/Chrome'
+      return path.win32.join(localAppData, product, 'User Data')
     }
     return path.join(os.homedir(), '.config', 'google-chrome')
   }

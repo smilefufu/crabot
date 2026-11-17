@@ -3508,6 +3508,7 @@ describe('ManagerLoop', () => {
 
     expect(result.outcome).toBe('failed')
     expect(result.error).toContain('PROVIDER_QUOTA_EXHAUSTED')
+    expect(result.llmFailure).toBe(true)
     expect(traceWriter.finishEpisode).toHaveBeenCalledWith(result.episodeId, expect.objectContaining({
       status: 'failed', outcome: expect.objectContaining({ error: result.error }),
     }))

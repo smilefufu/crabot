@@ -126,6 +126,7 @@ import { NativeTraceCopyStore } from './workers/trace/native-copy.js'
 import { makeAgentEventPublisher, type AgentEventPublisher } from './manager/events.js'
 import { resolveManagerModelConfig } from './manager/model-slot.js'
 import type { ManagerEpisodeFailure } from './manager/types.js'
+import { isLlmRequestFailure } from './engine/llm-adapter-types.js'
 import { createCrabMemoryServer } from './mcp/crab-memory.js'
 import {
   buildWorkerCapabilityBundle,
@@ -2502,6 +2503,7 @@ export class UnifiedAgent extends ModuleBase {
             void this.sendFailLoudReply(session.channel_id, session.session_id, {
               kind: 'outcome',
               outcome: settled.outcome,
+              llmFailure: settled.llmFailure,
               error: settled.error,
             }).catch((err) => console.error(`[${this.config.moduleId}] processDirectBatch settle fail-loud failed:`, err))
           }
@@ -2526,6 +2528,7 @@ export class UnifiedAgent extends ModuleBase {
       await this.sendFailLoudReply(session.channel_id, session.session_id, {
         kind: 'outcome',
         outcome: result.outcome,
+        llmFailure: result.llmFailure,
         error: result.error,
       })
       return
@@ -2595,6 +2598,7 @@ export class UnifiedAgent extends ModuleBase {
             void this.sendFailLoudReply(session.channel_id, sessionId, {
               kind: 'outcome',
               outcome: settled.outcome,
+              llmFailure: settled.llmFailure,
               error: settled.error,
             }).catch((err) => console.error(`[${this.config.moduleId}] processGroupLaneBatch settle fail-loud failed:`, err))
           }
@@ -2609,6 +2613,7 @@ export class UnifiedAgent extends ModuleBase {
         await this.sendFailLoudReply(session.channel_id, sessionId, {
           kind: 'outcome',
           outcome: result.outcome,
+          llmFailure: result.llmFailure,
           error: result.error,
         })
       }
@@ -2716,8 +2721,8 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   /**
-   * fail-loud 兜底：manager episode 没能把话说出来时，**不经 manager、不经 LLM**
-   * 直接告诉人类一声。
+   * fail-loud 兜底：只在请求边界确证 LLM 失败（或已知模型未配置）时，
+   * 不再调用 manager/LLM，直接告诉人类一声。
    *
    * 风险面是"agent 活着、health 还是绿的，但它完全不回话"——除了直接给人一条消息，
    * 没有别的通道能让人发现。因此这条路径与 manager 栈**零共享**：只依赖 `rpcClient`
@@ -2738,7 +2743,7 @@ export class UnifiedAgent extends ModuleBase {
    * `sendBackgroundFailLoud`）：判据、冷却、出站那一跳全部照旧，只有正文换成第三人称的
    * `buildBackgroundFailLoudText`。
    *
-   * 返回**这一次有没有真的把话送出去**：`false` = 冷却命中或出站 RPC 自身失败。
+   * 返回**这一次有没有真的把话送出去**：`false` = 非 LLM 故障、主动取消、冷却或投递失败。
    * channel 两条路忽略它（送不出去就只能落日志）；admin chat 靠它决定要不要把异常抛回
    * RPC 调用方，让 admin 侧既有的 `chat_error` 兜住占位气泡（见 `processAdminChatMessage`）。
    *
@@ -2751,6 +2756,13 @@ export class UnifiedAgent extends ModuleBase {
     adminChatRequestId?: string,
     subject?: string,
   ): Promise<boolean> {
+    const modelNotConfigured = failure.kind === 'threw'
+      && failure.error instanceof Error && failure.error.message.includes('model_config 缺少')
+    const llmFailure = failure.kind === 'outcome'
+      ? failure.outcome === 'failed' && failure.llmFailure === true
+      : isLlmRequestFailure(failure.error)
+    if (!llmFailure && !modelNotConfigured) return false
+
     const key = `${channelId}::${sessionId}`
     const now = Date.now()
     const lastAt = this.failLoudSentAt.get(key)
@@ -3273,7 +3285,7 @@ export class UnifiedAgent extends ModuleBase {
             console.error(
               `[${this.config.moduleId}] processAdminChatMessage injected episode outcome=${settled.outcome}`,
             )
-            void this.sendFailLoudReply('admin-web', sessionId, { kind: 'outcome', outcome: settled.outcome, ...(settled.error ? { error: settled.error } : {}) }, callbackInfo.request_id)
+            void this.sendFailLoudReply('admin-web', sessionId, { kind: 'outcome', outcome: settled.outcome, llmFailure: settled.llmFailure, ...(settled.error ? { error: settled.error } : {}) }, callbackInfo.request_id)
               .catch((err) => console.error(`[${this.config.moduleId}] processAdminChatMessage settle fail-loud failed:`, err))
           }
         },
@@ -3303,7 +3315,7 @@ export class UnifiedAgent extends ModuleBase {
       console.error(
         `[${this.config.moduleId}] processAdminChatMessage manager episode outcome=${result.outcome}`,
       )
-      const failure: ManagerEpisodeFailure = { kind: 'outcome', outcome: result.outcome, ...(result.error ? { error: result.error } : {}) }
+      const failure: ManagerEpisodeFailure = { kind: 'outcome', outcome: result.outcome, llmFailure: result.llmFailure, ...(result.error ? { error: result.error } : {}) }
       if (!(await this.sendFailLoudReply('admin-web', sessionId, failure, callbackInfo.request_id))) {
         throw new Error(`manager episode ${result.outcome}`)
       }
@@ -3894,7 +3906,7 @@ export class UnifiedAgent extends ModuleBase {
         console.error(
           `[${this.config.moduleId}] trigger_schedule episode outcome=${result.outcome} (schedule=${params.schedule_id})`,
         )
-        await this.sendBackgroundFailLoud(target, subject, { kind: 'outcome', outcome: result.outcome })
+        await this.sendBackgroundFailLoud(target, subject, { kind: 'outcome', outcome: result.outcome, error: result.error, llmFailure: result.llmFailure })
       })
       .catch(async (error) => {
         const message = error instanceof Error ? error.message : String(error)

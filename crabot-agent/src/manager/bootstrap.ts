@@ -528,7 +528,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
             console.error(
               `[manager-bootstrap] routeWorkerEvent episode outcome=${result.outcome} (worker=${event.worker_id}, kind=${event.kind})`,
             )
-            await reportWorkerEventFailure(event.worker_id, { kind: 'outcome', outcome: result.outcome })
+            await reportWorkerEventFailure(event.worker_id, { kind: 'outcome', outcome: result.outcome, error: result.error, llmFailure: result.llmFailure })
           }
           // 上报在先、返回在后:episode 失败时两件事都要发生——人类得到一声招呼(上面),
           // 巡检拿到"未消费"因而下一轮还能重报(这里)。`ManagerLoop` 只在

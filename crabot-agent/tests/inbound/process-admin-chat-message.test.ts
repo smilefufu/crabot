@@ -740,6 +740,7 @@ describe('processAdminChatMessage —— admin chat 入站（cutover 后下游�
       internals.managerStack.registry.routeHumanMessages = async () => ({
         episodeId: 'ep-1',
         outcome,
+        llmFailure: outcome === 'failed' ? true as const : undefined,
         turns: 1,
         consumedEvents: outcome === 'completed',
         repliedToHuman: false,
@@ -785,26 +786,25 @@ describe('processAdminChatMessage —— admin chat 入站（cutover 后下游�
       expect(failLoudText()).toContain('管理员')
     })
 
-    it('F1：outcome=aborted 同样兜底', async () => {
+    it('主动取消不伪造 assistant 兜底回复，交回既有请求失败路径', async () => {
       boot()
       stubOutcome('aborted')
 
-      await runAdminChat()
-      expect(failLoudText()).toContain('aborted')
+      await expect(runAdminChat()).rejects.toThrow('manager episode aborted')
+      expect(failLoudText()).toBeUndefined()
+      expect(internals.failLoudSentAt.size).toBe(0)
     })
 
-    /**
-     * F2：唤醒本身抛错。cutover 前这里是"原样抛回 RPC 调用方"，admin 侧只会推一条笼统的
-     * `chat_error`（"系统暂时不可用"）。现在改成先把**带原因**的回执送到人眼前。
-     */
-    it('F2：episode 抛错时不再裸抛，改发带原始错误的兜底回执', async () => {
+    /** 本地异常沿既有 RPC 请求失败路径收口，不伪造成 LLM 的 assistant 回复。 */
+    it('本地 episode 异常交回请求失败路径，不发 LLM 话术', async () => {
       boot()
       internals.managerStack.registry.routeHumanMessages = async () => {
         throw new Error('route boom')
       }
 
-      await expect(runAdminChat()).resolves.toEqual({ decision_types: [] })
-      expect(failLoudText()).toContain('route boom')
+      await expect(runAdminChat()).rejects.toThrow('route boom')
+      expect(failLoudText()).toBeUndefined()
+      expect(internals.failLoudSentAt.size).toBe(0)
       expectThreeNots()
     })
 
@@ -824,10 +824,16 @@ describe('processAdminChatMessage —— admin chat 入站（cutover 后下游�
       expect(text).toContain('槽位')
     })
 
-    /**
-     * F3 不兜：与另两条路同一条纪律——"故意沉默"和"prompt 坏了"在信号层面无法区分，
-     * 误报（无缘无故说"我出错了"）比漏报更伤。
-     */
+    it('本地 failed 结果没有 LLM 来源时走请求失败，不新增 assistant 消息', async () => {
+      boot()
+      internals.managerStack.registry.routeHumanMessages = async () => ({
+        episodeId: 'local', outcome: 'failed', error: 'ENOENT: local file', turns: 0, consumedEvents: false, repliedToHuman: false,
+      })
+      await expect(runAdminChat()).rejects.toThrow('manager episode failed')
+      expect(failLoudText()).toBeUndefined()
+      expect(internals.failLoudSentAt.size).toBe(0)
+    })
+
     it('F3：episode 正常完成但 manager 决定沉默时，一个字都不发', async () => {
       boot() // 空脚本 = manager 一句话都不说
 

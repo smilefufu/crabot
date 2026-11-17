@@ -26,6 +26,9 @@ import { formatError } from './error-utils'
 import type { HookInput } from '../hooks/types'
 import { executeHooks } from '../hooks/hook-executor'
 import * as fs from 'fs'
+import { tmpdir } from 'os'
+import path from 'path'
+import { isLlmRequestFailure } from './llm-adapter-types.js'
 import { randomUUID } from 'crypto'
 import { getWorkspaceDir } from '../core/data-paths.js'
 import { assertToolMessageIntegrity, completeToolUseMessages } from './tool-message-integrity.js'
@@ -329,8 +332,8 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
           return { ...finishResult('failed',
             `上下文压缩失败：${compacted.ok ? '未取得压缩进展' : compacted.failedReason}`), contextRecoveryRequired: true }
         }
-        console.error('[query-loop] LLM call threw:', error)
-        return finishResult('failed', formatError(error))
+        console.error('[query-loop] request failed:', error)
+        return { ...finishResult('failed', formatError(error)), ...(isLlmRequestFailure(error) ? { llmFailure: true } : {}) }
       }
 
       const processed = partitionResponseContent(response.content)
@@ -780,14 +783,21 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
           if (!r.images?.length) return r
 
           const descriptions: string[] = [r.content]
-          for (let i = 0; i < r.images.length; i++) {
-            const img = r.images[i]
-            const filename = `screenshot-${Date.now()}-${i}.png`
-            const filePath = `/tmp/${filename}`
-            fs.writeFileSync(filePath, Buffer.from(img.data, 'base64'))
-            descriptions.push(`[Image saved to ${filePath}] Use Bash tool to analyze with OCR if needed.`)
+          let isError = r.is_error
+          for (const img of r.images) {
+            try {
+              const extension = ({ 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif' } as Record<string, string>)[img.media_type] ?? 'bin'
+              const tempDir = tmpdir()
+              fs.mkdirSync(tempDir, { recursive: true })
+              const filePath = path.join(tempDir, `screenshot-${randomUUID()}.${extension}`)
+              fs.writeFileSync(filePath, Buffer.from(img.data, 'base64'), { flag: 'wx', mode: 0o600 })
+              descriptions.push(`[Image saved to ${filePath}] Use Bash tool to analyze with OCR if needed.`)
+            } catch (error) {
+              isError = true
+              descriptions.push(`[Image could not be saved: ${formatError(error)}]`)
+            }
           }
-          return { ...r, content: descriptions.join('\n'), images: undefined }
+          return { ...r, is_error: isError, content: descriptions.join('\n'), images: undefined }
         })
       }
 

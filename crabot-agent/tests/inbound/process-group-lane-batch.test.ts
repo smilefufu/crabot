@@ -656,6 +656,7 @@ describe('processGroupLaneBatch —— 群聊 lane handler（cutover 后下游�
       internals.managerStack.registry.routeAttentionFlush = async () => ({
         episodeId: 'ep-g1',
         outcome,
+        llmFailure: outcome === 'failed' ? true as const : undefined,
         turns: 1,
         consumedEvents: false,
         repliedToHuman: false,
@@ -690,10 +691,10 @@ describe('processGroupLaneBatch —— 群聊 lane handler（cutover 后下游�
       boot({ attentionMinMs: 1000 })
       internals.managerStack.registry.routeAttentionFlush = async (
         _ch: string, _sid: string, _msgs: unknown, _friend: unknown, _onCommitted: unknown,
-        onSettled?: (result: { episodeId: string; outcome: string; turns: number; consumedEvents: boolean; repliedToHuman: boolean }) => void,
+        onSettled?: (result: { episodeId: string; outcome: string; turns: number; consumedEvents: boolean; repliedToHuman: boolean; llmFailure?: true }) => void,
       ) => {
         queueMicrotask(() => onSettled?.({
-          episodeId: 'ep-real', outcome: 'failed', turns: 3, consumedEvents: true, repliedToHuman: false,
+          episodeId: 'ep-real', outcome: 'failed', llmFailure: true, turns: 3, consumedEvents: true, repliedToHuman: false,
         }))
         return { episodeId: '', outcome: 'completed', turns: 0, consumedEvents: true, repliedToHuman: false }
       }
@@ -724,7 +725,7 @@ describe('processGroupLaneBatch —— 群聊 lane handler（cutover 后下游�
       expect(internals.attentionScheduler.getCurrentIntervalMs(GROUP_SESSION)).toBe(5000)
     })
 
-    it('F2：episode 抛错时也兜底，且异常不冒回 lane、退避仍按没出声算', async () => {
+    it('本地异常不发 LLM 兜底，异常不冒回 lane，群聊退避仍正确结算', async () => {
       boot({ attentionMinMs: 1000 })
       internals.managerStack.registry.routeAttentionFlush = async () => {
         throw new Error('store IO boom')
@@ -733,7 +734,8 @@ describe('processGroupLaneBatch —— 群聊 lane handler（cutover 后下游�
       await expect(deliverMention(gmsg({ id: 'g-1', mention: true }))).resolves.toBeUndefined()
 
       expect(rpcCalls.find((c) => c.method === 'add_reaction')).toBeUndefined()
-      expect((failLoudSent()[0].params.content as { text: string }).text).toContain('store IO boom')
+      expect(failLoudSent()).toHaveLength(0)
+      expect(internals.failLoudSentAt.size).toBe(0)
       expect(internals.attentionScheduler.getCurrentIntervalMs(GROUP_SESSION)).toBe(5000)
     })
 
