@@ -221,6 +221,33 @@ export function pruneImageRefs(
   return kept
 }
 
+/**
+ * 工具结果图像的持久化剥离（spec: 2026-11-17-manager-inspect-image-read 设计点 5）：
+ * 工具（如 inspect_project_docs.read_image）返回的 base64 图像只存在于 LLM 请求投影；
+ * episode 收尾持久化（episode log / recent / checkpoint）前把 toolResults 里的图像数组
+ * 摘掉，文本追加中性占位——base64 不随 finalMessages 落盘（同 injectInboundImages 的
+ * 「投影还原」教训：base64 进 state.json / episodes/*.jsonl 会无限放大）。
+ */
+export function stripToolResultImages(messages: ReadonlyArray<EngineMessage>): ReadonlyArray<EngineMessage> {
+  let changed = false
+  const stripped = messages.map((message) => {
+    if (message.role !== 'user' || !('toolResults' in message)) return message
+    if (!message.toolResults.some((tr) => tr.images?.length)) return message
+    changed = true
+    return {
+      ...message,
+      toolResults: message.toolResults.map((tr) => tr.images?.length
+        ? {
+            tool_use_id: tr.tool_use_id,
+            content: `${tr.content}\n[图像已省略，仅当前回合可见]`,
+            is_error: tr.is_error,
+          }
+        : tr),
+    }
+  })
+  return changed ? stripped : messages
+}
+
 // --- 插话（turn 间 drain 注入）的同步路径 ---
 //
 // HumanMessageQueueLike.drainPending() 是同步签名,engine 在 turn 边界调用;本地图注入

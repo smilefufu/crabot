@@ -70,7 +70,7 @@ import {
   type IncrementalCompactionResult,
 } from '../engine/context-manager.js'
 import { DEFAULT_MAX_CONTEXT_TOKENS } from '../engine/query-loop.js'
-import { REMOTE_IMAGE_PREFETCH_TIMEOUT_MS, GroupInboundImageProjection, collectInboundImages, injectInboundImages, pruneImageRefs, readImageFileSync, toImageBlock, type ManagerImageRef } from './image-vision.js'
+import { REMOTE_IMAGE_PREFETCH_TIMEOUT_MS, GroupInboundImageProjection, collectInboundImages, injectInboundImages, pruneImageRefs, readImageFileSync, stripToolResultImages, toImageBlock, type ManagerImageRef } from './image-vision.js'
 import { fetchRemoteImage } from '../agent/media-resolver.js'
 import type { ImageBlock } from '../engine/index.js'
 import { assembleManagerSystemPrompt, VOICE_PENDING_RESULTS_PROMPT, VOICE_MANAGEMENT_RESULT_PROMPT } from './prompt.js'
@@ -1532,7 +1532,7 @@ export class ManagerLoop {
     // 文本逐字一致)。
     const transientPromptCounts = this.transientPromptCounts()
     const durableIds = new Set(initialState.recent.map((message) => message.id))
-    const persistedFinalMessages = attachManagerHumanSources(attempt.result.finalMessages.flatMap((m) => {
+    const restoredFinalMessages = attempt.result.finalMessages.flatMap((m) => {
       if (this.resumeCheckpoint?.transientMessageIds.includes(m.id)) return []
       // 系统提示只服务当前 LLM 请求。只在本次动态尾部之后按数量剔除，避免误删旧 history
       // 中恰好同文的人类消息；Worker/任务板正文从未进入这里。
@@ -1553,7 +1553,9 @@ export class ManagerLoop {
         if (first && first.type === 'text') return [{ ...m, content: first.text }]
       }
       return [m]
-    }), this.humanSourcesForReview())
+    })
+    // 工具结果图像同样只存在于 LLM 请求投影：落盘前剥离（read_image 等，spec 设计点 5）。
+    const persistedFinalMessages = attachManagerHumanSources(stripToolResultImages(restoredFinalMessages), this.humanSourcesForReview())
 
     if (attempt.hasSummaryMarker && persistedFinalMessages[0]) episodeHistoryIds.add(persistedFinalMessages[0].id)
     await this.deps.store.appendEpisodeLog(this.deps.key, episodeId, persistedFinalMessages, episodeHistoryIds)
@@ -2418,7 +2420,9 @@ export class ManagerLoop {
         this.resumeCheckpoint = { ...this.resumeCheckpoint, transientMessageIds: [...transientIds],
           protectedTailMessageId: this.resumeCheckpoint.protectedTailMessageId ?? firstInput?.id }
       }
-      this.flushCheckpoint({ ...state, recent })
+      // 工具结果图像只存在于 LLM 请求投影：回合中 checkpoint 落盘同样剥离
+      // （read_image 之后每次 LLM 调用都会走到，PR #259 review 真实风险修复）。
+      this.flushCheckpoint({ ...state, recent: stripToolResultImages(recent) })
     }
 
     // LLM 重试期间配置热切换的订阅（spec 2026-08-30-llm-retry-config-hotreload）：
@@ -2530,7 +2534,8 @@ export class ManagerLoop {
                 imageRefs: this.resumeCheckpoint?.state.imageRefs ?? state.imageRefs,
                 rollingSummary: batch.state.previousSummary, recent,
                 foldedCount: state.foldedCount + batch.consumedMessages }
-              await this.deps.store.save({ ...next, recent: recent.filter((message) =>
+              // 压缩落盘（state.json）同样剥离工具结果图像（PR #259 review 真实风险修复）。
+              await this.deps.store.save({ ...next, recent: stripToolResultImages(recent).filter((message) =>
                 !this.resumeCheckpoint?.transientMessageIds.includes(message.id)) })
               for (const item of [...this.currentEpisodeEnvelopes, ...(this.currentEpisodeInjected ?? [])]) {
                 if (isHumanWake(item.wake) || transientSystemPromptForWake(item.wake)) continue

@@ -8,8 +8,10 @@ import {
   injectInboundImages,
   normalizeImageRefs,
   pruneImageRefs,
+  stripToolResultImages,
 } from '../../src/manager/image-vision.js'
 import { createUserMessage, createAssistantMessage } from '../../src/engine/index.js'
+import type { EngineMessage } from '../../src/engine/index.js'
 import type { ChannelMessage } from '../../src/types'
 
 let mediaDir: string
@@ -245,5 +247,32 @@ describe('pruneImageRefs', () => {
     const refs = [{ message_id: 'x', images: [{ path: '/a.png', label: 'a.png' }] }]
     expect(pruneImageRefs(refs, [])).not.toBe(refs) // 有死条目 → 新数组
     expect(pruneImageRefs(refs, [createUserMessage('m')].map((m) => ({ ...m, id: 'x' })))).toBe(refs)
+  })
+})
+
+describe('stripToolResultImages', () => {
+  const toolResultMessage = (images?: Array<{ media_type: string; data: string }>): EngineMessage => ({
+    id: 'tr-1',
+    role: 'user',
+    toolResults: [{ tool_use_id: 'call-1', content: '[图片: shots/e10.png, 100 bytes]', ...(images ? { images } : {}), is_error: false }],
+    timestamp: 0,
+  })
+
+  it('剥离 toolResults 图像并追加占位，纯文本消息原样返回', () => {
+    const withImage = toolResultMessage([{ media_type: 'image/png', data: 'aGg=' }])
+    const text = createUserMessage('普通文本')
+    const assistant = createAssistantMessage('回复')
+    const out = stripToolResultImages([text, withImage, assistant])
+    expect(out[0]).toBe(text)
+    expect(out[2]).toBe(assistant)
+    const stripped = out[1] as typeof withImage
+    expect(stripped.toolResults[0].images).toBeUndefined()
+    expect(stripped.toolResults[0].content).toContain('[图像已省略，仅当前回合可见]')
+    expect(JSON.stringify(stripped)).not.toContain('aGg=')
+  })
+
+  it('无图像的消息数组原样返回（同一引用）', () => {
+    const messages = [createUserMessage('a'), toolResultMessage()]
+    expect(stripToolResultImages(messages)).toBe(messages)
   })
 })

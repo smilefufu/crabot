@@ -18,7 +18,7 @@ describe('独立角色提示词', () => {
     expect(manager).toContain('局部成果不等于整体完成')
     expect(manager).toContain('不等待人类重新提出原要求')
     expect(manager).toContain('同一目标改由新执行器接续时，在委托中传递相关的有效成果、当前状态、已知失败与已验证做法')
-    expect(manager).toContain('先说明整体目标是否完成、当前是否在执行')
+    expect(manager).toContain('对外消息用倒金字塔')
     const worker = assembleBuiltinWorkerPrompt({ workspaceRoot: '/fixture', imageAvailable: true })
     expect(worker).toContain('不在条件未变时重复已明确无效的尝试')
     expect(worker).toContain('可以直接结束本轮，不必通过反复调用工具维持回合')

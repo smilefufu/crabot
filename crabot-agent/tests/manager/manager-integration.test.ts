@@ -231,6 +231,8 @@ interface AssemblyOptions {
   readonly managerAdapter: LLMAdapter
   readonly managerNow: () => Date
   readonly extraAdapters?: ReadonlyArray<readonly [WorkerImplId, WorkerAdapter]>
+  /** 人类唤醒的主控主体权限（缺省未解析 → 项目文件授权 fail-closed） */
+  readonly humanPrincipalPermissions?: ResolvedPermissions
 }
 
 interface ToolCallLogEntry {
@@ -346,6 +348,9 @@ async function setupAssembly(opts: AssemblyOptions): Promise<Assembly> {
     ledger,
     now: opts.managerNow,
     readCurrentWorkboard: async (key) => ({ manager_key: key, objectives: [], archive: [] }),
+    onHumanWake: async () => opts.humanPrincipalPermissions,
+    // 场景六需要 manager engine 具备视觉：否则引擎把工具结果图像落 /tmp 丢弃，测不到剥离
+    supportsVision: () => opts.humanPrincipalPermissions !== undefined,
     managerKeyFor,
     adapter: () => opts.managerAdapter,
     model: () => 'test-manager-model',
@@ -356,7 +361,10 @@ async function setupAssembly(opts: AssemblyOptions): Promise<Assembly> {
           managerKey: key,
           reportTo: channelSessionFromKey(key),
           triggerType: isSystemThread ? 'system' : 'message',
-          principalPermissions: { ...BUILTIN_WORKER_PERMISSIONS, tool_access: { ...BUILTIN_WORKER_PERMISSIONS.tool_access, memory: true, messaging: true } },
+          // buildProjectDocTools 经 workerContext().principalPermissions 取主体授权
+          // （tool-face currentPrincipal），与 wake 上的 principalPermissions 同源。
+          principalPermissions: opts.humanPrincipalPermissions
+            ?? { ...BUILTIN_WORKER_PERMISSIONS, tool_access: { ...BUILTIN_WORKER_PERMISSIONS.tool_access, memory: true, messaging: true } },
         }),
         messagingDeps,
         memoryServer,
@@ -371,6 +379,7 @@ async function setupAssembly(opts: AssemblyOptions): Promise<Assembly> {
           readWorkerContext: async () => undefined,
           managerKey: key,
           managerPrincipalPermissions: wakeEvent && 'principalPermissions' in wakeEvent ? wakeEvent.principalPermissions : undefined,
+          supportsVision: () => true,
         },
       })
       // 记录每次真实工具调用(名称+入参),供断言"工具调用序列符合预期" / "send_master_private
@@ -986,5 +995,92 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
       expect(JSON.stringify(sendCall!.params)).toContain('开工日')
     },
     15000,
+  )
+
+  // --- 场景六：read_image 之后回合中持久化不落 base64（PR #259 review 真实风险回归） ---
+
+  it(
+    '场景六：manager read_image 读到产物图后，回合中 checkpoint（running.json）与 episode log 都不含图像 base64，' +
+      '落盘只留占位标记',
+    async () => {
+      const imageRoot = join(dataDir, 'image-root')
+      await fs.mkdir(join(imageRoot, 'shots'), { recursive: true })
+      const sharp = (await import('sharp')).default
+      const png = await sharp({ create: { width: 16, height: 16, channels: 3, background: { r: 9, g: 9, b: 9 } } }).png().toBuffer()
+      await fs.writeFile(join(imageRoot, 'shots', 'e10.png'), png)
+
+      const managerScript = makeManagerAdapter()
+      const managerNowMs = Date.parse('2026-01-01T00:00:00.000Z')
+      const assembly = await setupAssembly({
+        dataDir,
+        policy: GENEROUS_POLICY,
+        managerAdapter: managerScript.adapter,
+        managerNow: () => new Date(managerNowMs),
+        humanPrincipalPermissions: {
+          ...BUILTIN_WORKER_PERMISSIONS,
+          tool_access: { ...BUILTIN_WORKER_PERMISSIONS.tool_access, file_io: true },
+          storage: { workspace_path: imageRoot, access: 'readwrite' },
+        },
+      })
+
+      managerScript.queue.push({
+        toolCalls: [{
+          name: 'inspect_project_docs',
+          id: 'call_read_image',
+          input: { project_root: imageRoot, operation: 'read_image', path: 'shots/e10.png' },
+        }],
+        stopReason: 'tool_use',
+      })
+      managerScript.queue.push({ text: '图已读，分析完成。', stopReason: 'end_turn' })
+
+      const key = 'wechat::sess-image' as ManagerKey
+      // 捕获回合中持久化载荷：checkpoint（每次 LLM 调用前必触发）与 state.save（压缩时）
+      const checkpointPayloads: string[] = []
+      const statePayloads: string[] = []
+      const store = assembly.store as unknown as {
+        saveCheckpoint: (cp: unknown) => void
+        save: (s: unknown) => Promise<unknown>
+      }
+      const origSaveCheckpoint = store.saveCheckpoint.bind(assembly.store)
+      store.saveCheckpoint = (cp: unknown) => {
+        checkpointPayloads.push(JSON.stringify(cp))
+        origSaveCheckpoint(cp)
+      }
+      const origSave = store.save.bind(assembly.store)
+      store.save = async (s: unknown) => {
+        statePayloads.push(JSON.stringify(s))
+        return origSave(s)
+      }
+
+      const episode = await assembly.registry.routeHumanMessages('wechat', 'sess-image', [makeChannelMessage('看一下 shots/e10.png')])
+      expect(episode.outcome).toBe('completed')
+      // read_image 真实执行且成功（授权 + 解码 + 压缩链路真实走到）
+      expect(assembly.toolCallLog.some((c) => c.name === 'inspect_project_docs')).toBe(true)
+      // read_image 之后必然又发起了一次 LLM 调用（end_turn 收口），checkpoint 必已落盘
+      expect(checkpointPayloads.length).toBeGreaterThan(0)
+
+      const sessionDir = join(dataDir, 'manager-sessions', encodeSegment(key))
+      // 全量断言：任何持久化载荷都不含图像结构或 data URI
+      for (const payload of checkpointPayloads) {
+        expect(payload).not.toContain('"images"')
+        expect(payload).not.toContain('data:image')
+      }
+      for (const payload of statePayloads) {
+        expect(payload).not.toContain('"images"')
+        expect(payload).not.toContain('data:image')
+      }
+      // 工具结果落进 messages 之后的那次 checkpoint 必含占位标记——证明「曾有图像、被
+      // 剥离」，而不是「本来就没有图像」的空断言（call_read_image 的 tool_use_id 只在
+      // 工具结果存在后出现在 state.recent 里）
+      const afterToolCheckpoint = [...checkpointPayloads].reverse().find((payload) => payload.includes('call_read_image') && payload.includes('toolResults'))
+      expect(afterToolCheckpoint).toBeDefined()
+      expect(afterToolCheckpoint!).toContain('[图像已省略，仅当前回合可见]')
+
+      const episodeLog = await fs.readFile(join(sessionDir, 'episodes', `${episode.episodeId}.jsonl`), 'utf-8')
+      expect(episodeLog).not.toContain('"images"')
+      expect(episodeLog).not.toContain('data:image')
+      expect(episodeLog).toContain('[图像已省略，仅当前回合可见]')
+    },
+    20000,
   )
 })

@@ -6,6 +6,8 @@ import { createInterface } from 'node:readline'
 import { checkFileAccess, denied, type ManagedWorkspaceScope } from '../../permissions/tool-authorization.js'
 import { defineTool } from '../../engine/index.js'
 import type { ToolCallResult, ToolDefinition } from '../../engine/index.js'
+import { compressImage, verifyImageDecodable } from '../../engine/image-utils.js'
+import { inferMediaType, MAX_IMAGE_SIZE } from '../../agent/media-resolver.js'
 import type { ResolvedPermissions } from '../../types.js'
 import type { WorkerContext } from '../../workers/harness/context-store.js'
 import type { ManagerKey } from '../../workers/harness/ledger-types.js'
@@ -21,6 +23,11 @@ const MAX_READ_FILE_BYTES = 1024 * 1024
 const EXCLUDED_DIRECTORIES = new Set([
   '.git', 'node_modules', '.pnpm-store', 'dist', 'build', 'coverage', '.next',
 ])
+/** read/search 支持的文本文件白名单（Markdown 之外）。 */
+const TEXT_EXTENSIONS = new Set(['.txt', '.json', '.yaml', '.yml', '.toml', '.log', '.csv'])
+/** read_image 支持的图片格式（与 inferMediaType 对齐）。 */
+const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp'])
+const LISTED_EXTENSIONS = new Set(['.md', ...TEXT_EXTENSIONS, ...IMAGE_EXTENSIONS])
 
 interface WorkspaceHistoryReadBinding {
   readonly before_root: string
@@ -39,9 +46,11 @@ export interface ProjectDocToolDeps {
   readonly managerKey: ManagerKey
   /** Current Manager authority; ordinary wake sources never supply their own permissions. */
   readonly managerPrincipalPermissions?: ResolvedPermissions
+  /** Manager 模型视觉能力；仅显式 true 暴露 read_image（与入站图注入 supportsVision 同口径）。 */
+  readonly supportsVision?: () => boolean | undefined
 }
 
-interface MarkdownFile {
+interface ListedFile {
   readonly path: string
   readonly realPath: string
   readonly kind: 'file' | 'symlink'
@@ -115,8 +124,21 @@ function protocolPath(nativePath: string): string {
   return nativePath.split(path.sep).join('/')
 }
 
-function assertMarkdownPath(relativePath: string, field = 'path'): void {
-  if (path.extname(relativePath).toLowerCase() !== '.md') throw new Error(`${field} 必须指向 Markdown 文件`)
+function fileExtension(relativePath: string): string {
+  return path.extname(relativePath).toLowerCase()
+}
+
+function assertReadableTextPath(relativePath: string, field = 'path'): void {
+  const ext = fileExtension(relativePath)
+  if (ext !== '.md' && !TEXT_EXTENSIONS.has(ext)) {
+    throw new Error(`${field} 必须指向 Markdown 或白名单文本文件（${[...TEXT_EXTENSIONS].sort().join(' ')}）`)
+  }
+}
+
+function assertImagePath(relativePath: string, field = 'path'): void {
+  if (!IMAGE_EXTENSIONS.has(fileExtension(relativePath))) {
+    throw new Error(`${field} 必须指向图片文件（${[...IMAGE_EXTENSIONS].sort().join(' ')}）`)
+  }
 }
 
 async function realDirectory(value: string, label: string): Promise<string> {
@@ -247,8 +269,8 @@ async function resolveExisting(root: string, relativePath: string): Promise<{
   return { logicalPath, realPath, kind: linkStat.isSymbolicLink() ? 'symlink' : 'file', stat }
 }
 
-async function markdownFile(root: string, relativePath: string): Promise<MarkdownFile> {
-  assertMarkdownPath(relativePath)
+async function readableTextFile(root: string, relativePath: string): Promise<ListedFile> {
+  assertReadableTextPath(relativePath)
   const resolved = await resolveExisting(root, relativePath)
   if (!resolved.stat.isFile()) throw new Error('path 目标不是普通文件')
   return {
@@ -259,15 +281,27 @@ async function markdownFile(root: string, relativePath: string): Promise<Markdow
   }
 }
 
-async function listMarkdownFiles(root: string, scope: string): Promise<MarkdownFile[]> {
+/** list 用：扩展名由 LISTED_EXTENSIONS 过滤，这里不再按文本白名单校验（图片软链接也要能列出）。 */
+async function listedFile(root: string, relativePath: string): Promise<ListedFile> {
+  const resolved = await resolveExisting(root, relativePath)
+  if (!resolved.stat.isFile()) throw new Error('path 目标不是普通文件')
+  return {
+    path: protocolPath(relativePath),
+    realPath: resolved.realPath,
+    kind: resolved.kind,
+    size: resolved.stat.size,
+  }
+}
+
+async function listReadableFiles(root: string, scope: string): Promise<ListedFile[]> {
   if (scope !== '') {
     const resolved = await resolveExisting(root, scope)
-    if (resolved.stat.isFile()) return [await markdownFile(root, scope)]
-    if (!resolved.stat.isDirectory()) throw new Error('path 目标既不是 Markdown 文件也不是目录')
+    if (resolved.stat.isFile()) return [await listedFile(root, scope)]
+    if (!resolved.stat.isDirectory()) throw new Error('path 目标既不是可读文件也不是目录')
     if (resolved.kind === 'symlink') throw new Error('list/search 范围不能是目录软链接')
   }
 
-  const found: MarkdownFile[] = []
+  const found: ListedFile[] = []
   const walk = async (relativeDirectory: string): Promise<void> => {
     const absoluteDirectory = path.join(root, relativeDirectory)
     const entries = await fs.readdir(absoluteDirectory, { withFileTypes: true })
@@ -276,11 +310,11 @@ async function listMarkdownFiles(root: string, scope: string): Promise<MarkdownF
       const relative = relativeDirectory === '' ? entry.name : path.join(relativeDirectory, entry.name)
       if (entry.isDirectory()) {
         await walk(relative)
-      } else if (entry.isFile() && path.extname(entry.name).toLowerCase() === '.md') {
+      } else if (entry.isFile() && LISTED_EXTENSIONS.has(fileExtension(entry.name))) {
         const stat = await fs.stat(path.join(root, relative))
         found.push({ path: protocolPath(relative), realPath: path.join(root, relative), kind: 'file', size: stat.size })
-      } else if (entry.isSymbolicLink() && path.extname(entry.name).toLowerCase() === '.md') {
-        found.push(await markdownFile(root, relative))
+      } else if (entry.isSymbolicLink() && LISTED_EXTENSIONS.has(fileExtension(entry.name))) {
+        found.push(await listedFile(root, relative))
       }
     }
   }
@@ -296,9 +330,9 @@ function textLines(text: string): string[] {
   return lines
 }
 
-async function readMarkdown(root: string, relativePath: string, startLine: number, maxLines: number) {
-  const file = await markdownFile(root, relativePath)
-  if (file.size > MAX_READ_FILE_BYTES) throw new Error('Markdown 文件超过 1 MiB，拒绝读取')
+async function readTextFile(root: string, relativePath: string, startLine: number, maxLines: number) {
+  const file = await readableTextFile(root, relativePath)
+  if (file.size > MAX_READ_FILE_BYTES) throw new Error('文件超过 1 MiB，拒绝读取')
   const body = await fs.readFile(file.realPath, 'utf-8')
   const lines = textLines(body)
   const content = lines.slice(startLine - 1, startLine - 1 + maxLines)
@@ -313,8 +347,35 @@ async function readMarkdown(root: string, relativePath: string, startLine: numbe
   }
 }
 
-async function searchMarkdown(root: string, scope: string, query: string, limit: number) {
-  const files = await listMarkdownFiles(root, scope)
+/** 读取授权项目根内的产物图片：完整解码校验 → 压缩，坏图/超限拒绝（spec: 2026-11-17-manager-inspect-image-read）。 */
+async function readProjectImage(root: string, relativePath: string): Promise<{
+  path: string
+  sizeBytes: number
+  image: { media_type: string; data: string }
+  digest: string
+}> {
+  assertImagePath(relativePath)
+  const resolved = await resolveExisting(root, relativePath)
+  if (!resolved.stat.isFile()) throw new Error('path 目标不是普通文件')
+  if (resolved.stat.size > MAX_IMAGE_SIZE) throw new Error(`图片超过 ${MAX_IMAGE_SIZE} 字节上限，拒绝读取`)
+  const raw = await fs.readFile(resolved.realPath)
+  if (!await verifyImageDecodable(raw)) {
+    throw new Error('图片解码失败：文件不完整或已损坏，可能仍在被写入中；等写入它的命令结束再读')
+  }
+  const compressed = await compressImage({ media_type: inferMediaType(undefined, resolved.realPath), data: raw.toString('base64') })
+  return {
+    path: protocolPath(relativePath),
+    sizeBytes: resolved.stat.size,
+    image: compressed,
+    digest: sha256(raw),
+  }
+}
+
+async function searchTextFiles(root: string, scope: string, query: string, limit: number) {
+  const files = (await listReadableFiles(root, scope)).filter((file) => {
+    const ext = fileExtension(file.path)
+    return ext === '.md' || TEXT_EXTENSIONS.has(ext)
+  })
   const matches: Array<{ path: string; line: number; text: string }> = []
   const needle = query.toLowerCase()
   let truncated = false
@@ -340,15 +401,27 @@ async function searchMarkdown(root: string, scope: string, query: string, limit:
 }
 
 export function buildProjectDocTools(deps: ProjectDocToolDeps): ToolDefinition[] {
+  // 与入站图注入同口径：仅显式 true 视为具备视觉能力（undefined/false 都不暴露 read_image）。
+  const visionAvailable = deps.supportsVision?.() === true
   const inspect = defineTool({
     name: 'inspect_project_docs',
-    description: '在本处理回合有权访问的项目根内，按需列举、分段读取或字面搜索 Markdown 项目文档。',
+    description: visionAvailable
+      ? '在本处理回合有权访问的项目根内，按需列举、分段读取或字面搜索文档（Markdown 与白名单文本），或读取产物图片（read_image，返回图像供视觉分析）。'
+      : '在本处理回合有权访问的项目根内，按需列举、分段读取或字面搜索文档（Markdown 与白名单文本）。',
     inputSchema: {
       type: 'object',
       properties: {
         project_root: { type: 'string', description: '项目 workspace root 的规范化绝对路径' },
-        operation: { type: 'string', enum: ['list', 'read', 'search'] },
-        path: { type: 'string', description: '项目根下的相对 Markdown 路径；list/search 可用目录范围' },
+        operation: {
+          type: 'string',
+          enum: visionAvailable ? ['list', 'read', 'search', 'read_image'] : ['list', 'read', 'search'],
+        },
+        path: {
+          type: 'string',
+          description: visionAvailable
+            ? '项目根下的相对路径；list/search 可用目录范围；read 支持 Markdown 与白名单文本（txt/json/yaml/yml/toml/log/csv）；read_image 支持图片（png/jpg/jpeg/webp）'
+            : '项目根下的相对路径；list/search 可用目录范围；read 支持 Markdown 与白名单文本（txt/json/yaml/yml/toml/log/csv）',
+        },
         query: { type: 'string', description: 'search 必填的不区分大小写字面查询' },
         start_line: { type: 'integer', minimum: 1, description: 'read 默认 1' },
         max_lines: { type: 'integer', minimum: 1, maximum: MAX_READ_LINES, description: 'read 默认 200，最大 400' },
@@ -366,12 +439,23 @@ export function buildProjectDocTools(deps: ProjectDocToolDeps): ToolDefinition[]
           throw new Error('包含未定义字段')
         }
         const root = await authorizeProjectRoot(deps, input.project_root, false)
+        if (input.operation === 'read_image') {
+          if (!hasOnlyKeys(input, ['project_root', 'operation', 'path'])) throw new Error('read_image 包含无关参数')
+          if (!visionAvailable) throw new Error('read_image 仅在 Manager 模型支持视觉时可用')
+          const relative = normalizeRelativePath(input.path, 'path')
+          const { path, sizeBytes, image, digest } = await readProjectImage(root, relative)
+          return {
+            output: JSON.stringify({ operation: 'read_image', path, size_bytes: sizeBytes, digest }),
+            images: [image],
+            isError: false,
+          }
+        }
         if (input.operation === 'list') {
           if (!hasOnlyKeys(input, ['project_root', 'operation', 'path', 'page', 'page_size'])) throw new Error('list 包含无关参数')
           const scope = input.path === undefined ? '' : normalizeRelativePath(input.path, 'path', true)
           const page = boundedInteger(input.page, 1, Number.MAX_SAFE_INTEGER, 'page')
           const pageSize = boundedInteger(input.page_size, DEFAULT_LIST_PAGE_SIZE, MAX_LIST_PAGE_SIZE, 'page_size')
-          const files = await listMarkdownFiles(root, scope)
+          const files = await listReadableFiles(root, scope)
           const offset = (page - 1) * pageSize
           return ok({
             operation: 'list',
@@ -389,16 +473,16 @@ export function buildProjectDocTools(deps: ProjectDocToolDeps): ToolDefinition[]
           const relative = normalizeRelativePath(input.path, 'path')
           const startLine = boundedInteger(input.start_line, 1, Number.MAX_SAFE_INTEGER, 'start_line')
           const maxLines = boundedInteger(input.max_lines, DEFAULT_READ_LINES, MAX_READ_LINES, 'max_lines')
-          return ok(await readMarkdown(root, relative, startLine, maxLines))
+          return ok(await readTextFile(root, relative, startLine, maxLines))
         }
         if (input.operation === 'search') {
           if (!hasOnlyKeys(input, ['project_root', 'operation', 'path', 'query', 'limit'])) throw new Error('search 包含无关参数')
           const scope = input.path === undefined ? '' : normalizeRelativePath(input.path, 'path', true)
           if (typeof input.query !== 'string' || input.query.trim() === '') throw new Error('search.query 必须是非空字符串')
           const limit = boundedInteger(input.limit, DEFAULT_SEARCH_MATCHES, MAX_SEARCH_MATCHES, 'limit')
-          return ok(await searchMarkdown(root, scope, input.query, limit))
+          return ok(await searchTextFiles(root, scope, input.query, limit))
         }
-        throw new Error('operation 必须是 list、read 或 search')
+        throw new Error('operation 必须是 list、read、search' + (visionAvailable ? ' 或 read_image' : ''))
       } catch (error) {
         return fail('inspect_project_docs', error)
       }

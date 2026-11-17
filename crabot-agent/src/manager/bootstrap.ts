@@ -1156,6 +1156,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
           readWorkerContext: (workerId) => workerContextStore.read(workerId),
           managerKey: key,
           managerPrincipalPermissions: managerPermissions ?? undefined,
+          supportsVision: deps.managerSupportsVision,
         },
       })
     },

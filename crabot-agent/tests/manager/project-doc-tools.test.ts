@@ -98,7 +98,7 @@ describe('project document tools', () => {
     await fs.mkdir(sibling, { recursive: true })
     await fs.writeFile(join(project, 'README.md'), '# 项目\n入口说明\n')
     await fs.writeFile(join(project, 'docs', 'ARCHITECTURE.md'), '# 架构\n关键数据流\n')
-    await fs.writeFile(join(project, 'notes.txt'), '不应列出')
+    await fs.writeFile(join(project, 'notes.txt'), '白名单文本，list 可见\n第二行\n')
     workers = [worker('w-project', KEY, project), worker('w-sibling', KEY, sibling)]
     contexts = new Map([
       ['w-project', { principal_permissions: permissions() }],
@@ -117,13 +117,14 @@ describe('project document tools', () => {
     await fs.rm(root, { recursive: true, force: true })
   })
 
-  function tools(wakeEvent: WakeEvent | undefined, managerPrincipalPermissions?: ResolvedPermissions) {
+  function tools(wakeEvent: WakeEvent | undefined, managerPrincipalPermissions?: ResolvedPermissions, supportsVision?: () => boolean | undefined) {
     return buildProjectDocTools({
       ledger,
       readWorkerContext: async (workerId) => contexts.get(workerId),
       managerKey: KEY,
       managerPrincipalPermissions: managerPrincipalPermissions
         ?? (wakeEvent && 'principalPermissions' in wakeEvent ? wakeEvent.principalPermissions : undefined),
+      supportsVision,
     })
   }
 
@@ -198,8 +199,11 @@ describe('project document tools', () => {
     expect(JSON.parse(listed.output)).toMatchObject({
       operation: 'list',
       items: [{ path: 'README.md', kind: 'file' }],
-      pagination: { page: 1, page_size: 1, total_items: 2, total_pages: 2 },
+      pagination: { page: 1, page_size: 1, total_items: 3, total_pages: 3 },
     })
+    // 白名单文本不再被 list 排除（fixture notes.txt 见 beforeEach）
+    const fullList = await inspect.call({ project_root: project, operation: 'list' }, {} as never)
+    expect(JSON.parse(fullList.output).items.map((item: { path: string }) => item.path)).toContain('notes.txt')
 
     const read = await inspect.call({
       project_root: project,
@@ -224,6 +228,71 @@ describe('project document tools', () => {
       matches: [{ path: 'docs/ARCHITECTURE.md', line: 2, text: '关键数据流' }],
       truncated: false,
     })
+
+    // 白名单文本可 read，行段语义与 Markdown 一致
+    const textRead = await inspect.call({ project_root: project, operation: 'read', path: 'notes.txt', start_line: 2, max_lines: 1 }, {} as never)
+    expect(JSON.parse(textRead.output)).toMatchObject({
+      operation: 'read',
+      path: 'notes.txt',
+      total_lines: 2,
+      content: '第二行',
+    })
+    // search 范围覆盖文本文件
+    const textSearch = await inspect.call({ project_root: project, operation: 'search', query: '白名单' }, {} as never)
+    expect(JSON.parse(textSearch.output).matches).toEqual([{ path: 'notes.txt', line: 1, text: '白名单文本，list 可见' }])
+  })
+
+  it('read_image 在视觉模型下返回压缩图像块，坏图与非图片扩展拒绝', async () => {
+    const wake = humanWake(permissions({ storage: { workspace_path: root, access: 'readwrite' } }))
+    const supportsVision = () => true
+    const inspect = tools(wake, permissions({ storage: { workspace_path: root, access: 'readwrite' } }), supportsVision)
+      .find((entry) => entry.name === 'inspect_project_docs')!
+    const sharp = (await import('sharp')).default
+
+    const png = await sharp({ create: { width: 8, height: 8, channels: 3, background: { r: 1, g: 2, b: 3 } } }).png().toBuffer()
+    await fs.mkdir(join(project, 'shots'), { recursive: true })
+    await fs.writeFile(join(project, 'shots', 'e10.png'), png)
+
+    const good = await inspect.call({ project_root: project, operation: 'read_image', path: 'shots/e10.png' }, {} as never)
+    expect(good.isError).toBe(false)
+    expect(good.images).toHaveLength(1)
+    expect(good.images![0].media_type).toMatch(/^image\/(png|jpeg)$/)
+    const payload = JSON.parse(good.output)
+    expect(payload).toMatchObject({ operation: 'read_image', path: 'shots/e10.png', size_bytes: png.length })
+    expect(payload.digest).toMatch(/^[a-f0-9]{64}$/)
+
+    // 截断图（写入中产物）→ 工具错误，不进对话
+    await fs.writeFile(join(project, 'shots', 'truncated.png'), png.subarray(0, Math.floor(png.length / 2)))
+    const bad = await inspect.call({ project_root: project, operation: 'read_image', path: 'shots/truncated.png' }, {} as never)
+    expect(bad.isError).toBe(true)
+    expect(bad.output).toContain('不完整或已损坏')
+    expect(bad.images).toBeUndefined()
+
+    // 非图片扩展照常拒绝
+    expect((await inspect.call({ project_root: project, operation: 'read_image', path: 'notes.txt' }, {} as never)).isError).toBe(true)
+
+    // 授权外目录（非任何 worker 工作区、本回合无 storage 授权）拒绝
+    const stranger = join(root, 'stranger')
+    await fs.mkdir(join(stranger, 'shots'), { recursive: true })
+    await fs.writeFile(join(stranger, 'shots', 'x.png'), png)
+    const noStorage = tools(humanWake(permissions()), undefined, () => true)
+      .find((entry) => entry.name === 'inspect_project_docs')!
+    expect((await noStorage.call({ project_root: stranger, operation: 'read_image', path: 'shots/x.png' }, {} as never)).isError).toBe(true)
+  })
+
+  it('非视觉模型的工具面不含 read_image，调用时 fail-closed', async () => {
+    const granted = permissions({ storage: { workspace_path: root, access: 'readwrite' } })
+    for (const supportsVision of [undefined, () => false, () => undefined]) {
+      const inspect = tools(humanWake(granted), undefined, supportsVision)
+        .find((entry) => entry.name === 'inspect_project_docs')!
+      expect(JSON.stringify(inspect.inputSchema)).not.toContain('read_image')
+      const result = await inspect.call({ project_root: project, operation: 'read_image', path: 'notes.txt' }, {} as never)
+      expect(result.isError).toBe(true)
+      expect(result.output).toContain('支持视觉')
+    }
+    const enabled = tools(humanWake(granted), undefined, () => true)
+      .find((entry) => entry.name === 'inspect_project_docs')!
+    expect(JSON.stringify(enabled.inputSchema)).toContain('read_image')
   })
 
   it('无 file_io、缺权限快照和无主体系统唤醒均 fail-closed', async () => {
@@ -318,12 +387,12 @@ describe('project document tools', () => {
     }
   })
 
-  it('拒绝路径逃逸、非 Markdown、生成目录和越界软链接', async () => {
+  it('拒绝路径逃逸、非白名单格式、生成目录和越界软链接', async () => {
     const wake = humanWake(permissions({ storage: { workspace_path: root, access: 'readwrite' } }))
     const inspect = tool(wake, 'inspect_project_docs')
 
     expect((await inspect.call({ project_root: project, operation: 'read', path: '../outside.md' }, {} as never)).isError).toBe(true)
-    expect((await inspect.call({ project_root: project, operation: 'read', path: 'notes.txt' }, {} as never)).isError).toBe(true)
+    expect((await inspect.call({ project_root: project, operation: 'read', path: 'notes.exe' }, {} as never)).isError).toBe(true)
     expect((await inspect.call({ project_root: project, operation: 'list', path: 'dist' }, {} as never)).isError).toBe(true)
 
     await fs.writeFile(join(sibling, 'secret.md'), '# secret\n')
