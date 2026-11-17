@@ -70,7 +70,7 @@ import {
   type IncrementalCompactionResult,
 } from '../engine/context-manager.js'
 import { DEFAULT_MAX_CONTEXT_TOKENS } from '../engine/query-loop.js'
-import { REMOTE_IMAGE_PREFETCH_TIMEOUT_MS, GroupInboundImageProjection, collectInboundImages, injectInboundImages, pruneImageRefs, readImageFileSync, toImageBlock, type ManagerImageRef } from './image-vision.js'
+import { REMOTE_IMAGE_PREFETCH_TIMEOUT_MS, GroupInboundImageProjection, collectInboundImages, injectInboundImages, pruneImageRefs, readImageFileSync, stripToolResultImages, toImageBlock, type ManagerImageRef } from './image-vision.js'
 import { fetchRemoteImage } from '../agent/media-resolver.js'
 import type { ImageBlock } from '../engine/index.js'
 import { assembleManagerSystemPrompt, VOICE_PENDING_RESULTS_PROMPT, VOICE_MANAGEMENT_RESULT_PROMPT } from './prompt.js'
@@ -1530,7 +1530,7 @@ export class ManagerLoop {
     // 文本逐字一致)。
     const transientPromptCounts = this.transientPromptCounts()
     const durableIds = new Set(initialState.recent.map((message) => message.id))
-    const persistedFinalMessages = attachManagerHumanSources(attempt.result.finalMessages.flatMap((m) => {
+    const restoredFinalMessages = attempt.result.finalMessages.flatMap((m) => {
       if (this.resumeCheckpoint?.transientMessageIds.includes(m.id)) return []
       // 系统提示只服务当前 LLM 请求。只在本次动态尾部之后按数量剔除，避免误删旧 history
       // 中恰好同文的人类消息；Worker/任务板正文从未进入这里。
@@ -1551,7 +1551,9 @@ export class ManagerLoop {
         if (first && first.type === 'text') return [{ ...m, content: first.text }]
       }
       return [m]
-    }), this.humanSourcesForReview())
+    })
+    // 工具结果图像同样只存在于 LLM 请求投影：落盘前剥离（read_image 等，spec 设计点 5）。
+    const persistedFinalMessages = attachManagerHumanSources(stripToolResultImages(restoredFinalMessages), this.humanSourcesForReview())
 
     if (attempt.hasSummaryMarker && persistedFinalMessages[0]) episodeHistoryIds.add(persistedFinalMessages[0].id)
     await this.deps.store.appendEpisodeLog(this.deps.key, episodeId, persistedFinalMessages, episodeHistoryIds)
