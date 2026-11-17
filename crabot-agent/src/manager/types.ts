@@ -39,9 +39,9 @@ export interface ManagerSessionState {
 /**
  * fail-loud 兜底:manager episode 失败的两种形态。
  *
- * `ManagerLoop` 只有 F2 会抛错;最常见的 F1(LLM 挂 / key 过期 / 限流耗尽重试)记
- * `outcome:'failed'`、把整批输入推回 mailbox,然后**正常 resolve**。所以判据必须双管:
- * `catch` 抓 F2,`outcome ∈ {failed, aborted}` 抓 F1。只写 try/catch 抓不住最常见的那种。
+ * `ManagerLoop` 的 LLM 失败通常正常 resolve 为 `outcome:'failed'`；本地异常也可能
+ * failed 或直接抛错。发送出口必须核验请求边界的 LLM 来源，不能仅凭 outcome/catch
+ * 发 LLM 兜底；主动取消不发送。模型未配置的既有专门引导独立保留。
  *
  * 住在这里而不是 `unified-agent.ts`:除了三条人类消息入口,`bootstrap.ts` 的 worker 事件
  * 出口也要按同一套判据上报(`BootstrapDeps.reportEpisodeFailure`),两边必须是同一个类型。
@@ -50,4 +50,4 @@ export interface ManagerSessionState {
  */
 export type ManagerEpisodeFailure =
   | { readonly kind: 'threw'; readonly error: unknown }
-  | { readonly kind: 'outcome'; readonly outcome: 'failed' | 'aborted'; readonly error?: string }
+  | { readonly kind: 'outcome'; readonly outcome: 'failed' | 'aborted'; readonly error?: string; readonly llmFailure?: true }

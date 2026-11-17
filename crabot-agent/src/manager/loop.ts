@@ -247,6 +247,8 @@ export interface EpisodeResult {
   /** Successful `send_message` deliveries, paired with their tool results by tool_use_id. */
   readonly successfulSendMessageTargets: ReadonlyArray<{ readonly channel_id: string; readonly session_id: string }>
   readonly error?: string
+  /** Confirmed at the adapter request boundary; missing provenance is not an LLM failure. */
+  readonly llmFailure?: true
   readonly contextRecoveryRequired?: true
 }
 
@@ -1624,6 +1626,7 @@ export class ManagerLoop {
         && !attempt.result.error.startsWith('上下文压缩失败：')
         ? `上下文压缩失败：${attempt.result.error}` : attempt.result.error } : {}),
       ...(attempt.result.contextRecoveryRequired ? { contextRecoveryRequired: true } : {}),
+      ...(attempt.result.llmFailure ? { llmFailure: true } : {}),
     }
     this.deps.onEpisodeEnd?.(result)
     return result

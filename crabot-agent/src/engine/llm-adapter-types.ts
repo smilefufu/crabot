@@ -30,6 +30,27 @@ import type {
   GeminiProviderState,
 } from './types.js'
 
+// Preserve request provenance without changing SDK errors used by retry classification.
+const llmRequestFailures = new WeakSet<object>()
+
+export function isLlmRequestFailure(error: unknown): boolean {
+  return error !== null && typeof error === 'object' && llmRequestFailures.has(error)
+}
+
+function markLlmRequestFailure(error: unknown): object {
+  const failure = error !== null && typeof error === 'object' ? error : new Error(String(error))
+  llmRequestFailures.add(failure)
+  return failure
+}
+
+async function* requestStream(adapter: LLMAdapter, params: LLMStreamParams): AsyncGenerator<StreamChunk> {
+  try {
+    yield* adapter.stream(params)
+  } catch (error) {
+    throw markLlmRequestFailure(error)
+  }
+}
+
 // --- Interfaces ---
 
 export interface LLMRetryEvent {
@@ -275,7 +296,7 @@ async function withStreamConsumptionRetry(
     try {
       const processor = new StreamProcessor()
       const { model: _pModel, maxTokens: _pMaxTokens, thinking: _pThinking, ...baseParams } = params
-      for await (const chunk of currentAdapter.stream({ ...baseParams, ...currentRequestParams, messages: [...params.messages] } as LLMStreamParams)) {
+      for await (const chunk of requestStream(currentAdapter, { ...baseParams, ...currentRequestParams, messages: [...params.messages] } as LLMStreamParams)) {
         if (params.signal?.aborted) {
           throw new DOMException('Aborted', 'AbortError')
         }
@@ -285,7 +306,7 @@ async function withStreamConsumptionRetry(
         }
         chunkCount++
         if (chunk.type === 'error') {
-          throw new Error(chunk.error)
+          throw markLlmRequestFailure(new Error(chunk.error))
         }
         if (consumer && chunk.type === 'text_delta') await consumer.write(chunk.text)
         processor.process(chunk)
@@ -423,6 +444,7 @@ function enrichGiveUp(err: unknown, attempts: number, elapsedMs: number): Error 
   const wrapped = new Error(`${base.message}（流式重试放弃：${attempts} 次尝试 / ${elapsedS}s）`)
   wrapped.name = base.name
   ;(wrapped as Error & { cause?: unknown }).cause = base
+  if (isLlmRequestFailure(err)) llmRequestFailures.add(wrapped)
   return wrapped
 }
 
