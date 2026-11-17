@@ -19,6 +19,7 @@ type SharpFn = (input: Buffer) => {
       toBuffer: () => Promise<Buffer>
     }
   }
+  toBuffer: () => Promise<Buffer>
 }
 
 let sharpFn: SharpFn | null | undefined
@@ -32,6 +33,21 @@ async function getSharp(): Promise<SharpFn | null> {
   } catch {
     sharpFn = null
     return null
+  }
+}
+
+/**
+ * 解码校验：强制完整解码一次，截断/损坏的图片在此失败（如后台命令仍在写入时的产物，
+ * spec: 2026-11-17-bg-shell-product-read-guard）。sharp 不可用时跳过校验，维持透传现状。
+ */
+export async function verifyImageDecodable(image: Buffer): Promise<boolean> {
+  const sharp = await getSharp()
+  if (!sharp) return true
+  try {
+    await sharp(image).toBuffer()
+    return true
+  } catch {
+    return false
   }
 }
 

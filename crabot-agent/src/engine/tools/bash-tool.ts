@@ -261,7 +261,7 @@ export function createBashTool(
     category: 'shell',
     description:
       '执行 Bash 命令并返回输出。' +
-      `运行超过 ${Math.round(FOREGROUND_GRACE_PERIOD_MS / 1000)}s 时自动转后台，命令继续运行并返回 entity_id；后续输出通过 Output 读取。`,
+      `运行超过 ${Math.round(FOREGROUND_GRACE_PERIOD_MS / 1000)}s 时，视为本次运行需要较长时间才能完成，则自动转到后台异步运行并返回 entity_id，可通过 Output 进行阻塞式读取。`,
     inputSchema: {
       type: 'object',
       properties: {
