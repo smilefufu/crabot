@@ -307,9 +307,11 @@ try {
      $raw = & $command status --json 2>&1
      if ($LASTEXITCODE -eq 0) {
       $state = ($raw -join "`n") | ConvertFrom-Json
-      $runtime = Get-Content (Join-Path $data 'instance-runtime.json') -Raw | ConvertFrom-Json
       $readyModules = @($state.modules | Where-Object { $_.module_id -in @('admin-web','crabot-agent','memory-default') -and $_.status -eq 'running' })
-      if ($state.running -eq $true -and $state.data_dir -eq $data -and $readyModules.Count -eq 3 -and $runtime.generation -ne $beforeMenuGeneration -and $runtime.install_root -eq ([IO.Path]::GetFullPath((Join-Path $target 'program/core')))) { $menuReopened=$true; break }
+      if ($state.running -eq $true -and $state.data_dir -eq $data -and $readyModules.Count -eq 3) {
+       $runtime = Get-Content (Join-Path $data 'instance-runtime.json') -Raw | ConvertFrom-Json
+       if ($runtime.generation -ne $beforeMenuGeneration -and $runtime.install_root -eq ([IO.Path]::GetFullPath((Join-Path $target 'program/core')))) { $menuReopened=$true; break }
+      }
      }
     }
     Start-Sleep -Milliseconds 750
