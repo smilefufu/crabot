@@ -8,7 +8,7 @@
 - 修复 B：`applyPermissionUpdatesOnce` 对 builtin worker 直接跳过（不比较 revision、不发通知、不读 observation、不再触发权限 RPC）；非 builtin（CLI/tmux）保留 revision 比较 + stopForPermissionUpdate + 通知；`sweepLiveness` 删除周期 `applyPermissionUpdates()` 调用（配置事件链已覆盖）；builtin adapter `SYSTEM_NOTIFICATION_ENVELOPES` 移除 `'<permission-notification>'`。builtin 权限变更时效不变：下一次 LLM 请求即用新权限（engine 每轮 prepareTools 实时解析，无缓存）。
 - 设计记录：[spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-11-18-permission-query-decouple-and-notification-removal-design.md)（docs `f88c180`）。
 - 验证：admin 定向全绿（group-uniform 5/5 含新增事故回归、chat-master 5/5、admin-web-api 76/76、group-session-permissions+request-permission-sources 26/26 按新语义改写）；agent 定向全绿（harness-continuation、policy-observation、bootstrap 53/53）；admin/agent tsc --noEmit 通过。全量对照：worktree 与 main 基线同环境同文件集合 AB 比对，剩余失败全部是基线既有环境噪音（v1-cleanup、legacy-directory-migration、channel-package、llm-adapter flaky 等，逐项定性确认与权限路径无关）。
-- Follow-up：① "Tool not found" 权限拒绝的错误归类（Fix A 后触发场景基本消失）；② 非 builtin worker 权限停止失去 sweep 兜底（配置事件丢失时 stop 延迟到下次变更，可接受）；③ channel 掉线根因、zhi.gao 实例部署升级（含 #257）。
+- Follow-up：① "Tool not found" 权限拒绝的错误归类（Fix A 后触发场景基本消失）；② 非 builtin worker 权限停止失去 sweep 兜底：配置事件丢失（admin 重启窗口）或权限刷新 catch 分支"先 stop 后 pending"（stop 本身已实证为同步完成——claude-code kill 等进程树退出并 transitionExited，verify 读 state 立得 succeeded；该窗口是错误路径上的停住恢复延迟）时，停住的 CLI/tmux worker 要等下次配置变更或 agent 重启才恢复；③ channel 掉线根因、zhi.gao 实例部署升级（含 #257）；④ review 处置见 PR #262 线程：阻塞项为协议未同步，已修订 protocol-admin v0.5.9（docs `42b6b34`）。
 
 ### 桌面设置诊断与截图结果修复（2026-11-18，源码修复，未部署）
 
