@@ -23,7 +23,9 @@ export class ComputerUseOwner {
   private capture?: ComputerUseRuntimeStatus['capture']
   private setupId?: string
   private setupAbort?: AbortController
-  private readonly diagnosticsPending = new Map<string, (checks: NonNullable<ComputerUseRuntimeStatus['checks']>) => void>()
+  private diagnosticFlight?: { id: string; child: ChildProcess; generation: number; timer: NodeJS.Timeout }
+  private diagnosticSnapshot: Pick<ComputerUseRuntimeStatus, 'checks' | 'checks_at' | 'reason'> = {}
+  private diagnosticCompletedAt?: number
   private readonly grants = new Map<string, { token: string; check: (method: string, name?: string) => Promise<boolean> }>()
   private readonly tokens = new Map<string, (method: string, name?: string) => Promise<boolean>>()
   private config?: MCPServerConfig
@@ -36,14 +38,41 @@ export class ComputerUseOwner {
   }
   async diagnostics(): Promise<ComputerUseRuntimeStatus> {
     if (!this.available || !this.child?.connected) return this.status
-    const child = this.child
-    const id = randomUUID()
-    const checks = await new Promise<NonNullable<ComputerUseRuntimeStatus['checks']>>(done => {
-      const timer = setTimeout(() => { this.diagnosticsPending.delete(id); done([]) }, 3500)
-      this.diagnosticsPending.set(id, value => { clearTimeout(timer); done(value) })
-      child.send({ type: 'diagnostics', id }, error => { if (error) { this.diagnosticsPending.get(id)?.([]); this.diagnosticsPending.delete(id) } })
-    })
-    return { ...this.status, checks }
+    if (!this.diagnosticFlight && (this.diagnosticCompletedAt === undefined || Date.now() - this.diagnosticCompletedAt >= 2000)) {
+      const child = this.child, id = randomUUID()
+      const timer = setTimeout(() => this.completeDiagnostics(child, id, { reason: 'COMPUTER_USE_DIAGNOSTICS_TIMEOUT' }), 6500)
+      this.diagnosticFlight = { id, child, generation: this.generation, timer }
+      try {
+        child.send({ type: 'diagnostics', id }, error => {
+          if (error) this.completeDiagnostics(child, id, { reason: 'COMPUTER_USE_DIAGNOSTICS_FAILED' })
+        })
+      } catch { this.completeDiagnostics(child, id, { reason: 'COMPUTER_USE_DIAGNOSTICS_FAILED' }) }
+    }
+    const snapshot = this.diagnosticSnapshot
+    const reason = this.reason ?? (this.diagnosticFlight ? 'COMPUTER_USE_DIAGNOSTICS_PENDING' : snapshot.reason)
+    return { ...this.status, ...(snapshot.checks ? { checks: snapshot.checks.map(check => ({ ...check })), checks_at: snapshot.checks_at } : {}),
+      ...(reason ? { reason } : {}) }
+  }
+
+  private completeDiagnostics(child: ChildProcess, id: string, result: { checks?: unknown; reason?: unknown }): void {
+    const flight = this.diagnosticFlight
+    if (!flight || flight.id !== id || flight.child !== child || this.child !== child || flight.generation !== this.generation) return
+    clearTimeout(flight.timer); this.diagnosticFlight = undefined; this.diagnosticCompletedAt = Date.now()
+    const reasons = ['COMPUTER_USE_DIAGNOSTICS_BUSY', 'COMPUTER_USE_DIAGNOSTICS_TIMEOUT', 'COMPUTER_USE_DIAGNOSTICS_FAILED', 'COMPUTER_USE_DIAGNOSTICS_INVALID', 'COMPUTER_USE_QUARANTINED']
+    if (typeof result.reason === 'string' && reasons.includes(result.reason)) { this.diagnosticSnapshot = { reason: result.reason }; return }
+    const names = ['session_active', 'ax_capability', 'screen_capture_capability']
+    const checkReasons = ['COMPUTER_USE_AX_UNAVAILABLE', 'COMPUTER_USE_AX_TIMEOUT', 'COMPUTER_USE_AX_BUSY',
+      'COMPUTER_USE_SCREEN_CAPTURE_PREREQUISITE_FAILED', 'COMPUTER_USE_SESSION_UNAVAILABLE', 'COMPUTER_USE_NATIVE_CAPABILITY_UNAVAILABLE']
+    const checks: ComputerUseRuntimeStatus['checks'] = Array.isArray(result.checks) ? result.checks
+      .filter(check => names.includes(check?.name) && ['pass', 'fail', 'skip'].includes(check.status))
+      .map(check => ({ name: check.name, status: check.status, ...(checkReasons.includes(check.reason) ? { reason: check.reason } : {}) })) : []
+    this.diagnosticSnapshot = checks.length === names.length && names.every(name => checks.some(check => check.name === name))
+      ? { checks, checks_at: new Date().toISOString() } : { reason: 'COMPUTER_USE_DIAGNOSTICS_INVALID' }
+  }
+
+  private clearDiagnostics(): void {
+    if (this.diagnosticFlight) clearTimeout(this.diagnosticFlight.timer)
+    this.diagnosticFlight = undefined; this.diagnosticSnapshot = {}; this.diagnosticCompletedAt = undefined
   }
 
   async verifySetup(request: ComputerUseSetupRequest, current: () => boolean): Promise<void> {
@@ -109,6 +138,7 @@ export class ComputerUseOwner {
   async prepare(configs: ReadonlyArray<MCPServerConfig>): Promise<MCPServerConfig[]> {
     const standard = configs.find(isStandardComputerUse)
     if (!standard) { await this.close().catch(error => console.error('[computer-use] cleanup pending:', error.message)); return [...configs] }
+    if (this.config?.args?.[0] !== standard.args?.[0]) this.clearDiagnostics()
     this.config = standard
     try {
       if (!this.connected) {
@@ -143,18 +173,15 @@ export class ComputerUseOwner {
     child.stderr?.on('data', () => {}) // Runtime errors cross IPC without process environment or credentials.
     child.on('message', (message: any) => {
       if (this.child !== child) return
-      if (message?.type === 'availability') { this.ready = message.available === true; this.quarantined = !this.ready }
-      if (message?.type === 'diagnostics' && Array.isArray(message.checks)) {
-        this.diagnosticsPending.get(message.id)?.(message.checks.filter((check: any) => typeof check?.name === 'string' && ['pass', 'fail', 'skip'].includes(check.status)).map((check: any) => ({ name: check.name, status: check.status })))
-        this.diagnosticsPending.delete(message.id)
-      }
+      if (message?.type === 'availability') { this.ready = message.available === true; this.quarantined = !this.ready; if (!this.ready) this.clearDiagnostics() }
+      if (message?.type === 'diagnostics') this.completeDiagnostics(child, message.id, message)
       if (message?.type !== 'authorize') return
       const check = this.tokens.get(message.token)
       void Promise.resolve(check?.(message.method, message.name) ?? false).catch(() => false).then(allowed => {
         if (child.connected) child.send({ type: 'authorized', id: message.id, allowed })
       })
     })
-    child.on('exit', () => { if (this.child === child) { this.quarantined ||= this.ready; this.ready = false; this.endpoint = undefined; this.child = undefined; this.grants.clear(); this.tokens.clear(); this.setupAbort?.abort(); for (const done of this.diagnosticsPending.values()) done([]); this.diagnosticsPending.clear() } })
+    child.on('exit', () => { if (this.child === child) { this.quarantined ||= this.ready; this.ready = false; this.endpoint = undefined; this.child = undefined; this.grants.clear(); this.tokens.clear(); this.setupAbort?.abort(); this.clearDiagnostics() } })
     await new Promise<void>((done, fail) => {
       const timer = setTimeout(() => fail(new Error('COMPUTER_USE_HOST_START_TIMEOUT')), 30_000)
       child.once('error', fail)
@@ -172,6 +199,7 @@ export class ComputerUseOwner {
 
   async close(): Promise<void> {
     this.generation += 1
+    this.clearDiagnostics()
     this.setupAbort?.abort()
     this.capture = undefined
     const child = this.child

@@ -4,7 +4,9 @@ import { ComputerUseSetup } from './computer-use-setup.js'
 function fixture(platform = 'darwin') {
   const configuration = { enabled: true, standard: true, root: '/fixture', key: 'standard' }
   const deps = { configuration: () => ({ ...configuration }), host: async () => ({ platform, hostname: 'test-computer', session: 'active' as const }),
-    runtime: vi.fn().mockResolvedValue({ state: 'ready' }), permissions: vi.fn().mockResolvedValue({ accessibility: true, screen_recording: true }),
+    runtime: vi.fn().mockImplementation(async () => ({ state: 'ready', checks_at: new Date().toISOString(), checks: [
+      { name: 'session_active', status: 'pass' }, { name: 'ax_capability', status: 'pass' }, { name: 'screen_capture_capability', status: 'pass' },
+    ] })), permissions: vi.fn().mockResolvedValue({ accessibility: true, screen_recording: true }),
     request: vi.fn().mockResolvedValue({ accessibility: true, screen_recording: true, capturable: true }),
     settings: vi.fn().mockResolvedValue(undefined),
     appPath: () => platform === 'darwin' ? '/fixture/CuaDriver.app' : undefined, reveal: vi.fn(), invalidate: vi.fn().mockResolvedValue(undefined) }
@@ -13,6 +15,40 @@ function fixture(platform = 'darwin') {
 const settle = async () => { for (let i = 0; i < 15; i++) await Promise.resolve() }
 
 describe('human desktop setup lifecycle', () => {
+  it('does not label an unattempted screenshot as failed when native controls fail', async () => {
+    const { setup, deps } = fixture('win32')
+    deps.runtime.mockImplementation(async () => ({ state: 'ready', checks_at: new Date().toISOString(),
+      checks: [{ name: 'ax_capability', status: 'fail', reason: 'COMPUTER_USE_AX_UNAVAILABLE' }] }))
+    await setup.start(); await settle()
+    const result = await setup.status()
+    expect(result.setup?.phase).toBe('failed')
+    expect(result.capture.status).toBe('unverified')
+    await setup.close()
+  })
+  it.each(['stale', 'incomplete', 'undated'])('does not accept a %s report even when the real screenshot succeeds', async mode => {
+    vi.useFakeTimers()
+    const { setup, deps } = fixture('win32')
+    const started = await setup.start(); await settle()
+    const report = await deps.runtime()
+    deps.runtime.mockResolvedValue({ ...report, checks_at: mode === 'undated' ? undefined : new Date(Date.now() - (mode === 'stale' ? 10000 : 0)).toISOString(),
+      checks: mode === 'incomplete' ? [{ name: 'ax_capability', status: 'pass' }] : report.checks,
+      capture: { setup_id: started.setup!.setup_id, status: 'verified', verified_at: new Date().toISOString() } })
+    await vi.advanceTimersByTimeAsync(2000)
+    const result = await setup.status()
+    expect(result.capture.status).toBe('verified')
+    expect(result.setup?.phase).toBe('capture')
+    await setup.close(); vi.useRealTimers()
+  })
+  it('keeps successful capture evidence when controls subsequently fail', async () => {
+    const { setup, deps } = fixture()
+    deps.runtime.mockImplementation(async () => ({ state: 'ready', checks_at: new Date().toISOString(),
+      checks: [{ name: 'ax_capability', status: 'fail', reason: 'COMPUTER_USE_AX_TIMEOUT' }] }))
+    await setup.start(); await settle()
+    const result = await setup.status()
+    expect(result.setup).toMatchObject({ phase: 'failed', reason: 'COMPUTER_USE_AX_TIMEOUT' })
+    expect(result.capture.status).toBe('verified')
+    await setup.close()
+  })
   it('GET reports exactly the missing grant without requesting permission or loading runtime', async () => {
     const { setup, deps } = fixture()
     deps.permissions.mockResolvedValue({ accessibility: true, screen_recording: false })
@@ -106,7 +142,8 @@ describe('human desktop setup lifecycle', () => {
     expect(setup.requestForAgent()?.setup_id).toBe(status.setup?.setup_id)
     expect((await setup.status()).permissions.accessibility).toBe('not_applicable')
     expect((await setup.status()).capture.status).toBe('unverified')
-    deps.runtime.mockResolvedValue({ state: 'ready', capture: { setup_id: status.setup!.setup_id, status: 'verified', verified_at: new Date().toISOString() } })
+    const runtime = await deps.runtime()
+    deps.runtime.mockResolvedValue({ ...runtime, capture: { setup_id: status.setup!.setup_id, status: 'verified', verified_at: new Date().toISOString() } })
     await vi.advanceTimersByTimeAsync(2000)
     expect((await setup.status()).setup?.phase).toBe('ready')
     expect(deps.request).not.toHaveBeenCalled()
@@ -118,6 +155,7 @@ describe('human desktop setup lifecycle', () => {
     await setup.start(); await settle()
     await vi.advanceTimersByTimeAsync(180001)
     expect((await setup.status()).setup?.reason).toBe('COMPUTER_USE_SETUP_TIMEOUT')
+    expect((await setup.status()).capture.status).toBe('unverified')
     await setup.close()
     await expect(setup.start()).rejects.toThrow('COMPUTER_USE_SETUP_CLOSED')
     vi.useRealTimers()

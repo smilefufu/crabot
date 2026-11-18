@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { ComputerUseSetupCard } from './ComputerUseSetupCard'
 import { computerUseService, type ComputerUseSetupStatus } from '../../services/computerUse'
@@ -11,8 +11,38 @@ vi.mock('../../contexts/ToastContext', () => ({ useToast: () => ({ error: vi.fn(
 const status: ComputerUseSetupStatus = { enabled: true, standard: true, host: { platform: 'darwin', hostname: 'CRABOT 的电脑', session: 'active' },
   permissions: { accessibility: 'granted', screen_recording: 'missing' }, capture: { status: 'unverified' }, runtime: { state: 'uninitialized' }, app_path: '/fixture/CuaDriver.app' }
 beforeEach(() => { vi.clearAllMocks(); vi.mocked(computerUseService.status).mockResolvedValue(structuredClone(status)); vi.mocked(computerUseService.cancel).mockResolvedValue(status) })
+afterEach(() => { vi.useRealTimers() })
 const show = () => render(<MemoryRouter><ComputerUseSetupCard /></MemoryRouter>)
 describe('guided desktop setup UI', () => {
+  it('explains a failed native check even when an old report has no reason field', async () => {
+    vi.mocked(computerUseService.status).mockResolvedValue({ ...status, permissions: { accessibility: 'granted', screen_recording: 'granted' },
+      runtime: { state: 'ready', checks: [{ name: 'ax_capability', status: 'fail' }] } })
+    show()
+    expect(await screen.findByText(/原生控件读取未通过/)).toBeTruthy()
+  })
+  it('bounds automatic diagnostic waiting without starting a human setup or claiming failure', async () => {
+    vi.useFakeTimers()
+    vi.mocked(computerUseService.status).mockResolvedValue({ ...status, runtime: { state: 'ready', reason: 'COMPUTER_USE_DIAGNOSTICS_PENDING' } })
+    await act(async () => { show() })
+    await act(async () => { await vi.advanceTimersByTimeAsync(10000) })
+    const calls = vi.mocked(computerUseService.status).mock.calls.length
+    await act(async () => { await vi.advanceTimersByTimeAsync(10000) })
+    expect(computerUseService.status).toHaveBeenCalledTimes(calls)
+    expect(screen.getByText(/检查尚未完成/)).toBeTruthy()
+    expect(computerUseService.start).not.toHaveBeenCalled()
+  })
+  it('explains Windows background checks and labels the dated previous report during refresh', async () => {
+    const windows = { ...status, host: { ...status.host, platform: 'win32' }, permissions: { accessibility: 'not_applicable' as const, screen_recording: 'not_applicable' as const }, runtime: { state: 'ready' as const,
+      reason: 'COMPUTER_USE_DIAGNOSTICS_PENDING', checks_at: new Date().toISOString(), checks: [{ name: 'ax_capability', status: 'pass' as const }] } }
+    vi.mocked(computerUseService.status).mockResolvedValue(windows)
+    vi.mocked(computerUseService.start).mockResolvedValue({ ...windows, setup: { setup_id: 'windows', phase: 'capture', expires_at: new Date(Date.now() + 180000).toISOString() } })
+    const page = show(); await screen.findByText(/正在复查桌面能力/)
+    fireEvent.click(screen.getByRole('button', { name: '设置桌面控制' }))
+    expect(await screen.findByText(/通常不会弹出系统授权窗口/)).toBeTruthy()
+    expect(screen.getByText(/下方为上次结果/)).toBeTruthy()
+    expect(screen.getByText('待验证')).toBeTruthy()
+    page.unmount()
+  })
   it('shows actual missing permission separately from enabled and never requests on mount', async () => {
     vi.mocked(computerUseService.status).mockResolvedValue({ ...status, runtime: { state: 'uninitialized', checks: [{ name: 'ax_capability', status: 'fail' }] } })
     show()

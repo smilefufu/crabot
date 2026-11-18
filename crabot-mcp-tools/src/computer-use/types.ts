@@ -23,6 +23,11 @@ export interface NativeDriver {
   close(): Promise<void>
 }
 
+export interface NativeDiagnostics {
+  checks?: Array<{ name: string; status: 'pass' | 'fail' | 'skip'; reason?: string }>
+  reason?: string
+}
+
 export function errorResult(code: string): CallToolResult {
   const data = { code, ...(code === 'COMPUTER_USE_UNKNOWN' ? { effect: 'unknown' } : {}) }
   return { isError: true, content: [{ type: 'text', text: JSON.stringify(data) }], structuredContent: data }

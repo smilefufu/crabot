@@ -23,7 +23,7 @@ function code(error: unknown): string {
 
 /** Human setup only; no task, permission snapshot or configuration mutation. */
 export class ComputerUseSetup {
-  private operation?: { view: NonNullable<ComputerUseSetupStatus['setup']>; config: SetupConfiguration; controller: AbortController; promise: Promise<void> }
+  private operation?: { view: NonNullable<ComputerUseSetupStatus['setup']>; config: SetupConfiguration; startedAt: number; controller: AbortController; promise: Promise<void> }
   private capture: ComputerUseSetupStatus['capture'] = { status: 'unverified' }
   private captureKey?: string
   private permissions?: { key: string; value: PermissionProbe; at: number }
@@ -108,7 +108,7 @@ export class ComputerUseSetup {
     }
     this.capture = { status: 'unverified' }
     this.captureKey = config.key
-    const operation = { config, controller: new AbortController(),
+    const operation = { config, startedAt: Date.now(), controller: new AbortController(),
       view: { setup_id: randomUUID(), phase: 'permissions' as const, expires_at: new Date(Date.now() + 180000).toISOString() } as NonNullable<ComputerUseSetupStatus['setup']>,
       promise: Promise.resolve() }
     this.operation = operation
@@ -153,9 +153,17 @@ export class ComputerUseSetup {
         }
         if (!this.current(op)) throw new Error('COMPUTER_USE_SETUP_CANCELLED')
         op.view.phase = 'capture'
-        const capture = await this.deps.request(op.config.root, true, signal)
+        let capture: PermissionProbe
+        try { capture = await this.deps.request(op.config.root, true, signal) }
+        catch (error) {
+          if (this.current(op)) this.capture = { status: 'failed', reason: 'COMPUTER_USE_CAPTURE_FAILED' }
+          throw error
+        }
         if (!this.current(op)) throw new Error('COMPUTER_USE_SETUP_CANCELLED')
-        if (!capture.capturable) throw new Error('COMPUTER_USE_CAPTURE_FAILED')
+        if (!capture.capturable) {
+          this.capture = { status: 'failed', reason: 'COMPUTER_USE_CAPTURE_FAILED' }
+          throw new Error('COMPUTER_USE_CAPTURE_FAILED')
+        }
         this.capture = { status: 'verified', verified_at: new Date().toISOString() }
         op.view.phase = 'connecting'
       } else op.view.phase = 'capture'
@@ -169,15 +177,20 @@ export class ComputerUseSetup {
           this.capture = { status: runtime.capture.status, verified_at: runtime.capture.verified_at, reason: runtime.capture.reason }
           if (this.capture.status === 'failed') throw new Error(this.capture.reason ?? 'COMPUTER_USE_CAPTURE_FAILED')
         }
-        if (runtime.checks?.some(check => check.status === 'fail')) throw new Error('COMPUTER_USE_NATIVE_CAPABILITY_UNAVAILABLE')
-        if (runtime.state === 'ready' && this.capture.status === 'verified') { op.view.phase = 'ready'; return }
+        const fresh = runtime.checks_at !== undefined && Date.parse(runtime.checks_at) >= op.startedAt
+        if (fresh) {
+          const failed = runtime.checks?.find(check => check.status === 'fail')
+          if (failed) throw new Error(failed.reason ?? 'COMPUTER_USE_NATIVE_CAPABILITY_UNAVAILABLE')
+        }
+        const checksReady = fresh && ['session_active', 'ax_capability'].every(name => runtime.checks?.some(check => check.name === name && check.status === 'pass'))
+          && runtime.checks?.some(check => check.name === 'screen_capture_capability' && ['pass', 'skip'].includes(check.status))
+        if (runtime.state === 'ready' && this.capture.status === 'verified' && checksReady) { op.view.phase = 'ready'; return }
         await this.wait(signal)
       }
       throw new Error('COMPUTER_USE_SETUP_CANCELLED')
     } catch (error) {
       op.view.phase = signal.aborted ? 'cancelled' : 'failed'
       op.view.reason = Date.now() >= Date.parse(op.view.expires_at) ? 'COMPUTER_USE_SETUP_TIMEOUT' : code(error)
-      if (this.capture.status !== 'verified') this.capture = { status: 'failed', reason: op.view.reason }
     } finally { clearTimeout(timer) }
   }
 

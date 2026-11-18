@@ -57,8 +57,8 @@ async function main(): Promise<void> {
     if (message?.type === 'authorized') { pending.get(message.id)?.(message.allowed === true); pending.delete(message.id) }
     if (message?.type === 'revoke' && typeof message.token === 'string') void coordinator?.revoke(message.token)
     if (message?.type === 'diagnostics' && typeof message.id === 'string') {
-      void coordinator?.diagnostics().catch(() => []).then(checks => {
-        if (process.connected) process.send!({ type: 'diagnostics', id: message.id, checks })
+      void coordinator?.diagnostics().catch(() => ({ reason: 'COMPUTER_USE_DIAGNOSTICS_FAILED' })).then(result => {
+        if (process.connected) process.send!({ type: 'diagnostics', id: message.id, ...result })
       })
     }
   })
