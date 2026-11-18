@@ -6,7 +6,8 @@ export type ComputerUseSetupPhase = 'permissions' | 'capture' | 'connecting' | '
 export interface ComputerUseRuntimeStatus {
   state: ComputerUseRuntimeState
   reason?: string
-  checks?: Array<{ name: string; status: 'pass' | 'fail' | 'skip' }>
+  checks?: Array<{ name: string; status: 'pass' | 'fail' | 'skip'; reason?: string }>
+  checks_at?: string
   capture?: { setup_id: string; status: ComputerUseCaptureStatus; verified_at?: string; reason?: string }
 }
 export interface ComputerUseSetupStatus {

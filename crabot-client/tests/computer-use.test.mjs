@@ -10,6 +10,10 @@ test('computer-use schema rejects malformed permission/runtime facts and preserv
   const value = ComputerUseSetupStatusSchema.parse({ ...status, runtime: { state: 'quarantined', checks: [{ name: 'fixture', status: 'skip' }] } })
   assert.equal(value.runtime.state, 'quarantined')
   assert.equal(value.capture.status, 'unverified')
+  const detailed = ComputerUseSetupStatusSchema.parse({ ...status, runtime: { state: 'ready', checks_at: '2026-11-18T01:00:00.000Z',
+    checks: [{ name: 'ax_capability', status: 'fail', reason: 'COMPUTER_USE_AX_TIMEOUT' }] } })
+  assert.equal(detailed.runtime.checks_at, '2026-11-18T01:00:00.000Z')
+  assert.equal(detailed.runtime.checks[0].reason, 'COMPUTER_USE_AX_TIMEOUT')
 })
 test('status is read-only; only explicit actions POST and cancellation keeps the exact setup ID', async () => {
   const calls = []

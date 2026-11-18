@@ -1,5 +1,11 @@
 # Crabot 项目进度
 
+### 桌面设置诊断与截图结果修复（2026-11-18，源码修复，未部署）
+
+- 按已确认的 [Spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-11-18-desktop-diagnostics-truthfulness-design.md)：检查失败返回稳定原因码；原生探针预算允许 Windows 4 秒 UIA 检查完成，Owner 异步快照使 health 不等待；截图只按实际捕获证据结算，就绪要求本次设置开始后的完整原生报告。面板补 Windows 后台检查说明、旧结果时间与非设置轮询 10 秒收口。
+- 定向验证 99 项通过，Shared/Client/MCP/Agent/Admin/Web 类型检查通过。Owner 另有 1 项现有 capability fixture 缺少 `browser-interaction-test-check`，在未修改的既有 worktree 复现，不并入本次修复。
+- 本次构建在 macOS ARM 与 Windows ARM 虚拟机（x64 Node/Driver、登录用户 Limited 会话）的隔离宿主上均设置 ready、真实截图 verified、独立测试窗口控件写入回读通过，health 读取分别最多 0/2 毫秒。报障的另一台 Windows 电脑仍待重打包验收；没有完整安装包设置页点按验收、现有安装覆盖、安装包发布或真实模型调用。
+
 ### 图片临时路径、LLM 误报与 Windows 管理浏览器（2026-11-17，源码修复，未部署）
 
 - 按用户收窄后的 [Spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-11-17-cross-platform-path-and-failure-boundaries-design.md)，仅修三项：非视觉工具图片改用系统临时目录及唯一 MIME 文件名，写入失败回工具结果；LLM 专用兜底要求明确请求来源，普通文件/工具/runtime 错误与取消不误报；Windows 管理 Chrome/CDP 补标准目录发现与 profile 路径，失败准确说明，不新增全局杀用户 Chrome。B（shell entity 身份）、C（原生 CLI）和其他审计项不改。

@@ -18,6 +18,7 @@ export function desktopStatusText(status: ComputerUseSetupStatus): string {
   if (status.runtime.state === 'quarantined') return '暂不可用，等待安全恢复'
   if (status.permissions.accessibility === 'missing') return '尚需辅助功能授权'
   if (status.permissions.screen_recording === 'missing') return '尚需屏幕录制授权'
+  if (status.runtime.reason === 'COMPUTER_USE_DIAGNOSTICS_PENDING') return status.runtime.checks_at ? '正在复查桌面能力' : '正在检查桌面能力'
   if (status.runtime.checks?.some(check => check.status === 'fail')) return '桌面环境检查未通过'
   if (status.runtime.reason === 'COMPUTER_USE_PERMISSIONS_PENDING') return '正在检查系统权限'
   if (setupRunning(status)) return status.setup?.phase === 'permissions' ? '等待系统授权' : status.setup?.phase === 'capture' ? '正在验证屏幕访问' : '正在连接桌面工具'
@@ -50,8 +51,25 @@ export function desktopErrorText(reason?: string): string | undefined {
     COMPUTER_USE_AGENT_UNAVAILABLE: 'Crabot Agent 尚不可用，请检查模块状态或模型配置。',
     COMPUTER_USE_QUARANTINED: '桌面操作仍处于安全隔离中。设置不会重放动作或解除隔离，请由新观察核实实际状态。',
     COMPUTER_USE_NATIVE_CAPABILITY_UNAVAILABLE: '原生桌面能力检查未通过，请检查当前图形会话与辅助功能服务。',
+    COMPUTER_USE_AX_UNAVAILABLE: '原生控件读取未通过。请确认桌面已解锁，并检查辅助功能服务是否响应。',
+    COMPUTER_USE_AX_TIMEOUT: '原生控件读取超时，可能有应用的辅助功能服务未响应。请稍后重新检查。',
+    COMPUTER_USE_AX_BUSY: '原生控件读取仍在等待此前未结束的系统检查，请稍后重新检查。',
+    COMPUTER_USE_SCREEN_CAPTURE_PREREQUISITE_FAILED: '截图前提检查未通过，请检查当前桌面会话及显卡驱动。这不是实际截图验证结果。',
+    COMPUTER_USE_SESSION_UNAVAILABLE: '原生驱动的会话检查未通过，请确认此电脑已登录并解锁桌面。',
+    COMPUTER_USE_DIAGNOSTICS_PENDING: '正在检查桌面能力，完成后会在此显示结果。',
+    COMPUTER_USE_DIAGNOSTICS_BUSY: '桌面组件正在处理其它操作，本次能力检查尚未执行，请稍后重新检查。',
+    COMPUTER_USE_DIAGNOSTICS_TIMEOUT: '桌面能力检查超时，尚不能确认控件和截图能力，请重新检查。',
+    COMPUTER_USE_DIAGNOSTICS_FAILED: '未能取得桌面能力检查结果，请重新检查；持续失败时查看模块状态。',
+    COMPUTER_USE_DIAGNOSTICS_INVALID: '桌面组件返回的检查结果不完整，尚不能确认能力，请重新检查。',
     COMPUTER_USE_SETUP_TIMEOUT: '本次等待已结束。完成系统授权后可以重新开始设置。',
     COMPUTER_USE_SETUP_CANCELLED: '设置已取消，已经批准的系统权限仍然保留。',
   }
   return descriptions[reason] ?? '当前检查未完成，请重新检查；仍然失败时可查看模块状态。'
+}
+
+export function desktopCheckErrorText(check: NonNullable<ComputerUseSetupStatus['runtime']['checks']>[number]): string | undefined {
+  if (check.status !== 'fail') return undefined
+  const fallback: Record<string, string> = { ax_capability: 'COMPUTER_USE_AX_UNAVAILABLE',
+    screen_capture_capability: 'COMPUTER_USE_SCREEN_CAPTURE_PREREQUISITE_FAILED', session_active: 'COMPUTER_USE_SESSION_UNAVAILABLE' }
+  return desktopErrorText(check.reason ?? fallback[check.name] ?? 'COMPUTER_USE_NATIVE_CAPABILITY_UNAVAILABLE')
 }

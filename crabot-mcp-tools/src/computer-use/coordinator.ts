@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { AjvJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/ajv-provider.js'
 import type { CallToolResult, Tool } from '@modelcontextprotocol/sdk/types.js'
-import { ACTION_TOOLS, NATIVE_TOOLS, READ_TOOLS, errorResult, type NativeDriver,
+import { ACTION_TOOLS, NATIVE_TOOLS, READ_TOOLS, errorResult, type NativeDriver, type NativeDiagnostics,
   type PerformComputerUseActionsParams, type PerformComputerUseActionsResult } from './types.js'
 
 const BATCH_SCHEMA = { type: 'object' as const, additionalProperties: false, required: ['steps'], properties: {
@@ -76,13 +76,37 @@ export class ComputerUseCoordinator {
     return structuredClone(this.catalog!)
   }
 
-  async diagnostics(): Promise<Array<{ name: string; status: 'pass' | 'fail' | 'skip' }>> {
-    if (this.closed || this.quarantined || this.busy) return []
-    const result = await this.driver.call('health_report', { include: ['session_active', 'ax_capability', 'screen_capture_capability'] }, AbortSignal.timeout(3000))
-    const data = nativePayload(result)
-    if (result.isError || data.schema_version !== '1' || !Array.isArray(data.checks)) return []
-    return data.checks.filter((check: any) => typeof check?.name === 'string' && ['pass', 'fail', 'skip'].includes(check.status))
-      .map((check: any) => ({ name: check.name, status: check.status }))
+  async diagnostics(): Promise<NativeDiagnostics> {
+    if (this.quarantined) return { reason: 'COMPUTER_USE_QUARANTINED' }
+    if (this.closed) return { reason: 'COMPUTER_USE_DIAGNOSTICS_FAILED' }
+    if (this.busy) return { reason: 'COMPUTER_USE_DIAGNOSTICS_BUSY' }
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 6000)
+    try {
+      const include = ['session_active', 'ax_capability', 'screen_capture_capability']
+      const result = await interruptible(this.driver.call('health_report', { include }, controller.signal), controller.signal)
+      const data = nativePayload(result)
+      if (result.isError || data.schema_version !== '1' || !Array.isArray(data.checks)) return { reason: 'COMPUTER_USE_DIAGNOSTICS_INVALID' }
+      const checks: NonNullable<NativeDiagnostics['checks']> = data.checks
+        .filter((check: any) => include.includes(check?.name) && ['pass', 'fail', 'skip'].includes(check.status))
+        .map((check: any) => {
+          if (check.status !== 'fail') return { name: check.name, status: check.status }
+          let reason = 'COMPUTER_USE_NATIVE_CAPABILITY_UNAVAILABLE'
+          if (check.name === 'session_active') reason = 'COMPUTER_USE_SESSION_UNAVAILABLE'
+          if (check.name === 'screen_capture_capability') reason = 'COMPUTER_USE_SCREEN_CAPTURE_PREREQUISITE_FAILED'
+          if (check.name === 'ax_capability') {
+            reason = 'COMPUTER_USE_AX_UNAVAILABLE'
+            const detail = check.data?.error_detail
+            if (typeof detail === 'string' && /^UI Automation desktop enumeration exceeded \d+ms;/.test(detail)) reason = 'COMPUTER_USE_AX_TIMEOUT'
+            if (typeof detail === 'string' && detail.startsWith('UI Automation is busy with an earlier timed-out provider call;')) reason = 'COMPUTER_USE_AX_BUSY'
+          }
+          return { name: check.name, status: check.status, reason }
+        })
+      if (checks.length !== include.length || !include.every(name => checks.some(check => check.name === name))) return { reason: 'COMPUTER_USE_DIAGNOSTICS_INVALID' }
+      return { checks }
+    } catch {
+      return { reason: controller.signal.aborted ? 'COMPUTER_USE_DIAGNOSTICS_TIMEOUT' : 'COMPUTER_USE_DIAGNOSTICS_FAILED' }
+    } finally { clearTimeout(timer) }
   }
 
   private async loadTools(driver: NativeDriver): Promise<void> {

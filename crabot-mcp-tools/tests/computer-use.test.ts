@@ -23,10 +23,10 @@ describe('computer-use coordinator', () => {
   it('host diagnostics perform only a read-only prerequisite check and omit raw native details', async () => {
     const f = fixture()
     f.setHandler((async () => ({ content: [{ type: 'text', text: 'private native detail' }], structuredContent: {
-      schema_version: '1', checks: [{ name: 'ax_capability', status: 'pass', data: { executable: '/private/app' } },
+      schema_version: '1', checks: [{ name: 'session_active', status: 'pass' }, { name: 'ax_capability', status: 'pass', data: { executable: '/private/app' } },
         { name: 'screen_capture_capability', status: 'skip', hint: 'native detail' }, { name: 'unknown', status: 'invalid' }],
     } })) as never)
-    expect(await f.coordinator.diagnostics()).toEqual([{ name: 'ax_capability', status: 'pass' }, { name: 'screen_capture_capability', status: 'skip' }])
+    expect(await f.coordinator.diagnostics()).toEqual({ checks: [{ name: 'session_active', status: 'pass' }, { name: 'ax_capability', status: 'pass' }, { name: 'screen_capture_capability', status: 'skip' }] })
     expect(f.calls).toEqual([{ name: 'health_report', args: { include: ['session_active', 'ax_capability', 'screen_capture_capability'] } }])
     expect((await f.coordinator.tools()).some(tool => tool.name === 'health_report')).toBe(false)
     await f.coordinator.close()
@@ -56,7 +56,7 @@ describe('computer-use coordinator', () => {
     const active = f.coordinator.call('a', 'type_text', { text: 'once' })
     while (!release) await new Promise(resolve => setTimeout(resolve, 0))
     expect((await f.coordinator.call('b', 'list_windows', {})).structuredContent).toEqual({ code: 'COMPUTER_USE_BUSY' })
-    expect(await f.coordinator.diagnostics()).toEqual([])
+    expect(await f.coordinator.diagnostics()).toEqual({ reason: 'COMPUTER_USE_DIAGNOSTICS_BUSY' })
     expect(f.calls.some(call => call.name === 'health_report')).toBe(false)
     release()
     await active
