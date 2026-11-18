@@ -1,5 +1,10 @@
 # Crabot 项目进度
 
+### Read 的 Provider 配置文件漏拦截（2026-11-18，源码修复，未发包）
+
+- 修正既有凭据软拦截规则只匹配 `model_providers/`、漏掉实际 `data/admin/model_providers.json` 的问题；保留原渠道配置和旧目录拦截，不修改 Bash、主体授权或文件权限契约。
+- 假凭据经正式文件授权与工具结果管线先复现泄露，修复后拒绝且结果不含假密钥；POSIX/Windows 分隔符、相对路径和普通相似文件边界覆盖。Read 34 项、工具结果管线 16 项及 Agent 类型检查通过，完整 diff 已自审；未读取真实凭据、未调用模型、未打包发布。
+
 ### 权限查询解耦 session 验证 + 拆除 builtin 权限通知（2026-11-18，源码修复，待开 PR）
 
 - 背景：11-17~18 zhi.gao 实例（192.168.0.59 system mode）事故——wechat channel 状态异常 → admin `resolve_principal_permissions` 因 session 存活验证失败（`Channel module not found`）→ agent 侧权限解析吞错返回 null → PR #241 的 permission-notification 每 5 分钟向所有非终态 worker 重发且无收敛路径 → 4 个 worker 各空转 218~225 轮、manager 向群轰炸 ~92 轮报告，直至 agent 重启。服务器版本（11-16 12:22 +0900）也缺 #257 僵尸 trace 修复。
@@ -36,7 +41,7 @@
 - review 真实风险（阻塞）确认成立并修复（`ee1c4ea8`）：剥离最初只覆盖 episode 收尾，回合中 `checkpoint()`（每次 LLM 调用前必触发 → running.json）与压缩落盘 `onBatchApplied`（state.json）仍写 base64。两条路径套用同一 strip；回归场景六（manager-integration）捕获每次 saveCheckpoint/store.save 载荷断言无 images 结构、含「[图像已省略]」占位，先在未修复代码上确认失败再转绿。命名漂移随本次修正（MarkdownFile→ListedFile、readMarkdown→readTextFile 等，纯内部）。@claude 复核 Approve 后自动合并。
 - 场景搭建澄清两个既有接线事实（已写进 harness 注释）：buildProjectDocTools 主体授权经 `workerContext().principalPermissions` 取（非 wake 直接带）；manager engine 未声明 supportsVision 时 query-loop 本就把工具结果图像落 /tmp 丢弃——测剥离必须显式声明视觉能力。
 - 验证：manager-integration 7/7、project-doc-tools+image-vision 42/42、tool-face 89/89、episode-projection 通过、agent tsc 通过；registry 2 项失败为 main 基线既有。
-- Follow-up：① search 无单文件大小上限（流式全扫，大日志慢；review 非阻塞，是否对齐 read 的 1 MiB 拒绝属产品决策）；② **Read 工具敏感路径守卫缺失**：`containsSensitivePath` 只在 Bash 上，worker/manager 侧 Read 均可读 channel-configs 与 model_providers.json（API key 明文）——既有洞，应抽通用守卫 Read/Bash 共用；③ 历史毒图自愈与 `pendingBgNotifications` 死代码清理见下段。
+- Follow-up：① search 无单文件大小上限（流式全扫，大日志慢；review 非阻塞，是否对齐 read 的 1 MiB 拒绝属产品决策）；② Read/Bash 通用凭据守卫仍为后续设计：标准 `data/admin/model_providers.json` 的 Read 文件名漏匹配已于 11-18 修复，现有软拦截不等于自定义数据根、符号链接及其它工具的统一隔离；③ 历史毒图自愈与 `pendingBgNotifications` 死代码清理见下段。
 - 设计记录：[spec](crabot-docs/superpowers/specs/2026-11-17-manager-inspect-image-read-design.md)（docs `7887bc6`）。
 
 ### 后台 Shell 产物读取防护：Bash 工具描述语义 + Read 图片解码门禁（2026-11-17，已合并）

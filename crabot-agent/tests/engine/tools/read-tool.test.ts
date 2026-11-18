@@ -5,6 +5,9 @@ import * as os from 'os'
 import { createReadTool } from '../../../src/engine/tools/read-tool'
 import { FILE_UNCHANGED_STUB } from '../../../src/engine/tools/file-read-state'
 import type { FileReadState } from '../../../src/engine/tools/file-read-state'
+import { authorizeTool, fileAuthorization } from '../../../src/permissions/tool-authorization'
+import { executeToolBatches } from '../../../src/engine/tool-orchestration'
+import type { ResolvedPermissions } from '../../../src/types'
 
 describe('createReadTool', () => {
   let tmpDir: string
@@ -36,6 +39,42 @@ describe('createReadTool', () => {
     expect(result.output).toContain('1\tline one')
     expect(result.output).toContain('2\tline two')
     expect(result.output).toContain('3\tline three')
+  })
+
+  it('keeps Provider credentials out of an authorized Read tool result', async () => {
+    const filePath = path.join(tmpDir, 'data', 'admin', 'model_providers.json')
+    const marker = 'SYNTHETIC_PROVIDER_SECRET'
+    await fs.mkdir(path.dirname(filePath), { recursive: true })
+    await fs.writeFile(filePath, JSON.stringify([{ api_key: marker }]))
+    const principal = { tool_access: { file_io: true }, storage: { workspace_path: tmpDir, access: 'readwrite' } } as ResolvedPermissions
+    const guarded = authorizeTool(tool, fileAuthorization('worker', () => principal, () => tmpDir, 'file_path', false))
+    const input = { file_path: path.relative(tmpDir, filePath) }
+    expect((await guarded.authorization!.check(input)).allowed).toBe(true)
+    const [result] = await executeToolBatches([{ parallel: false, blocks: [{ id: 'provider-read', name: 'Read', input }] }], [guarded])
+    expect(result.is_error).toBe(true)
+    expect(result.content).toContain('禁止直接讀取')
+    expect(result.content).not.toContain(marker)
+  })
+
+  it.each([
+    '/fixture/data/admin/model_providers.json',
+    'C:\\fixture\\data\\admin\\model_providers.json',
+    'data/admin/model_providers/private.json',
+    'data/admin/channel-configs/private.json',
+  ])('rejects the credential path %s before filesystem access', async filePath => {
+    const result = await tool.call({ file_path: filePath }, {})
+    expect(result.isError).toBe(true)
+    expect(result.output).toContain('禁止直接讀取')
+    expect(result.output).not.toContain('ENOENT')
+  })
+
+  it.each(['model_providers.example.json', 'model_providers.json.notes.txt'])('does not block the ordinary file %s', async name => {
+    const filePath = path.join(tmpDir, 'data', 'admin', name)
+    await fs.mkdir(path.dirname(filePath), { recursive: true })
+    await fs.writeFile(filePath, 'ordinary example')
+    const result = await tool.call({ file_path: filePath }, {})
+    expect(result.isError).toBe(false)
+    expect(result.output).toContain('ordinary example')
   })
 
   it('supports offset and limit', async () => {
