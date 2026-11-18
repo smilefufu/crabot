@@ -29,7 +29,7 @@ jobs:
           from pathlib import Path
           tag='v2026.11.18.1'; source='6c4a21d648d697feacf17bc36f01c48f71b74f18'; public=os.environ['VERIFY_PUBLIC']=='true'
           def gh(*args):return subprocess.check_output(['gh',*args],text=True)
-          runs=[44320308552,44320321012,44320331049,44320340437,44324249178,44322859651]
+          runs=[44320308552,44320321012,44320331049,44320340437,44324249178,44326590492]
           cli_jobs=json.loads(gh('run','view','44320299223','--repo','smilefufu/crabot','--json','jobs'))['jobs']
           cli_evidence={}
           for platform in ['windows-latest, windows, x64','macos-15-intel, darwin, x64','ubuntu-24.04, linux, x64']:
@@ -37,12 +37,12 @@ jobs:
             assert len(matches)==1 and matches[0]['conclusion']=='success',(platform,matches)
             cli_evidence[platform]={'run':44320299223,'job':matches[0]['databaseId'],'conclusion':'success'}
           cli_evidence['macos-15, darwin, arm64']={'run':44324249178,'reason':'Original job never acquired hosted runner; independent ARM-only retry uses identical pinned source, recipe and acceptance'}
-          upgrade_jobs=json.loads(gh('run','view','44322859651','--repo','smilefufu/crabot','--json','jobs'))['jobs']
+          upgrade_jobs={run:json.loads(gh('run','view',str(run),'--repo','smilefufu/crabot','--json','jobs'))['jobs'] for run in [44322859651,44326590492]}
           upgrade_evidence={}
-          for target in ['win32-x64','linux-x64','darwin-arm64','darwin-x64']:
-            matches=[job for job in upgrade_jobs if job['name'].startswith('upgrade ('+target+',')]
+          for target,run in [('win32-x64',44326590492),('linux-x64',44322859651),('darwin-arm64',44326590492),('darwin-x64',44322859651)]:
+            matches=[job for job in upgrade_jobs[run] if job['name'].startswith('upgrade ('+target+',')]
             assert len(matches)==1 and matches[0]['conclusion']=='success',(target,matches)
-            upgrade_evidence[target]={'run':44322859651,'job':matches[0]['databaseId'],'conclusion':'success','from':'0.1.0-desktop.26','to':'0.1.0-desktop.32'}
+            upgrade_evidence[target]={'run':run,'job':matches[0]['databaseId'],'conclusion':'success','from':'0.1.0-desktop.26','to':'0.1.0-desktop.32'}
           for run in runs:assert gh('run','view',str(run),'--repo','smilefufu/crabot','--json','conclusion','--jq','.conclusion').strip()=='success',run
           releases=json.loads(gh('api','repos/smilefufu/crabot/releases'))
           matches=[v for v in releases if v['tag_name']==tag]
@@ -90,7 +90,7 @@ jobs:
           assert desktop_receipt['source_commit']==source and desktop_receipt['desktop_version']=='0.1.0-desktop.32'
           assert {item['file'] for item in desktop_receipt['files']}==set(desktop)
           for item in desktop_receipt['files']:assert (item['sha256'],item['bytes'])==(results[item['file']]['sha256'],results[item['file']]['bytes'])
-          receipt={'tag':tag,'source_commit':source,'phase':'public' if public else 'draft','verified_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'native_acceptance_runs':runs,'cli_acceptance':cli_evidence,'upgrade_acceptance':upgrade_evidence,'mac_cli_ci_trust':'Explicit CURL_CA_BUNDLE with unchanged locked certifi; previous-release default-host example.com static TLS failure retained in diagnostic42759268758. Product default trust unchanged.','assets':results}
+          receipt={'tag':tag,'source_commit':source,'phase':'public' if public else 'draft','verified_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'native_acceptance_runs':runs,'cli_acceptance':cli_evidence,'upgrade_acceptance':upgrade_evidence,'windows_upgrade_fixture_correction':'Run44322859651 reached menu reopen then read absent runtime before Core startup; retry waits for the same data root and three running modules before retaining all original runtime/data/menu assertions. Product bytes unchanged.','arm_upgrade_retry':'Original macos15 job never acquired a hosted runner; repeat exact accepted DMG replacement/reopen on official macos26 ARM.','mac_cli_ci_trust':'Explicit CURL_CA_BUNDLE with unchanged locked certifi; previous-release default-host example.com static TLS failure retained in diagnostic42759268758. Product default trust unchanged.','assets':results}
           output=Path('release-public-verification.json' if public else 'release-draft-verification.json')
           output.write_text(json.dumps(receipt,ensure_ascii=False,indent=2)+'\n')
           print('RELEASE_VERIFIED '+json.dumps({'phase':receipt['phase'],'tag':tag,'packages':len(packages),'assets':len(results),'source':source}),flush=True)
