@@ -1,11 +1,20 @@
 # Crabot 项目进度
 
-### Read 的 Provider 配置文件漏拦截（2026-11-18，源码修复，未发包）
+### v2026.11.18.1 / desktop.32（2026-11-18，已公开发包）
+
+- [发布页](https://github.com/smilefufu/crabot/releases/tag/v2026.11.18.1)，源码固定 `6c4a21d648d697feacf17bc36f01c48f71b74f18`。Mac ARM64、Mac Intel、Windows x64、Ubuntu x64 的桌面包与 CLI 归档齐备，共 8 个包、8 个 SHA-256 旁附文件及 1 份桌面来源回执，已成为 latest。
+- 四平台最终桌面包启动、Windows EXE / Ubuntu DEB 原生安装流程、CLI 真实安装/重装/升级、旧公开 CLI 恢复和坏 checksum 拒绝均通过；[桌面来源回执](https://github.com/smilefufu/crabot/releases/download/v2026.11.18.1/desktop.32-verification.json)及完整平台 CI 链接见发布说明。
+- 实际公开 `.26 → .32` 升级保留原数据、凭据、安装位置并可重新打开：[Linux / Intel 成功 job](https://github.com/smilefufu/crabot/actions/runs/44322859651)，[Windows / ARM 重试成功](https://github.com/smilefufu/crabot/actions/runs/44326590492)。Windows 覆盖完成按钮、真实开始菜单重开及两轮停止/启动。
+- [草稿校验](https://github.com/smilefufu/crabot/actions/runs/44328262902)与[公开匿名校验](https://github.com/smilefufu/crabot/actions/runs/44329018418)均通过：17 个附件完整下载、HTTP 200、上传 digest/旁附 SHA-256/来源回执一致；tag 和 latest 指向固定源码。标签触发的冗余旧 CLI 构建已取消，未覆盖已验收附件。
+- 首轮 ARM 未取得 GitHub 执行机；CLI 在 macOS 15 单独重试通过，ARM 桌面包在 macOS 15 验收、实际升级在 macOS 26 ARM 验收。Windows 首轮验收脚本在服务就绪前读取运行文件；只调整轮询检查顺序后，以相同安装包重跑通过，保留全部原有断言与首轮失败记录，未改变产品源码或安装包字节。
+- 未显式配置的历史保留期由 30 天改为 7 天，已有显式配置保留。桌面包仍无发布者签名、macOS 未公证，自动更新关闭；用户报障 Windows 电脑、完整设置页点按及真实模型业务仍待现场复测，发布不等于用户实例部署。
+
+### Read 的 Provider 配置文件漏拦截（2026-11-18，已随 desktop.32 发包）
 
 - 修正既有凭据软拦截规则只匹配 `model_providers/`、漏掉实际 `data/admin/model_providers.json` 的问题；保留原渠道配置和旧目录拦截，不修改 Bash、主体授权或文件权限契约。
-- 假凭据经正式文件授权与工具结果管线先复现泄露，修复后拒绝且结果不含假密钥；POSIX/Windows 分隔符、相对路径和普通相似文件边界覆盖。Read 34 项、工具结果管线 16 项及 Agent 类型检查通过，完整 diff 已自审；未读取真实凭据、未调用模型、未打包发布。
+- 假凭据经正式文件授权与工具结果管线先复现泄露，修复后拒绝且结果不含假密钥；POSIX/Windows 分隔符、相对路径和普通相似文件边界覆盖。Read 34 项、工具结果管线 16 项及 Agent 类型检查通过，完整 diff 已自审；未读取真实凭据、未调用模型；最终包安装、升级和公开下载验收见本次发布记录。
 
-### 权限查询解耦 session 验证 + 拆除 builtin 权限通知（2026-11-18，源码修复，待开 PR）
+### 权限查询解耦 session 验证 + 拆除 builtin 权限通知（2026-11-18，已收录本次发版）
 
 - 背景：11-17~18 zhi.gao 实例（192.168.0.59 system mode）事故——wechat channel 状态异常 → admin `resolve_principal_permissions` 因 session 存活验证失败（`Channel module not found`）→ agent 侧权限解析吞错返回 null → PR #241 的 permission-notification 每 5 分钟向所有非终态 worker 重发且无收敛路径 → 4 个 worker 各空转 218~225 轮、manager 向群轰炸 ~92 轮报告，直至 agent 重启。服务器版本（11-16 12:22 +0900）也缺 #257 僵尸 trace 修复。
 - 根因两处：① 权限查询前置验证 channel session 存活（PR #162 引入）——权限配置全在 admin 本地，验证对解析结果零贡献，channel 故障传染整个权限系统；② builtin worker 权限通知（PR #241 引入）——builtin 每轮 engine turn 本就经 prepareTools 实时重解析权限，通知在机制上无必要，其收敛依赖 observation 回写，权限解析失败时无限重发。
@@ -15,17 +24,17 @@
 - 验证：admin 定向全绿（group-uniform 5/5 含新增事故回归、chat-master 5/5、admin-web-api 76/76、group-session-permissions+request-permission-sources 26/26 按新语义改写）；agent 定向全绿（harness-continuation、policy-observation、bootstrap 53/53）；admin/agent tsc --noEmit 通过。全量对照：worktree 与 main 基线同环境同文件集合 AB 比对，剩余失败全部是基线既有环境噪音（v1-cleanup、legacy-directory-migration、channel-package、llm-adapter flaky 等，逐项定性确认与权限路径无关）。
 - Follow-up：① "Tool not found" 权限拒绝的错误归类（Fix A 后触发场景基本消失）；② 非 builtin worker 权限停止失去 sweep 兜底：配置事件丢失（admin 重启窗口）或权限刷新 catch 分支"先 stop 后 pending"（stop 本身已实证为同步完成——claude-code kill 等进程树退出并 transitionExited，verify 读 state 立得 succeeded；该窗口是错误路径上的停住恢复延迟）时，停住的 CLI/tmux worker 要等下次配置变更或 agent 重启才恢复；③ channel 掉线根因、zhi.gao 实例部署升级（含 #257）；④ review 处置见 PR #262 线程：阻塞项为协议未同步，已修订 protocol-admin v0.5.9（docs `42b6b34`）。
 
-### 桌面设置诊断与截图结果修复（2026-11-18，源码修复，未部署）
+### 桌面设置诊断与截图结果修复（2026-11-18，已发包，现场待复测）
 
 - 按已确认的 [Spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-11-18-desktop-diagnostics-truthfulness-design.md)：检查失败返回稳定原因码；原生探针预算允许 Windows 4 秒 UIA 检查完成，Owner 异步快照使 health 不等待；截图只按实际捕获证据结算，就绪要求本次设置开始后的完整原生报告。面板补 Windows 后台检查说明、旧结果时间与非设置轮询 10 秒收口。
 - 定向验证 99 项通过，Shared/Client/MCP/Agent/Admin/Web 类型检查通过。Owner 另有 1 项现有 capability fixture 缺少 `browser-interaction-test-check`，在未修改的既有 worktree 复现，不并入本次修复。
-- 本次构建在 macOS ARM 与 Windows ARM 虚拟机（x64 Node/Driver、登录用户 Limited 会话）的隔离宿主上均设置 ready、真实截图 verified、独立测试窗口控件写入回读通过，health 读取分别最多 0/2 毫秒。报障的另一台 Windows 电脑仍待重打包验收；没有完整安装包设置页点按验收、现有安装覆盖、安装包发布或真实模型调用。
+- 本次构建在 macOS ARM 与 Windows ARM 虚拟机（x64 Node/Driver、登录用户 Limited 会话）的隔离宿主上均设置 ready、真实截图 verified、独立测试窗口控件写入回读通过，health 读取分别最多 0/2 毫秒。报障的另一台 Windows 电脑、完整安装包设置页点按和真实模型业务仍待现场复测；最终包启动、安装/覆盖升级与下载校验见本次发布记录。
 
-### 图片临时路径、LLM 误报与 Windows 管理浏览器（2026-11-17，源码修复，未部署）
+### 图片临时路径、LLM 误报与 Windows 管理浏览器（2026-11-17，已发包，浏览器现场待复测）
 
 - 按用户收窄后的 [Spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-11-17-cross-platform-path-and-failure-boundaries-design.md)，仅修三项：非视觉工具图片改用系统临时目录及唯一 MIME 文件名，写入失败回工具结果；LLM 专用兜底要求明确请求来源，普通文件/工具/runtime 错误与取消不误报；Windows 管理 Chrome/CDP 补标准目录发现与 profile 路径，失败准确说明，不新增全局杀用户 Chrome。B（shell entity 身份）、C（原生 CLI）和其他审计项不改。
 - 同步最新 main 后，338 项定向用例与 Agent/Admin 类型检查通过。扩大检查的 22 项失败均在原基线 `755c82e1` 复现（入站夹具 17、重试预算夹具 1、压缩夹具 3、Slack HTTPS 超时 1），不标全仓全绿、不并入本次修复。
-- Windows 浏览器使用平台模拟验证，尚未真机运行；没有真实模型调用、业务数据重放、部署或安装包发布。临时文件沿用 OS 管理，不新增 24 小时 TTL 或清理任务。
+- Windows 浏览器使用平台模拟验证，尚未真机运行；本次已发安装包，真实模型调用、业务数据重放与用户实例部署仍未覆盖。临时文件沿用 OS 管理，不新增 24 小时 TTL 或清理任务。
 
 ### 微信群聊响应开关保存与表单修复（2026-11-17，源码修复，未部署）
 
