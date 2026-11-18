@@ -3970,7 +3970,12 @@ export class WorkerHarness {
         if (!context) throw new Error('CAPABILITY_UNKNOWN: Worker context unavailable')
         const mainline = requireMainlineIncarnation(worker)
         if (!isExecutableIncarnation(mainline)) continue
-        if (mainline.impl !== 'builtin' && !this.permissionStops.has(worker.worker_id)) {
+        // builtin worker 每轮 engine turn 都经 prepareTools 实时重解析权限（query-loop），
+        // 权限通知对 builtin 在机制上无必要；其收敛依赖 observation 回写，权限解析失败时
+        // 无限重发（2026-11-17~18 事故：channel 故障 → 权限解析 null → 每 5 分钟向全部
+        // 非终态 worker 重发通知）。仅非 builtin（CLI/tmux）保留 stop 重建路径。
+        if (mainline.impl === 'builtin') continue
+        if (!this.permissionStops.has(worker.worker_id)) {
           const pending = (await this.controlOperationStore.list(worker.worker_id)).reverse().find(operation => operation.reason === 'permission_update'
             && operation.incarnation_id === mainline.incarnation_id && operation.kind === 'stop')
           if (pending) this.permissionStops.set(worker.worker_id, pending)
@@ -3982,21 +3987,20 @@ export class WorkerHarness {
           ? (sources.find(source => executionAdmission(mainline.impl, source.resolved).status === 'allowed') ?? sources[0])?.resolved ?? null
           : await this.currentWorkerPermissions(worker.worker_id)
         authorizationKnown = true
-        const revision = sha256CanonicalJson(mainline.impl === 'builtin' ? sources ?? permissions : permissions)
+        // builtin 已在上方 continue；此处恒为非 builtin worker。
+        const revision = sha256CanonicalJson(permissions)
         let previous = this.sessionPermissionRevisions.get(worker.worker_id)
         if (previous !== null && mainline.incarnation_id) {
           const observation = await readObservation(observationFile(this.deps.workersDir, worker.worker_id, mainline.incarnation_id),
-            executionObservation({ role: 'worker', impl: mainline.impl, source: mainline.impl === 'builtin' ? 'builtin_request' : 'cli_provision', worker_id: worker.worker_id, incarnation_id: mainline.incarnation_id }))
+            executionObservation({ role: 'worker', impl: mainline.impl, source: 'cli_provision', worker_id: worker.worker_id, incarnation_id: mainline.incarnation_id }))
           previous = observation.authorization_revision ?? previous
         }
         if (previous === revision && !this.permissionStops.has(worker.worker_id)) continue
-        if (mainline.impl !== 'builtin') {
-          if (!await this.stopForPermissionUpdate(worker.worker_id)) { this.permissionRefreshPending = true; continue }
-          if (executionAdmission(mainline.impl, permissions).status !== 'allowed') {
-            this.sessionPermissionRevisions.delete(worker.worker_id)
-            this.permissionStops.delete(worker.worker_id)
-            continue
-          }
+        if (!await this.stopForPermissionUpdate(worker.worker_id)) { this.permissionRefreshPending = true; continue }
+        if (executionAdmission(mainline.impl, permissions).status !== 'allowed') {
+          this.sessionPermissionRevisions.delete(worker.worker_id)
+          this.permissionStops.delete(worker.worker_id)
+          continue
         }
         const current = await this.deps.ledger.findWorker(worker.worker_id)
         if (!current || current.worker.task.status === 'closed' || current.worker.task.status === 'halted' && current.worker.task.halt?.halt_reason === 'worker_finalized') continue
@@ -5952,7 +5956,6 @@ export class WorkerHarness {
       await this.reconcileQueryEstablishmentOperations()
       await this.deliverQueryOperationNotifications()
       await this.reconcileControlOperationsOnStartup()
-      await this.applyPermissionUpdates()
       await this.deps.onContinuationSweep?.()
       const allWorkers = await this.deps.ledger.listAllWorkers()
       for (const { worker } of allWorkers) {

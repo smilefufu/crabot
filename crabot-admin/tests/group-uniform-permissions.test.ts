@@ -125,4 +125,18 @@ describe('resolvePrincipalPermissions: 群聊群级统一', () => {
       (admin as any).permissionTemplateManager.resolvePermissions('minimal', null)
     )
   })
+
+  it('带 channel_id 时不验证 session 存活：channel 会话查询失败权限解析仍成功（2026-11-17~18 事故回归）', async () => {
+    const spy = vi.spyOn(admin as any, 'resolveChannelSession').mockRejectedValueOnce(
+      new Error('Channel module not found'))
+    const result = await (admin as any).resolvePrincipalPermissions({
+      sender_friend_id: 'master',
+      channel_id: 'wechat-channel-down',
+      session_id: 'group-x',
+      session_type: 'group',
+    })
+    expect(spy).not.toHaveBeenCalled()
+    expect(result.sources.session_template_id).toBe('group_default')
+    spy.mockRestore()
+  })
 })

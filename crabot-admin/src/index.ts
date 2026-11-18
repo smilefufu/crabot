@@ -10420,7 +10420,14 @@ export class AdminModule extends ModuleBase {
   private async resolvePrincipalPermissions(
     params: ResolvePrincipalPermissionsParams,
   ): Promise<ResolvePrincipalPermissionsResult> {
-    const target = await this.resolvePermissionTarget(params)
+    // 权限配置全在 admin 本地（sessionConfigs / friends / 权限模板），session 存活验证
+    // 对解析结果零贡献；channel 故障会沿此路径把权限系统整体打挂（2026-11-17~18 事故：
+    // wechat channel 异常 → resolveChannelSession 抛 Channel module not found → 全实例
+    // 权限解析失败）。带 channel_id 的请求直接信任入参做本地解析；无 channel_id 的
+    // legacy 请求保留 resolvePermissionSessionTarget 遍历找归属（向后兼容旧 agent）。
+    const target = params.channel_id
+      ? { channel_id: params.channel_id, session_id: params.session_id }
+      : await this.resolvePermissionTarget(params)
     const sources: ResolvePrincipalPermissionsResult['sources'] = {}
 
     // 群聊：群级统一，与发言人无关（2026-08-30 决策，protocol-admin §3.2.7 语义 1）——

@@ -325,22 +325,21 @@ it.each(['resume', 'handoff'] as const)('project identity, shared files and auth
 })
 
 describe('current permission updates keep the logical Worker', () => {
-  it('compares the actual builtin session configuration instead of its older in-memory initial value', async () => {
+  it('builtin worker 权限变化不触发任何 harness 输入：每轮 engine turn 经 prepareTools 实时重解析（2026-11-17~18 事故拆除通知机制）', async () => {
     const initial = { ...structuredClone(BUILTIN_WORKER_PERMISSIONS), storage: { scope: 'all' as const, access: 'readwrite' as const } }
     let current = initial
-    const { harness, adaptersMap, workersDir } = await makeHarness({ resolvePermissions: async () => current, assertExecutionPolicy })
+    const { harness, adaptersMap } = await makeHarness({ resolvePermissions: async () => current, assertExecutionPolicy })
     const adapter = new FakeAdapter({ onStateChange: harness.handleStateChange })
     adaptersMap.set('builtin', adapter)
-    const worker = await harness.spawnWorker(spawnParams({ principal_permissions: initial }))
+    await harness.spawnWorker(spawnParams({ principal_permissions: initial }))
     current = { ...initial, tool_access: { ...initial.tool_access, mcp_skill: false } }
-    await persistObservation(observationFile(workersDir, worker.worker_id, worker.incarnations[0].incarnation_id!),
-      requestObservation([], { role: 'worker', impl: 'builtin', source: 'builtin_request', worker_id: worker.worker_id,
-        incarnation_id: worker.incarnations[0].incarnation_id, authorization_revision: sha256CanonicalJson(current) }))
     await harness.refreshPermissions()
     expect(adapter.sendInputCalls).toHaveLength(0)
+    expect(adapter.killCalls).toHaveLength(0)
     current = initial
     await harness.refreshPermissions()
-    expect(adapter.sendInputCalls).toHaveLength(1)
+    expect(adapter.sendInputCalls).toHaveLength(0)
+    expect(adapter.killCalls).toHaveLength(0)
   })
 
   it.each(['builtin', 'claude-code', 'codex'] as const)('%s does not restart a finalized Worker when permissions change', async impl => {

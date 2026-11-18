@@ -35,7 +35,9 @@ describe('Complete group/requester permission sources', () => {
     const result = await admin.handleResolveRequestPermissionSources({ source: source() }, core)
     expect(result.group).toMatchObject({ kind: 'group', subject_id: 'fixture-channel::fixture-group', is_master: false, resolved: { storage: { workspace_path: groupPath, access: 'read' }, memory_scopes: ['group-scope'] } })
     expect(result.friend).toMatchObject({ kind: 'friend', subject_id: 'actual-friend', is_master: false, resolved: { storage: { workspace_path: friendPath, access: 'readwrite' }, memory_scopes: ['friend-scope'] } })
-    expect(admin.resolvePermissionTarget).toHaveBeenCalled()
+    // 2026-11-17~18 事故修复：带 channel_id 的权限查询不再验证 session 存活（resolvePrincipalPermissions
+    // 直接本地解析），resolvePermissionTarget 不再被此路径调用；legacy 无 channel_id 路径仍走该验证。
+    expect(admin.resolvePermissionTarget).not.toHaveBeenCalled()
   })
   it('does not turn the shared Manager into Master when this requester is Master', async () => {
     admin.friends.get('actual-friend').permission = 'master'

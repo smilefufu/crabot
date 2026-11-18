@@ -71,13 +71,19 @@ describe('group permission authorization boundary', () => {
     expect(resolved.storage).toBeNull()
   })
 
-  it.each(['private', 'wrong-id', 'wrong-channel'])('rejects a mismatched target: %s', async (mismatch) => {
+  it.each(['private', 'wrong-id', 'wrong-channel'])('rejects a mismatched target on the legacy path and on config writes; channel_id queries no longer verify session liveness: %s', async (mismatch) => {
     admin.resolveChannelSession.mockResolvedValue({
       id: mismatch === 'wrong-id' ? 'other' : target.session_id,
       channel_id: mismatch === 'wrong-channel' ? 'other' : target.channel_id,
       type: mismatch === 'private' ? 'private' : 'group',
     })
-    await expect(admin.resolvePrincipalPermissions({ ...target, session_type: 'group', sender_friend_id: 'master' })).rejects.toMatchObject({ code: 'INVALID_PARAMS' })
+    // 2026-11-17~18 事故修复：带 channel_id 的权限查询不再验证 session 存活/身份/类型——
+    // 验证对解析结果零贡献，channel 故障却会把权限系统整体打挂。带 channel_id 直接按入参本地解析。
+    await expect(admin.resolvePrincipalPermissions({ ...target, session_type: 'group', sender_friend_id: 'master' })).resolves.toMatchObject({ sources: { session_template_id: 'group_default' } })
+    // legacy 无 channel_id 遍历路径保留验证（mismatch 在某 channel 上抛 INVALID_PARAMS，
+    // 遍历循环对非 NOT_FOUND 拒绝统一包装为 SERVICE_UNAVAILABLE 'Cannot prove unique session ownership'）
+    await expect(admin.resolvePrincipalPermissions({ session_id: target.session_id, session_type: 'group', sender_friend_id: 'master' })).rejects.toMatchObject({ code: expect.stringMatching(/INVALID_PARAMS|SERVICE_UNAVAILABLE/) })
+    // 配置写路径的验证不变
     await expect(admin.handleUpdateGroupSessionConfig({ ...target, config: {} })).rejects.toMatchObject({ code: 'INVALID_PARAMS' })
     expect(admin.saveData).not.toHaveBeenCalled()
   })
@@ -106,12 +112,14 @@ describe('group permission authorization boundary', () => {
     await expect(admin.resolvePrincipalPermissions(input)).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
   })
 
-  it('validates explicit Admin virtual sessions without calling a Channel module', async () => {
+  it('validates explicit Admin virtual sessions on legacy queries without calling a Channel module', async () => {
     const input = { channel_id: 'admin-web', session_id: 'admin-chat', session_type: 'private', sender_friend_id: 'master' }
     expect((await admin.resolvePrincipalPermissions(input)).sources.friend_template_id).toBe('master_private')
     expect(admin.resolveChannelSession).not.toHaveBeenCalled()
-    await expect(admin.resolvePrincipalPermissions({ ...input, session_type: 'group' })).rejects.toMatchObject({ code: 'INVALID_PARAMS' })
-    await expect(admin.resolvePrincipalPermissions({ ...input, session_id: 'unknown' })).rejects.toMatchObject({ code: 'NOT_FOUND' })
+    // legacy 无 channel_id 路径保留 admin-web 虚拟 session 校验（type mismatch / unknown session）；
+    // 带 channel_id 的请求不再做这些验证（2026-11-17~18 事故修复，见 mismatched target 用例）。
+    await expect(admin.resolvePrincipalPermissions({ session_id: 'admin-chat', session_type: 'group' })).rejects.toMatchObject({ code: 'INVALID_PARAMS' })
+    await expect(admin.resolvePrincipalPermissions({ session_id: 'unknown', session_type: 'private' })).rejects.toMatchObject({ code: 'INVALID_PARAMS' })
   })
 
   it('failed permission persistence cannot grant MCP or publish a success event', async () => {
