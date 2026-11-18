@@ -1624,13 +1624,15 @@ describe('Admin Web API', () => {
       expect((await makeWebRequest<any>(TEST_WEB_PORT, endpoint, 'GET', null, token)).body.config).toBeNull()
     })
 
-    it('permission REST rejects ambiguous legacy targets and reports unavailable channels without fallback grants', async () => {
+    it('permission REST rejects ambiguous legacy targets; channel_id 请求不再验证 session 存活（2026-11-17~18 事故修复）', async () => {
       const token = await loginAndGetToken()
       vi.spyOn(admin['channelManager'], 'listInstances').mockReturnValue({ items: [{ id: 'channel-a' }, { id: 'channel-b' }], pagination: {} } as never)
       const input = { session_id: 'ambiguous-group', session_type: 'group', sender_friend_id: 'master' }
       expect((await makeWebRequest(TEST_WEB_PORT, '/api/permissions/resolve-principal', 'POST', input, token)).statusCode).toBe(400)
-      vi.spyOn(admin as any, 'resolveChannelSession').mockRejectedValue(new Error('offline'))
-      expect((await makeWebRequest(TEST_WEB_PORT, '/api/permissions/resolve-principal', 'POST', { ...input, channel_id: 'channel-a' }, token)).statusCode).toBe(503)
+      const spy = vi.spyOn(admin as any, 'resolveChannelSession').mockRejectedValue(new Error('offline'))
+      const response = await makeWebRequest(TEST_WEB_PORT, '/api/permissions/resolve-principal', 'POST', { ...input, channel_id: 'channel-a' }, token)
+      expect(response.statusCode).toBe(200)
+      expect(spy).not.toHaveBeenCalled()
     })
   })
 

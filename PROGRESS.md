@@ -1,5 +1,15 @@
 # Crabot 项目进度
 
+### 权限查询解耦 session 验证 + 拆除 builtin 权限通知（2026-11-18，源码修复，待开 PR）
+
+- 背景：11-17~18 zhi.gao 实例（192.168.0.59 system mode）事故——wechat channel 状态异常 → admin `resolve_principal_permissions` 因 session 存活验证失败（`Channel module not found`）→ agent 侧权限解析吞错返回 null → PR #241 的 permission-notification 每 5 分钟向所有非终态 worker 重发且无收敛路径 → 4 个 worker 各空转 218~225 轮、manager 向群轰炸 ~92 轮报告，直至 agent 重启。服务器版本（11-16 12:22 +0900）也缺 #257 僵尸 trace 修复。
+- 根因两处：① 权限查询前置验证 channel session 存活（PR #162 引入）——权限配置全在 admin 本地，验证对解析结果零贡献，channel 故障传染整个权限系统；② builtin worker 权限通知（PR #241 引入）——builtin 每轮 engine turn 本就经 prepareTools 实时重解析权限，通知在机制上无必要，其收敛依赖 observation 回写，权限解析失败时无限重发。
+- 修复 A：带 `channel_id` 的 `resolve_principal_permissions` 直接本地解析，跳过 `resolvePermissionTarget` 存活验证；无 channel_id 的 legacy 请求保留遍历找归属；配置写路径（`handle*GroupSessionConfig`）验证不变。
+- 修复 B：`applyPermissionUpdatesOnce` 对 builtin worker 直接跳过（不比较 revision、不发通知、不读 observation、不再触发权限 RPC）；非 builtin（CLI/tmux）保留 revision 比较 + stopForPermissionUpdate + 通知；`sweepLiveness` 删除周期 `applyPermissionUpdates()` 调用（配置事件链已覆盖）；builtin adapter `SYSTEM_NOTIFICATION_ENVELOPES` 移除 `'<permission-notification>'`。builtin 权限变更时效不变：下一次 LLM 请求即用新权限（engine 每轮 prepareTools 实时解析，无缓存）。
+- 设计记录：[spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-11-18-permission-query-decouple-and-notification-removal-design.md)（docs `f88c180`）。
+- 验证：admin 定向全绿（group-uniform 5/5 含新增事故回归、chat-master 5/5、admin-web-api 76/76、group-session-permissions+request-permission-sources 26/26 按新语义改写）；agent 定向全绿（harness-continuation、policy-observation、bootstrap 53/53）；admin/agent tsc --noEmit 通过。全量对照：worktree 与 main 基线同环境同文件集合 AB 比对，剩余失败全部是基线既有环境噪音（v1-cleanup、legacy-directory-migration、channel-package、llm-adapter flaky 等，逐项定性确认与权限路径无关）。
+- Follow-up：① "Tool not found" 权限拒绝的错误归类（Fix A 后触发场景基本消失）；② 非 builtin worker 权限停止失去 sweep 兜底（配置事件丢失时 stop 延迟到下次变更，可接受）；③ channel 掉线根因、zhi.gao 实例部署升级（含 #257）。
+
 ### 桌面设置诊断与截图结果修复（2026-11-18，源码修复，未部署）
 
 - 按已确认的 [Spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-11-18-desktop-diagnostics-truthfulness-design.md)：检查失败返回稳定原因码；原生探针预算允许 Windows 4 秒 UIA 检查完成，Owner 异步快照使 health 不等待；截图只按实际捕获证据结算，就绪要求本次设置开始后的完整原生报告。面板补 Windows 后台检查说明、旧结果时间与非设置轮询 10 秒收口。

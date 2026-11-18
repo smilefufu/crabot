@@ -341,7 +341,7 @@ export interface BuiltinTraceReader {
  * manager 名义落 trace（否则 get_worker_activity 出现 manager 从未发过的 message/user 事件）。
  * 彻底方案（inbox item 带 source 字段透传）属跨模块契约变更，记 spec §8 follow-up。
  */
-const SYSTEM_NOTIFICATION_ENVELOPES: readonly string[] = ['<bg-notification>', '<sub_agent_notification>', '<permission-notification>']
+const SYSTEM_NOTIFICATION_ENVELOPES: readonly string[] = ['<bg-notification>', '<sub_agent_notification>']
 
 function isSystemNotificationEnvelope(text: string): boolean {
   return SYSTEM_NOTIFICATION_ENVELOPES.some((envelope) => text.includes(envelope))
