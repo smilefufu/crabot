@@ -8,7 +8,7 @@ import { once } from 'node:events'
 import { createHash, randomBytes } from 'node:crypto'
 import { pipeline } from 'node:stream/promises'
 import { Readable } from 'node:stream'
-import { probeMmModules } from '../../scripts/lib/mm-probe.mjs'
+import { probeMmModules, probeHealthStatus } from '../../scripts/lib/mm-probe.mjs'
 assert.equal(process.env.GITHUB_ACTIONS, 'true'); assert.equal(process.platform, 'linux'); assert.ok(process.getuid() > 0)
 const exec = promisify(execFile), distribution = path.resolve(process.argv[2])
 const base = path.dirname(distribution), root = '/opt/Crabot', core = root + '/resources/core', entry = root + '/crabot-desktop'
@@ -35,7 +35,7 @@ const baseline = baselinePath ? await readArtifact(path.resolve(baselinePath)) :
 if (baselinePath) assert.notEqual(baseline.artifact.version, artifact.version, 'upgrade acceptance requires two distinct GUI/Core versions')
 const report = { harness_source: process.env.GITHUB_SHA, version: artifact.version,
   legacy_fixture: legacyVersion ? { published_program: legacyVersion, stopped_data: 'synthetic history, password, dependencies and workspace' } : null,
-  initial_version: baseline.artifact.version, upgrade_fixture: baselinePath ? 'same source, two version stamps; not a released cross-version data migration' : null,
+  initial_version: baseline.artifact.version, upgrade_fixture: baselinePath ? 'published desktop.26 final DEB to desktop.32 final DEB with original data' : null,
   system: (await fs.readFile('/etc/os-release', 'utf8')).trim(), environment: 'Native GitHub VM, Xvfb; GNOME/Wayland human acceptance not represented', checks: [] }
 const children = [], pause = ms => new Promise(resolve => setTimeout(resolve, ms))
 const command = async (file, args, options = {}) => (await exec(file, args, { timeout: 180000, maxBuffer: 2000000, ...options })).stdout
@@ -73,14 +73,13 @@ async function healthyModules() {
   let failure
   while (Date.now() < deadline) {
     try {
-      const modules = await probeMmModules(19000), result = []
+      const modules = await probeMmModules(19000, undefined, { dataDir: data }), result = []
       for (const id of ['admin-web', 'crabot-agent', 'memory-default']) {
         const module = modules?.find(item => item.module_id === id)
         assert.equal(module?.status, 'running', id + ' has not registered')
-        const response = await fetch(`http://127.0.0.1:${module.port}/health`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(5000) })
-        const value = await response.json()
-        assert.ok(response.ok && value.success && ['healthy', 'degraded'].includes(value.data.status), id + ' is not ready')
-        result.push({ module: id, health: value.data.status })
+        const status = await probeHealthStatus(module.port, undefined, { dataDir: data })
+        assert.ok(['healthy', 'degraded'].includes(status), id + ' is not ready')
+        result.push({ module: id, health: status })
       }
       return result
     } catch (error) { failure = error; await pause(500) }
