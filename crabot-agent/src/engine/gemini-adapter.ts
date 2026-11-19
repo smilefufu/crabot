@@ -122,6 +122,7 @@ export function normalizeMessagesForGemini(messages: ReadonlyArray<EngineMessage
 export function buildGeminiRequest(params: LLMStreamParams): Record<string, unknown> {
   const generationConfig: Record<string, unknown> = {}
   if (params.maxTokens !== undefined) generationConfig.maxOutputTokens = params.maxTokens
+  if (params.temperature !== undefined) generationConfig.temperature = params.temperature
   if (params.thinking) {
     const value = params.thinking.custom ?? params.thinking.level
     if (typeof value === 'number') throw new Error('Numeric Gemini thinking configuration is not supported')

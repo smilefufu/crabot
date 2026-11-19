@@ -115,6 +115,8 @@ export interface LLMStreamParams {
   readonly tools: ToolDefinition[]
   readonly model: string
   readonly maxTokens?: number
+  /** 采样温度；undefined = 跟随模型默认（请求中不出现该字段） */
+  readonly temperature?: number
   /** 思考强度；undefined = 跟随模型默认（请求中不出现任何思考参数） */
   readonly thinking?: LLMThinkingConfig
   readonly signal?: AbortSignal

@@ -331,6 +331,7 @@ export class AnthropicAdapter implements LLMAdapter {
     const stream = this.client.messages.stream({
       model: params.model,
       max_tokens: params.maxTokens ?? defaultAnthropicMaxTokens(params.model),
+      ...(params.temperature !== undefined ? { temperature: params.temperature } : {}),
       ...(system ? { system } : {}),
       messages: cachedMessages,
       ...(cachedTools.length > 0 ? { tools: cachedTools } : {}),

@@ -36,7 +36,7 @@ describe('production delegation review', () => {
     const f = fixture()
     expect(DELEGATION_REVIEW_PROMPT).toBe('DELEGATION_FIDELITY_REVIEW\n' + readFileSync(resolve(__dirname, '../../eval/workbuddy/baselines/2026-11-10/reviewer.txt'), 'utf8'))
     expect(await f.gate(f.context)).toBe(f.context.tools)
-    expect(f.requests[0]).toMatchObject({ tools: [], model: 'configured-model', thinking: { level: 'high' } })
+    expect(f.requests[0]).toMatchObject({ tools: [], model: 'configured-model', thinking: { level: 'high' }, temperature: 0 })
     const snapshot = JSON.parse(String(f.requests[0].messages[0].content))
     expect(snapshot.proposedCalls.map((c: { id: string }) => c.id)).toEqual(['a', 'b'])
     expect(snapshot.managerMessages[0].content).toBe('human')
@@ -127,14 +127,41 @@ describe('production delegation review', () => {
     expect(await cancelled.gate({ ...cancelled.context, signal: controller.signal })).not.toBe(cancelled.context.tools)
   })
 
-  it('limits consecutive rejected revisions and ignores non-dispatch batches', async () => {
+  it('locks a repeatedly rejected batch, tells the manager to stop and report, and re-reviews any revision', async () => {
     const revise = JSON.stringify({ verdict: 'revise', issues: [issue] })
-    const f = fixture([revise, revise])
+    const f = fixture([revise, revise, allow])
     await f.gate(f.context); await f.gate(f.context)
-    const tools = await f.gate(f.context)
+    const locked = await f.gate(f.context)
     expect(f.requests).toHaveLength(2)
-    expect(JSON.parse((await tools[0].call({}, { toolCallId: 'internal-a' })).output).status).toBe('uncertain')
-    const other = fixture(); expect(await other.gate({ ...other.context, calls: [{ type: 'tool_use', id: 'read', name: 'Read', input: {} }] })).toBe(other.context.tools)
+    const out = JSON.parse((await locked[0].call({}, { toolCallId: 'internal-a' })).output)
+    expect(out).toMatchObject({ status: 'gate_closed', dispatched: false })
+    expect(out.instruction).toMatch(/拒绝 2 次/)
+    expect(out.instruction).toMatch(/停止重试/)
+    expect(out.instruction).toMatch(/报告/)
+    f.context.calls[0].input.prompt = '先调查再改写'
+    expect(await f.gate(f.context)).toBe(f.context.tools)
+    expect(f.requests).toHaveLength(3)
+  })
+
+  it('closes the gate after five real reviews in one episode', async () => {
+    const revise = JSON.stringify({ verdict: 'revise', issues: [issue] })
+    const f = fixture([revise, revise, revise, revise, revise])
+    for (let i = 0; i < 5; i++) {
+      f.context.calls[0].input.prompt = `attempt ${i}`
+      await f.gate(f.context)
+    }
+    expect(f.requests).toHaveLength(5)
+    f.context.calls[0].input.prompt = 'attempt final'
+    const closed = await f.gate(f.context)
+    expect(f.requests).toHaveLength(5)
+    const out = JSON.parse((await closed[0].call({}, { toolCallId: 'internal-a' })).output)
+    expect(out.status).toBe('gate_closed')
+    expect(out.instruction).toMatch(/上限/)
+  })
+
+  it('ignores non-dispatch batches', async () => {
+    const other = fixture()
+    expect(await other.gate({ ...other.context, calls: [{ type: 'tool_use', id: 'read', name: 'Read', input: {} }] })).toBe(other.context.tools)
     expect(other.requests).toHaveLength(0)
   })
 
