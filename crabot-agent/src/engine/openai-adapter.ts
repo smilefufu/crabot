@@ -260,7 +260,6 @@ export class OpenAIAdapter implements LLMAdapter {
     const body: Record<string, unknown> = {
       model: params.model,
       ...(params.maxTokens !== undefined ? { max_tokens: params.maxTokens } : {}),
-      ...(params.temperature !== undefined ? { temperature: params.temperature } : {}),
       messages: [{ role: 'system', content: params.systemPrompt }, ...messages],
       stream: true,
       stream_options: { include_usage: true },

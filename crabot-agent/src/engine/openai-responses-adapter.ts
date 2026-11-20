@@ -199,10 +199,6 @@ export class OpenAIResponsesAdapter implements LLMAdapter {
     if (!isCodexBackend && params.maxTokens) {
       body.max_output_tokens = params.maxTokens
     }
-    // Codex 后端与 max_output_tokens 一样不支持该字段；不传时维持 Provider 默认。
-    if (!isCodexBackend && params.temperature !== undefined) {
-      body.temperature = params.temperature
-    }
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',

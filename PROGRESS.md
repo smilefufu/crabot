@@ -1,5 +1,11 @@
 # Crabot 项目进度
 
+### 派工复核熔断修复（2026-11-20，PR #263，未部署）
+
+- 同一批次内容指纹被拒两次后仅关闭该方案，改写方案重新复核；单 episode 最多五次真复核，关闸回执明确要求停止重试并向用户报告分歧。
+- 用户明确取消降温：撤回 `temperature` 参数通道、复核传参与专用测试，沿用 Provider 默认采样，不新增能力探测或降级重试。设计点 A/B 保留，修订后的 [spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-11-18-delegation-review-circuit-breaker-design.md) 已同步。
+- 撤参回归先红后绿，派工复核与 adapter／思考配置／原生重试共 6 文件 168 项通过，Agent 类型检查通过；正式协议已同步原 spec 确认的熔断规则。未调用真实 Provider、部署或发包。
+
 ### 权限查询解耦 session 验证 + 拆除 builtin 权限通知（2026-11-18，源码修复，待开 PR）
 
 - 背景：11-17~18 zhi.gao 实例（192.168.0.59 system mode）事故——wechat channel 状态异常 → admin `resolve_principal_permissions` 因 session 存活验证失败（`Channel module not found`）→ agent 侧权限解析吞错返回 null → PR #241 的 permission-notification 每 5 分钟向所有非终态 worker 重发且无收敛路径 → 4 个 worker 各空转 218~225 轮、manager 向群轰炸 ~92 轮报告，直至 agent 重启。服务器版本（11-16 12:22 +0900）也缺 #257 僵尸 trace 修复。

@@ -108,7 +108,7 @@ export function createDelegationReview(options: {
         const response = await callNonStreaming(context.adapter, {
           systemPrompt: DELEGATION_REVIEW_PROMPT,
           messages: [createUserMessage(JSON.stringify(snapshot))],
-          model: context.model, thinking: context.thinking, tools: [], signal: context.signal, temperature: 0,
+          model: context.model, thinking: context.thinking, tools: [], signal: context.signal,
           configChangedSignal: context.configChangedSignal, configGeneration: context.configGeneration, onConfigChanged: context.onConfigChanged,
         })
         if (response.stopReason !== 'end_turn') throw new Error('Review response incomplete: ' + response.stopReason)
