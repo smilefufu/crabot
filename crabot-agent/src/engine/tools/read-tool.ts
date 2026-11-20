@@ -7,7 +7,7 @@ import type { FileReadState } from './file-read-state'
 const DEFAULT_LIMIT = 2000
 const SENSITIVE_PATH_PATTERNS = [
   /[/\\]data[/\\]admin[/\\]channel-configs[/\\]/,
-  /[/\\]data[/\\]admin[/\\]model_providers[/\\]/,
+  /[/\\]data[/\\]admin[/\\]model_providers(?:\.json$|[/\\])/,
 ]
 
 function isSensitivePath(filePath: string): boolean {
