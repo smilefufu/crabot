@@ -1,5 +1,12 @@
 # Crabot 项目进度
 
+### 派工复核熔断修复（2026-11-20，PR #263，未部署）
+
+- 同一批次内容指纹被拒两次后仅关闭该方案，改写方案重新复核；单 episode 最多五次真复核，关闸回执明确要求停止重试并向用户报告分歧。
+- 用户明确取消降温：撤回 `temperature` 参数通道、复核传参与专用测试，沿用 Provider 默认采样，不新增能力探测或降级重试。设计点 A/B 保留，修订后的 [spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-11-18-delegation-review-circuit-breaker-design.md) 已同步。
+- 撤参回归先红后绿，派工复核与 adapter／思考配置／原生重试共 6 文件 168 项通过，Agent 类型检查通过；正式协议已同步原 spec 确认的熔断规则。未调用真实 Provider、部署或发包。
+- 合入最新 main 并保留双方进度记录；Agent 全量与 main 同环境对照均为 98 个失败文件、516 个失败断言，失败集合及首条错误一致，无新增失败；主要受 native／跨包构建依赖缺失及已有断言问题影响，不标全量全绿。合并后类型检查通过。
+
 ### v2026.11.18.1 / desktop.32（2026-11-18，已公开发包）
 
 - [发布页](https://github.com/smilefufu/crabot/releases/tag/v2026.11.18.1)，源码固定 `6c4a21d648d697feacf17bc36f01c48f71b74f18`。Mac ARM64、Mac Intel、Windows x64、Ubuntu x64 的桌面包与 CLI 归档齐备，共 8 个包、8 个 SHA-256 旁附文件及 1 份桌面来源回执，已成为 latest。

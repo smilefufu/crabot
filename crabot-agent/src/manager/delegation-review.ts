@@ -5,6 +5,10 @@ import type { ChannelMessage } from '../types.js'
 import { DELEGATION_REVIEW_PROMPT } from './delegation-review-prompt.js'
 
 const DISPATCH_TOOLS = new Set(['spawn_worker', 'send_to_worker'])
+/** 同一派工方案（批次内容指纹）被拒上限；真改过的方案重新计数。 */
+const MAX_REJECTS_PER_BATCH = 2
+/** 单 episode 真复核 LLM 调用总上限，防无意义微调无限续命。 */
+const MAX_REVIEWS_PER_EPISODE = 5
 const fingerprint = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 interface ReviewIssue {
   call_ids: string[]
@@ -69,10 +73,16 @@ export function createDelegationReview(options: {
   readonly inputRevision: () => string
   readonly observe: (observation: DelegationReviewObservation) => void
 }) {
-  let consecutiveRejects = 0
+  /** 批次内容指纹 → 已被拒次数；仅拒绝时递增，gate 生命周期内不清零。 */
+  const batchRejects = new Map<string, number>()
+  let reviewCount = 0
   return async (context: ToolBatchContext): Promise<ReadonlyArray<ToolDefinition>> => {
     const dispatches = context.calls.filter(call => DISPATCH_TOOLS.has(call.name))
     if (!dispatches.length) return context.tools
+    const batchKey = fingerprint(dispatches.map(call => [call.name, call.input]))
+    const rejectCount = batchRejects.get(batchKey) ?? 0
+    const closedReason = rejectCount >= MAX_REJECTS_PER_BATCH ? 'repeat'
+      : reviewCount >= MAX_REVIEWS_PER_EPISODE ? 'budget' : undefined
     const snapshotMessages = attachManagerHumanSources(context.messages, options.sources())
     const snapshot = {
       originalSource: snapshotMessages.flatMap(message => message.role === 'user' && 'managerHumanSource' in message ? message.managerHumanSource ?? [] : []),
@@ -86,9 +96,15 @@ export function createDelegationReview(options: {
     let verdict: ReviewVerdict | undefined
     let failure: string | undefined
     try {
-      if (consecutiveRejects >= 2) {
-        verdict = { verdict: 'uncertain', issues: dispatches.map(call => ({ call_ids: [call.id], source_quote: '已用尽本次连续修订机会', handoff_quote: '', impact: '停止继续派工，保留结果并报告未解决的需求分歧。' })) }
+      if (closedReason) {
+        verdict = { verdict: 'uncertain', issues: dispatches.map(call => ({
+          call_ids: [call.id], handoff_quote: '', impact: '复核门已关闭。',
+          source_quote: closedReason === 'repeat'
+            ? `同一派工方案已被拒绝 ${MAX_REJECTS_PER_BATCH} 次`
+            : `本回合复核次数已达上限 ${MAX_REVIEWS_PER_EPISODE} 次`,
+        })) }
       } else {
+        reviewCount++
         const response = await callNonStreaming(context.adapter, {
           systemPrompt: DELEGATION_REVIEW_PROMPT,
           messages: [createUserMessage(JSON.stringify(snapshot))],
@@ -106,23 +122,23 @@ export function createDelegationReview(options: {
       failure = String(error)
     }
     options.observe({ snapshotSha256, callIds: dispatches.map(call => call.id), verdict, technical_error: failure })
-    if (!failure && verdict?.verdict === 'allow') {
-      consecutiveRejects = 0
-      return context.tools
-    }
-    consecutiveRejects++
+    if (!failure && verdict?.verdict === 'allow') return context.tools
+    if (!closedReason) batchRejects.set(batchKey, rejectCount + 1)
     return context.tools.map(tool => !DISPATCH_TOOLS.has(tool.name) ? tool : {
       ...tool,
       call: async (_input, callContext) => {
         const call = dispatches.find(call => context.callIds.get(call.id) === callContext.toolCallId)
         const ids = call ? [call.id] : []
         return { isError: true, output: JSON.stringify({
-          status: failure ? 'review_unavailable' : verdict!.verdict,
+          status: failure ? 'review_unavailable' : closedReason ? 'gate_closed' : verdict!.verdict,
           dispatched: false, batch_deferred: true, affected_call_ids: ids,
           issues: (verdict?.issues ?? []).filter(issue => issue.call_ids.some(id => ids.includes(id))),
           other_call_issues: (verdict?.issues ?? []).filter(issue => !issue.call_ids.some(id => ids.includes(id))),
           technical_error: failure,
-          instruction: failure ? '复核接口技术失败，本次未派工；如实报告，不能宣称任务完成。' : '本批派工尚未执行。结合全批分工修订后重新派发；同一问题最多一次修订，仍有争议则报告真实缺口。',
+          instruction: failure ? '复核接口技术失败，本次未派工；如实报告，不能宣称任务完成。'
+            : closedReason === 'repeat' ? `该派工方案已被拒绝 ${MAX_REJECTS_PER_BATCH} 次，复核门已关闭。停止重试该方案，保留结果并直接向用户报告未解决的需求分歧。`
+            : closedReason === 'budget' ? `本回合复核次数已达上限 ${MAX_REVIEWS_PER_EPISODE} 次，复核门已关闭。停止重试派工，保留结果并直接向用户报告未解决的需求分歧。`
+            : '本批派工尚未执行。结合全批分工修订后重新派发；同一问题最多一次修订，仍有争议则报告真实缺口。',
         }) }
       },
     })
