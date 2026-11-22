@@ -8,10 +8,24 @@ import { promisify } from 'node:util'
 import { downloadProductAsset } from './lib/product-prepare.mjs'
 import { runBounded } from './lib/run-bounded.mjs'
 import { developmentBuildState } from './lib/development-build.mjs'
+import nativeBuild from './lib/native-build.cjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const args = process.argv.slice(2)
+if (args.length && (args.length !== 2 || args[0] !== '--output')) throw new Error('Usage: build-native.mjs [--output <isolated-directory>]')
+const output = args.length ? resolve(args[1]) : nativeBuild.standardDirectory(root)
+if (args.length && (dirname(output) !== join(root, '.desktop-build/upgrade-native') || !output.split(/[\\/]/).at(-1).startsWith('.preparing-'))) {
+  throw new Error('Native bootstrap output must be its isolated preparation directory')
+}
+const signature = nativeBuild.nativeSignature(root)
 const developmentState = developmentBuildState(join(root, 'crabot-native'), [await fs.readFile(fileURLToPath(import.meta.url), 'utf8')])
 const cache = join(root, '.desktop-build', 'native')
+for (const directory of [dirname(cache), cache]) {
+  try { await fs.mkdir(directory, { mode: 0o700 }) } catch (error) { if (error.code !== 'EEXIST') throw error }
+  nativeBuild.trustedPaths(root, [directory])
+}
+await fs.mkdir(output, { recursive: true })
+nativeBuild.trustedPaths(root, [output])
 const version = '22.22.3'
 const headers = await downloadProductAsset({
   url: `https://nodejs.org/dist/v${version}/node-v${version}-headers.tar.gz`,
@@ -20,8 +34,6 @@ const headers = await downloadProductAsset({
 const systemTar = process.platform === 'win32' ? join(process.env.SystemRoot, 'System32', 'tar.exe') : 'tar'
 await runBounded(systemTar, ['-xf', headers, '-C', cache])
 const include = join(cache, `node-v${version}`, 'include', 'node')
-const output = join(root, 'crabot-native', 'build', 'Release')
-await fs.mkdir(output, { recursive: true })
 const source = join(root, 'crabot-native', 'src', 'identity.cc')
 const binary = join(output, 'crabot-native.node')
 const cliSource = join(root, 'crabot-native/src/cli-launcher.cc')
@@ -61,5 +73,7 @@ if (process.platform === 'win32') {
   await runBounded(process.env.CXX || 'c++', ['-std=c++17', '-O2',
     ...(process.platform === 'darwin' ? ['-mmacosx-version-min=14.0'] : []), cleanupSource, '-o', cleanupBinary])
 }
-developmentState.commit() // Only a successful complete native build is reusable.
+await runBounded(process.execPath, [join(root, 'scripts/lib/native-probe.cjs'), output], { timeout: 30000 })
+nativeBuild.writeNativeReceipt(root, output, signature)
+if (!args.length) developmentState.commit() // Bootstrap output is not a standard build receipt.
 console.log('Native process identity helper built: ' + process.platform + '-' + process.arch)

@@ -36,6 +36,7 @@ jobs:
         run: >-
           node --test
           scripts/lib/__tests__/process-identity.test.mjs
+          scripts/lib/__tests__/source-native.test.mjs
           scripts/lib/__tests__/known-process-exit.test.mjs
           scripts/lib/__tests__/known-process-termination.test.mjs
           scripts/lib/__tests__/product-runtime.test.mjs
@@ -50,3 +51,8 @@ jobs:
       - name: Verify ordinary Windows owner defaults outside the Bash token context
         if: runner.os == 'Windows'
         run: node --test --test-name-pattern='Windows ordinary existing paths' scripts/lib/__tests__/private-file-paths.test.mjs
+      - name: Verify source upgrade target preparation and native rollback
+        shell: bash
+        run: |
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm exec vitest run --root scripts/upgrade-lib __tests__/source-build-order.test.mjs __tests__/prepared-upgrade.test.mjs --pool=forks --poolOptions.forks.singleFork

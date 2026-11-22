@@ -1,14 +1,19 @@
 import product from '../lib/product-runtime.cjs'
 import { isDevelopmentTree } from '../lib/development-environment.mjs'
 import fs from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import path from 'node:path'
 import { createRequire } from 'node:module'
 import { verifyReleasePackage } from '../lib/release-package.mjs'
 import { preparedMemoryPython } from '../lib/memory-deps.mjs'
 import { previewMigrations } from './migrate.mjs'
+import { verifySourceNative } from '../lib/source-native.mjs'
 
 /** Read-only restart check. Never downloads, builds, stops processes or writes data. */
 export async function preflightRestart(home, dataRoot) {
+  if (!existsSync(path.join(home, 'core-release.json')) && existsSync(path.join(home, 'crabot-native/src/identity.cc'))) {
+    await verifySourceNative(home)
+  }
   for (const name of ['crabot-core/dist/main.js', 'crabot-core/dist/orphan-recovery-preflight.js', 'crabot-admin/dist/main.js', 'crabot-agent/dist/main.js', 'scripts/prepare-shared-requests.mjs']) {
     if (!(await fs.stat(path.join(home, name))).isFile()) throw new Error(`Target build missing: ${name}; prepare it before restarting`)
   }

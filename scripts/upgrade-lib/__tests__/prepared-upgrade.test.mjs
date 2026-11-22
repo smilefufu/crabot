@@ -6,6 +6,9 @@ import { execFileSync } from 'node:child_process'
 import { prepareUpgrade, installPreparedUpgrade } from '../prepared-upgrade.mjs'
 import { preflightRestart } from '../preflight.mjs'
 import { acquireCliLock, releaseCliLock } from '../../lib/cli-lock.mjs'
+import { fileURLToPath } from 'node:url'
+import nativeBuild from '../../lib/native-build.cjs'
+const product = fileURLToPath(new URL('../../../', import.meta.url))
 let root, home, data
 const git = args => execFileSync('git', args, { cwd: home, stdio: 'pipe' })
 beforeEach(async () => {
@@ -100,4 +103,63 @@ it('restart preflight refuses missing artifacts and unknown adapters while a liv
   await fs.mkdir(path.join(data, 'core')); await fs.writeFile(path.join(data, 'core/SCHEMA_VERSION'), 'v1')
   await expect(preflightRestart(home, data)).rejects.toThrow('Missing migration scope')
   expect(await fs.readFile(path.join(data, 'mm.pid'), 'utf8')).toBe(String(process.pid))
+})
+
+async function nativeSource() {
+  await fs.cp(path.join(product, 'crabot-native/src'), path.join(home, 'crabot-native/src'), { recursive: true })
+  for (const name of ['scripts/build-native.mjs', 'scripts/lib/native-build.cjs', 'scripts/lib/native-probe.cjs']) {
+    await fs.mkdir(path.dirname(path.join(home, name)), { recursive: true })
+    await fs.copyFile(path.join(product, name), path.join(home, name))
+  }
+  await fs.appendFile(path.join(home, '.gitignore'), 'crabot-native/build/\n.desktop-build/\n')
+  git(['add', '.']); git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'native inputs'])
+}
+async function nativeTarget(stage) {
+  await build(stage)
+  await fs.cp(nativeBuild.standardDirectory(product), nativeBuild.standardDirectory(stage), { recursive: true })
+}
+it('native source target must be complete, is switched and retained for rollback with its verified receipt', async () => {
+  await nativeSource()
+  await expect(prepareUpgrade(home, data, options())).rejects.toThrow('原生产物缺失')
+  await fs.cp(nativeBuild.standardDirectory(product), nativeBuild.standardDirectory(home), { recursive: true })
+  const prepared = await prepareUpgrade(home, data, options({ build: nativeTarget }))
+  expect(prepared.artifacts).toContain('crabot-native/build/Release')
+  expect(prepared.entries.some(entry => entry.name.endsWith('native-build.json'))).toBe(true)
+  const lock = await acquireCliLock(data, 'upgrade')
+  try {
+    const installed = await installPreparedUpgrade(prepared, home, data)
+    expect(nativeBuild.nativeReady(home, nativeBuild.standardDirectory(home))).toBe(true)
+    expect(await fs.readFile(path.join(installed.rollback, 'crabot-native/build/Release/native-build.json'), 'utf8'))
+      .toBe(await fs.readFile(path.join(home, 'crabot-native/build/Release/native-build.json'), 'utf8'))
+  } finally { releaseCliLock(lock) }
+})
+it('old prepared success missing the native artifact is rebuilt rather than reused', async () => {
+  await nativeSource()
+  const prepared = await prepareUpgrade(home, data, options({ build: nativeTarget }))
+  const readyFile = path.join(path.dirname(prepared.stage), 'prepared.json')
+  const old = JSON.parse(await fs.readFile(readyFile, 'utf8'))
+  old.artifacts = old.artifacts.filter(name => name !== 'crabot-native/build/Release')
+  await fs.writeFile(readyFile, JSON.stringify(old))
+  const builder = vi.fn(nativeTarget)
+  const repaired = await prepareUpgrade(home, data, options({ build: builder }))
+  expect(repaired.reused).toBe(false); expect(builder).toHaveBeenCalledTimes(1)
+  expect(repaired.artifacts).toContain('crabot-native/build/Release')
+})
+it('post-switch native load failure rolls back native files and ordinary product artifacts', async () => {
+  await nativeSource()
+  await fs.cp(nativeBuild.standardDirectory(product), nativeBuild.standardDirectory(home), { recursive: true })
+  const old = await fs.readFile(path.join(home, 'crabot-native/build/Release/crabot-native.node'))
+  const prepared = await prepareUpgrade(home, data, options({ build: nativeTarget }))
+  const rename = fs.rename
+  vi.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
+    await rename(from, to)
+    if (String(from) === path.join(prepared.stage, 'crabot-native/build/Release')) {
+      await fs.appendFile(path.join(to, 'crabot-native.node'), 'injected switch corruption')
+    }
+  })
+  const lock = await acquireCliLock(data, 'upgrade')
+  try { await expect(installPreparedUpgrade(prepared, home, data)).rejects.toThrow('损坏') }
+  finally { releaseCliLock(lock) }
+  expect(await fs.readFile(path.join(home, 'crabot-native/build/Release/crabot-native.node'))).toEqual(old)
+  expect(await fs.readFile(path.join(home, 'dist/live.js'), 'utf8')).toBe('old build')
 })

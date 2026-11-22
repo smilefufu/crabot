@@ -1,7 +1,7 @@
 const path = require('node:path')
 const fs = require('node:fs')
 // Both standalone Node and Electron use this Node-API-only helper. It has no V8/libuv ABI dependency.
-const native = require('../../crabot-native/build/Release/crabot-native.node')
+const native = require(require('./native-build.cjs').resolveNative(path.resolve(__dirname, '../..')))
 
 function sameProcess(expected, actual) {
   return Boolean(expected && actual && expected.pid === actual.pid

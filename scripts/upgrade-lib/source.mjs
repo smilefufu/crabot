@@ -6,6 +6,7 @@ import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { developmentBuildState } from '../lib/development-build.mjs'
+import nativeBuild from '../lib/native-build.cjs'
 
 const SHARED_MODULE = 'crabot-shared'
 const JS_MODULES = [
@@ -64,6 +65,11 @@ async function installAndBuild(moduleDir, logger, source) {
 }
 
 export async function runSourceUpgrade(crabotHome, logger, { incremental = false, desktop = false } = {}) {
+  if (existsSync(join(crabotHome, 'scripts/build-native.mjs'))
+    && existsSync(join(crabotHome, 'crabot-native/src'))
+    && (!incremental || !nativeBuild.nativeReady(crabotHome, nativeBuild.standardDirectory(crabotHome)))) {
+    await runCmd(process.execPath, [join(crabotHome, 'scripts/build-native.mjs')], crabotHome, logger)
+  }
   const dependencies = incremental ? ['crabot-client', SHARED_MODULE].filter(name => existsSync(join(crabotHome, name)))
     .map(name => developmentBuildState(join(crabotHome, name)).signature) : []
   async function prepareModule(directory) {

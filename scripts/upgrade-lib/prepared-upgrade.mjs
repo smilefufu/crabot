@@ -12,10 +12,16 @@ import { verifyReleasePackage } from '../lib/release-package.mjs'
 import { previewMigrations } from './migrate.mjs'
 import { preparedMemoryPython } from '../lib/memory-deps.mjs'
 import { runBounded } from '../lib/run-bounded.mjs'
+import { verifySourceNative } from '../lib/source-native.mjs'
 const exec = promisify(execFile)
 const protectedNames = new Set(['.git', '.env', 'data', 'instance.json', 'agent-venv', 'VERSION'])
 const environment = () => ({ platform: process.platform, arch: process.arch, node: process.version, executable: process.execPath, uid: process.getuid?.() ?? null })
 const directoryFor = home => path.join(path.dirname(home), `.${path.basename(home)}-upgrade-prepared`)
+const nativeArtifact = 'crabot-native/build/Release'
+const hasNativeSource = root => fs.stat(path.join(root, 'crabot-native/src/identity.cc')).then(() => true, error => {
+  if (error.code === 'ENOENT') return false
+  throw error
+})
 
 async function git(home, args) { return (await exec('git', args, { cwd: home, maxBuffer: 16 * 1024 * 1024 })).stdout }
 export async function sourceIdentity(home) {
@@ -83,7 +89,8 @@ async function artifactNames(stage, mode, home) {
   for (const entry of await fs.readdir(stage, { withFileTypes: true })) {
     if (entry.name.startsWith('.scrapling-runtime-')) candidates.push(entry.name)
     if (entry.isDirectory() && entry.name.startsWith('crabot-')) {
-      if (entry.name === 'crabot-memory') candidates.push('crabot-memory/.venv', 'crabot-memory/prepared-environment.json')
+      if (entry.name === 'crabot-native') candidates.push(nativeArtifact)
+      else if (entry.name === 'crabot-memory') candidates.push('crabot-memory/.venv', 'crabot-memory/prepared-environment.json')
       else candidates.push(`${entry.name}/dist`, `${entry.name}/node_modules`)
     }
   }
@@ -110,6 +117,7 @@ export async function prepareUpgrade(home, dataRoot, { mode, version, logger = c
   home = await fs.realpath(home)
   if (mode === 'release' && await fs.lstat(path.join(home, '.git')).then(() => true, () => false)) throw new Error('A release must not replace a source checkout')
   const target = mode === 'source' ? await sourceIdentity(home) : version
+  const nativeRequired = mode === 'source' && await hasNativeSource(home)
   if (!target || !['source', 'release'].includes(mode)) throw new Error('Missing upgrade target')
   const parent = directoryFor(home), readyFile = path.join(parent, 'prepared.json')
   await fs.mkdir(parent, { recursive: true, mode: 0o700 })
@@ -121,11 +129,13 @@ export async function prepareUpgrade(home, dataRoot, { mode, version, logger = c
     if (existing) {
       const ready = JSON.parse(existing)
       if (ready.phase === 'switching') throw new Error('Interrupted product switch; preserve recovery materials')
-      if (ready.phase === 'prepared' && JSON.stringify(ready.identity) === JSON.stringify(identity)) {
+      if (ready.phase === 'prepared' && JSON.stringify(ready.identity) === JSON.stringify(identity)
+        && (!nativeRequired || ready.artifacts.includes(nativeArtifact))) {
         const manifest = await fs.readFile(ready.manifest)
         if (hash(manifest) !== ready.payload_sha256) throw new Error('Prepared manifest changed')
         const entries = await inventory(ready.stage, ready.artifacts)
         if (hash(JSON.stringify(entries)) !== ready.payload_sha256) throw new Error('Prepared product changed; prepare a fresh target')
+        if (nativeRequired) await verifySourceNative(ready.stage)
         await audit(ready.stage)
         return { ...ready, entries, preview: await previewMigrations(ready.stage, dataRoot), reused: true }
       }
@@ -144,6 +154,7 @@ export async function prepareUpgrade(home, dataRoot, { mode, version, logger = c
       await sync(stage, logger)
     }
     await verify(stage, target)
+    if (nativeRequired) await verifySourceNative(stage)
     await audit(stage)
     const artifacts = await artifactNames(stage, mode, home), entries = await inventory(stage, artifacts)
     const bytes = entries.reduce((sum, entry) => sum + (entry.size ?? 0), 0)
@@ -177,6 +188,11 @@ export async function installPreparedUpgrade(prepared, home, dataRoot) {
   if (!cliLockToken(path.resolve(dataRoot, 'cli.lock'))) throw new Error('Product switch requires the owning instance operation lock')
   if (prepared.phase !== 'prepared' || prepared.identity.home !== home || JSON.stringify(prepared.identity.environment) !== JSON.stringify(environment())) throw new Error('Prepared upgrade belongs to a different target or environment')
   if (prepared.identity.mode === 'source' && await sourceIdentity(home) !== prepared.identity.target) throw new Error('Source target changed after preparation')
+  const nativeRequired = prepared.identity.mode === 'source' && await hasNativeSource(home)
+  if (nativeRequired) {
+    if (!prepared.artifacts.includes(nativeArtifact)) throw new Error('Prepared source target is missing native artifacts')
+    await verifySourceNative(prepared.stage)
+  }
   // The expensive digest audit ran immediately before stop. Verify the sealed payload's identity
   // again without putting a second full product hash into the downtime window.
   for (const entry of prepared.entries) {
@@ -203,6 +219,7 @@ export async function installPreparedUpgrade(prepared, home, dataRoot) {
       if (existed) { await fs.mkdir(path.dirname(saved), { recursive: true }); await fs.rename(old, saved); entry.saved = true }
       await fs.rename(target, old); entry.installed = true
     }
+    if (nativeRequired) await verifySourceNative(home)
     await recordSwitch('installed')
     return { rollback }
   } catch (error) {

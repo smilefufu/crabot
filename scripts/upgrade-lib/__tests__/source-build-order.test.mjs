@@ -90,3 +90,14 @@ it('does not install or build Channel SDKs during ordinary source preparation', 
   expect(observed.commands.some(call => /crabot-channel-/.test(call.cwd))).toBe(false)
   expect(observed.commands.some(call => call.cwd === path.join(root, 'crabot-core'))).toBe(true)
 })
+
+it('builds the source target native helper before consumers without preparing Electron', async () => {
+  await fs.mkdir(path.join(root, 'crabot-native/src'), { recursive: true })
+  await fs.mkdir(path.join(root, 'scripts'), { recursive: true })
+  await fs.writeFile(path.join(root, 'scripts/build-native.mjs'), '// native build fixture')
+  await runSourceUpgrade(root, logger)
+  const native = observed.commands.findIndex(call => call.args.includes(path.join(root, 'scripts/build-native.mjs')))
+  expect(native).toBeGreaterThanOrEqual(0)
+  expect(native).toBeLessThan(observed.commands.findIndex(call => call.args.includes('install')))
+  expect(observed.commands.some(call => call.args.includes("require('electron')"))).toBe(false)
+})
