@@ -169,3 +169,13 @@ test('fixed maintenance bootstrap carries the native loader and loads without an
   assert.ok(Number(stdout.trim()) > 0)
   assert.equal(await fs.stat(path.join(root, '.desktop-build')).then(() => true, () => false), false)
 })
+
+test('Windows source ACL lookup handles case-sensitive worker environment snapshots', () => {
+  const module = { exports: {} }, calls = [], require = createRequire(import.meta.url)
+  vm.runInNewContext(require('node:fs').readFileSync(path.join(product, 'scripts/lib/native-build.cjs'), 'utf8'), {
+    module, process: { platform: 'win32', env: { sYsTeMrOoT: 'fixed-system-root' } },
+    require: name => name === 'node:child_process' ? { execFileSync: command => calls.push(command) } : require(name),
+  })
+  module.exports.trustedPaths(product.replace(/[\\/]$/, ''), [])
+  assert.deepEqual(calls, [path.join('fixed-system-root', 'System32/WindowsPowerShell/v1.0/powershell.exe')])
+})

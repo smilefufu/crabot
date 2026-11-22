@@ -52,7 +52,6 @@ jobs:
         run: >-
           node --test
           scripts/lib/__tests__/process-identity.test.mjs
-          scripts/lib/__tests__/source-native.test.mjs
           scripts/lib/__tests__/known-process-exit.test.mjs
           scripts/lib/__tests__/known-process-termination.test.mjs
           scripts/lib/__tests__/product-runtime.test.mjs
@@ -67,7 +66,13 @@ jobs:
       - name: Verify ordinary Windows owner defaults outside the Bash token context
         if: runner.os == 'Windows'
         run: node --test --test-name-pattern='Windows ordinary existing paths' scripts/lib/__tests__/private-file-paths.test.mjs
+      - name: Verify isolated source native preparation
+        if: ${{ !cancelled() }}
+        shell: bash
+        # Cold compilers must not contend with the existing bounded OS resource-query stress test.
+        run: node --test scripts/lib/__tests__/source-native.test.mjs
       - name: Verify source upgrade target preparation and native rollback
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           pnpm install --frozen-lockfile --ignore-scripts

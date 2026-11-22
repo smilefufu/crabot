@@ -31,12 +31,15 @@ function trustedPaths(root, files) {
   }
   if (process.platform === 'win32') {
     // Node's Windows stat does not expose ACLs. Observe them before loading any addon.
+    // Worker process.env keys are case-sensitive, unlike the main Windows thread.
+    const systemRoot = process.env[Object.keys(process.env).find(key => key.toUpperCase() === 'SYSTEMROOT')]
+    if (!systemRoot) throw failure('无法定位 Windows 系统权限检查工具')
     const script = '$ErrorActionPreference="Stop";$allowed=@([Security.Principal.WindowsIdentity]::GetCurrent().User.Value,"S-1-5-18","S-1-5-32-544");'
       + 'foreach($p in (ConvertFrom-Json $env:CRABOT_NATIVE_CHECK_PATHS)){ $a=Get-Acl -LiteralPath $p;'
       + 'if($a.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin $allowed){throw "Foreign native owner"};'
       + 'foreach($r in $a.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])){'
       + 'if($r.AccessControlType -eq "Allow" -and ($r.FileSystemRights.value__ -band 0xD0156) -and $r.IdentityReference.Value -notin $allowed){throw "Writable native path"}}}'
-    execFileSync(path.join(process.env.SystemRoot, 'System32/WindowsPowerShell/v1.0/powershell.exe'),
+    execFileSync(path.join(systemRoot, 'System32/WindowsPowerShell/v1.0/powershell.exe'),
       ['-NoProfile', '-NonInteractive', '-Command', script], { timeout: 30000, stdio: 'pipe',
         env: { ...process.env, CRABOT_NATIVE_CHECK_PATHS: JSON.stringify([...checked]) } })
   }
