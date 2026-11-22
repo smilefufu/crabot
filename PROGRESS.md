@@ -1,5 +1,10 @@
 # Crabot 项目进度
 
+### Harness 安全执行与资源治理：第一关已测，后端未定
+
+- [架构草案](crabot-docs/superpowers/specs/2026-11-21-harness-sandbox-and-resource-governance-design.md)覆盖宿主变更门禁、知情例外、实例总预算/弹性、普通人/专家可用性和持久文件交接；正式协议和产品执行策略尚未修改。
+- 2026-11-22 按用户所选独立本机 Linux VM 完成[第一关基础验证](crabot-docs/superpowers/research/2026-11-22-sandbox-qualification-phase1-results.md)：N 的基本资源/文件/合成桌面部分通过，但 work 整组 OOM 未通过；P 首次带 disk 配额创建被 Docker 拒绝后停止，资源/网络压力未测。42 项研究脚本测试通过，登记预算全部清零、VM 已 Stopped；真实 Crabot、动态弹性、Windows/Mac 和最终后端未定，未改现有业务 Docker 或连接事发机器。
+
 ### 源码升级原生依赖修复（2026-11-22，未部署）
 
 - 按已确认 [spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-11-22-source-upgrade-native-bootstrap-design.md) 修复缺 addon 时升级入口无法加载、目标准备未编译 native、切换清单遗漏三处缺口；升级 helper 隔离构建，普通运行命令只消费已验证产物。
