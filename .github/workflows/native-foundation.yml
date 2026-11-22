@@ -23,6 +23,20 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22.22.3'
+      - name: Protect the Windows test checkout before source builds
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $acl = New-Object System.Security.AccessControl.DirectorySecurity
+          $owner = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+          $acl.SetOwner($owner)
+          $acl.SetAccessRuleProtection($true, $false)
+          foreach ($sid in @($owner.Value, 'S-1-5-18', 'S-1-5-32-544')) {
+            $identity = New-Object System.Security.Principal.SecurityIdentifier($sid)
+            $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($identity, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
+            $acl.AddAccessRule($rule)
+          }
+          Set-Acl -LiteralPath $env:GITHUB_WORKSPACE -AclObject $acl
       - name: Compile this complete native boundary
         shell: bash
         run: node scripts/build-native.mjs
@@ -31,6 +45,8 @@ jobs:
         run: |
           pnpm --dir crabot-shared install --frozen-lockfile --ignore-scripts
           pnpm --dir crabot-shared run build
+          pnpm --dir crabot-core install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-core run build
       - name: Run native behavior and baseline downloader regressions
         shell: bash
         run: >-

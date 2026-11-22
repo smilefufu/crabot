@@ -7,6 +7,8 @@ import { fileURLToPath } from 'node:url'
 import { execFile, spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { promisify } from 'node:util'
+import { randomUUID } from 'node:crypto'
+import identity from '../process-identity.cjs'
 import nativeBuild from '../native-build.cjs'
 import { prepareSourceNative, verifySourceNative } from '../source-native.mjs'
 
@@ -17,7 +19,11 @@ const commit = async root => {
   await git(root, ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'fixture'])
 }
 async function fixture(t) {
-  const root = await fs.realpath(await fs.mkdtemp(path.join(process.env.RUNNER_TEMP || tmpdir(), 'n-')))
+  let root
+  if (process.platform === 'win32') {
+    root = path.join(await fs.realpath(process.env.RUNNER_TEMP || tmpdir()), 'n-' + randomUUID())
+    identity.createPrivateDirectory(root)
+  } else root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'n-')))
   t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
   await fs.cp(path.join(product, 'scripts'), path.join(root, 'scripts'), { recursive: true,
     filter: name => !['node_modules', '__tests__'].includes(path.basename(name)) })
@@ -95,8 +101,8 @@ test('native compilation failure is reported before main, leaves the running ins
   const standard = nativeBuild.standardDirectory(root)
   await fs.mkdir(standard, { recursive: true }); await fs.writeFile(path.join(standard, 'crabot-native.node'), 'old component')
   await assert.rejects(exec(process.execPath, [path.join(root, 'scripts/upgrade.mjs'), '--yes'], { cwd: root, timeout: 150000 }), error => {
-    assert.match(error.stderr, /source_native_failure_fixture/)
-    assert.doesNotMatch(error.stderr, /must not enter upgrade main/)
+    assert.match(error.stdout + error.stderr, /source_native_failure_fixture/)
+    assert.doesNotMatch(error.stdout + error.stderr, /must not enter upgrade main/)
     return error.code === 1
   })
   assert.equal(await fs.readFile(path.join(standard, 'crabot-native.node'), 'utf8'), 'old component')

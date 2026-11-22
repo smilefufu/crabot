@@ -39,7 +39,7 @@ async function fixture(t, fixed = false) {
   for (const [name, value] of Object.entries({ 'package.json': { version: '1.2.3' }, 'product-runtime.json': { version: '1.2.3' } })) await fs.writeFile(path.join(temporary, name), JSON.stringify(value))
   await fs.copyFile(path.resolve(library, '../../cli.mjs'), path.join(temporary, 'cli.mjs'))
   await fs.mkdir(path.join(temporary, 'scripts/lib'), { recursive: true }); await fs.mkdir(path.join(temporary, 'crabot-native/build/Release'), { recursive: true })
-  for (const name of ['cli-location.cjs', 'desktop-installation.cjs', 'process-identity.cjs']) await fs.copyFile(path.join(library, name), path.join(temporary, 'scripts/lib', name))
+  for (const name of ['cli-location.cjs', 'desktop-installation.cjs', 'process-identity.cjs', 'native-build.cjs']) await fs.copyFile(path.join(library, name), path.join(temporary, 'scripts/lib', name))
   await fs.copyFile(path.join(binary, 'crabot-native.node'), path.join(temporary, 'crabot-native/build/Release/crabot-native.node'))
   await fs.mkdir(path.join(temporary, 'scripts'), { recursive: true })
   await fs.writeFile(path.join(temporary, 'scripts/help.mjs'), 'console.log(JSON.stringify({data:process.env.DATA_DIR,core:process.env.CRABOT_HOME}))')
