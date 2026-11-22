@@ -35,7 +35,8 @@ function trustedPaths(root, files) {
     const systemRoot = process.env[Object.keys(process.env).find(key => key.toUpperCase() === 'SYSTEMROOT')]
     if (!systemRoot) throw failure('无法定位 Windows 系统权限检查工具')
     const script = '$ErrorActionPreference="Stop";$allowed=@([Security.Principal.WindowsIdentity]::GetCurrent().User.Value,"S-1-5-18","S-1-5-32-544");'
-      + 'foreach($p in (ConvertFrom-Json $env:CRABOT_NATIVE_CHECK_PATHS)){ $a=Get-Acl -LiteralPath $p;'
+      + 'foreach($p in (ConvertFrom-Json $env:CRABOT_NATIVE_CHECK_PATHS)){'
+      + '$a=if([IO.Directory]::Exists($p)){[IO.Directory]::GetAccessControl($p)}else{[IO.File]::GetAccessControl($p)};'
       + 'if($a.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin $allowed){throw "Foreign native owner"};'
       + 'foreach($r in $a.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])){'
       + 'if($r.AccessControlType -eq "Allow" -and ($r.FileSystemRights.value__ -band 0xD0156) -and $r.IdentityReference.Value -notin $allowed){throw "Writable native path"}}}'

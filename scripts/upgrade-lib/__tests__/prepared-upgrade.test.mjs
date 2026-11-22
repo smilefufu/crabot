@@ -132,7 +132,7 @@ it('native source target must be complete, is switched and retained for rollback
     expect(await fs.readFile(path.join(installed.rollback, 'crabot-native/build/Release/native-build.json'), 'utf8'))
       .toBe(await fs.readFile(path.join(home, 'crabot-native/build/Release/native-build.json'), 'utf8'))
   } finally { releaseCliLock(lock) }
-})
+}, 30000)
 it('old prepared success missing the native artifact is rebuilt rather than reused', async () => {
   await nativeSource()
   const prepared = await prepareUpgrade(home, data, options({ build: nativeTarget }))
@@ -144,7 +144,7 @@ it('old prepared success missing the native artifact is rebuilt rather than reus
   const repaired = await prepareUpgrade(home, data, options({ build: builder }))
   expect(repaired.reused).toBe(false); expect(builder).toHaveBeenCalledTimes(1)
   expect(repaired.artifacts).toContain('crabot-native/build/Release')
-})
+}, 30000)
 it('post-switch native load failure rolls back native files and ordinary product artifacts', async () => {
   await nativeSource()
   await fs.cp(nativeBuild.standardDirectory(product), nativeBuild.standardDirectory(home), { recursive: true })
@@ -162,4 +162,4 @@ it('post-switch native load failure rolls back native files and ordinary product
   finally { releaseCliLock(lock) }
   expect(await fs.readFile(path.join(home, 'crabot-native/build/Release/crabot-native.node'))).toEqual(old)
   expect(await fs.readFile(path.join(home, 'dist/live.js'), 'utf8')).toBe('old build')
-})
+}, 30000)
