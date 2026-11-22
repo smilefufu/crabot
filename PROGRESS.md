@@ -1,5 +1,10 @@
 # Crabot 项目进度
 
+### 源码升级原生依赖修复（2026-11-22，未部署）
+
+- 按已确认 [spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-11-22-source-upgrade-native-bootstrap-design.md) 修复缺 addon 时升级入口无法加载、目标准备未编译 native、切换清单遗漏三处缺口；升级 helper 隔离构建，普通运行命令只消费已验证产物。
+- Mac ARM 已通过真实编译/加载、并发及失败清理、目标切换和 native 回退定向验证；升级器全量 124 项通过、1 项 CI-only 跳过。四平台真实编译/加载与升级事务回归由 Native foundation CI 验收，逐平台结果在交付时汇报。未升级、停止或改写现场实例；system 源码整机协调仍另案。
+
 ### 派工复核熔断修复（2026-11-20，PR #263，未部署）
 
 - 同一批次内容指纹被拒两次后仅关闭该方案，改写方案重新复核；单 episode 最多五次真复核，关闸回执明确要求停止重试并向用户报告分歧。

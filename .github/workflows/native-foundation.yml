@@ -23,6 +23,20 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22.22.3'
+      - name: Protect the Windows test checkout before source builds
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $acl = New-Object System.Security.AccessControl.DirectorySecurity
+          $owner = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+          $acl.SetOwner($owner)
+          $acl.SetAccessRuleProtection($true, $false)
+          foreach ($sid in @($owner.Value, 'S-1-5-18', 'S-1-5-32-544')) {
+            $identity = New-Object System.Security.Principal.SecurityIdentifier($sid)
+            $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($identity, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
+            $acl.AddAccessRule($rule)
+          }
+          Set-Acl -LiteralPath $env:GITHUB_WORKSPACE -AclObject $acl
       - name: Compile this complete native boundary
         shell: bash
         run: node scripts/build-native.mjs
@@ -31,6 +45,8 @@ jobs:
         run: |
           pnpm --dir crabot-shared install --frozen-lockfile --ignore-scripts
           pnpm --dir crabot-shared run build
+          pnpm --dir crabot-core install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-core run build
       - name: Run native behavior and baseline downloader regressions
         shell: bash
         run: >-
@@ -50,3 +66,14 @@ jobs:
       - name: Verify ordinary Windows owner defaults outside the Bash token context
         if: runner.os == 'Windows'
         run: node --test --test-name-pattern='Windows ordinary existing paths' scripts/lib/__tests__/private-file-paths.test.mjs
+      - name: Verify isolated source native preparation
+        if: ${{ !cancelled() }}
+        shell: bash
+        # Cold compilers must not contend with the existing bounded OS resource-query stress test.
+        run: node --test scripts/lib/__tests__/source-native.test.mjs
+      - name: Verify source upgrade target preparation and native rollback
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm exec vitest run --root scripts/upgrade-lib __tests__/source-build-order.test.mjs __tests__/prepared-upgrade.test.mjs --pool=forks --poolOptions.forks.singleFork

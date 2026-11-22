@@ -88,7 +88,8 @@ test('workspace metadata bridge retains both original opaque pins even with non-
   const source = {}, target = {}, calls = [], backend = {}, module = { exports: {} }
   Object.defineProperty(backend, 'copyPinnedWorkspaceMetadata', { value(...pins) { calls.push(pins) } })
   vm.runInNewContext(fs.readFileSync(new URL('../process-identity.cjs', import.meta.url), 'utf8'), {
-    module, process: { platform: 'win32' }, require: name => name === 'node:path' ? path.win32 : name === 'node:fs' ? fs : backend,
+    module, __dirname: 'fixture-library', process: { platform: 'win32' },
+    require: name => name === 'node:path' ? path.win32 : name === 'node:fs' ? fs : name === './native-build.cjs' ? { resolveNative: () => 'fixture-native' } : backend,
   })
   module.exports.copyPinnedWorkspaceMetadata(source, target)
   assert.deepEqual(calls, [[source, target]])

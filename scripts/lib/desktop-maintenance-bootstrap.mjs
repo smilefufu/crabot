@@ -47,6 +47,7 @@ export const desktopMaintenanceBootstrap = Object.freeze([
   'scripts/lib/pid.mjs',
   'scripts/lib/preflight-state.cjs',
   'scripts/lib/process-identity.cjs',
+  'scripts/lib/native-build.cjs',
   'scripts/lib/product-runtime.cjs',
   'scripts/lib/supervisor-shutdown.mjs',
   'scripts/lib/workspace-maintenance.cjs',

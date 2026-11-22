@@ -25,6 +25,14 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
+// Source upgrade must prepare its isolated helper before installation/native imports.
+if (process.argv[2] === 'upgrade') {
+  try {
+    const { prepareSourceNative } = await import('./scripts/lib/source-native.mjs')
+    await prepareSourceNative(__dirname)
+  } catch (error) { console.error('[upgrade]', error.message); process.exit(1) }
+}
+
 // A retained immutable version is not an alternate writable instance entry.
 const { default: cliLocation } = await import(new URL('./scripts/lib/cli-location.cjs', import.meta.url))
 let cliInstallation

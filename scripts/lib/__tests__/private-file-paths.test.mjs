@@ -12,7 +12,8 @@ test('Windows private file adapter preserves payload and converts actual filesys
   const native = Object.fromEntries(['writePrivateFile', 'isPrivateFile', 'isOwnedFile', 'createPrivateDirectory', 'isPrivateDirectory', 'isOwnedDirectory', 'isOwnerOnlyFile', 'isOwnerOnlyDirectory', 'isExistingDataDirectory'].map(name => [name, method(name)]))
   const module = { exports: {} }
   vm.runInNewContext(fs.readFileSync(new URL('../process-identity.cjs', import.meta.url), 'utf8'), {
-    module, process: { platform: 'win32' }, require: name => name === 'node:path' ? path.win32 : name === 'node:fs' ? fs : native,
+    module, __dirname: 'fixture-library', process: { platform: 'win32' },
+    require: name => name === 'node:path' ? path.win32 : name === 'node:fs' ? fs : name === './native-build.cjs' ? { resolveNative: () => 'fixture-native' } : native,
   })
   for (const file of ['C:/deep/中文/file.json', '\\\\server\\share\\中文\\file.json', 'C:\\deep\\' + 'long-name/'.repeat(30) + 'file.json']) {
     const expected = path.win32.toNamespacedPath(file)

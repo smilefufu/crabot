@@ -13,7 +13,8 @@ test('Windows sync bridge preserves the actual opaque pin without filesystem pat
   const backend = {}
   Object.defineProperty(backend, 'syncPinnedWorkspaceTree', { value(value) { calls.push(value); return { files: 2, directories: 1, streams: 1 } } })
   vm.runInNewContext(syncFs.readFileSync(new URL('../process-identity.cjs', import.meta.url), 'utf8'), {
-    module, process: { platform: 'win32' }, require: name => name === 'node:path' ? path.win32 : name === 'node:fs' ? syncFs : backend,
+    module, __dirname: 'fixture-library', process: { platform: 'win32' },
+    require: name => name === 'node:path' ? path.win32 : name === 'node:fs' ? syncFs : name === './native-build.cjs' ? { resolveNative: () => 'fixture-native' } : backend,
   })
   assert.deepEqual(module.exports.syncPinnedWorkspaceTree(pin), { files: 2, directories: 1, streams: 1 })
   assert.deepEqual(calls, [pin])
