@@ -42,7 +42,7 @@ function trustedPaths(root, files) {
   }
 }
 
-function nativeSignature(root) {
+function nativeSignature(root, nodeVersion = process.version) {
   const files = ['scripts/build-native.mjs', 'scripts/lib/native-build.cjs', 'scripts/lib/native-probe.cjs']
   function visit(directory) {
     for (const entry of fs.readdirSync(path.join(root, directory), { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
@@ -54,16 +54,19 @@ function nativeSignature(root) {
   }
   visit('crabot-native/src')
   trustedPaths(root, files.map(file => path.join(root, file)))
-  const hash = createHash('sha256').update(JSON.stringify([process.platform, process.arch, process.version, process.env.CXX || 'c++']))
+  const hash = createHash('sha256').update(JSON.stringify([process.platform, process.arch, nodeVersion, process.env.CXX || 'c++']))
   for (const file of files) hash.update(file.split(path.sep).join('/')).update(fs.readFileSync(path.join(root, file)))
   return hash.digest('hex')
 }
 
-function nativeReady(root, directory, signature = nativeSignature(root)) {
+function nativeReady(root, directory, signature) {
   try {
     const files = nativeFiles(), receipt = path.join(directory, 'native-build.json')
     trustedPaths(root, [receipt, ...files.map(name => path.join(directory, name))])
     const record = JSON.parse(fs.readFileSync(receipt, 'utf8'))
+    if (!record || !/^v\d+\.\d+\.\d+$/.test(record.node)) return false
+    // The dev GUI consumes the same Node-API-only build, despite Electron's embedded Node version.
+    signature ??= nativeSignature(root, process.versions.electron ? record.node : process.version)
     return record.signature === signature && record.files && Object.keys(record.files).sort().join() === [...files].sort().join()
       && files.every(name => record.files[name] === sha(fs.readFileSync(path.join(directory, name))))
   } catch (error) {
@@ -75,14 +78,15 @@ function nativeReady(root, directory, signature = nativeSignature(root)) {
 function writeNativeReceipt(root, directory, signature) {
   if (nativeSignature(root) !== signature) throw failure('构建期间输入发生变化')
   const files = Object.fromEntries(nativeFiles().map(name => [name, sha(fs.readFileSync(path.join(directory, name)))]))
-  fs.writeFileSync(path.join(directory, 'native-build.json'), JSON.stringify({ signature, files }) + '\n', { mode: process.getuid?.() === 0 ? 0o644 : 0o600 })
+  fs.writeFileSync(path.join(directory, 'native-build.json'), JSON.stringify({ signature, node: process.version, files }) + '\n', { mode: process.getuid?.() === 0 ? 0o644 : 0o600 })
 }
 
 const bootstrapDirectory = (root, signature) => path.join(root, '.desktop-build/upgrade-native', signature)
 function resolveNative(root) {
   if (!isSourceTree(root)) return path.join(standardDirectory(root), 'crabot-native.node')
-  const signature = nativeSignature(root)
-  for (const directory of [bootstrapDirectory(root, signature), standardDirectory(root)]) {
+  const signature = process.versions.electron ? undefined : nativeSignature(root)
+  const directories = signature ? [bootstrapDirectory(root, signature), standardDirectory(root)] : [standardDirectory(root)]
+  for (const directory of directories) {
     if (nativeReady(root, directory, signature)) return path.join(directory, 'crabot-native.node')
   }
   throw failure('缺少与当前源码匹配的原生组件')

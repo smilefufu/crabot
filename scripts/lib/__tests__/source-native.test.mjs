@@ -8,9 +8,12 @@ import { execFile, spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { promisify } from 'node:util'
 import { randomUUID } from 'node:crypto'
+import { createRequire } from 'node:module'
+import vm from 'node:vm'
 import identity from '../process-identity.cjs'
 import nativeBuild from '../native-build.cjs'
 import { prepareSourceNative, verifySourceNative } from '../source-native.mjs'
+import { desktopMaintenanceBootstrap } from '../desktop-maintenance-bootstrap.mjs'
 
 const exec = promisify(execFile), product = fileURLToPath(new URL('../../../', import.meta.url))
 const git = (root, args) => exec('git', args, { cwd: root })
@@ -137,7 +140,32 @@ test('standard native receipts bind every runtime output and source/Node/compile
   const signature = nativeBuild.nativeSignature(root)
   nativeBuild.writeNativeReceipt(root, directory, signature)
   await verifySourceNative(root)
+  for (const electron of [true, false]) {
+    const module = { exports: {} }
+    vm.runInNewContext(await fs.readFile(path.join(product, 'scripts/lib/native-build.cjs'), 'utf8'), {
+      module, require: createRequire(import.meta.url),
+      process: { platform: process.platform, arch: process.arch, version: 'v99.0.0', versions: electron ? { electron: 'fixture' } : {},
+        env: process.env, getuid: process.getuid },
+    })
+    if (electron) assert.equal(module.exports.resolveNative(root), path.join(directory, 'crabot-native.node'))
+    else assert.throws(() => module.exports.resolveNative(root), /crabot upgrade/)
+  }
   await fs.appendFile(path.join(root, 'crabot-native/src/identity.cc'), '\n// changed')
   assert.notEqual(nativeBuild.nativeSignature(root), signature)
   assert.equal(nativeBuild.nativeReady(root, directory), false)
+})
+
+test('fixed maintenance bootstrap carries the native loader and loads without any source tree or compiler', async t => {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'n-')))
+  t.after(() => fs.rm(root, { recursive: true, force: true }))
+  for (const name of desktopMaintenanceBootstrap.filter(name => /\/(process-identity|native-build)\.cjs$/.test(name))) {
+    await fs.mkdir(path.dirname(path.join(root, name)), { recursive: true })
+    await fs.copyFile(path.join(product, name), path.join(root, name))
+  }
+  const directory = nativeBuild.standardDirectory(root)
+  await fs.mkdir(directory, { recursive: true })
+  await fs.copyFile(path.join(nativeBuild.standardDirectory(product), 'crabot-native.node'), path.join(directory, 'crabot-native.node'))
+  const { stdout } = await exec(process.execPath, ['-e', 'console.log(require(process.argv[1]).inspectProcess(process.pid).pid)', path.join(root, 'scripts/lib/process-identity.cjs')])
+  assert.ok(Number(stdout.trim()) > 0)
+  assert.equal(await fs.stat(path.join(root, '.desktop-build')).then(() => true, () => false), false)
 })
