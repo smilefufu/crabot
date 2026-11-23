@@ -38,6 +38,17 @@ export function isTerminalStatus(status: TaskStatus): boolean {
 }
 
 /**
+ * 台账 upsert 后是否刚进入唯一终态 closed。
+ * harness 用它触发 onWorkerTaskClosed（bg-entities：task 完成即清终态 shell）。
+ */
+export function workerBecameClosed(
+  prev: { task: { status: TaskStatus } } | undefined,
+  next: { task: { status: TaskStatus } } | undefined,
+): boolean {
+  return Boolean(prev && next && prev.task.status !== 'closed' && next.task.status === 'closed')
+}
+
+/**
  * Manager 默认决策视野（恢复 v2 dispatcher 的 active-only 不变量）。
  * 工具、Admin summary、Workers 默认列表、retention 保护集必须共用本函数。
  */

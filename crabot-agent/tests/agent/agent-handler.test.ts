@@ -587,3 +587,66 @@ describe('AgentHandler bg-entities admin RPC', () => {
     expect(result.type).toBe('shell')
   })
 })
+
+describe('AgentHandler.cleanupTerminalBackgroundForTask', () => {
+  let dataDir: string
+  let registryPath: string
+
+  beforeEach(() => {
+    dataDir = mkdtempSync(join(tmpdir(), 'ah-task-close-cleanup-'))
+    process.env.DATA_DIR = dataDir
+    process.env.CRABOT_AGENT_DATA_DIR = join(dataDir, 'agent')
+    registryPath = join(dataDir, 'agent', 'bg-entities', 'registry.json')
+    mkdirSync(join(dataDir, 'agent', 'bg-entities'), { recursive: true })
+  })
+
+  afterEach(() => {
+    delete process.env.DATA_DIR
+    delete process.env.CRABOT_AGENT_DATA_DIR
+    rmSync(dataDir, { recursive: true, force: true })
+  })
+
+  it('task 终态清理调用 removeTerminalShellsByTask：清终态 shell，保留 running', async () => {
+    const now = new Date().toISOString()
+    const registry = new BgEntityRegistry(registryPath)
+    await registry.register({
+      entity_id: 'shell_done',
+      type: 'shell',
+      status: 'completed',
+      owner: { friend_id: 'f1', worker_id: 'w-1' },
+      spawned_by_task_id: 'w-1',
+      spawned_at: now,
+      exit_code: 0,
+      ended_at: now,
+      last_activity_at: now,
+      command: 'echo done',
+      log_file: join(dataDir, 'done.log'),
+      pid: 1,
+      pgid: 1,
+      process_started_at: now,
+      exit_notification: { status: 'delivered', updated_at: now, attempts: 1 },
+    })
+    await registry.register({
+      entity_id: 'shell_run',
+      type: 'shell',
+      status: 'running',
+      owner: { friend_id: 'f1', worker_id: 'w-1' },
+      spawned_by_task_id: 'w-1',
+      spawned_at: now,
+      exit_code: null,
+      ended_at: null,
+      last_activity_at: now,
+      command: 'sleep 999',
+      log_file: join(dataDir, 'run.log'),
+      pid: 2,
+      pgid: 2,
+      process_started_at: now,
+    })
+
+    const handler = makeHandler({ bgRegistry: registry })
+    const removed = await handler.cleanupTerminalBackgroundForTask('w-1')
+    expect(removed).toEqual(['shell_done'])
+    expect(await registry.get('shell_done')).toBeFalsy()
+    expect((await registry.get('shell_run'))?.status).toBe('running')
+  })
+})

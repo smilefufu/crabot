@@ -178,7 +178,7 @@ import { reviewFingerprint, type IdleReviewFacts, type ReviewBackgroundFacts } f
 import { readLegacyTraces } from '../legacy-source-reader.js'
 import { isLegacyContinuationAuth, type LegacyContinuationAuth } from './legacy-continuation-auth.js'
 import { createLegacyWorkspaceExecutionMatcher, type LegacyWorkspaceExecutions } from './workspace-legacy-executions.js'
-import { applyStatusTransition, canTransition, isTerminalStatus } from './task-status'
+import { applyStatusTransition, canTransition, isTerminalStatus, workerBecameClosed } from './task-status'
 import { selectWorkerView, resolveWorkerProjects, type WorkerExecutionFact, type WorkerViewSelection, type WorkerViewFacts } from '../../manager/worker-candidates.js'
 import type { ManagerWorkboard } from '../../manager/workboard-store.js'
 import { join, dirname } from 'path'
@@ -694,6 +694,12 @@ export interface HarnessDeps {
    */
   readonly onIncarnationTerminal?: (handle: IncarnationHandle) => void
   /**
+   * task 进入唯一终态 closed 后触发一次（fire-and-forget）。
+   * 装配层用它做 bg-entities「task 完成即清终态 shell」（spec 2026-06-26 §4）。
+   * 回调异常不得影响状态机推进。
+   */
+  readonly onWorkerTaskClosed?: (workerId: string) => void | Promise<void>
+  /**
    * A CLI parent native trace has been durably observed. The callback receives no raw content;
    * assembly may use the opportunity to capture independently terminal child records.
    */
@@ -929,6 +935,49 @@ function continuationDelivery(
   return initialInputDelivery(initialInput, requeueAfter, replacement)
 }
 
+/**
+ * 所有 closed 落账都走 ledger.upsertWorker；在此统一侦测 → onWorkerTaskClosed，
+ * 避免在每个 closed 调用点重复接线。
+ */
+function wrapLedgerForWorkerTaskClosed(deps: HarnessDeps): HarnessDeps {
+  const onClosed = deps.onWorkerTaskClosed
+  if (!onClosed) return deps
+  const ledger = deps.ledger
+  return {
+    ...deps,
+    ledger: new Proxy(ledger, {
+      get(target, prop, receiver) {
+        if (prop === 'upsertWorker') {
+          return async (
+            key: Parameters<LedgerStore['upsertWorker']>[0],
+            workerId: string,
+            mutator: Parameters<LedgerStore['upsertWorker']>[2],
+          ) => {
+            let becameClosed = false
+            const result = await target.upsertWorker(key, workerId, (prev) => {
+              const next = mutator(prev)
+              if (workerBecameClosed(prev, next)) becameClosed = true
+              return next
+            })
+            if (becameClosed) {
+              try {
+                void Promise.resolve(onClosed(workerId)).catch((err) => {
+                  console.error(`[WorkerHarness] onWorkerTaskClosed failed for ${workerId}:`, err)
+                })
+              } catch (err) {
+                console.error(`[WorkerHarness] onWorkerTaskClosed failed for ${workerId}:`, err)
+              }
+            }
+            return result
+          }
+        }
+        const value = Reflect.get(target, prop, receiver)
+        return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value
+      },
+    }),
+  }
+}
+
 export class WorkerHarness {
   private readonly executionAdmissions = new ExecutionAdmissions()
   private readonly workspaceRelocationStopWorkers = new Set<string>()
@@ -1012,7 +1061,10 @@ export class WorkerHarness {
     return this.nativeActivityStore.cursor(workerId, incarnationId)
   }
 
-  constructor(private readonly deps: HarnessDeps) {
+  private readonly deps: HarnessDeps
+
+  constructor(deps: HarnessDeps) {
+    this.deps = wrapLedgerForWorkerTaskClosed(deps)
     this.contextStore = new WorkerContextStore(deps.workersDir)
     this.inputDeliveryStore = new InputDeliveryStore(deps.workersDir)
     this.queryReceiptStore = new QueryReceiptStore(deps.workersDir)

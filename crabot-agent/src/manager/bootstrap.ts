@@ -289,6 +289,8 @@ export interface BootstrapDeps {
   readonly builtinTraceReader?: import('../workers/builtin/adapter.js').BuiltinTraceReader
   /** P6-A §8.10：化身终态收割钩子（harness fire-and-forget；装配层做最后一次 native read）。 */
   readonly onIncarnationTerminal?: (handle: import('../workers/types.js').IncarnationHandle) => void
+  /** task 进入 closed 后清理 bg-entities 终态 shell（spec 2026-06-26 §4）。 */
+  readonly onWorkerTaskClosed?: (workerId: string) => void | Promise<void>
   /** Parent native activity has been persisted; used only to notice terminal direct CLI children. */
   readonly onNativeActivityCollected?: (handle: import('../workers/types.js').IncarnationHandle) => void
   /** P6-A §3.2：episode 消费后结算未 claim 的 Admin Chat request IDs（写 correlation store）。 */
@@ -489,6 +491,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     mintActivityCursor: deps.mintActivityCursor,
     // P6-A §8.10：化身终态时主动收割一次 native trace（最后一次 read → Agent-owned copy）。
     onIncarnationTerminal: deps.onIncarnationTerminal,
+    onWorkerTaskClosed: deps.onWorkerTaskClosed,
     onNativeActivityCollected: deps.onNativeActivityCollected,
     // harness 事件 → 该 worker 的监护 manager(§4.4)。过滤复用 P4 的
     // `shouldWakeOnHarnessEvent`(input_sent 不唤醒:manager 发起 send_to_worker 时已在同一次

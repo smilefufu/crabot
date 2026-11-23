@@ -721,6 +721,19 @@ export class AgentHandler {
     }
   }
 
+  /**
+   * task 进入终态 closed 后由 harness onWorkerTaskClosed 调用。
+   * 清该 task 名下终态 shell（记录 + 日志 + sentinel）；running 保留（spec 2026-06-26 §4）。
+   */
+  async cleanupTerminalBackgroundForTask(taskId: string): Promise<string[]> {
+    try {
+      return await this.bgRegistry.removeTerminalShellsByTask(taskId)
+    } catch (err) {
+      console.error(`[AgentHandler] cleanupTerminalBackgroundForTask(${taskId}) failed:`, err)
+      return []
+    }
+  }
+
   /** Render the common shell exit payload for WorkerInbox system delivery. */
   async renderShellExitNotification(info: {
     entity_id: string

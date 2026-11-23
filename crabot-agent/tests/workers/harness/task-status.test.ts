@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   VALID_TRANSITIONS,
   isTerminalStatus,
+  workerBecameClosed,
   canTransition,
   applyStatusTransition,
   isDecisionVisibleWorker,
@@ -47,6 +48,20 @@ describe('v3 task 状态机（2026-08-31 4 态修正）', () => {
       expect(isTerminalStatus('queued')).toBe(false)
       expect(isTerminalStatus('running')).toBe(false)
       expect(isTerminalStatus('halted')).toBe(false)
+    })
+  })
+
+  describe('workerBecameClosed', () => {
+    it('running/halted → closed 为 true', () => {
+      expect(workerBecameClosed({ task: { status: 'running' } }, { task: { status: 'closed' } })).toBe(true)
+      expect(workerBecameClosed({ task: { status: 'halted' } }, { task: { status: 'closed' } })).toBe(true)
+    })
+
+    it('非进入 closed 或缺一侧为 false', () => {
+      expect(workerBecameClosed({ task: { status: 'running' } }, { task: { status: 'halted' } })).toBe(false)
+      expect(workerBecameClosed({ task: { status: 'closed' } }, { task: { status: 'closed' } })).toBe(false)
+      expect(workerBecameClosed(undefined, { task: { status: 'closed' } })).toBe(false)
+      expect(workerBecameClosed({ task: { status: 'running' } }, undefined)).toBe(false)
     })
   })
 

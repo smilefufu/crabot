@@ -1291,6 +1291,10 @@ export class UnifiedAgent extends ModuleBase {
         if (handle.incarnation_id) this.computerUseOwner.revoke(`worker:${handle.worker_id}:${handle.incarnation_id}`)
         void this.harvestIncarnationNativeTrace(handle)
       },
+      // bg-entities：task 完成即清名下终态 shell（spec 2026-06-26 §4）；方法已有、此前未接线。
+      onWorkerTaskClosed: (workerId) => {
+        void this.agentHandler?.cleanupTerminalBackgroundForTask(workerId)
+      },
       // Parent native activity is already persisted by Harness. Only terminal direct CLI children
       // are read here; running child output is never continuously captured.
       onNativeActivityCollected: (handle) => {
