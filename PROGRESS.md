@@ -1,5 +1,10 @@
 # Crabot 项目进度
 
+### bg-entities task 终态清理接线（2026-11-23）
+
+- 补上既有设计漏接线：worker task 进入 `closed` 时调用 `removeTerminalShellsByTask`，清该 task 名下终态 shell；7d GC 仍作兜底。
+- 定向验证：`workerBecameClosed` + `cleanupTerminalBackgroundForTask` 相关测试通过。未部署到本机 release 实例（实例此前已手工压库恢复）。
+
 ### Harness 安全执行与资源治理：第一关已测，后端未定
 
 - [架构草案](crabot-docs/superpowers/specs/2026-11-21-harness-sandbox-and-resource-governance-design.md)覆盖宿主变更门禁、知情例外、实例总预算/弹性、普通人/专家可用性和持久文件交接；正式协议和产品执行策略尚未修改。
