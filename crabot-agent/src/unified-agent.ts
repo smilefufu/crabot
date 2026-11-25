@@ -1175,8 +1175,9 @@ export class UnifiedAgent extends ModuleBase {
 
     // 初始化 Worker Handler（如果有 worker 角色）
     if (this.roles.has('worker')) {
-      // Phase 5 ModelRole 重整：worker 用 powerful（强模型）
-      const workerModelConfig = config.model_config?.powerful
+      // 2026-11-25 槽位调整：builtin worker 直接使用 cost_effective slot（协议 v3 §11）；
+      // slot 缺失回落由 Admin 全局默认负责，这里不做槽位间回退。
+      const workerModelConfig = config.model_config?.cost_effective
       if (workerModelConfig) {
         this.sdkEnvWorker = this.buildSdkEnv(workerModelConfig)
 
@@ -1505,9 +1506,9 @@ export class UnifiedAgent extends ModuleBase {
       },
     })
     // P6-B §6：activation registry 与 manager stack 共用同一 adapters Map；
-    // builtin ready 的 model slot 判据 = powerful slot 当前可解析（config 已应用）。
+    // builtin ready 的 model slot 判据 = cost_effective slot 当前可解析（config 已应用）。
     this.activationRegistry.setAdapters(this.managerStack.adapters)
-    this.activationRegistry.setModelSlotResolvable(() => Boolean(this.agentConfig?.model_config.powerful?.apikey))
+    this.activationRegistry.setModelSlotResolvable(() => Boolean(this.agentConfig?.model_config.cost_effective?.apikey))
     // 构造即播种（同步、无 detect）：builtin gate 立即可判；CLI 待 pull/detect 重算。
     this.activationRegistry.seedDesired(this.initialUnifiedConfig.worker_implementations ?? DEFAULT_SAFE_WORKER_IMPLS)
   }
@@ -1530,18 +1531,18 @@ export class UnifiedAgent extends ModuleBase {
    * 授权主体始终沿原 Worker 绑定；该主体的权限配置与 tools/MCP 一样刷新。
    * 创建快照保留历史事实，每轮通过宿主当前解析装配工具，不能取群内最近发言者的权限。
    *
-   * 缺 `powerful` slot 时**抛错，不降级**：harness 会把这次 spawn 如实落成一条 failed 台账
+   * 缺 `cost_effective` slot 时**抛错，不降级**：harness 会把这次 spawn 如实落成一条 failed 台账
    * 加一条 `spawn_failed` 事件，manager 的 `spawn_worker` 拿到错误文本。静默降级只会让
    * manager 以为派活成功。
    */
   private buildBuiltinWorkerRuntime(ctx: BuiltinRuntimeContext): SpawnSpec['builtin'] {
     if (ctx.origin?.request && !ctx.request_runtime) throw new Error('CAPABILITY_UNKNOWN: Verified request runtime is required')
-    // 与现网 worker loop 同一个 slot（`initializeAgentLayer` 的 `model_config.powerful`），
+    // 与现网 worker loop 同一个 slot（`initializeAgentLayer` 的 `model_config.cost_effective`），
     // 但取值时机不同：那边在装配期解析成 `sdkEnvWorker` 字段，这里每次起化身现读现解析。
-    const connInfo = this.agentConfig?.model_config?.powerful
+    const connInfo = this.agentConfig?.model_config?.cost_effective
     if (!connInfo) {
       throw new Error(
-        "[builtin-worker] model_config 缺少 'powerful' slot，无法解析 builtin worker 的 LLM 连接信息",
+        "[builtin-worker] model_config 缺少 'cost_effective' slot，无法解析 builtin worker 的 LLM 连接信息",
       )
     }
     const sdkEnv = this.buildSdkEnv(connInfo)
@@ -2246,8 +2247,9 @@ export class UnifiedAgent extends ModuleBase {
     const candidate = next.agent_config
     if (!candidate) throw new Error('Pulled runtime config has no agent config')
     // All fallible work happens before the live fields are touched.
-    const worker = candidate.model_config.powerful
-    const digest = candidate.model_config.cost_effective ?? worker
+    const worker = candidate.model_config.cost_effective
+    // digest 维持既有回退语义（cost_effective 缺失时回落 powerful），不随 worker 槽位调整变化。
+    const digest = candidate.model_config.cost_effective ?? candidate.model_config.powerful
     const nextWorkerSdk = worker ? this.buildSdkEnv(worker) : undefined
     const nextDigestSdk = digest ? this.buildSdkEnv(digest) : undefined
     const nextMcp = await McpConnector.prepare(await this.computerUseOwner.prepare(candidate.mcp_servers ?? []))
@@ -3479,7 +3481,8 @@ export class UnifiedAgent extends ModuleBase {
 
     // 更新 Worker Agent
     if (this.roles.has('worker')) {
-      const workerConfig = modelConfig.powerful
+      // 2026-11-25 槽位调整：worker 热更同样走 cost_effective slot。
+      const workerConfig = modelConfig.cost_effective
       if (workerConfig) {
         const newWorkerSdkEnv = this.buildSdkEnv(workerConfig)
         this.sdkEnvWorker = newWorkerSdkEnv

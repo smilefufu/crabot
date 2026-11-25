@@ -1,5 +1,11 @@
 # Crabot 项目进度
 
+### builtin worker 降槽 cost_effective + 恢复 plan-and-execute 委派约束（2026-11-25，PR 待审）
+
+- 24h 用量统计显示 powerful 槽承载 98.6% token（worker 执行量占 77%），v2 §11.8.2 委派约束在 2026-11-10 prompt 基线中丢失、code_planner→code_writer 链路零调用。按已确认 [spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-11-25-worker-cost-effective-slot-design.md) 实施：worker 四处解析点（初始化/配置热更/builtin 起化身/updateLlmClients）与 builtin 就绪判据改读 cost_effective，不做槽位间回退；digest 回退维持现状；委派硬约束只注入 builtin worker prompt（共享 WORKER_WORKFLOW_GUIDANCE 不动，CLI worker 零涉及）；不加强制门。
+- 协议先行：base-protocol §5.16 + protocol-agent-v3 §11（3.22.2）已推送文档仓。
+- 新增 worker-slot-resolution 5 项测试与 prompt 契约断言通过；回归对比组与 main 逐项一致（builtin-production-runtime 在 main 即 36 个既有失败，skill fixture 与 #247 脱节，未在本 PR 修复）。生效后观察项：trace 中 worker 模型切到 cost_effective 槽、delegate_task 出现 planner→writer 串联、直改用户项目代码比例下降。
+
 ### bg-entities task 终态清理接线（2026-11-23）
 
 - 补上既有设计漏接线：worker task 进入 `closed` 时调用 `removeTerminalShellsByTask`，清该 task 名下终态 shell；7d GC 仍作兜底。
