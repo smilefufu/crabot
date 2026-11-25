@@ -116,7 +116,7 @@ function makeConfig(p: {
       instance_id: 'p7f',
       roles: ['worker'],
       system_prompt: p.systemPrompt ?? '你是测试用 Crabot',
-      model_config: p.modelConfig ?? { powerful: connInfo('model-A') },
+      model_config: p.modelConfig ?? { powerful: connInfo('model-A'), cost_effective: connInfo('model-A') },
       skills: p.skills ?? REQUIRED_MAINLINE_SKILLS,
       ...(p.tmpPageBaseUrl ? { tmp_page_base_url: p.tmpPageBaseUrl } : {}),
       ...(p.builtinToolConfig ? { builtin_tool_config: p.builtinToolConfig } : {}),
@@ -318,7 +318,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
       vi.mocked(agentHandlerModule.adapterFromSdkEnv).mockReturnValue(actual as never)
     }
     const timeout = connection ? 90000 : 8000
-    const { agent, internals } = boot(connection ? makeConfig({ modelConfig: { powerful: connection } }) : undefined), stack = internals.managerStack!, runtime = internals as any
+    const { agent, internals } = boot(connection ? makeConfig({ modelConfig: { powerful: connection, cost_effective: connection } }) : undefined), stack = internals.managerStack!, runtime = internals as any
     // This acceptance isolates Worker execution; request event routing is outside this test.
     const harnessInternal = stack.harness as any
     harnessInternal.deps.onEvent = async () => ({ consumed: true })
@@ -374,7 +374,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     const sensitiveRpc = vi.mocked(runtime.rpcClient.callSensitive).getMockImplementation()!
     await agent.stop()
     agents.delete(agent)
-    const restarted = boot(connection ? makeConfig({ modelConfig: { powerful: connection } }) : undefined)
+    const restarted = boot(connection ? makeConfig({ modelConfig: { powerful: connection, cost_effective: connection } }) : undefined)
     const restored = restarted.internals as any
     vi.mocked(restored.rpcClient.call).mockImplementation(ordinaryRpc)
     vi.mocked(restored.rpcClient.callSensitive).mockImplementation(sensitiveRpc)
@@ -914,8 +914,8 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
         principal_permissions: sPerms ?? undefined,
       })
 
-      // 生产权威路径：invalidation 后的 authenticated pull。
-      await applyConfigViaPull(internals, { powerful: connInfo('model-B') })
+      // 生产权威路径：invalidation 后的 authenticated pull。worker 读 cost_effective slot。
+      await applyConfigViaPull(internals, { cost_effective: connInfo('model-B') })
       await speak(internals, friendOf('f-master', 'master'))
 
       const next = internals.buildBuiltinWorkerRuntime(await readSpawnContext(internals, worker.worker_id))!
@@ -1117,8 +1117,8 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     })
     expect(workerBurstModels(runEngineSpy)).toEqual(['model-A'])
 
-    // 生产配置变更由 authenticated pull 驱动（update_config 已退役）。
-    await applyConfigViaPull(internals, { powerful: connInfo('model-B') })
+    // 生产配置变更由 authenticated pull 驱动（update_config 已退役）。worker 读 cost_effective slot。
+    await applyConfigViaPull(internals, { cost_effective: connInfo('model-B') })
 
     // 已经起好的那个化身不受影响：它那次 burst 仍记 model-A，没有被追溯改写。
     expect(workerBurstModels(runEngineSpy)).toEqual(['model-A'])
@@ -1369,29 +1369,29 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
 
   // --- 缺配置时 fail-loud ---
 
-  it('model_config 缺 powerful slot → 工厂抛错，spawn 如实落成一次失败尝试（不静默降级）', async () => {
+  it('model_config 缺 cost_effective slot → 工厂抛错，spawn 如实落成一次失败尝试（不静默降级）', async () => {
     const { internals } = boot(makeConfig({ modelConfig: { fast: connInfo('model-A') } }))
     const managerKey = (`test::${'friend-noconf'}` as ManagerKey)
 
     // Keep this test on the intended factory failure seam instead of the earlier runtime
     // admission guard; Admin now refuses to publish such a config in production.
-    // P6-B：registry gate 也要一并旁路——缺 powerful 时 builtin 在 registry 里同样
+    // P6-B：registry gate 也要一并旁路——缺 cost_effective 时 builtin 在 registry 里同样
     // not ready（模型 slot 不可解析），那是更靠前的同一 fail-loud 语义，但本测试
     // 的验收点是工厂抛错如实落 failed 尝试。
     const admission = internals.managerStack!.harness.deps.assertExecutionAdmission
     const implReady = internals.managerStack!.harness.deps.assertWorkerImplReady
-    // P6-C：纯选择器同样要旁路（缺 powerful 时 builtin 在 registry 里 not ready，
+    // P6-C：纯选择器同样要旁路（缺 cost_effective 时 builtin 在 registry 里 not ready，
     // 选择器会先于工厂抛错——本测试验收的是工厂失败缝）。
     const selector = internals.managerStack!.harness.deps.selectWorkerImpl
     const builtinDefaults = internals.managerStack!.harness.deps.builtinSpawnDefaults
     internals.managerStack!.harness.deps.assertExecutionAdmission = undefined
     internals.managerStack!.harness.deps.assertWorkerImplReady = undefined
     internals.managerStack!.harness.deps.selectWorkerImpl = undefined
-    // fence 里的 assertReady 同理（缺 powerful 时 builtin not ready）。
+    // fence 里的 assertReady 同理（缺 cost_effective 时 builtin not ready）。
     const fence = internals.managerStack!.harness.deps.acquireWorkerFence
     internals.managerStack!.harness.deps.acquireWorkerFence = undefined
     internals.managerStack!.harness.deps.builtinSpawnDefaults = (ctx: unknown) => internals.buildBuiltinWorkerRuntime(ctx)
-    await expect(spawnBuiltin(internals, managerKey)).rejects.toThrow(/powerful/)
+    await expect(spawnBuiltin(internals, managerKey)).rejects.toThrow(/cost_effective/)
     internals.managerStack!.harness.deps.assertExecutionAdmission = admission
     internals.managerStack!.harness.deps.assertWorkerImplReady = implReady
     internals.managerStack!.harness.deps.selectWorkerImpl = selector

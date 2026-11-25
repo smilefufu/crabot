@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { assembleBuiltinWorkerPrompt } from '../../src/prompts/builtin-worker.js'
+import { WORKER_WORKFLOW_GUIDANCE } from '../../src/prompts/workflow-guidance.js'
 import { assembleManagerSystemPrompt } from '../../src/manager/prompt.js'
 
 describe('独立角色提示词', () => {
@@ -11,6 +12,13 @@ describe('独立角色提示词', () => {
     expect(prompt).toContain('worker.project-context')
     expect(prompt).toContain('默认工作目录：/tmp/prompt-review')
     expect(prompt).not.toContain('所有中间产物和最终产出都要落在这个目录')
+  })
+
+  it('plan-and-execute 委派约束只注入 builtin worker prompt，不进共享 guidance（CLI worker 无 delegate_task）', () => {
+    const prompt = assembleBuiltinWorkerPrompt({ workspaceRoot: '/tmp/prompt-review', imageAvailable: false })
+    for (const present of ['code_planner', 'code_writer', 'delegate_task', 'STATUS: DONE / DONE_WITH_CONCERNS / BLOCKED', 'BLOCKER_TYPE']) expect(prompt).toContain(present)
+    expect(WORKER_WORKFLOW_GUIDANCE).not.toContain('delegate_task')
+    expect(WORKER_WORKFLOW_GUIDANCE).not.toContain('code_planner')
   })
 
   it('保留原目标并将异步恢复交给系统，不暗示模型调用等待工具', () => {
