@@ -69,6 +69,10 @@ const ORCHESTRATION: OrchestrationConfig = {
 }
 
 const REQUIRED_MAINLINE_SKILLS: SkillConfig[] = [
+  // 与 capability-policy.ts 的 REQUIRED_MAINLINE_WORKER_SKILL_NAMES 对齐（#247 新增前三项时漏更本 fixture）。
+  { id: 'browser-interaction-test-check', name: 'browser-interaction-test-check', description: '浏览器交互测试检查', skill_dir: '/tmp/skills/browser-interaction-test-check' },
+  { id: 'web-page-visual-check', name: 'web-page-visual-check', description: '网页视觉检查', skill_dir: '/tmp/skills/web-page-visual-check' },
+  { id: 'pptx-source-to-delivery', name: 'pptx-source-to-delivery', description: 'PPTX 模板交付', skill_dir: '/tmp/skills/pptx-source-to-delivery' },
   { id: 'tmp-page', name: 'tmp-page', description: '临时页面', skill_dir: '/tmp/skills/tmp-page' },
 ]
 
