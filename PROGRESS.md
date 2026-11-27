@@ -1,11 +1,12 @@
 # Crabot 项目进度
 
-### Agent 启动历史 trace 索引阻塞健康检查（2026-11-27，修复已合并、未部署）
+### Agent 启动历史 trace 索引阻塞健康检查（2026-11-27，已合并并部署本机 desktop.35）
 
 - 现象：本机 release 实例（desktop.33-local）crabot-agent 每 ~3 分钟被 MM 健康检查连续 3 次 5 秒超时杀掉重启，GUI 聊天/任务不可用；日志为 `history index built ... ms=138k~182k`。根因：v4 append-only 后 `foldHistoricalTraceLogs` 对整个 `traces-v4` 逐文件同步 `readFileSync`+fold、不让出事件循环；全量 2.4GB 历史数据下连续阻塞约 40 秒（抽样 167 文件/20.8MB=1.02s 外推）。
 - 修复：新增 `TraceLog.foldFileChunked`（按 50ms 预算分片让出事件循环），历史索引改用该入口并保留文件间让出；`foldFile` 与原调用方语义不变。新增“两次 fold 之间必须发生事件循环让出”回归测试与分片/同步结果等价测试。
 - 验证：trace-store / trace-log / append-outcome 70 项通过，Agent 类型检查通过；临时副本全量 2.4GB 数据离线构建 `maxGap=317ms`（修复前 5.6s），索引总耗时 114s 不变。
-- 本地现场：11:06 起进入重启循环；已按桌面停止路径停实例，将 2.4GB 历史 trace 移至 `data/agent/traces-hold-20261127/`（现场只留 11-27 当天），重启后索引 1.1s、agent 稳定 healthy。**本修复尚未部署到 release；部署前不要移回历史 trace，否则循环复发。**
+- 本地现场：11:06 起进入重启循环；先用桌面停止路径停实例，将 2.4GB 历史 trace 暂存至 `data/agent/traces-hold-20261127/`（现场只留 11-27 当天），重启后索引 1.1s、agent 稳定。随后从 main `fb805080` 构建并静默安装 `0.1.0-desktop.35-local` 未签名单层候选（EXE 564,652,271 字节，SHA-256 `bd3b3e15c12c0f5f06efb1f0625d8317ba8221e66ac4371925b36112a7d23f3f`，位于 `.desktop-build/manual-35/installer/distribution/`）；确认安装后的 core 含 `foldFileChunked` 后将历史 trace 全部移回。全量 2.4GB 启动索引 `files=15 lines=7304 traces=1086 episodes=8577 ms=209994`，agent 全程 healthy、无重启，已超过旧循环的 3 分钟必杀周期。
+- 构建说明：源码为 main `fb805080`（含本修复 `b4fe8578` 与 #267）；stage-core 一次通过。`package-application` 的 electron-builder `icon-tool` 子进程在本机因提交内存紧张（系统 commit 仅余 ~9GB）两次失败，最终仅以进程级 `ELECTRON_BUILDER_ICONS_TOOLSET_DIR` 指向预生成合法 ICO 的包装工具完成构建，未改仓库或全局缓存；正式发版仍应让原 icon-tool 正常执行。
 - Follow-up：构造函数 `recoverTraceLog` 仍同步扫描全部 v4 文件（实测 8.4s，发生在注册前，不影响健康检查）；`mergeHistoricalIndex` 单次 606ms；MM 重启限流窗口与 ~3 分钟重启周期叠加导致无限循环，属重启策略问题另议。
 
 ### inspect_project_docs 增加 summarize（2026-11-27，已合并 #267）
