@@ -1,5 +1,13 @@
 # Crabot 项目进度
 
+### Agent 启动历史 trace 索引阻塞健康检查（2026-11-27，修复已合并、未部署）
+
+- 现象：本机 release 实例（desktop.33-local）crabot-agent 每 ~3 分钟被 MM 健康检查连续 3 次 5 秒超时杀掉重启，GUI 聊天/任务不可用；日志为 `history index built ... ms=138k~182k`。根因：v4 append-only 后 `foldHistoricalTraceLogs` 对整个 `traces-v4` 逐文件同步 `readFileSync`+fold、不让出事件循环；全量 2.4GB 历史数据下连续阻塞约 40 秒（抽样 167 文件/20.8MB=1.02s 外推）。
+- 修复：新增 `TraceLog.foldFileChunked`（按 50ms 预算分片让出事件循环），历史索引改用该入口并保留文件间让出；`foldFile` 与原调用方语义不变。新增“两次 fold 之间必须发生事件循环让出”回归测试与分片/同步结果等价测试。
+- 验证：trace-store / trace-log / append-outcome 70 项通过，Agent 类型检查通过；临时副本全量 2.4GB 数据离线构建 `maxGap=317ms`（修复前 5.6s），索引总耗时 114s 不变。
+- 本地现场：11:06 起进入重启循环；已按桌面停止路径停实例，将 2.4GB 历史 trace 移至 `data/agent/traces-hold-20261127/`（现场只留 11-27 当天），重启后索引 1.1s、agent 稳定 healthy。**本修复尚未部署到 release；部署前不要移回历史 trace，否则循环复发。**
+- Follow-up：构造函数 `recoverTraceLog` 仍同步扫描全部 v4 文件（实测 8.4s，发生在注册前，不影响健康检查）；`mergeHistoricalIndex` 单次 606ms；MM 重启限流窗口与 ~3 分钟重启周期叠加导致无限循环，属重启策略问题另议。
+
 ### builtin worker 降槽 cost_effective + 恢复 plan-and-execute 委派约束（2026-11-25，已合并 #266）
 
 - 24h 用量统计显示 powerful 槽承载 98.6% token（worker 执行量占 77%），v2 §11.8.2 委派约束在 2026-11-10 prompt 基线中丢失、code_planner→code_writer 链路零调用。按已确认 [spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-11-25-worker-cost-effective-slot-design.md) 实施：worker 四处解析点（初始化/配置热更/builtin 起化身/updateLlmClients）与 builtin 就绪判据改读 cost_effective，不做槽位间回退；digest 回退维持现状；委派硬约束只注入 builtin worker prompt（共享 WORKER_WORKFLOW_GUIDANCE 不动，CLI worker 零涉及）；不加强制门。

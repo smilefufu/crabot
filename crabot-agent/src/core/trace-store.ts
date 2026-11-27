@@ -256,7 +256,7 @@ export class TraceStore {
           stream.destroy()
         }
       }
-      entries.push(...this.foldHistoricalTraceLogs(episodes))
+      entries.push(...await this.foldHistoricalTraceLogs(episodes))
       this.mergeHistoricalIndex(entries, episodes)
       merged = true
       console.log(
@@ -756,10 +756,13 @@ export class TraceStore {
     if (trace.related_task_id) this.addToTaskIndex(trace.related_task_id, trace.trace_id)
   }
 
-  private foldHistoricalTraceLogs(episodes: Map<string, ManagerEpisodeTrace>): TraceIndexEntry[] {
+  private async foldHistoricalTraceLogs(episodes: Map<string, ManagerEpisodeTrace>): Promise<TraceIndexEntry[]> {
     const entries: TraceIndexEntry[] = []
     for (const filePath of this.log?.files() ?? []) {
-      const folded = this.log!.foldFile(filePath)
+      const folded = await this.log!.foldFileChunked(filePath)
+      // 后台索引必须让出事件循环：v4 每 trace 一个文件，连续同步折叠会阻塞
+      // 健康检查 RPC；大文件内部另由 foldFileChunked 分片让出。
+      await new Promise<void>((resolve) => setImmediate(resolve))
       if (!folded) continue
       if (folded.kind === 'manager_episode') {
         const episode = folded.trace as ManagerEpisodeTrace
