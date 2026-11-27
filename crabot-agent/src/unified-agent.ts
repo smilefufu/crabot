@@ -125,6 +125,7 @@ import { TraceCursorStore, incarnationFingerprint } from './workers/trace/cursor
 import { NativeTraceCopyStore } from './workers/trace/native-copy.js'
 import { makeAgentEventPublisher, type AgentEventPublisher } from './manager/events.js'
 import { resolveManagerModelConfig } from './manager/model-slot.js'
+import { createProjectDocSummarizer } from './manager/project-doc-summarizer.js'
 import type { ManagerEpisodeFailure } from './manager/types.js'
 import { isLlmRequestFailure } from './engine/llm-adapter-types.js'
 import { createCrabMemoryServer } from './mcp/crab-memory.js'
@@ -1320,6 +1321,16 @@ export class UnifiedAgent extends ModuleBase {
         }
       },
       managerModel: () => resolveManagerModelConfig(this.agentConfig?.model_config).model_id,
+      // 项目文档摘要只走 cost_effective；槽缺失/调用失败由工具回退原文，不借用 powerful。
+      projectDocSummarizer: (observe) => {
+        const connection = this.agentConfig?.model_config?.cost_effective
+        if (!connection?.apikey || !connection.model_id) return undefined
+        return createProjectDocSummarizer({
+          adapter: () => adapterFromSdkEnv(this.buildSdkEnv(connection)),
+          model: connection.model_id,
+          observe,
+        })
+      },
       managerThinking: () => {
         const conn = resolveManagerModelConfig(this.agentConfig?.model_config)
         return thinkingParam(conn.thinking_level, conn.thinking_custom)

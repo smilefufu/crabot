@@ -12,6 +12,7 @@ import type { ResolvedPermissions } from '../../types.js'
 import type { WorkerContext } from '../../workers/harness/context-store.js'
 import type { ManagerKey } from '../../workers/harness/ledger-types.js'
 import type { LedgerStore } from '../../workers/harness/ledger-store.js'
+import type { ProjectDocSummary, ProjectDocSummarizer } from '../project-doc-summarizer.js'
 
 const MAX_READ_LINES = 400
 const DEFAULT_READ_LINES = 200
@@ -20,6 +21,12 @@ const DEFAULT_LIST_PAGE_SIZE = 50
 const MAX_SEARCH_MATCHES = 50
 const DEFAULT_SEARCH_MATCHES = 20
 const MAX_READ_FILE_BYTES = 1024 * 1024
+const SUMMARY_RAW_BELOW_CHARS = 4000
+const SUMMARY_MAX_CHARS = 2000
+const SUMMARY_MAX_LINES = 80
+const SUMMARY_MAX_QUOTES = 8
+const SUMMARY_CACHE_CAPACITY = 32
+const SUMMARY_TIMEOUT_MS = 60_000
 const EXCLUDED_DIRECTORIES = new Set([
   '.git', 'node_modules', '.pnpm-store', 'dist', 'build', 'coverage', '.next',
 ])
@@ -48,6 +55,8 @@ export interface ProjectDocToolDeps {
   readonly managerPrincipalPermissions?: ResolvedPermissions
   /** Manager 模型视觉能力；仅显式 true 暴露 read_image（与入站图注入 supportsVision 同口径）。 */
   readonly supportsVision?: () => boolean | undefined
+  /** cost_effective 项目文档摘要器；缺省时 summarize 返回原文并说明原因。 */
+  readonly summarizer?: ProjectDocSummarizer
 }
 
 interface ListedFile {
@@ -400,27 +409,146 @@ async function searchTextFiles(root: string, scope: string, query: string, limit
   return { operation: 'search' as const, matches, truncated }
 }
 
+const summaryCache = new Map<string, ProjectDocSummary>()
+
+function cachedSummary(key: string): ProjectDocSummary | undefined {
+  const value = summaryCache.get(key)
+  if (!value) return undefined
+  summaryCache.delete(key)
+  summaryCache.set(key, value)
+  return value
+}
+
+function cacheSummary(key: string, value: ProjectDocSummary): void {
+  summaryCache.delete(key)
+  summaryCache.set(key, value)
+  while (summaryCache.size > SUMMARY_CACHE_CAPACITY) {
+    const oldest = summaryCache.keys().next().value
+    if (oldest === undefined) break
+    summaryCache.delete(oldest)
+  }
+}
+
+function characterCount(value: string): number {
+  return Array.from(value).length
+}
+
+async function readWholeTextFile(root: string, relativePath: string) {
+  const file = await readableTextFile(root, relativePath)
+  if (file.size > MAX_READ_FILE_BYTES) throw new Error('文件超过 1 MiB，拒绝读取')
+  const body = await fs.readFile(file.realPath, 'utf-8')
+  const lines = textLines(body)
+  return { file, body, digest: sha256(body), lines, chars: characterCount(body) }
+}
+
+function rawSummary(
+  file: { path: string },
+  body: string,
+  digest: string,
+  totalLines: number,
+  chars: number,
+  fallbackReason?: string,
+) {
+  return {
+    operation: 'summarize' as const,
+    mode: 'raw' as const,
+    path: file.path,
+    digest,
+    total_lines: totalLines,
+    chars,
+    content: body,
+    ...(fallbackReason ? { fallback_reason: fallbackReason } : {}),
+  }
+}
+
+/** 工具侧校验行号与原文，并对摘要/引用数量做硬上限；不信任模型输出的长度。 */
+function materializeSummary(raw: ProjectDocSummary, lines: ReadonlyArray<string>) {
+  let truncated = false
+  let uncertain = raw.uncertain === true
+  const quotes: Array<{ start_line: number; end_line: number; text: string }> = []
+  for (const quote of raw.quotes) {
+    if (quotes.length >= SUMMARY_MAX_QUOTES) { truncated = true; break }
+    if (!Number.isInteger(quote.start_line) || !Number.isInteger(quote.end_line)
+      || quote.start_line < 1 || quote.end_line > lines.length || quote.start_line > quote.end_line
+      || typeof quote.text !== 'string' || quote.text.trim() === '') {
+      uncertain = true
+      continue
+    }
+    const text = lines.slice(quote.start_line - 1, quote.end_line).join('\n')
+    if (text.trim() !== quote.text.trim()) { uncertain = true; continue }
+    quotes.push({ start_line: quote.start_line, end_line: quote.end_line, text })
+  }
+  let summary = raw.summary
+  const summaryLines = summary.split(/\r?\n/)
+  if (summaryLines.length > SUMMARY_MAX_LINES) {
+    summary = summaryLines.slice(0, SUMMARY_MAX_LINES).join('\n')
+    truncated = true
+  }
+  if (characterCount(summary) > SUMMARY_MAX_CHARS) {
+    summary = Array.from(summary).slice(0, SUMMARY_MAX_CHARS).join('')
+    truncated = true
+  }
+  if (summary.trim() === '') throw new Error('摘要为空')
+  return { summary, quotes, truncated, ...(uncertain ? { uncertain: true } : {}) }
+}
+
+async function summarizeTextFile(
+  root: string,
+  relativePath: string,
+  focus: string | undefined,
+  mode: 'auto' | 'raw' | 'summary',
+  summarizer: ProjectDocSummarizer | undefined,
+  callerSignal: AbortSignal | undefined,
+) {
+  const { file, body, digest, lines, chars } = await readWholeTextFile(root, relativePath)
+  const raw = (reason?: string) => rawSummary(file, body, digest, lines.length, chars, reason)
+  const summaryResult = (materialized: ReturnType<typeof materializeSummary>) => ({
+    operation: 'summarize' as const,
+    mode: 'summary' as const,
+    path: file.path,
+    digest,
+    total_lines: lines.length,
+    chars,
+    ...materialized,
+  })
+  if (mode === 'raw' || chars < SUMMARY_RAW_BELOW_CHARS) return raw()
+  if (!summarizer) return raw('summarizer_unavailable')
+  const cacheKey = [root, file.path, digest, sha256(focus ?? ''), summarizer.cacheKey].join('\0')
+  const cached = cachedSummary(cacheKey)
+  if (cached) return summaryResult(materializeSummary(cached, lines))
+  const timeout = AbortSignal.timeout(SUMMARY_TIMEOUT_MS)
+  const signal = callerSignal ? AbortSignal.any([callerSignal, timeout]) : timeout
+  try {
+    const summary = await summarizer.summarize({ path: file.path, digest, text: body, focus, signal })
+    const materialized = materializeSummary(summary, lines)
+    cacheSummary(cacheKey, summary)
+    return summaryResult(materialized)
+  } catch (error) {
+    return raw(`summary_failed: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
 export function buildProjectDocTools(deps: ProjectDocToolDeps): ToolDefinition[] {
   // 与入站图注入同口径：仅显式 true 视为具备视觉能力（undefined/false 都不暴露 read_image）。
   const visionAvailable = deps.supportsVision?.() === true
   const inspect = defineTool({
     name: 'inspect_project_docs',
     description: visionAvailable
-      ? '在本处理回合有权访问的项目根内，按需列举、分段读取或字面搜索文档（Markdown 与白名单文本），或读取产物图片（read_image，返回图像供视觉分析）。'
-      : '在本处理回合有权访问的项目根内，按需列举、分段读取或字面搜索文档（Markdown 与白名单文本）。',
+      ? '在本处理回合有权访问的项目根内，按需列举、分段读取或字面搜索文档（Markdown 与白名单文本），长文档可先 summarize 得到带原文行号的结构化摘要；也可读取产物图片（read_image，返回图像供视觉分析）。摘要只作导航，不可逆动作前仍应回读原文。'
+      : '在本处理回合有权访问的项目根内，按需列举、分段读取或字面搜索文档（Markdown 与白名单文本），长文档可先 summarize 得到带原文行号的结构化摘要。摘要只作导航，不可逆动作前仍应回读原文。',
     inputSchema: {
       type: 'object',
       properties: {
         project_root: { type: 'string', description: '项目 workspace root 的规范化绝对路径' },
         operation: {
           type: 'string',
-          enum: visionAvailable ? ['list', 'read', 'search', 'read_image'] : ['list', 'read', 'search'],
+          enum: visionAvailable ? ['list', 'read', 'search', 'summarize', 'read_image'] : ['list', 'read', 'search', 'summarize'],
         },
         path: {
           type: 'string',
           description: visionAvailable
-            ? '项目根下的相对路径；list/search 可用目录范围；read 支持 Markdown 与白名单文本（txt/json/yaml/yml/toml/log/csv）；read_image 支持图片（png/jpg/jpeg/webp）'
-            : '项目根下的相对路径；list/search 可用目录范围；read 支持 Markdown 与白名单文本（txt/json/yaml/yml/toml/log/csv）',
+            ? '项目根下的相对路径；list/search 可用目录范围；read/summarize 支持 Markdown 与白名单文本（txt/json/yaml/yml/toml/log/csv），summarize 只接受单个文件；read_image 支持图片（png/jpg/jpeg/webp）'
+            : '项目根下的相对路径；list/search 可用目录范围；read/summarize 支持 Markdown 与白名单文本（txt/json/yaml/yml/toml/log/csv），summarize 只接受单个文件',
         },
         query: { type: 'string', description: 'search 必填的不区分大小写字面查询' },
         start_line: { type: 'integer', minimum: 1, description: 'read 默认 1' },
@@ -428,14 +556,16 @@ export function buildProjectDocTools(deps: ProjectDocToolDeps): ToolDefinition[]
         page: { type: 'integer', minimum: 1, description: 'list 默认 1' },
         page_size: { type: 'integer', minimum: 1, maximum: MAX_LIST_PAGE_SIZE, description: 'list 默认 50，最大 100' },
         limit: { type: 'integer', minimum: 1, maximum: MAX_SEARCH_MATCHES, description: 'search 默认 20，最大 50' },
+        focus: { type: 'string', description: 'summarize 的提取重点；为空时提取通用强制流程、审批、验证、禁止事项和例外' },
+        mode: { type: 'string', enum: ['auto', 'raw', 'summary'], description: 'summarize 默认 auto；raw 强制原文；summary 在 4000 字符以下仍返回原文' },
       },
       required: ['project_root', 'operation'],
       additionalProperties: false,
     },
     isReadOnly: true,
-    call: async (input): Promise<ToolCallResult> => {
+    call: async (input, context): Promise<ToolCallResult> => {
       try {
-        if (!hasOnlyKeys(input, ['project_root', 'operation', 'path', 'query', 'start_line', 'max_lines', 'page', 'page_size', 'limit'])) {
+        if (!hasOnlyKeys(input, ['project_root', 'operation', 'path', 'query', 'start_line', 'max_lines', 'page', 'page_size', 'limit', 'focus', 'mode'])) {
           throw new Error('包含未定义字段')
         }
         const root = await authorizeProjectRoot(deps, input.project_root, false)
@@ -449,6 +579,14 @@ export function buildProjectDocTools(deps: ProjectDocToolDeps): ToolDefinition[]
             images: [image],
             isError: false,
           }
+        }
+        if (input.operation === 'summarize') {
+          if (!hasOnlyKeys(input, ['project_root', 'operation', 'path', 'focus', 'mode'])) throw new Error('summarize 包含无关参数')
+          const relative = normalizeRelativePath(input.path, 'path')
+          if (input.focus !== undefined && typeof input.focus !== 'string') throw new Error('summarize.focus 必须是字符串')
+          const mode = input.mode ?? 'auto'
+          if (mode !== 'auto' && mode !== 'raw' && mode !== 'summary') throw new Error('summarize.mode 必须是 auto、raw 或 summary')
+          return ok(await summarizeTextFile(root, relative, input.focus as string | undefined, mode, deps.summarizer, context?.abortSignal))
         }
         if (input.operation === 'list') {
           if (!hasOnlyKeys(input, ['project_root', 'operation', 'path', 'page', 'page_size'])) throw new Error('list 包含无关参数')
@@ -482,7 +620,7 @@ export function buildProjectDocTools(deps: ProjectDocToolDeps): ToolDefinition[]
           const limit = boundedInteger(input.limit, DEFAULT_SEARCH_MATCHES, MAX_SEARCH_MATCHES, 'limit')
           return ok(await searchTextFiles(root, scope, input.query, limit))
         }
-        throw new Error('operation 必须是 list、read、search' + (visionAvailable ? ' 或 read_image' : ''))
+        throw new Error('operation 必须是 list、read、search、summarize' + (visionAvailable ? ' 或 read_image' : ''))
       } catch (error) {
         return fail('inspect_project_docs', error)
       }

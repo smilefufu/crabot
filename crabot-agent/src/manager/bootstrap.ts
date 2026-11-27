@@ -9,7 +9,7 @@ import { ConversationRequestAuthority } from './conversation-request-authority.j
 import { findVoiceDelivery } from './voice-output.js'
 import { voiceOutputPort } from './voice-output-port.js'
 import { collectInboundImages } from './image-vision.js'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { requestObservation, persistObservation, executionObservation, readObservation, observationFile } from '../permissions/execution-observation.js'
 /**
  * manager 栈装配 —— protocol-agent-v3.md §4/§5/§6/§7(P5 Task 1)。
@@ -65,6 +65,7 @@ import { ManagerSessionStore } from './session-store.js'
 import { makeTaskStatusEventBridge, type AgentEventPublisher } from './events.js'
 import { shouldWakeOnHarnessEvent } from './inbound-adapters.js'
 import { buildManagerToolFace } from './tools/tool-face.js'
+import type { ProjectDocSummaryObservation, ProjectDocSummarizer } from './project-doc-summarizer.js'
 import { PrincipalBindingStore } from './principal-binding-store.js'
 import { TrustedHumanInputStore } from './trusted-human-input-store.js'
 import { ConversationRequestStore } from './conversation-request-store.js'
@@ -206,6 +207,8 @@ export interface BootstrapDeps {
   readonly managerContextWindowTokens?: () => number | undefined
   /** manager 模型的视觉能力(随 powerful slot supports_vision);控制入站图片是否注入 episode 输入 */
   readonly managerSupportsVision?: () => boolean | undefined
+  /** cost_effective 项目文档摘要器工厂；缺省时 inspect_project_docs.summarize 返回原文。 */
+  readonly projectDocSummarizer?: (observe: (observation: ProjectDocSummaryObservation) => void) => ProjectDocSummarizer | undefined
   readonly messagingDeps: CrabMessagingDeps
   /**
    * crab-memory server **工厂**(P7 J:原本是一个建好的 `McpServer` 定值)。
@@ -1029,6 +1032,30 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         const master = !!scheduleMasterAuthorization && await principals.validateMasterAuthorization(scheduleMasterAuthorization)
         return makeMemoryContext(applyGroupScopeFallback(fresh, scheduleTarget.type, scheduleTarget.session_id) ?? undefined, master)
       }
+      const projectDocSummarizer = deps.projectDocSummarizer?.(observation => {
+        const traceId = traceHooks?.currentTraceId()
+        if (!traceId || !deps.traceWriter) return
+        try {
+          deps.traceWriter.appendSpan(traceId, {
+            span_id: `project-doc-summary-${randomUUID()}`,
+            parent_span_id: `root-${traceId}`,
+            type: 'llm_call',
+            status: observation.status === 'completed' ? 'completed' : 'failed',
+            started_at: observation.started_at,
+            ended_at: observation.ended_at,
+            duration_ms: observation.duration_ms,
+            details: {
+              kind: 'project_doc_summary',
+              purpose: 'project_doc_summary',
+              model_id: observation.model_id,
+              path: observation.path,
+              digest: observation.digest,
+              ...(observation.usage ? { usage: observation.usage } : {}),
+              ...(observation.error ? { error: observation.error } : {}),
+            },
+          })
+        } catch { /* observation must not change the tool result */ }
+      })
       return buildManagerToolFace({
         dailyReflection: dailyReflectionFor(key),
         describeExecutionTools: deps.describeExecutionTools,
@@ -1160,6 +1187,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
           managerKey: key,
           managerPrincipalPermissions: managerPermissions ?? undefined,
           supportsVision: deps.managerSupportsVision,
+          ...(projectDocSummarizer ? { summarizer: projectDocSummarizer } : {}),
         },
       })
     },
