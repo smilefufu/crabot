@@ -8,12 +8,13 @@
 - 本地现场：11:06 起进入重启循环；已按桌面停止路径停实例，将 2.4GB 历史 trace 移至 `data/agent/traces-hold-20261127/`（现场只留 11-27 当天），重启后索引 1.1s、agent 稳定 healthy。**本修复尚未部署到 release；部署前不要移回历史 trace，否则循环复发。**
 - Follow-up：构造函数 `recoverTraceLog` 仍同步扫描全部 v4 文件（实测 8.4s，发生在注册前，不影响健康检查）；`mergeHistoricalIndex` 单次 606ms；MM 重启限流窗口与 ~3 分钟重启周期叠加导致无限循环，属重启策略问题另议。
 
-### inspect_project_docs 增加 summarize（2026-11-27，PR 待审）
+### inspect_project_docs 增加 summarize（2026-11-27，已合并 #267）
 
 - Manager 可按需读取项目规则入口：小于 4000 字符返回原文，达到阈值用 cost_effective 槽生成带原文行号引用的结构化摘要；摘要最多 2000 字符/80 行、quotes 最多 8，行号校验失败标 `uncertain`，模型不可用/超时/解析失败回退原文。内存 LRU 按 digest+focus 缓存。
 - 协议先行：protocol-agent-v3 3.23.0；spec `2026-11-27-inspect-project-docs-summarize-design.md`。
 - 验证：project-doc-tools 26 项（含 6 项 summarize）、project-doc-summarizer 3 项通过；Agent `tsc --noEmit` 通过。
 - 边界：只提供工具，未自动在项目任务前强制读文档；Manager onboarding、Worker `PROCESS_CONFLICT` 回执与部署门禁仍属另一条设计线。
+- 已合并 #267，自动 review 通过。非阻塞 follow-up：request-scoped 回合的摘要调用尚无 trace（observe 为 no-op）；max_tokens 等非 end_turn 失败的 span 不含 usage（usage 赋值在 stopReason 检查后）。均不影响本次行为。
 
 ### builtin worker 降槽 cost_effective + 恢复 plan-and-execute 委派约束（2026-11-25，已合并 #266）
 
