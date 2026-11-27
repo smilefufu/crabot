@@ -41,6 +41,16 @@ describe('append-only trace log', () => {
     expect((folded?.trace as AgentTrace).resume_checkpoint?.agent_version).toBe('1')
   })
 
+  it('chunked fold produces the same trace as the synchronous fold', async () => {
+    appendScript()
+    const file = log.file('t-1', started_at)
+    const sync = new TraceLog(root).foldFile(file)
+    const chunked = await new TraceLog(root).foldFileChunked(file, 0)
+    expect(chunked?.ended).toBe(sync?.ended)
+    expect(chunked?.trace).toEqual(sync?.trace)
+    expect(chunked?.seqs).toEqual(sync?.seqs)
+  })
+
   it('ignores one partial trailing line and keeps earlier records', () => {
     appendScript()
     const file = log.file('t-1', started_at)

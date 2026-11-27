@@ -3,6 +3,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
 import { TraceStore } from '../../src/core/trace-store'
+import { TraceLog } from '../../src/core/trace-log'
 
 describe('TraceStore', () => {
   describe('startTrace with related_task_id', () => {
@@ -289,6 +290,40 @@ describe('TraceStore index', () => {
       await expect(store.whenIndexed()).resolves.toBeUndefined()
     } finally {
       fs.rmSync(dir, { recursive: true })
+    }
+  })
+
+  it('yields the event loop between archived trace files during the background index build', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trace-test-'))
+    const originalFold = TraceLog.prototype.foldFileChunked
+    const events: string[] = []
+    let beating = true
+    try {
+      const dayDir = path.join(dir, 'traces-v4', '2026-04-13')
+      fs.mkdirSync(dayDir, { recursive: true })
+      for (let index = 0; index < 6; index++) {
+        fs.writeFileSync(path.join(dayDir, `trace-${index}.jsonl`), '')
+      }
+
+      const store = new TraceStore(10, dir, 'traces-running.jsonl', 'traces-v3-', ['traces-', 'traces-v3-'], false, true)
+      vi.spyOn(TraceLog.prototype, 'foldFileChunked').mockImplementation(function (this: TraceLog, file: string) {
+        events.push('fold')
+        return originalFold.call(this, file)
+      })
+      const beat = (): void => {
+        events.push('tick')
+        if (beating) setImmediate(beat)
+      }
+      setImmediate(beat)
+
+      await store.whenIndexed()
+
+      expect(events.filter((event) => event === 'fold').length).toBeGreaterThan(1)
+      expect(events.join(',')).not.toMatch(/fold,fold/)
+    } finally {
+      beating = false
+      vi.restoreAllMocks()
+      fs.rmSync(dir, { recursive: true, force: true })
     }
   })
 

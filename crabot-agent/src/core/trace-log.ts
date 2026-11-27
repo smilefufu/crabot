@@ -263,6 +263,23 @@ export class TraceLog {
     return state
   }
 
+  /** Background-index variant of foldFile: yields the event loop in bounded slices. */
+  async foldFileChunked(file: string, budgetMs = 50): Promise<FoldedTrace | undefined> {
+    let state: FoldedTrace | undefined
+    const records = parseRecords(fs.readFileSync(file, 'utf-8'))
+    let lastYield = Date.now()
+    for (const record of records) {
+      state = apply(state, record)
+      if (Date.now() - lastYield >= budgetMs) {
+        await new Promise<void>((resolve) => setImmediate(resolve))
+        lastYield = Date.now()
+      }
+    }
+    const last = records.at(-1)
+    if (last) this.nextSeq.set(last.trace_id, last.seq + 1)
+    return state
+  }
+
   /** Last complete record's seq; a partial tail is ignored. */
   lastSeq(traceId: string, startedAt: string): number {
     const file = this.file(traceId, startedAt)
