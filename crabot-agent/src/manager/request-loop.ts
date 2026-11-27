@@ -39,6 +39,8 @@ export function createConversationRequestLoop(context: RequestRunContext, deps: 
   const voiceOutput = request.delivery.kind === 'origin' ? deps.voiceOutput : undefined
   const board = new ManagerWorkboardStore(path.join(deps.root, request.request_id, 'workboard'))
   const deliveries = new RequestDeliveryStore(path.join(deps.root, request.request_id), request)
+  // Request-scoped Manager has no shared episode trace; summarize still uses the same cost_effective slot.
+  const projectDocSummarizer = host.projectDocSummarizer?.(() => {})
   let loop: ManagerLoop, pending = false
   const visibleLedger: ToolFaceDeps['projectDocs']['ledger'] = {
     findWorker: async id => {
@@ -152,7 +154,8 @@ export function createConversationRequestLoop(context: RequestRunContext, deps: 
       schedule: { targetSession: target, ...(source.sender_friend_id ? { creatorFriendId: source.sender_friend_id } : {}),
         canCreate: !!source.sender_friend_id, resolvePermissions: async () => (recheck ? await recheck() : actor).resolved },
       isSystemThread: false, workboard: { store: board, managerKey: key },
-      projectDocs: { ledger: visibleLedger, historyWorkspace: (id, incarnation) => deps.harness.workspaceHistoryRead(id, incarnation), managedWorkspace: (id, workspace) => deps.harness.managedWorkspaceScope(id, workspace), readWorkerContext: id => deps.contexts.read(id), managerKey: key, managerPrincipalPermissions: permissions },
+      projectDocs: { ledger: visibleLedger, historyWorkspace: (id, incarnation) => deps.harness.workspaceHistoryRead(id, incarnation), managedWorkspace: (id, workspace) => deps.harness.managedWorkspaceScope(id, workspace), readWorkerContext: id => deps.contexts.read(id), managerKey: key, managerPrincipalPermissions: permissions,
+        ...(projectDocSummarizer ? { summarizer: projectDocSummarizer } : {}) },
     }
   }
   const scope = new RequestManagerToolScope({ context, raw, checkOperation: async (name, input, actor) => {

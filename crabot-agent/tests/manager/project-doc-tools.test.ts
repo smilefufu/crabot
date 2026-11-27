@@ -10,6 +10,7 @@ import type { ResolvedPermissions } from '../../src/types.js'
 import type { WorkerContext } from '../../src/workers/harness/context-store.js'
 import type { LedgerWorker } from '../../src/workers/harness/ledger-types.js'
 import type { LedgerStore } from '../../src/workers/harness/ledger-store.js'
+import type { ProjectDocSummarizer } from '../../src/manager/project-doc-summarizer.js'
 
 const KEY = 'feishu::cotton-candy' as ManagerKey
 const OTHER_KEY = 'feishu::other' as ManagerKey
@@ -117,7 +118,12 @@ describe('project document tools', () => {
     await fs.rm(root, { recursive: true, force: true })
   })
 
-  function tools(wakeEvent: WakeEvent | undefined, managerPrincipalPermissions?: ResolvedPermissions, supportsVision?: () => boolean | undefined) {
+  function tools(
+    wakeEvent: WakeEvent | undefined,
+    managerPrincipalPermissions?: ResolvedPermissions,
+    supportsVision?: () => boolean | undefined,
+    summarizer?: ProjectDocSummarizer,
+  ) {
     return buildProjectDocTools({
       ledger,
       readWorkerContext: async (workerId) => contexts.get(workerId),
@@ -125,11 +131,17 @@ describe('project document tools', () => {
       managerPrincipalPermissions: managerPrincipalPermissions
         ?? (wakeEvent && 'principalPermissions' in wakeEvent ? wakeEvent.principalPermissions : undefined),
       supportsVision,
+      ...(summarizer ? { summarizer } : {}),
     })
   }
 
-  function tool(wakeEvent: WakeEvent | undefined, name: string, managerPrincipalPermissions?: ResolvedPermissions) {
-    return tools(wakeEvent, managerPrincipalPermissions).find((entry) => entry.name === name)!
+  function tool(
+    wakeEvent: WakeEvent | undefined,
+    name: string,
+    managerPrincipalPermissions?: ResolvedPermissions,
+    summarizer?: ProjectDocSummarizer,
+  ) {
+    return tools(wakeEvent, managerPrincipalPermissions, undefined, summarizer).find((entry) => entry.name === name)!
   }
 
   for (const mode of ['managed default', 'explicit read', 'all', 'narrow docs', 'no file entry', 'wrong Manager', 'outside scope']) it('preserves original history read qualification: ' + mode, async () => {
@@ -423,5 +435,121 @@ describe('project document tools', () => {
 
     await fs.writeFile(join(project, 'too-large.md'), Buffer.alloc(1024 * 1024 + 1, 97))
     expect((await inspect.call({ project_root: project, operation: 'read', path: 'too-large.md' }, {} as never)).isError).toBe(true)
+  })
+
+  describe('summarize', () => {
+    const longLines = Array.from({ length: 120 }, (_, index) => `第${index + 1}行 必须遵守流程 ${'x'.repeat(40)}`)
+    const longText = longLines.join('\n')
+    const granted = () => permissions({ storage: { workspace_path: root, access: 'readwrite' } })
+
+    async function writeLong(name = 'AGENTS.md') {
+      await fs.writeFile(join(project, name), longText)
+    }
+
+    function inspectTool(summarize?: ProjectDocSummarizer['summarize']) {
+      return tool(humanWake(granted()), 'inspect_project_docs', undefined, summarize ? { cacheKey: 'test', summarize } : undefined)
+    }
+
+    it('小于 4000 字符时即使是 summary 模式也返回原文，不调用模型', async () => {
+      await fs.writeFile(join(project, 'short.md'), '短规则\n第二行\n')
+      const summarize = vi.fn()
+      const result = await inspectTool(summarize)
+        .call({ project_root: project, operation: 'summarize', path: 'short.md', mode: 'summary' }, {} as never)
+      expect(result.isError).toBe(false)
+      expect(JSON.parse(result.output)).toMatchObject({
+        operation: 'summarize',
+        mode: 'raw',
+        path: 'short.md',
+        total_lines: 2,
+        chars: 8,
+        content: '短规则\n第二行\n',
+      })
+      expect(summarize).not.toHaveBeenCalled()
+    })
+
+    it('达到阈值时返回结构化摘要、原文引用和整文件 digest', async () => {
+      await writeLong()
+      const summarize = vi.fn(async () => ({
+        summary: '部署前必须在 local_verified 阶段留下真实证据。',
+        quotes: [{ start_line: 2, end_line: 2, text: longLines[1] }],
+      }))
+      const result = await inspectTool(summarize)
+        .call({ project_root: project, operation: 'summarize', path: 'AGENTS.md', focus: '部署门禁' }, {} as never)
+      expect(result.isError).toBe(false)
+      const payload = JSON.parse(result.output)
+      expect(payload).toMatchObject({
+        operation: 'summarize',
+        mode: 'summary',
+        path: 'AGENTS.md',
+        total_lines: 120,
+        chars: Array.from(longText).length,
+        summary: '部署前必须在 local_verified 阶段留下真实证据。',
+        quotes: [{ start_line: 2, end_line: 2, text: longLines[1] }],
+        truncated: false,
+      })
+      expect(payload.digest).toMatch(/^[a-f0-9]{64}$/)
+      expect(summarize).toHaveBeenCalledTimes(1)
+      expect(summarize.mock.calls[0][0]).toMatchObject({ path: 'AGENTS.md', digest: payload.digest, text: longText, focus: '部署门禁' })
+      expect(summarize.mock.calls[0][0].signal).toBeInstanceOf(AbortSignal)
+    })
+
+    it('raw 模式强制原文，不调用模型', async () => {
+      await writeLong()
+      const summarize = vi.fn()
+      const result = await inspectTool(summarize)
+        .call({ project_root: project, operation: 'summarize', path: 'AGENTS.md', mode: 'raw' }, {} as never)
+      expect(JSON.parse(result.output)).toMatchObject({ mode: 'raw', content: longText })
+      expect(summarize).not.toHaveBeenCalled()
+    })
+
+    it('模型失败、缺失或空结果时回退原文并给出原因', async () => {
+      await writeLong()
+      const failing = vi.fn(async () => { throw new Error('provider down') })
+      const failed = await inspectTool(failing)
+        .call({ project_root: project, operation: 'summarize', path: 'AGENTS.md' }, {} as never)
+      expect(JSON.parse(failed.output)).toMatchObject({ mode: 'raw', fallback_reason: 'summary_failed: provider down' })
+
+      const missing = await inspectTool()
+        .call({ project_root: project, operation: 'summarize', path: 'AGENTS.md' }, {} as never)
+      expect(JSON.parse(missing.output)).toMatchObject({ mode: 'raw', fallback_reason: 'summarizer_unavailable' })
+
+      const empty = vi.fn(async () => ({ summary: '   ', quotes: [] }))
+      const emptyResult = await inspectTool(empty)
+        .call({ project_root: project, operation: 'summarize', path: 'AGENTS.md' }, {} as never)
+      expect(JSON.parse(emptyResult.output)).toMatchObject({ mode: 'raw', fallback_reason: 'summary_failed: 摘要为空' })
+    })
+
+    it('丢弃行号不匹配的引用并标记 uncertain，超限时截断', async () => {
+      await writeLong()
+      const summarize = vi.fn(async () => ({
+        summary: '长'.repeat(2500),
+        quotes: [
+          { start_line: 999, end_line: 999, text: '不存在' },
+          ...Array.from({ length: 12 }, (_, index) => ({ start_line: index + 1, end_line: index + 1, text: longLines[index] })),
+        ],
+      }))
+      const payload = JSON.parse((await inspectTool(summarize)
+        .call({ project_root: project, operation: 'summarize', path: 'AGENTS.md' }, {} as never)).output)
+      expect(payload.uncertain).toBe(true)
+      expect(payload.truncated).toBe(true)
+      expect(payload.summary).toHaveLength(2000)
+      expect(payload.quotes).toHaveLength(8)
+      expect(payload.quotes[0]).toEqual({ start_line: 1, end_line: 1, text: longLines[0] })
+    })
+
+    it('相同 digest 与 focus 命中缓存，focus 或文件内容变化后重新总结', async () => {
+      await writeLong()
+      const summarize = vi.fn(async () => ({ summary: '摘要', quotes: [] }))
+      const inspect = inspectTool(summarize)
+      const call = (focus?: string) => inspect.call({ project_root: project, operation: 'summarize', path: 'AGENTS.md', ...(focus ? { focus } : {}) }, {} as never)
+      await call('部署')
+      await call('部署')
+      expect(summarize).toHaveBeenCalledTimes(1)
+      await call('合并')
+      expect(summarize).toHaveBeenCalledTimes(2)
+      await fs.appendFile(join(project, 'AGENTS.md'), '\n新增规则')
+      await call('部署')
+      expect(summarize).toHaveBeenCalledTimes(3)
+    })
   })
 })
