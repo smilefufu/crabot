@@ -6,6 +6,8 @@
 - 根因：#204 (`7ebf64ed`) 给 Manager memory/messaging 工具加了 `entryAuthorization`；#205 (`c5592354`) 的 `builtin_reflection` 只覆盖 memory 数据侧；builtin schedule 唤醒时 `onScheduleWake` 返回 null，工具面在 RPC 之前拒绝。协议 §4.4.4 要求 daily 直接使用 Memory catalog。
 - 修复：新增内置工作流最小主体——daily 开 `memory+messaging`，graph 仅开 `memory`；其余 tool_access/CLI/storage 全关；普通 Manager 与未知主体仍 fail-closed；worker 权限仍按 `narrowWorkerPermissions` 收窄。无协议变更。
 - 验证：新增 bootstrap 真实 stack 回归（daily `list_entries` + 摘要投递、graph `list_entries`），修复前失败、修复后通过；bootstrap 55 + tool-face 89 + daily-pagination 15 = 159 项通过，Agent `tsc --noEmit` 通过。
+- 本机已从 `36718ee2` 构建并静默安装 `0.1.0-desktop.36-local` 未签名单层候选（EXE 564,651,676 字节，SHA-256 `c78a09c148bd17e1b28d9a1f40c94dd80b3b656112142ce1017ff3a0566a4329`，位于 `.desktop-build/manual-36/installer-dist-4/distribution/`）；安装后 `core-release.json` 为 36、`crabot-agent/dist/manager/bootstrap.js` 含本次修复，实例启动后 admin/agent/memory/slack 四模块 running，1 分钟后 PID 未变。停实例时 `crabot stop` 只停了 core，4 个 `D:\Crabot\program\gui\Crabot.exe` 仍在；确认路径后按精确 PID 结束后静默安装成功。
+- 构建说明：最终 NSIS 的 electron-builder `icon-tool.js` 在本机再次因堆内存不足崩溃；沿用 manual-35 的本地 ICO shim（`.desktop-build/manual-36/icons-toolset`）完成打包，未改仓库或全局缓存。
 
 ### Agent 启动历史 trace 索引阻塞健康检查（2026-11-27，已合并并部署本机 desktop.35）
 
