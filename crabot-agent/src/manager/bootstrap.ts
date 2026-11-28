@@ -134,6 +134,35 @@ export const DEFAULT_MANAGER_COMPACTION_POLICY: CompactionPolicy = {
   hardCapTokens: Math.floor(DEFAULT_MAX_CONTEXT_TOKENS * DEFAULT_COMPACT_THRESHOLD),
 }
 
+/**
+ * 内置工作流的最小主体。builtin schedule 不以任何 friend 的名义执行，但工具入口
+ * (`entryAuthorization`) 与 `spawn_worker` 都需要一份可信主体快照。这里只开放
+ * 协议给该 profile 声明的最小入口，文件、shell、桌面与 CLI 全部关闭。
+ */
+const BUILTIN_DAILY_REFLECTION_PERMISSIONS: ResolvedPermissions = {
+  tool_access: {
+    memory: true, messaging: true, task: false, mcp_skill: false,
+    file_io: false, browser: false, shell: false, remote_exec: false, desktop: false,
+  },
+  cli_access: Object.fromEntries(CLI_DOMAINS.map(domain => [domain, 'none'])) as ResolvedPermissions['cli_access'],
+  storage: null,
+  memory_scopes: [],
+}
+
+const BUILTIN_WORKFLOW_PERMISSIONS: Record<'daily_reflection' | 'memory_graph_rebuild', ResolvedPermissions> = {
+  daily_reflection: BUILTIN_DAILY_REFLECTION_PERMISSIONS,
+  memory_graph_rebuild: {
+    ...BUILTIN_DAILY_REFLECTION_PERMISSIONS,
+    tool_access: { ...BUILTIN_DAILY_REFLECTION_PERMISSIONS.tool_access, messaging: false },
+  },
+}
+
+function builtinWorkflowPermissions(profile: ManagerToolProfile): ResolvedPermissions | undefined {
+  return profile === 'daily_reflection' || profile === 'memory_graph_rebuild'
+    ? BUILTIN_WORKFLOW_PERMISSIONS[profile]
+    : undefined
+}
+
 export interface ManagerStack {
   voiceManagementReady(payload: import('crabot-shared').VoiceAgentManagementReadyPayload): Promise<void>
   startContinuationReconciliation(): Promise<void>
@@ -991,7 +1020,10 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         ? principals.currentMasterAuthorization(key)
         : undefined
       const profile = managerToolProfileForSchedule(scheduleIdentity)
-      let managerPermissions = scheduleIdentity ? principalPermissions : managerPrincipal?.permissions ?? undefined
+      const builtinPermissions = scheduleIdentity?.isBuiltin === true ? builtinWorkflowPermissions(profile) : undefined
+      let managerPermissions = scheduleIdentity
+        ? (builtinPermissions ?? principalPermissions)
+        : managerPrincipal?.permissions ?? undefined
       const mcpCreatorFriendId = scheduleIdentity
         ? (scheduleIdentity.isBuiltin ? undefined : scheduleIdentity.creatorFriendId)
         : managerPrincipal?.principal.friend?.id
@@ -1086,10 +1118,9 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
           onWorkerSpawned: traceHooks?.onWorkerSpawned,
           reportTo: target,
           ...(targetSessionType ? { targetSession: { ...target, type: targetSessionType } } : {}),
-          // 权限身份(§4.4"权限按 Schedule.creator_friend_id 解析(is_builtin 按 master
-          // 等价)"):内置 schedule 不以任何 friend 的名义执行,显式留空——空 creator 正是
-          // admin 侧既有的 master 等价规则(protocol-admin §"is_builtin=true 或
-          // creator_friend_id 为空 → master_private"),所以这里丢弃而不是改写成某个 id。
+          // 权限身份(§4.4"权限按 Schedule.creator_friend_id 解析"):内置 schedule 不以
+          // 任何 friend 的名义执行，creator 显式留空。工具入口与 Worker 派发所需的主体
+          // 快照由上面的内置工作流最小权限常量提供，不把 builtin 改写成某个 friend id。
           //
           // 人类消息使用本批发言者；私聊非人类唤醒使用 beforeWake 刷新过的 session
           // 主体。没有新发言不等于没有委托身份，creator 必须随同会话权限传给 Worker。
@@ -1097,7 +1128,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
           creatorFriendId: scheduleIdentity
             ? (scheduleIdentity.isBuiltin ? undefined : scheduleIdentity.creatorFriendId)
             : humanPrincipal?.friend?.id ?? managerPrincipal?.principal.friend?.id,
-          // 固定任务主体；权限值在调用前刷新，Worker 后续也按原主体解析。
+          // 固定任务主体：普通 schedule/会话在调用前刷新；内置工作流沿用最小主体常量。
           principalPermissions: (scheduleIdentity ? managerPermissions : principals.get(key)?.permissions) ?? undefined,
           legacyContinuationAuth: (targetManagerKey) => principals.bindLegacyContinuationAuth(
             legacyAuthTemplate,

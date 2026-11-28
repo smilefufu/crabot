@@ -803,6 +803,109 @@ describe('manager bootstrap（P5 Task 1）', () => {
     expect(memoryCalls).toEqual([])
   })
 
+  it('内置每日反思获得最小主体：Memory 与摘要投递不再被判缺少授权', async () => {
+    const memoryCalls: Array<{ method: string; params: Record<string, unknown> }> = []
+    const results: Array<{ name: string; output: string; isError?: boolean }> = []
+    let ran = false
+    const adapter: LLMAdapter = {
+      async *stream(params) {
+        if (!ran) {
+          ran = true
+          const list = params.tools.find(tool => tool.name === 'mcp__crab-memory__list_entries')
+          expect(list, 'daily 工具面应包含 Memory list_entries').toBeDefined()
+          const listResult = await list!.call({ status: 'confirmed', limit: 5 }, {} as never)
+          results.push({ name: list!.name, output: listResult.output, isError: listResult.isError })
+
+          const summary = params.tools.find(tool => tool.name === 'send_daily_reflection_summary')
+          expect(summary, 'daily 工具面应包含固定摘要投递').toBeDefined()
+          const summaryResult = await summary!.call({ content: '每日反思完成' }, {} as never)
+          results.push({ name: summary!.name, output: summaryResult.output, isError: summaryResult.isError })
+        }
+        yield* chunksFromContent([{ type: 'text', text: '完成' }], 'end_turn', { inputTokens: 10, outputTokens: 5 })
+      },
+      updateConfig: () => {},
+    }
+    const stack = buildManagerStack(makeDeps({
+      managerAdapter: () => adapter,
+      memoryServerFor: (ctx) => createCrabMemoryServer(
+        {
+          rpcClient: {
+            callSensitive: async (_port: number, method: string, params: Record<string, unknown>) => {
+              memoryCalls.push({ method, params })
+              return { results: [] }
+            },
+          } as never,
+          moduleId: 'manager-bootstrap-test',
+          getMemoryPort: async () => 19100,
+        },
+        ctx,
+      ),
+    }))
+
+    try {
+      await stack.registry.routeSchedule({
+        scheduleId: 'daily', triggerId: 'trigger', scheduleName: 'daily',
+        title: 'daily', description: 'review', isBuiltin: true, taskType: 'daily_reflection',
+        targetSession: { channel_id: 'admin-web', session_id: 'system-tasks', type: 'private' },
+        reflectionWindow: { window_start: '2026-09-21T00:00:00.000Z', window_end: '2026-09-22T00:00:00.000Z' },
+      })
+
+      const list = memoryCalls.find(call => call.method === 'list_entries')
+      expect(list, 'daily 的 Memory 调用应真正到达 memory 模块').toBeDefined()
+      expect(list!.params.access_context).toMatchObject({ actor_kind: 'builtin_reflection', memory_enabled: true })
+      expect(results.find(result => result.name === 'mcp__crab-memory__list_entries')).toMatchObject({ isError: false })
+      expect(results.find(result => result.name === 'send_daily_reflection_summary')).toMatchObject({ isError: false })
+    } finally { await stack.dispose() }
+  })
+
+  it('内置图谱重建获得最小主体：三项 Memory 工具可用', async () => {
+    const memoryCalls: Array<{ method: string; params: Record<string, unknown> }> = []
+    const results: Array<{ name: string; output: string; isError?: boolean }> = []
+    let ran = false
+    const adapter: LLMAdapter = {
+      async *stream(params) {
+        if (!ran) {
+          ran = true
+          const list = params.tools.find(tool => tool.name === 'mcp__crab-memory__list_entries')
+          expect(list, 'graph 工具面应包含 Memory list_entries').toBeDefined()
+          const result = await list!.call({ status: 'confirmed', limit: 5 }, {} as never)
+          results.push({ name: list!.name, output: result.output, isError: result.isError })
+        }
+        yield* chunksFromContent([{ type: 'text', text: '完成' }], 'end_turn', { inputTokens: 10, outputTokens: 5 })
+      },
+      updateConfig: () => {},
+    }
+    const stack = buildManagerStack(makeDeps({
+      managerAdapter: () => adapter,
+      memoryServerFor: (ctx) => createCrabMemoryServer(
+        {
+          rpcClient: {
+            callSensitive: async (_port: number, method: string, params: Record<string, unknown>) => {
+              memoryCalls.push({ method, params })
+              return { results: [] }
+            },
+          } as never,
+          moduleId: 'manager-bootstrap-test',
+          getMemoryPort: async () => 19100,
+        },
+        ctx,
+      ),
+    }))
+
+    try {
+      await stack.registry.routeSchedule({
+        scheduleId: 'memory-graph-rebuild', triggerId: 'trigger', scheduleName: '重建长期记忆图谱',
+        title: '重建长期记忆图谱', description: 'link memory', isBuiltin: true,
+        targetSession: { channel_id: 'admin-web', session_id: 'system-tasks', type: 'private' },
+      })
+
+      const list = memoryCalls.find(call => call.method === 'list_entries')
+      expect(list, 'graph 的 Memory 调用应真正到达 memory 模块').toBeDefined()
+      expect(list!.params.access_context).toMatchObject({ actor_kind: 'builtin_graph_rebuild', memory_enabled: true })
+      expect(results.find(result => result.name === 'mcp__crab-memory__list_entries')).toMatchObject({ isError: false })
+    } finally { await stack.dispose() }
+  })
+
   it('独立任务板系统更新复用已有 Manager 的 Memory scope', async () => {
     const memoryCalls: Array<{ method: string; params: Record<string, unknown> }> = []
     const adapter: LLMAdapter = {
