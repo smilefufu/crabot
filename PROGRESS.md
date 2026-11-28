@@ -1,5 +1,12 @@
 # Crabot 项目进度
 
+### 内置反思权限主体修复（2026-11-28，PR #268）
+
+- 现象：部署实例自 2026-11-04 起每日反思的 Memory 调用与摘要投递均被 `CAPABILITY_UNKNOWN: 缺少可信主体授权` 拒绝；现有 3 条长期记忆全部在 trash。
+- 根因：#204 (`7ebf64ed`) 给 Manager memory/messaging 工具加了 `entryAuthorization`；#205 (`c5592354`) 的 `builtin_reflection` 只覆盖 memory 数据侧；builtin schedule 唤醒时 `onScheduleWake` 返回 null，工具面在 RPC 之前拒绝。协议 §4.4.4 要求 daily 直接使用 Memory catalog。
+- 修复：新增内置工作流最小主体——daily 开 `memory+messaging`，graph 仅开 `memory`；其余 tool_access/CLI/storage 全关；普通 Manager 与未知主体仍 fail-closed；worker 权限仍按 `narrowWorkerPermissions` 收窄。无协议变更。
+- 验证：新增 bootstrap 真实 stack 回归（daily `list_entries` + 摘要投递、graph `list_entries`），修复前失败、修复后通过；bootstrap 55 + tool-face 89 + daily-pagination 15 = 159 项通过，Agent `tsc --noEmit` 通过。
+
 ### Agent 启动历史 trace 索引阻塞健康检查（2026-11-27，已合并并部署本机 desktop.35）
 
 - 现象：本机 release 实例（desktop.33-local）crabot-agent 每 ~3 分钟被 MM 健康检查连续 3 次 5 秒超时杀掉重启，GUI 聊天/任务不可用；日志为 `history index built ... ms=138k~182k`。根因：v4 append-only 后 `foldHistoricalTraceLogs` 对整个 `traces-v4` 逐文件同步 `readFileSync`+fold、不让出事件循环；全量 2.4GB 历史数据下连续阻塞约 40 秒（抽样 167 文件/20.8MB=1.02s 外推）。
